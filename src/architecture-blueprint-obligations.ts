@@ -28,6 +28,25 @@ export interface ObligationSources {
   task: string;
   contract: unknown;
 }
+/** Compact planning retains its actual sources, not an exhaustive model-invented
+ * proof checklist. The independent reviewer must inspect these sources. */
+export interface CompactBlueprintSources {
+  schema: "noveltea-blueprint-sources/v1";
+  sources: BlueprintObligations["sources"];
+}
+export function compactBlueprintSources(sources: ObligationSources): CompactBlueprintSources {
+  return { schema: "noveltea-blueprint-sources/v1", sources: {
+    foundationDigest: digest(sources.foundation),
+    taskDigest: digest(sources.task),
+    contractDigest: digest(sources.contract),
+  } };
+}
+export function validateCompactBlueprintSources(value: unknown, sources: ObligationSources): CompactBlueprintSources {
+  const expected = compactBlueprintSources(sources);
+  if (JSON.stringify(value) !== JSON.stringify(expected))
+    throw Error("Compact Story Blueprint sources do not match approved Foundation, task and contract.");
+  return expected;
+}
 function record(value: unknown, keys: string[]): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join("|") === [...keys].sort().join("|");

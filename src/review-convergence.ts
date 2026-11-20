@@ -7,7 +7,8 @@ import type { CausalBlueprint } from "./architecture-blueprint.js";
 
 export type ReviewCitation =
   | { beatId: string; quote: string; field?: never }
-  | { beatId: "resolution"; field: "conclusion" | "uncertainty" | "supportedBy"; quote: string };
+  | { beatId: "resolution"; field: "conclusion" | "uncertainty" | "supportedBy"; quote: string }
+  | { beatId: "story"; field: "causalAnswer" | "feasibility" | "arcs"; quote: string };
 export interface ConvergentFinding {
   beatId: string;
   reason: string;
@@ -51,6 +52,14 @@ export function cited(blueprint: CausalBlueprint, value: unknown, from?: string)
   for (const beat of blueprint.beats)
     if (beat.dependsOn.some(id => candidates.has(id))) candidates.add(beat.id);
   if ("field" in citation) {
+    if (citation.beatId === "story") {
+      if (blueprint.schema !== "noveltea-causal-blueprint/v2" ||
+          !exact(citation, ["beatId", "field", "quote"]) ||
+          !["causalAnswer", "feasibility", "arcs"].includes(String(citation.field)))
+        return false;
+      return JSON.stringify(blueprint[citation.field as "causalAnswer" | "feasibility" | "arcs"])
+        .includes(citation.quote);
+    }
     if (citation.beatId !== "resolution") return false;
     if (!exact(citation, ["beatId", "field", "quote"]) ||
         !["conclusion", "uncertainty", "supportedBy"].includes(String(citation.field)) ||
@@ -90,7 +99,7 @@ function checkReviewShape(review: unknown, blueprint: CausalBlueprint,
           .includes(finding.requirement.quote as string) ||
         !cited(blueprint, finding.evidence, finding.beatId as string) ||
         ((finding.evidence as ReviewCitation).beatId !== finding.beatId &&
-          !((finding.evidence as ReviewCitation).beatId === "resolution" &&
+          !(["resolution", "story"].includes((finding.evidence as ReviewCitation).beatId) &&
             "field" in (finding.evidence as ReviewCitation))))
       throw Error("Convergent Blueprint finding lacks a current beat and exact authorized source citation.");
     if (previous.length) {

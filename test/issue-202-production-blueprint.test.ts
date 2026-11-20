@@ -18,6 +18,7 @@ import { createControllerServer, SandboxController, type ControllerConfig } from
 import { createReviewedBlueprint, readApprovedBlueprint, inspectPausedBlueprint, type BlueprintReview } from "../src/architecture-blueprint.js";
 import type { ConvergentReview } from "../src/review-convergence.js";
 import { blueprintDigest } from "../src/architecture-blueprint-patch.js";
+import { evaluateReviewConvergence } from "../src/review-convergence.js";
 import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
 import type { Plan } from "../src/architecture.js";
 import { startStoryJob } from "../src/job.js";
@@ -77,6 +78,27 @@ const evidence = [
     observable: "An entry records a protected arrival at dusk",
     supports: "The clerk entered the shelter", limits: "Does not independently prove motive" }] },
 ];
+const compact = {
+  schema: "noveltea-causal-blueprint/v2",
+  premise: header.premise,
+  arcs: [{ id: "shelter", goal: "Resolve the clerk's disappearance without harming the witness" }],
+  beats: beats.map(beat => ({ ...beat, arcId: "shelter", observations: [] })),
+  resolution: header.resolution,
+  causalAnswer: {
+    question: answer.question,
+    answer: answer.answer,
+    mechanism: answer.mechanism,
+    responsibility: answer.responsibility,
+    motive: answer.motive,
+    proofApproach: "Compare a dated service-gate log and the independent guard-shift register",
+  },
+  feasibility: {
+    playthrough: "One coherent roughly one-hour narrative-led route",
+    interaction: "A dialogue-led mystery where consent and confidentiality matter",
+    production: "Reuse the archive and shelter backgrounds and a small witness cast",
+    endings: "Both routes identify refuge, while protected disclosure affects trust",
+  },
+};
 const obligation = {
   id: "proof-without-exposure", category: "route", source: "task",
   quote: "independent proof of the missing clerk's refuge",
@@ -89,7 +111,7 @@ const negative: BlueprintReview = {
   schema: "noveltea-blueprint-review/v2", status: "revise", prior: [],
   findings: [{ beatId: "arrival", origin: "initial",
     requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
-    evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
+    evidence: { beatId: "arrival", quote: "A dated departure entry establishes when the clerk went missing" },
     reason: "The arrival timeline relies on an uncorroborated town entry.",
     correction: "Append an independent dated shift record corroborating arrival." }],
 };
@@ -106,7 +128,7 @@ const negative1: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
   prior: [progress0],
   findings: [{ beatId: "archive", origin: "overlooked",
     requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
-    evidence: { beatId: "archive", quote: "An entry records a protected arrival at dusk" },
+    evidence: { beatId: "archive", quote: "The dated gate and shift logs confirm entry without witness testimony" },
     reason: "The arrival's gate log is not independently cross-checked.",
     correction: "Add a separate guard ledger entry to the archive beat." }],
 };
@@ -123,7 +145,7 @@ const positive: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
 const stillBlocked = (round: number) => ({
   round, findingIndex: 0, status: "persisting" as const,
   reason: "The timeline still relies on the same uncorroborated source.",
-  evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
+  evidence: { beatId: "arrival", quote: "A dated departure entry establishes when the clerk went missing" },
 });
 const stalled1: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
   status: "revise", prior: [stillBlocked(0)], findings: [
@@ -141,22 +163,15 @@ const stalledPatches = [
   { kind: "replace", findingBeatId: "arrival",
     path: "beats/arrival/change", expected: noisyChange, value: oldChange },
 ];
+const oldArchiveChange = beats[1]!.change;
+const archiveChange1 = oldArchiveChange + "; " + progress1.evidence.quote;
 const corrections = [
-  { kind: "append-observation", findingBeatId: "arrival",
-    beatId: "arrival", value: { source: "independent guard shift log",
-      observable: progress0.evidence.quote,
-      supports: "Corroborates arrival timing independently of the town entry",
-      limits: "Does not disclose the protected source identity" } },
-  { kind: "append-observation", findingBeatId: "archive",
-    beatId: "archive", value: { source: "independent patrol log",
-      observable: progress1.evidence.quote,
-      supports: "Corroborates the initial gate evidence independently",
-      limits: "Still does not determine who completed the registration" } },
-  { kind: "append-observation", findingBeatId: "archive",
-    beatId: "archive", value: { source: "independent registrar archive",
-      observable: progress2.evidence.quote,
-      supports: "Proves the causal chain between the dated sources",
-      limits: "Does not expose the protected witness" } },
+  { kind: "replace", findingBeatId: "arrival", path: "beats/arrival/change",
+    expected: oldChange, value: oldChange + "; " + progress0.evidence.quote },
+  { kind: "replace", findingBeatId: "archive", path: "beats/archive/change",
+    expected: oldArchiveChange, value: archiveChange1 },
+  { kind: "replace", findingBeatId: "archive", path: "beats/archive/change",
+    expected: archiveChange1, value: archiveChange1 + "; " + progress2.evidence.quote },
 ];
 const readCalls = (): ToolCall[] => [
   "skill://nt-story-architecture/SKILL.md",
@@ -164,6 +179,40 @@ const readCalls = (): ToolCall[] => [
   "creative-direction/foundation.md",
 ].map((path, i) => ({ type: "toolCall", id: "source-read-" + randomUUID() + "-" + i,
   name: "read", arguments: { path } }));
+const canonicalArchitecture = [
+  {
+    "path": "arcs/shelter.md",
+    "content": "---\nschema: '0.1'\ntype: arc\nid: arc.shelter\ntitle: \"The Shelter\"\nstatus: draft\ndecisions: []\ndramatic_question: \"Can the clerk's refuge be proven without exposing a witness?\"\ncharacters: []\n---\n\nAn investigator follows contradictory public records to a shelter's private gate. The central conclusion relies on separately maintained records, not testimony from a protected witness. The inquiry can responsibly publish the corroborated finding while withholding the witness's name.\n"
+  },
+  {
+    "path": "milestones/arrival.md",
+    "content": "---\nschema: '0.1'\ntype: milestone\nid: milestone.arrival\ntitle: \"The Departure Register\"\nstatus: draft\ndecisions: []\ncompleteness: partial\nchange: \"A dated departure register gives the investigator a contradictory lead\"\narcs: [arc.shelter]\nfulfillment: {any_of: []}\n---\n\nThe investigator inspects the dated town register and compares its departure timestamp against a separately dated archive notice. The conflicting entries are a testable clue that the official departure story is incomplete; neither establishes who altered it or where the clerk went. This contradiction motivates inspecting the shelter service gate and the independent guard roster.\n"
+  },
+  {
+    "path": "milestones/archive.md",
+    "content": "---\nschema: '0.1'\ntype: milestone\nid: milestone.archive\ntitle: \"The Service Gate\"\nstatus: draft\ndecisions: []\ncompleteness: partial\nchange: \"Independent gate and guard records establish the clerk's protected arrival\"\narcs: [arc.shelter]\nfulfillment: {any_of: []}\n---\n\nAfter the town-record contradiction, the investigator examines a signed gate-entry ledger. A separately maintained guard shift roster confirms the clerk arrived through the service gate on that date without relying on witness testimony. The records support the bounded conclusion of protected refuge but cannot establish the creditor's private threats. The protagonist can present the independently verified arrival to the inquiry without exposing the witness's identity. A later disclosure choice may damage community trust but cannot erase this corroborated finding. Reuse the archive and shelter backgrounds for this narrative-led playthrough.\n"
+  }
+];
+const writeCalls = (): ToolCall[] => canonicalArchitecture.map(({ path, content }, i) => ({
+  type: "toolCall", id: "write-architecture-" + randomUUID() + "-" + i,
+  name: "write", arguments: { path, content },
+}));
+const architectureReadCalls = (): ToolCall[] => [
+  ...readCalls(),
+  ...["records.md", "progression.md", "authority-and-validation.md"].map((name, i) => ({
+    type: "toolCall" as const,
+    id: "read-architecture-reference-" + randomUUID() + "-" + i,
+    name: "read",
+    arguments: { path: "skill://nt-catalog/references/" + name },
+  })),
+];
+const draftReadCalls = (): ToolCall[] => [
+  ...readCalls(),
+  ...canonicalArchitecture.map(({ path }, i) => ({
+    type: "toolCall" as const, id: "read-canonical-" + randomUUID() + "-" + i,
+    name: "read", arguments: { path },
+  })),
+];
 const asText = (s: string): AssistantMessage["content"] => [{ type: "text", text: s }];
 function promptText(messages: readonly unknown[]): string {
   const users = messages.filter((m): m is { role: "user"; content: unknown } =>
@@ -203,20 +252,40 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
     }
     const prompt = promptText(ctx.messages);
     const lastRole = ctx.messages.at(-1)?.role ?? "";
-    const reviewer = prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER");
+    const reviewer = prompt.includes("INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW");
     const diagnostic = prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW");
     const replacement = prompt.includes("YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER");
+    const architect = prompt.includes("AUTHORIZED PLAN AND SCOPE") &&
+      prompt.includes("CAUSAL_MILESTONE_ORDER");
+    const draftReviewer = prompt.includes("INDEPENDENT READ-ONLY early reviewer");
     calls.push({ prompt, tools: [...active], messages: structuredClone(ctx.messages), lastRole });
     if (reviewer && crashFirstReviewer && !reviewerCrashed) {
       reviewerCrashed = true;
       throw Error("Simulated crash during initial reviewer prompt before verdict sealing.");
     }
-    const needRead = (prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") || reviewer || diagnostic) &&
-      lastRole !== "toolResult";
+    const needRead = (prompt.includes("READ-ONLY COMPACT STORY BLUEPRINT.") ||
+      reviewer || diagnostic) && lastRole !== "toolResult";
     let content: AssistantMessage["content"];
     let reason: "stop" | "toolUse" = "stop";
     if (needRead) { content = readCalls(); reason = "toolUse"; }
-    else if (prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT")) content = asText(JSON.stringify(header));
+    else if (draftReviewer) {
+      const toolNames = ctx.messages.flatMap(m => m.role === "assistant"
+        ? m.content.filter(c => c.type === "toolCall").map(c => c.name) : []);
+      if (!toolNames.includes("read")) { content = draftReadCalls(); reason = "toolUse"; }
+      else content = asText(JSON.stringify({ schema: "noveltea-architecture-draft-review/v2", status: "pass", findings: [], prior: [] }));
+    } else if (architect) {
+      const toolNames = ctx.messages.flatMap(m => m.role === "assistant"
+        ? m.content.filter(c => c.type === "toolCall").map(c => c.name) : []);
+      if (!toolNames.includes("read")) { content = architectureReadCalls(); reason = "toolUse"; }
+      else if (!toolNames.includes("write")) { content = writeCalls(); reason = "toolUse"; }
+      else if (!toolNames.includes("story_validate")) {
+        content = [{ type: "toolCall", id: "story-validate-" + randomUUID(),
+          name: "story_validate", arguments: {} }];
+        reason = "toolUse";
+      } else content = asText(
+        "Canonical Architecture authored.\nCAUSAL_MILESTONE_ORDER: milestone.arrival,milestone.archive");
+    } else if (prompt.includes("READ-ONLY COMPACT STORY BLUEPRINT."))
+      content = asText(JSON.stringify(compact));
     else if (prompt.includes("READ-ONLY CAUSAL BEAT DETAIL STAGE"))
       content = asText(beats.map(v => JSON.stringify(v)).join("\n"));
     else if (prompt.includes("READ-ONLY CAUSAL BLUEPRINT EVIDENCE STAGE"))
@@ -231,14 +300,14 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
       assessments: [{ kind: "material",
         reason: "The source still lacks the independently verified arrival evidence.",
         requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
-        evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
+        evidence: { beatId: "arrival", quote: "A dated departure entry establishes when the clerk went missing" },
       }],
     }));
     else if (replacement) content = asText(JSON.stringify({
       schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
       prior: [0, 1, 2].map(round => ({ round, findingIndex: 0, status: "resolved",
         reason: "The original reviewer did not account for the independent shelter record.",
-        evidence: { beatId: "archive", quote: "An entry records a protected arrival at dusk" },
+        evidence: { beatId: "archive", quote: "The dated gate and shift logs confirm entry without witness testimony" },
       })),
     }));
     else if (reviewer) {
@@ -252,7 +321,7 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
       assert.equal(protocolRepaired, false);
       protocolRepaired = true;
       content = asText(JSON.stringify(negative2));
-    } else if (prompt.includes("INDEPENDENT CAUSAL REVIEW.") ||
+    } else if (prompt.includes("ORIGINAL WRITER: correct the INDEPENDENT REVIEW FINDINGS") ||
         prompt.includes("RESUME AT VERIFIED CAUSAL BLUEPRINT WRITER BOUNDARY.")) {
       const match = /BASE DIGEST: ([a-f0-9]{64}) REVIEW DIGEST: ([a-f0-9]{64})/.exec(prompt);
       assert.ok(match, "the controller must give the exact previous source/verdict digests");
@@ -297,7 +366,8 @@ function available() {
     if (!security.some(v => /(^|=)rootless$/.test(v))) return false;
     execFileSync("docker", ["image", "inspect", "noveltea-sandbox:local"],
       { stdio: "ignore", timeout: 8000 });
-    return existsSync(resolve("../noveltea-skills/skills/nt-story-architecture/SKILL.md"));
+    return existsSync(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills",
+      "skills/nt-story-architecture/SKILL.md"));
   } catch { return false; }
 }
 
@@ -324,7 +394,8 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
   try {
     const app = join(tmp, "app"), state = join(tmp, "state"), cache = join(tmp, "cache");
-    const socketDir = join(tmp, "controller"), source = resolve("../noveltea-skills");
+    const socketDir = join(tmp, "controller"),
+      source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
     for (const dir of [app, state, cache, socketDir]) mkdirSync(dir, { recursive: true });
     const owner = "protocol-202-owner", repositoryId = "protocol-202-repo";
     const scoped = join(cache, hash(owner), hash("github:" + repositoryId));
@@ -381,20 +452,22 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     const runtime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
     runtime.registerNativeProvider(scripted(calls));
     await runtime.refresh({ allowNetwork: false });
+    assert.equal(evaluateReviewConvergence(negative, compact, [],
+      { foundation, task, contract: plan.contract }).review.status, "revise");
     const create = () => withJobModelRuntime(runtime, () =>
       withStoryJobLock(job, "global-architecture", () =>
         createReviewedBlueprint(job, snapshot, plan, model.provider, model.id, task, baseSha)));
     await configurePiPolicy(job, { version: 1,
-      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 7 } });
+      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 4 } });
     await assert.rejects(create(), (error: unknown) =>
       error instanceof PiBudgetPause && error.reason === "modelCalls",
-      "seven scripted planner/review calls must pause BEFORE the next writer turn");
+      "compact planner and first review must pause BEFORE the next writer turn");
     assert.equal((await inspectPiPolicy(job)).budget.pause?.reason, "modelCalls");
     const directory = join(job.stateDir, "architecture-blueprints");
     assert.ok(existsSync(join(directory, "plan-1-pause-1-writer.json")));
     assert.equal(existsSync(join(directory, "plan-1-approved.json")), false);
     await configurePiPolicy(job, { version: 1,
-      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 8 } });
+      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 5 } });
     await assert.rejects(create(), (error: unknown) =>
       error instanceof PiBudgetPause && error.reason === "modelCalls",
       "the completed writer patch should pause before a new reviewer turn");
@@ -403,7 +476,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       "paused review must retain the completed, verified patch");
     assert.equal(existsSync(join(directory, "plan-1-verdict-1.json")), false,
       "no new verdict was started when the budget paused");
-    assert.equal((await inspectPiPolicy(job)).budget.modelCalls, 8);
+    assert.equal((await inspectPiPolicy(job)).budget.modelCalls, 5);
     await configurePiPolicy(job, { version: 1,
       profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 60 } });
     const pausedWriter = JSON.parse(readFileSync(join(directory,
@@ -439,14 +512,14 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       assert.deepEqual(JSON.parse(readFileSync(join(directory,
         "plan-1-verdict-" + i + ".json"), "utf8")), verdict);
     const reviews = calls.filter(c =>
-      c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER"));
+      c.prompt.includes("INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW"));
     assert.equal(reviews.length, 8, "all four semantic rounds must reread source before verdict");
     assert.equal(reviews.filter(c => c.lastRole === "toolResult").length, 4);
     assert.equal(calls.filter(c =>
       c.prompt.includes("CONTROLLER REJECTED YOUR REVIEW PROTOCOL")).length, 1,
       "malformed structured review receives bounded protocol correction, not another semantic round");
-    assert.match(reviews[2]!.prompt, /PREVIOUS VERIFIED VERDICT/);
-    assert.match(reviews[2]!.prompt, /EXACT SOURCE CHANGES/);
+    assert.match(reviews[2]!.prompt, /PRIOR SEALED REVIEWS/);
+    assert.match(reviews[2]!.prompt, /SOURCE CHANGES/);
     assert.match(reviews[2]!.prompt, /CONTINUING YOUR EXISTING INDEPENDENT REVIEW CYCLE/);
     assert.match(JSON.stringify(reviews[2]!.messages), /uncorroborated town entry/,
       "second review must retain the first verdict and the same session analysis");
@@ -480,7 +553,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     try {
       writeFileSync(foundationFile, foundation + "Unexpected change to authorized Story source.\\n");
       await assert.rejects(readApprovedBlueprint(job, plan, snapshot,
-        model.provider, model.id, task, baseSha), /proof obligations.*approved sources/);
+        model.provider, model.id, task, baseSha), /do not match approved/);
     } finally { writeFileSync(foundationFile, foundation); }
     const originalTranscript = readFileSync(pin.reviewerSessionFile);
     try {
@@ -531,7 +604,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     assert.equal(diagnosis.diagnosis.action, "escalate");
     assert.notEqual(diagnosis.sessionId, diagnosis.reviewerSessionId);
     assert.equal(stuckCalls.filter(c =>
-      c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER") &&
+      c.prompt.includes("INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW") &&
       c.lastRole === "toolResult").length, 3);
     assert.equal(git(stuck.worktreeRoot, "status", "--porcelain"), "");
 
@@ -716,15 +789,15 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       assert.equal(invalidPause.recovery?.status, "blocked",
         "reconciliation must reject a forged initial-review pause before resuming Pi");
     } finally { writeFileSync(initialMarkerPath, originalMarker); }
-    const headerPath = join(graphDir, "plan-1-outline-header.json");
-    const headerBytes = readFileSync(headerPath);
+    const draftPath = join(graphDir, "plan-1-draft-0.json");
+    const draftBytes = readFileSync(draftPath);
     try {
-      writeFileSync(headerPath, JSON.stringify({ ...JSON.parse(headerBytes.toString("utf8")),
-        premise: "Tampered staged premise",
+      writeFileSync(draftPath, JSON.stringify({ ...JSON.parse(draftBytes.toString("utf8")),
+        premise: "Tampered compact premise",
       }));
       assert.equal((await graphInspect()).recovery?.status, "blocked",
-        "staged header tampering is rejected by the shared verifier");
-    } finally { writeFileSync(headerPath, headerBytes); }
+        "compact staged draft tampering is rejected by the shared verifier");
+    } finally { writeFileSync(draftPath, draftBytes); }
     const graphWriterBefore = originalSealed.plannerSessionId;
     // Exercise the exact-session recovery contract when legitimate historical
     // Pi session data exceeds the opportunistic 1.5 MB reuse threshold. The
@@ -762,9 +835,35 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     assert.equal(graphPin.plannerSessionId, graphWriterBefore);
     assert.equal(graphPin.draftVersion, 3);
     assert.equal(graphCalls.filter(c =>
-      c.prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") && c.lastRole === "toolResult").length,
+      c.prompt.includes("READ-ONLY COMPACT STORY BLUEPRINT.") && c.lastRole === "toolResult").length,
     1, "graph resume does not regenerate original staged Blueprint");
     assert.equal(git(graphJob.worktreeRoot, "status", "--porcelain"), "");
+
+    // #205: the SAME verified compact Blueprint must pass through the genuine
+    // canonical Architecture writer, independent draft review, native
+    // validator and Git checkpoint, not merely stop at a private approval.
+    await configurePiPolicy(graphJob, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { steps: 10, modelCalls: completeBudget + 20 } });
+    const authored = await graphRun();
+    assert.equal(authored.status, "architecture-committed",
+      "global compact planning must hand off to canonical Arc/Milestone authoring");
+    assert.notEqual(git(graphJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+    assert.equal(git(graphJob.worktreeRoot, "status", "--porcelain"), "");
+    for (const { path } of canonicalArchitecture) {
+      assert.ok(existsSync(join(graphJob.worktreeStoryRoot, path)),
+        "canonical Architecture must create " + path);
+    }
+    assert.match(readFileSync(join(graphJob.worktreeStoryRoot,
+      "milestones/archive.md"), "utf8"), /separately maintained guard shift roster/i);
+    assert.match(readFileSync(join(graphJob.worktreeStoryRoot,
+      "creative-direction/foundation.md"), "utf8"), /Prove the truth/);
+    assert.equal(JSON.parse(readFileSync(join(graphDir,
+      "plan-1-approved.json"), "utf8")).blueprintDigest, graphPin.blueprintDigest,
+    "canonical writing must not change its private reviewed causal source");
+    assert.ok(graphCalls.some(c => c.prompt.includes(
+      "INDEPENDENT READ-ONLY early reviewer")),
+    "canonical draft must receive an independent source-reading early review");
 
     // Crash after the reviewer is admitted on a resumed initial pause but
     // before any independent verdict is sealed. A fresh reviewer must never
@@ -799,7 +898,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       profile: { provider: model.provider, model: model.id }, limits: { steps: 3 } });
     await assert.rejects(crashRun(), /Simulated crash during initial reviewer prompt|did not read Creative Direction/);
     assert.ok(crashCalls.some(call => call.prompt.includes(
-      "INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER")),
+      "INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW")),
     "the first reviewer prompt must have been attempted before failure");
     const startReceipt = JSON.parse(readFileSync(join(crashDir,
       "plan-1-initial-review-started.json"), "utf8"));
@@ -875,7 +974,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     } finally { writeFileSync(admissionMarker, admissionBytes); }
     await configurePiPolicy(activeJob, { version: 1,
       profile: { provider: model.provider, model: model.id },
-      limits: { activeSeconds: 1000, modelCalls: 5 } });
+      limits: { activeSeconds: 1000, modelCalls: 2 } });
     await assert.rejects(activeRun(), (error: unknown) =>
       error instanceof PiBudgetPause && error.reason === "modelCalls",
       "after raising active time, graph resumes planner and reaches initial reviewer boundary");
@@ -884,7 +983,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     assert.ok(existsSync(join(activeDir, "plan-1-pause-initial-review.json")));
     assert.equal((await activeInspect()).recovery?.status, "ready");
     assert.equal(activeCalls.filter(call => call.prompt.includes(
-      "READ-ONLY CAUSAL STORY ARCHITECT") && call.lastRole === "toolResult").length, 1,
+      "READ-ONLY COMPACT STORY BLUEPRINT.") && call.lastRole === "toolResult").length, 1,
     "the graph launches the original planning assignment only once");
   } finally {
     for (const key of keys) {

@@ -5,7 +5,7 @@ import { parseCausalBlueprint, type CausalBlueprint } from "./architecture-bluep
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
 import { buildBlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
 
-type OutlineBody = Omit<CausalBlueprint, "schema" | "beats"> & {
+type OutlineBody = Pick<CausalBlueprint, "premise" | "resolution"> & {
   beats: Array<Omit<CausalBlueprint["beats"][number], "observations">>;
 };
 export type BlueprintCausalAnswer = {

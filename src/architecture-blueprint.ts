@@ -21,10 +21,12 @@ import { evaluateReviewConvergence, type ConvergentReview, type ReviewRound } fr
 import { diagnosticCaseFingerprint, diagnosticEvidence, diagnosticTrigger, parseBlueprintDiagnosis,
   type BlueprintDiagnosis, type DiagnosticTrigger } from "./blueprint-diagnostic.js";
 import { buildBlueprintObligations, validateBlueprintObligations,
-  type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
+  compactBlueprintSources, validateCompactBlueprintSources,
+  type BlueprintObligations, type CompactBlueprintSources, type ObligationSources } from "./architecture-blueprint-obligations.js";
 import { parseBlueprintPatch, applyBlueprintPatch,
   allowedBlueprintPatchTargets } from "./architecture-blueprint-patch.js";
 import { parseBlueprintWire } from "./architecture-blueprint-wire.js";
+import { compactReviewPrompt, compactCorrectionPrompt } from "./architecture-compact-prompts.js";
 import { assembleBlueprintStages, assembleBlueprintOutlineCore,
   assembleCurrentBlueprintOutline, BEAT_BATCH_SIZE, EVIDENCE_BATCH_SIZE,
   parseBlueprintBeatBatch, parseBlueprintEvidence, parseBlueprintObligationStage,
@@ -48,7 +50,9 @@ export function classifyBlueprintFailure(reason: string):
   if (/\b(?:interrupted|cancelled|canceled|aborted|timed out|timeout)\b/i.test(reason))
     return "interrupted";
   if (/^(?:Blueprint patch |Blueprint JSONL |Blueprint response |Blueprint model response |Causal blueprint |Causal outline |Causal evidence |Independent blueprint review |Invalid bounded causal blueprint)/.test(reason) ||
-      reason.includes("invalid beat relationships"))
+      reason.includes("invalid beat relationships") ||
+      reason.startsWith("Compact Story Blueprint") ||
+      reason.startsWith("New Story Blueprint"))
     return "invalid-plan";
   return "interrupted";
 }
@@ -60,9 +64,15 @@ const MAX_BLUEPRINT_BYTES = 64000;
 const REQUIRED_SKILLS = ["nt-story-architecture/SKILL.md", "nt-catalog/SKILL.md"] as const;
 
 export interface CausalBlueprint {
-  schema: "noveltea-causal-blueprint/v1";
+  schema: "noveltea-causal-blueprint/v1" | "noveltea-causal-blueprint/v2";
   premise: string;
+  /** Compact v2 describes major Arcs and Milestones; v1 retains historical evidence. */
+  arcs?: Array<{ id: string; goal: string }>;
+  causalAnswer?: { question: string; answer: string; mechanism: string; responsibility: string;
+    motive: string; proofApproach: string };
+  feasibility?: { playthrough: string; interaction: string; production: string; endings: string };
   beats: Array<{
+    arcId?: string;
     id: string;
     purpose: string;
     dependsOn: string[];
@@ -115,8 +125,13 @@ function parseJson(text: string): unknown {
 }
 export function parseCausalBlueprint(text: string): CausalBlueprint {
   const value = parseJson(text);
-  if (!strict(value, ["schema", "premise", "beats", "resolution"]) ||
-      value.schema !== "noveltea-causal-blueprint/v1" || !nonempty(value.premise, MAX_BLUEPRINT_BYTES) ||
+  const compact = !!value && typeof value === "object" &&
+    (value as Record<string, unknown>).schema === "noveltea-causal-blueprint/v2";
+  if (!strict(value, compact ?
+        ["schema", "premise", "arcs", "beats", "resolution", "causalAnswer", "feasibility"] :
+        ["schema", "premise", "beats", "resolution"]) ||
+      !["noveltea-causal-blueprint/v1", "noveltea-causal-blueprint/v2"].includes(String(value.schema)) ||
+      !nonempty(value.premise, MAX_BLUEPRINT_BYTES) ||
       !Array.isArray(value.beats) || value.beats.length < 2 || value.beats.length > 16 ||
       !strict(value.resolution, ["question", "conclusion", "supportedBy", "uncertainty"]))
     throw Error("Invalid bounded causal blueprint structure.");
@@ -127,11 +142,33 @@ export function parseCausalBlueprint(text: string): CausalBlueprint {
       !Array.isArray(resolution.supportedBy) ||
       !resolution.supportedBy.length || resolution.supportedBy.length > 16)
     throw Error("Causal blueprint resolution requires a question, supported conclusion and explicit uncertainty.");
+  const arcIds = new Set<string>();
+  if (compact) {
+    if (Buffer.byteLength(JSON.stringify(value)) > 20000)
+      throw Error("Compact Story Blueprint exceeds its 20 KB global-planning budget.");
+    if (!Array.isArray(value.arcs) || !value.arcs.length || value.arcs.length > 8 ||
+        value.arcs.some((arc: unknown) => !strict(arc, ["id", "goal"]) ||
+          typeof arc.id !== "string" || !SLUG.test(arc.id) ||
+          !nonempty(arc.goal) || arcIds.has(arc.id) || !arcIds.add(arc.id)) ||
+        !strict(value.causalAnswer, ["question", "answer", "mechanism", "responsibility", "motive", "proofApproach"]) ||
+        !["question", "answer", "mechanism", "responsibility", "motive", "proofApproach"].every(
+          key => nonempty((value.causalAnswer as Record<string, unknown>)[key], 1500)) ||
+        !strict(value.feasibility, ["playthrough", "interaction", "production", "endings"]) ||
+        !["playthrough", "interaction", "production", "endings"].every(
+          key => nonempty((value.feasibility as Record<string, unknown>)[key], 1500)) ||
+        /\b(?:not yet (?:known|decided)|to be determined|will be specified later)\b/i.test(
+          (value.causalAnswer as Record<string, string>).answer + " " +
+          (value.causalAnswer as Record<string, string>).mechanism))
+      throw Error("Compact Story Blueprint needs a concrete causal answer, Arcs and route/budget feasibility.");
+  }
   const seen = new Set<string>();
+  const usedArcs = new Set<string>();
   let observations = 0;
   for (const beat of value.beats) {
-    const beatKeys = ["id", "purpose", "dependsOn", "observations", "change"];
+    const beatKeys = ["id", "purpose", "dependsOn", "observations", "change",
+      ...(compact ? ["arcId"] : [])];
     if ((!strict(beat, [...beatKeys, "decisions"]) && !strict(beat, beatKeys)) ||
+        (compact && (!arcIds.has(beat.arcId as string) || !usedArcs.add(beat.arcId as string))) ||
         typeof beat.id !== "string" || !SLUG.test(beat.id) || seen.has(beat.id) ||
         !nonempty(beat.purpose, MAX_BLUEPRINT_BYTES) ||
         !nonempty(beat.change, MAX_BLUEPRINT_BYTES) ||
@@ -165,12 +202,15 @@ export function parseCausalBlueprint(text: string): CausalBlueprint {
     }
     seen.add(beat.id);
   }
-  if (!observations || resolution.supportedBy.some((id: unknown) =>
+  if ((compact ? usedArcs.size !== arcIds.size : !observations) ||
+      resolution.supportedBy.some((id: unknown) =>
     typeof id !== "string" || !seen.has(id)) ||
       new Set(resolution.supportedBy).size !== resolution.supportedBy.length ||
-      !resolution.supportedBy.some((id: string) =>
-        (value.beats as CausalBlueprint["beats"]).find(beat => beat.id === id)?.observations.length))
-    throw Error("Causal blueprint resolution lacks a supported, source-linked evidence chain.");
+      (!compact && !resolution.supportedBy.some((id: string) =>
+        (value.beats as CausalBlueprint["beats"]).find(beat => beat.id === id)?.observations.length)))
+    throw Error(compact ?
+      "Causal blueprint resolution lacks a supported, source-linked causal chain." :
+      "Causal blueprint resolution lacks a supported, source-linked evidence chain.");
   return value as unknown as CausalBlueprint;
 }
 export function parseBlueprintReview(text: string, blueprint: CausalBlueprint): BlueprintReview {
@@ -299,6 +339,14 @@ async function verifyStageChain(job: JobStartResult, plan: Plan, stageDigest?: s
   if (stageDigest !== undefined) {
     const receipt = await safeRead(stagesPath(job, plan.version), root(job));
     stages = receipt;
+    if (initial.schema === "noveltea-causal-blueprint/v2") {
+      if (!isDeepStrictEqual(receipt, {
+        schema: "noveltea-blueprint-stages/v4", draftDigest: sha(initial),
+      }) || sha(receipt) !== stageDigest ||
+          initial.beats.some(beat => beat.observations.length))
+        throw Error("Compact Story Blueprint stage receipt is missing or altered.");
+      return { initial, stages: receipt };
+    }
     const batched = !!receipt && typeof receipt === "object" &&
       "schema" in receipt && receipt.schema === "noveltea-blueprint-stages/v3";
     const split = batched || (!!receipt && typeof receipt === "object" &&
@@ -488,7 +536,9 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
   const sources = await obligationSources(job, plan, task);
   const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const { initial } = await verifyStageChain(job, plan, record.stagesDigest);
-  validateBlueprintObligations(manifest, initial, sources);
+  if (initial.schema === "noveltea-causal-blueprint/v2")
+    validateCompactBlueprintSources(manifest, sources);
+  else validateBlueprintObligations(manifest, initial, sources);
   if (sha(manifest) !== record.obligationsDigest)
     throw Error("Approved causal proof obligations changed after review.");
   let blueprint = initial;
@@ -702,12 +752,17 @@ async function readInitialReviewPause(job: JobStartResult, plan: Plan, snapshot:
     throw Error("Initial Blueprint review has already started or progressed; inspect instead of replay.");
   const verifiedStages = await verifyStageChain(job, plan, marker.stagesDigest as string);
   const { initial, outline, stages } = verifiedStages;
-  if (!outline || !stages || (stages as { schema?: string }).schema !== "noveltea-blueprint-stages/v3" ||
+  if (!stages ||
+      (initial.schema === "noveltea-causal-blueprint/v2" ?
+        (stages as { schema?: string }).schema !== "noveltea-blueprint-stages/v4" :
+        !outline || (stages as { schema?: string }).schema !== "noveltea-blueprint-stages/v3") ||
       sha(initial) !== marker.draftDigest)
     throw Error("Initial Blueprint draft or stage chain differs from paused receipt.");
   const sources = await obligationSources(job, plan, task);
-  const manifest = validateBlueprintObligations(await safeRead(
-    obligationsPath(job, plan.version), root(job)), initial, sources);
+  const rawManifest = await safeRead(obligationsPath(job, plan.version), root(job));
+  const manifest = initial.schema === "noveltea-causal-blueprint/v2" ?
+    validateCompactBlueprintSources(rawManifest, sources) :
+    validateBlueprintObligations(rawManifest, initial, sources);
   if (sha(manifest) !== marker.obligationsDigest)
     throw Error("Initial Blueprint source obligations changed.");
   return { initial, manifest, outline, stages, plannerSessionId: marker.plannerSessionId as string,
@@ -820,13 +875,10 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
     if (sha(stored) !== marker.nextDraftDigest || sha(nextDraft) !== marker.nextDraftDigest)
       throw Error("Causal blueprint paused draft does not match its sealed source patch.");
   }
-  const outline = parseBlueprintOutline(JSON.stringify(
-    await safeRead(outlinePath(job, plan.version), root(job))));
-  const manifest = await safeRead(obligationsPath(job, plan.version), root(job)) as BlueprintObligations;
-  const stages = await safeRead(stagesPath(job, plan.version), root(job)) as {
-    schema: "noveltea-blueprint-stages/v3"; headerDigest: string; beatDigests: string[];
-    coreDigest: string; routesDigest: string; outlineDigest: string; evidenceDigests: string[];
-  };
+  const { outline, stages } = await verifyStageChain(job, plan,
+    verified.pin.stagesDigest);
+  const manifest = await safeRead(obligationsPath(job, plan.version), root(job)) as
+    BlueprintObligations | CompactBlueprintSources;
   const initial = parseCausalBlueprint(JSON.stringify(
     await safeRead(draftPath(job, plan.version, 0), root(job))));
   return { ...verified, boundary, nextVersion: version, nextDraft, nextPatch,
@@ -907,6 +959,46 @@ function lastText(session: Awaited<ReturnType<typeof sessionFor>>["session"]) {
     throw Error("Causal blueprint Pi session was interrupted; preserve original transcript.");
   return session.getLastAssistantText() ?? "";
 }
+/** One compact Story-wide planning response; local evidence belongs to Milestone work. */
+export function compactStoryBlueprintPrompt(plan: Plan, task: string) {
+  return "READ-ONLY COMPACT STORY BLUEPRINT. Read the pinned nt-story-architecture and " +
+    "nt-catalog skills and creative-direction/foundation.md. Propose the GLOBAL causal " +
+    "structure: concrete causal answer, mechanism, responsibility and motive when " +
+    "appropriate, major Arcs and Milestones, causal dependencies and turning points, " +
+    "meaningful decisions and compatible endings. Propose a plausible general " +
+    "evidence approach without inventing exhaustive clues, individual scenes, " +
+    "dialogue, custody ledgers, puzzle quotas or implementation details. " +
+    "Account for an actual single Playthrough length excluding mutually exclusive " +
+    "routes, overall Interaction profile, branching footprint and Production budget. " +
+    "Narrative-led stories need not add Choices or Puzzles to satisfy a quota. " +
+    "Do not defer the central answer, accept impossible refusal routes or violate " +
+    "the approved Foundation. This is private provisional planning, not canon. " +
+    "Return ONE complete strict JSON object with EXACT root keys " +
+    "schema,premise,arcs,beats,resolution,causalAnswer,feasibility. " +
+    "schema='noveltea-causal-blueprint/v2'; arcs is 1–8 {id,goal} rows with " +
+    "unique lowercase slug IDs; beats is 2–16 major Milestones in causal order. " +
+    "Every beat has EXACT keys id,arcId,purpose,dependsOn,observations,change,decisions; " +
+    "arcId names an arc, dependsOn contains earlier beat IDs, observations MUST BE [] " +
+    "(detailed evidence is owned by later stages). decisions is [] or an array of " +
+    "{question,alternatives:[{action,lastingEffect},...]}, 2–5 distinct alternatives " +
+    "per decision; describe consequences at Story level, not a route-state ledger. " +
+    "resolution has question,conclusion,supportedBy,uncertainty (supportedBy are " +
+    "existing beat IDs). causalAnswer has EXACT keys question,answer,mechanism," +
+    "responsibility,motive,proofApproach (use 'not applicable' when appropriate); " +
+    "proofApproach names plausible future evidence sources, not completed proof. " +
+    "feasibility has EXACT string keys playthrough,interaction,production,endings. " +
+    "No extra keys, markdown or prose. CONTRACT: " + JSON.stringify(plan.contract) +
+    "\nAUTHOR TASK: " + JSON.stringify(task);
+}
+
+export function parseCompactStoryBlueprint(text: string): CausalBlueprint {
+  const value = parseCausalBlueprint(text);
+  if (value.schema !== "noveltea-causal-blueprint/v2" ||
+      value.beats.some(beat => beat.observations.length))
+    throw Error("New Story Blueprint must be compact, without local evidence inventory.");
+  return value;
+}
+
 export function blueprintOutlinePrompt(plan: Plan, task: string) {
   return (
     "You are the NovelTea READ-ONLY CAUSAL STORY ARCHITECT. " +
@@ -1116,12 +1208,14 @@ function blueprintObligationsPrompt(plan: Plan, task: string, blueprint: CausalB
 function reviewPrompt(
   plan: Plan,
   blueprint: CausalBlueprint,
-  obligations: BlueprintObligations,
+  obligations: BlueprintObligations | CompactBlueprintSources,
   task: string,
-  outline: BlueprintOutline,
+  outline: BlueprintOutline | undefined,
   prior: readonly (ReviewRound & { patch?: unknown })[],
   sourceChanges?: unknown,
 ) {
+  if (blueprint.schema === "noveltea-causal-blueprint/v2")
+    return compactReviewPrompt(plan, blueprint, obligations, task, prior, sourceChanges);
   return (
     "You are an INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER. " +
     "Read skill://nt-story-architecture/SKILL.md, skill://nt-catalog/SKILL.md, " +
@@ -1212,7 +1306,10 @@ function reviewPrompt(
 }
 
 function blueprintCorrectionPrompt(blueprint: CausalBlueprint, verdict: BlueprintReview,
-  outline: BlueprintOutline) {
+  outline: BlueprintOutline | undefined) {
+  if (blueprint.schema === "noveltea-causal-blueprint/v2")
+    return compactCorrectionPrompt(blueprint, verdict);
+  if (!outline) throw Error("Legacy Blueprint correction lacks its source-bound outline.");
   return "INDEPENDENT CAUSAL REVIEW. The original blueprint and immutable " +
           "source-derived proof obligation manifest remain fixed; do not rewrite them. " +
           "Return ONLY STRICT JSON LINES (JSONL), no enclosing array or wrapper. " +
@@ -1386,8 +1483,9 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
   plan: Plan, provider: string, model: string, task: string, cycleId: string,
   rounds: readonly ReviewRound[], sources: ObligationSources,
   diagnosis: BlueprintDiagnosticReceipt, writer: { id: string; file: string },
-  reviewer: { id: string; file: string }, obligations: BlueprintObligations,
-  outline: BlueprintOutline, changes: unknown): Promise<{
+  reviewer: { id: string; file: string },
+  obligations: BlueprintObligations | CompactBlueprintSources,
+  outline: BlueprintOutline | undefined, changes: unknown): Promise<{
     receipt: BlueprintReplacementReceipt;
     session: Awaited<ReturnType<typeof sessionFor>>;
   }> {
@@ -1489,8 +1587,8 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
   let reviewer: Awaited<ReturnType<typeof sessionFor>> | undefined;
   try {
     let initialBlueprint!: CausalBlueprint;
-    let manifest!: BlueprintObligations;
-    let outline!: BlueprintOutline;
+    let manifest!: BlueprintObligations | CompactBlueprintSources;
+    let outline: BlueprintOutline | undefined;
     let stagesReceipt!: unknown;
     if (!paused && !initialPause) {
       // Even a crash before the first successful JSON result leaves durable evidence
@@ -1515,83 +1613,17 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         }
       };
       await promptStorySpecialist(planner.session,
-        planner.context.contextNote + blueprintOutlinePrompt(plan, task));
-      const header = await validatedStage(
-        "causal header",
-        parseBlueprintOutlineHeader,
-        "Return ONE short, fully closed causal-outline-header/v1 JSON object " +
-          "with premise, beatIds, resolution and concrete causalAnswer. " +
-          "Do not include full beat objects, decisions, observations or routes.",
-      );
-      await immutable(outlineHeaderPath(job, plan.version), header);
-      const beats: BlueprintOutlineBeat[] = [];
-      const beatDigests: string[] = [];
-      for (let first = 0; first < header.beatIds.length; first += BEAT_BATCH_SIZE) {
-        await promptStorySpecialist(planner.session, blueprintBeatPrompt(header, beats, first));
-        const batch = await validatedStage(
-          "causal beat batch " + first,
-          text => parseBlueprintBeatBatch(text, header, first, beats),
-          "Return ONLY " +
-            Math.min(BEAT_BATCH_SIZE, header.beatIds.length - first) +
-            " valid JSONL beat objects for these exact IDs, one per line: " +
-            JSON.stringify(header.beatIds.slice(first, first + BEAT_BATCH_SIZE)) +
-            ". Do not emit the header, earlier beats, future beats or an array.",
-        );
-        await immutable(outlineBeatPath(job, plan.version, first), batch);
-        beats.push(...batch);
-        beatDigests.push(sha(batch));
-      }
-      const core = assembleBlueprintOutlineCore(header, beats);
-      await immutable(outlineCorePath(job, plan.version), core);
-      const requiredRoutes = requiredBlueprintRouteChoices(core);
-      let routeConsequences: BlueprintRouteConsequence[] = [];
-      if (requiredRoutes.length) {
-        await promptStorySpecialist(planner.session, blueprintRoutesPrompt(core));
-        routeConsequences = await validatedStage(
-          "Choice route consequences",
-          text => parseBlueprintRouteStage(text, core),
-          "Return ONLY " + requiredRoutes.length + " complete standalone JSONL rows, " +
-            "one for EACH of these exact [beatId,decisionIndex,alternativeIndex] keys " +
-            "IN ORDER: " + JSON.stringify(requiredRoutes.map(
-              row => [row.beatId, row.decisionIndex, row.alternativeIndex])) +
-            ". No duplicates, wrapper or omitted routes. Preserve the fixed causal core.",
-        );
-      }
-      await immutable(outlineRoutesPath(job, plan.version), routeConsequences);
-      outline = assembleCurrentBlueprintOutline(core, routeConsequences);
-      await immutable(outlinePath(job, plan.version), outline);
-      const evidence: BlueprintEvidence[] = [];
-      const evidenceDigests: string[] = [];
-      for (let first = 0; first < outline.beats.length; first += EVIDENCE_BATCH_SIZE) {
-        await promptStorySpecialist(planner.session, blueprintEvidencePrompt(outline, first));
-        const batch = await validatedStage("evidence batch " + first,
-          text => parseBlueprintEvidence(text, outline, first),
-          "Return ONLY the " +
-          Math.min(EVIDENCE_BATCH_SIZE, outline.beats.length - first) +
-          " requested evidence objects as valid JSONL, one per line, " +
-          "with EXACT id and observations fields. " +
-          "Every observation requires source,observable,supports,limits.");
-        await immutable(evidencePath(job, plan.version, first), batch);
-        evidence.push(...batch);
-        evidenceDigests.push(sha(batch));
-      }
-      initialBlueprint = assembleBlueprintStages(outline, evidence);
-      await promptStorySpecialist(planner.session,
-        blueprintObligationsPrompt(plan, task, initialBlueprint, sources));
-      manifest = await validatedStage("source obligations",
-        text => parseBlueprintObligationStage(text, initialBlueprint, sources),
-        "Return ONLY 1–20 standalone valid JSON obligation lines. " +
-        "Every quote MUST be copied EXACTLY as a contiguous 8–40-character " +
-        "substring of its corresponding source text from the previous prompt; " +
-        "never fabricate or combine quotations, and reference existing beat IDs.");
+        planner.context.contextNote + compactStoryBlueprintPrompt(plan, task));
+      initialBlueprint = await validatedStage(
+        "compact Story Blueprint", parseCompactStoryBlueprint,
+        "Return a complete v2 Story Blueprint with major Arcs/Milestones and " +
+          "global feasibility; observations must be [] at every Milestone. " +
+          "Do not provide beat evidence batches or an exhaustive obligation inventory.");
+      manifest = compactBlueprintSources(sources);
       await immutable(obligationsPath(job, plan.version), manifest);
       await immutable(draftPath(job, plan.version, 0), initialBlueprint);
-      stagesReceipt = {
-        schema: "noveltea-blueprint-stages/v3",
-        headerDigest: sha(header), beatDigests,
-        coreDigest: sha(core), routesDigest: sha(routeConsequences),
-        outlineDigest: sha(outline), evidenceDigests,
-      };
+      stagesReceipt = { schema: "noveltea-blueprint-stages/v4",
+        draftDigest: sha(initialBlueprint) };
       await immutable(stagesPath(job, plan.version), stagesReceipt);
     } else {
       const stored = paused ?? initialPause!;
