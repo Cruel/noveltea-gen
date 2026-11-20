@@ -93,6 +93,8 @@ interface Receipt {
   piSessionFile?: string;
   piSessionId?: string;
   skillReads?: string[];
+  /** Sealed early Arc/Milestone reviewer verdict for exact uncommitted bytes. */
+  draftReview?: import("./architecture-draft-review.js").ArchitectureDraftReviewPin;
   /** Source-bound authoring metadata, not a permission or a gameplay prerequisite. */
   milestoneOrder?: string[];
   outstanding?: Obligation[];
@@ -635,6 +637,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           delete state.paths;
           delete state.contentDigest;
           delete state.manuallyReconciled;
+          delete state.draftReview;
           delete state.blueprint;
           delete state.blueprintTask;
           delete state.blueprintFailure;
@@ -807,6 +810,21 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         checkOriginalProtection(job, original, workingHead);
         const selected = checkArchitecture(report, receipt.plan!.contract);
         if (receipt.worker === 'pi' && !isFocusedScope(receipt.plan!.contract)) {
+          // Early review is not postcommit semantic approval. Its source-bound
+          // receipt must nevertheless match the exact candidate before commit.
+          if (!receipt.manuallyReconciled) {
+            if (!receipt.draftReview || !receipt.snapshot || !receipt.piSessionId ||
+                !receipt.piSessionFile || !receipt.paths)
+              throw Error("Architecture cannot publish without an exact independently reviewed precommit draft.");
+            const { verifyArchitectureDraftReviewPin } = await import("./architecture-draft-review.js");
+            const blueprint = receipt.blueprint ? await readApprovedBlueprint(job, receipt.plan!,
+              receipt.snapshot, receipt.provider, receipt.model, receipt.blueprintTask ?? "",
+              receipt.executionHead ?? receipt.expectedHead) : null;
+            await verifyArchitectureDraftReviewPin(job, receipt.snapshot, receipt.plan!,
+              receipt.provider, receipt.model, receipt.paths,
+              { id: receipt.piSessionId, file: receipt.piSessionFile },
+              receipt.draftReview, receipt.blueprintTask ?? "", blueprint?.blueprint);
+          }
           // Reject a stale or invented order BEFORE committing any Story bytes.
           verifiedArchitectureMilestoneOrder(receipt.milestoneOrder,
             selected.filter(record => record.metadata.type === 'milestone').map(record => record.metadata.id));
