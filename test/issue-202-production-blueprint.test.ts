@@ -15,7 +15,8 @@ import {
   type Provider, type TranscriptContext, type SimpleStreamOptions, type ToolCall,
 } from "@earendil-works/pi-ai";
 import { createControllerServer, SandboxController, type ControllerConfig } from "../web/src/sandbox-controller.js";
-import { createReviewedBlueprint, readApprovedBlueprint, type BlueprintReview } from "../src/architecture-blueprint.js";
+import { createReviewedBlueprint, readApprovedBlueprint, inspectPausedBlueprint, type BlueprintReview } from "../src/architecture-blueprint.js";
+import type { ConvergentReview } from "../src/review-convergence.js";
 import { blueprintDigest } from "../src/architecture-blueprint-patch.js";
 import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
 import type { Plan } from "../src/architecture.js";
@@ -170,7 +171,7 @@ function promptText(messages: readonly unknown[]): string {
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
-function scripted(calls: Call[], scenario: "productive" | "stalled" = "productive",
+function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-pass" | "continue" | "repeat" = "productive",
   crashFirstReviewer = false): Provider {
   let reviewerRound = 0;
   let reviewerCrashed = false;
@@ -178,8 +179,20 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" = "productiv
   let protocolRepaired = false;
   const verdicts = scenario === "productive"
     ? [negative, negative1, negative2, positive]
-    : [negative, stalled1, stalled2];
-  const writerPatches = scenario === "productive" ? corrections : stalledPatches;
+    : scenario === "continue" ? [negative, stalled1, stalled2, {
+      schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
+      prior: [0, 1, 2].map(round => ({ ...progress(round, "arrival", progress0.evidence.quote) })),
+    } satisfies ConvergentReview] : scenario === "repeat"
+      ? [negative, stalled1, stalled2, ...[3, 4].map(last => ({
+        schema: "noveltea-blueprint-review/v2" as const,
+        status: "revise" as const,
+        prior: Array.from({ length: last }, (_, round) => stillBlocked(round)),
+        findings: [{ ...negative.findings[0]!, origin: "continuing" as const }],
+      }))]
+      : [negative, stalled1, stalled2];
+  const writerPatches = scenario === "productive" ? corrections : scenario === "continue"
+    ? [...stalledPatches, corrections[0]!] : scenario === "repeat"
+      ? [...stalledPatches, ...stalledPatches] : stalledPatches;
   const stream = (_model: Model, ctx: TranscriptContext, _options?: SimpleStreamOptions) => {
     const result = createAssistantMessageEventStream();
     const active = new Set<string>();
@@ -191,12 +204,14 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" = "productiv
     const prompt = promptText(ctx.messages);
     const lastRole = ctx.messages.at(-1)?.role ?? "";
     const reviewer = prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER");
+    const diagnostic = prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW");
+    const replacement = prompt.includes("YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER");
     calls.push({ prompt, tools: [...active], messages: structuredClone(ctx.messages), lastRole });
     if (reviewer && crashFirstReviewer && !reviewerCrashed) {
       reviewerCrashed = true;
       throw Error("Simulated crash during initial reviewer prompt before verdict sealing.");
     }
-    const needRead = (prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") || reviewer) &&
+    const needRead = (prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") || reviewer || diagnostic) &&
       lastRole !== "toolResult";
     let content: AssistantMessage["content"];
     let reason: "stop" | "toolUse" = "stop";
@@ -208,6 +223,24 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" = "productiv
       content = asText(evidence.map(v => JSON.stringify(v)).join("\n"));
     else if (prompt.includes("READ-ONLY SOURCE-GROUNDED CAUSAL OBLIGATION INVENTORY"))
       content = asText(JSON.stringify(obligation));
+    else if (diagnostic) content = asText(JSON.stringify({
+      schema: "noveltea-blueprint-diagnosis/v1",
+      action: scenario === "replace-pass" ? "replace" :
+        scenario === "continue" || scenario === "repeat" ? "continue" : "escalate",
+      explanation: "Two ineffective source changes require independent escalation, not automatic approval.",
+      assessments: [{ kind: "material",
+        reason: "The source still lacks the independently verified arrival evidence.",
+        requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
+        evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
+      }],
+    }));
+    else if (replacement) content = asText(JSON.stringify({
+      schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
+      prior: [0, 1, 2].map(round => ({ round, findingIndex: 0, status: "resolved",
+        reason: "The original reviewer did not account for the independent shelter record.",
+        evidence: { beatId: "archive", quote: "An entry records a protected arrival at dusk" },
+      })),
+    }));
     else if (reviewer) {
       const round = reviewerRound++;
       // Round 2 intentionally violates the response contract once. Its
@@ -280,6 +313,9 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
   const old = Object.fromEntries(keys.map(k => [k, process.env[k]]));
   let controller: SandboxController | undefined;
   let stalledJobId: string | undefined;
+  let disputedJobId: string | undefined;
+  let resumedJobId: string | undefined;
+  let repeatedJobId: string | undefined;
   let graphJobId: string | undefined;
   let crashGraphJobId: string | undefined;
   let activeGraphJobId: string | undefined;
@@ -480,7 +516,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     await assert.rejects(() => withJobModelRuntime(stuckRuntime, () =>
       withStoryJobLock(stuck, "global-architecture", () =>
         createReviewedBlueprint(stuck, snapshot, plan, model.provider, model.id, task, baseSha))),
-    /requires independent reassessment after two nonproductive corrections/);
+    /Diagnostic review requires author-guided escalation/);
     const stuckDir = join(stuck.stateDir, "architecture-blueprints");
     assert.equal(existsSync(join(stuckDir, "plan-1-approved.json")), false);
     assert.equal(JSON.parse(readFileSync(join(stuckDir, "plan-1-convergence-1.json"),
@@ -488,10 +524,142 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     const end = JSON.parse(readFileSync(join(stuckDir, "plan-1-convergence-2.json"), "utf8"));
     assert.equal(end.stalled, 2);
     assert.equal(end.oscillating, true);
+    assert.ok(existsSync(join(stuckDir, "plan-1-diagnostic-2.json")),
+      "stagnation must request one independently sealed diagnostic opinion");
+    const diagnosis = JSON.parse(readFileSync(join(stuckDir, "plan-1-diagnostic-2.json"), "utf8"));
+    assert.equal(diagnosis.trigger, "stagnation");
+    assert.equal(diagnosis.diagnosis.action, "escalate");
+    assert.notEqual(diagnosis.sessionId, diagnosis.reviewerSessionId);
     assert.equal(stuckCalls.filter(c =>
       c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER") &&
       c.lastRole === "toolResult").length, 3);
     assert.equal(git(stuck.worktreeRoot, "status", "--porcelain"), "");
+
+    // A second production Thread diagnoses stalled review, safely pauses
+    // BEFORE diagnosis admission and BEFORE replacement reviewer admission,
+    // then gets an independent current pass without mutating old negatives.
+    const stalledModelCalls = (await inspectPiPolicy(stuck)).budget.modelCalls;
+    const diagnosticTurns = stuckCalls.filter(call =>
+      call.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW")).length;
+    assert.ok(diagnosticTurns >= 2);
+    disputedJobId = randomUUID();
+    const db3 = new DatabaseSync(join(app, "studio.sqlite"));
+    try { db3.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+      .run(disputedJobId, owner, "story", baseSha, null); } finally { db3.close(); }
+    const disputed = await startStoryJob({
+      story, job: disputedJobId, worktreeCacheRoot: scoped,
+    });
+    const disputedCalls: Call[] = [];
+    const disputedRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    disputedRuntime.registerNativeProvider(scripted(disputedCalls, "replace-pass"));
+    await disputedRuntime.refresh({ allowNetwork: false });
+    const createDisputed = () => withJobModelRuntime(disputedRuntime, () =>
+      withStoryJobLock(disputed, "global-architecture", () =>
+        createReviewedBlueprint(disputed, snapshot, plan, model.provider, model.id, task, baseSha)));
+    await configurePiPolicy(disputed, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: stalledModelCalls - diagnosticTurns } });
+    await assert.rejects(createDisputed(), (error: unknown) => error instanceof PiBudgetPause);
+    const disputedDir = join(disputed.stateDir, "architecture-blueprints");
+    assert.ok(existsSync(join(disputedDir, "plan-1-pause-2-diagnostic.json")));
+    assert.deepEqual(await inspectPausedBlueprint(disputed, plan, snapshot,
+      model.provider, model.id, task, baseSha),
+      { boundary: "diagnostic", nextVersion: 2 });
+    assert.equal(existsSync(join(disputedDir, "plan-1-diagnostic-2.json")), false);
+    await configurePiPolicy(disputed, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: stalledModelCalls } });
+    await assert.rejects(createDisputed(), (error: unknown) => error instanceof PiBudgetPause);
+    assert.ok(existsSync(join(disputedDir, "plan-1-pause-2-replacement.json")));
+    assert.ok(existsSync(join(disputedDir, "plan-1-diagnostic-2.json")));
+    assert.equal(existsSync(join(disputedDir, "plan-1-replacement-2.json")), false);
+    const countDiagnosticTurns = disputedCalls.filter(call =>
+      call.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW")).length;
+    await configurePiPolicy(disputed, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: 60 } });
+    const replacementPin = await createDisputed();
+    assert.equal(replacementPin.draftVersion, 2);
+    const replacementReceipt = JSON.parse(readFileSync(join(disputedDir,
+      "plan-1-replacement-2.json"), "utf8"));
+    assert.equal(replacementPin.reviewerSessionId, replacementReceipt.sessionId);
+    const independentCalls = disputedCalls.filter(call =>
+      call.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW") ||
+      call.prompt.includes("YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER"));
+    assert.ok(independentCalls.length >= 4, "both independent sessions reread source");
+    for (const call of independentCalls) {
+      assert.ok(call.tools.includes("read"));
+      assert.ok(call.tools.every(name => !["write", "edit", "bash", "exec"].includes(name)),
+        "neither diagnostic nor replacement can mutate the Story");
+    }
+    const originalReviewerId = JSON.parse(readFileSync(join(disputedDir,
+      "plan-1-review-session-2.json"), "utf8")).sessionId;
+    assert.notEqual(replacementPin.reviewerSessionId, originalReviewerId);
+    assert.equal(JSON.parse(readFileSync(join(disputedDir, "plan-1-verdict-2.json"),
+      "utf8")).status, "revise", "diagnosis never rewrites the historical negative");
+    assert.equal(disputedCalls.filter(call =>
+      call.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW")).length,
+    countDiagnosticTurns, "the sealed diagnosis must not rerun during replacement resume");
+    assert.deepEqual((await readApprovedBlueprint(disputed, plan, snapshot,
+      model.provider, model.id, task, baseSha))?.pin, replacementPin);
+    const diagnosticFile = join(disputedDir, "plan-1-diagnostic-2.json");
+    const diagnosticBytes = readFileSync(diagnosticFile);
+    try {
+      const oldReceipt = JSON.parse(diagnosticBytes.toString("utf8"));
+      writeFileSync(diagnosticFile, JSON.stringify({ ...oldReceipt, evidenceDigest: "0".repeat(64) }));
+      await assert.rejects(readApprovedBlueprint(disputed, plan, snapshot,
+        model.provider, model.id, task, baseSha), /diagnosis changed its source/);
+    } finally { writeFileSync(diagnosticFile, diagnosticBytes); }
+
+    // A diagnosis may instead authorize exactly one more bounded attempt.
+    // It must retain the original reviewer session, not auto-approve drift.
+    resumedJobId = randomUUID();
+    const db4 = new DatabaseSync(join(app, "studio.sqlite"));
+    try { db4.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+      .run(resumedJobId, owner, "story", baseSha, null); } finally { db4.close(); }
+    const resumed = await startStoryJob({
+      story, job: resumedJobId, worktreeCacheRoot: scoped,
+    });
+    const continuedCalls: Call[] = [];
+    const continuedRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    continuedRuntime.registerNativeProvider(scripted(continuedCalls, "continue"));
+    await continuedRuntime.refresh({ allowNetwork: false });
+    const continuedPin = await withJobModelRuntime(continuedRuntime, () =>
+      withStoryJobLock(resumed, "global-architecture", () =>
+        createReviewedBlueprint(resumed, snapshot, plan, model.provider, model.id, task, baseSha)));
+    assert.equal(continuedPin.draftVersion, 3);
+    assert.equal(JSON.parse(readFileSync(join(resumed.stateDir, "architecture-blueprints",
+      "plan-1-diagnostic-2.json"), "utf8")).diagnosis.action, "continue");
+    assert.equal(continuedPin.reviewerSessionId, JSON.parse(readFileSync(join(resumed.stateDir,
+      "architecture-blueprints", "plan-1-review-session-0.json"), "utf8")).sessionId);
+    assert.deepEqual((await readApprovedBlueprint(resumed, plan, snapshot,
+      model.provider, model.id, task, baseSha))?.pin, continuedPin);
+
+    // Re-entering the same source and material blocker after a prior
+    // diagnosis must escalate without spending another diagnostic Pi turn.
+    repeatedJobId = randomUUID();
+    const db5 = new DatabaseSync(join(app, "studio.sqlite"));
+    try { db5.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+      .run(repeatedJobId, owner, "story", baseSha, null); } finally { db5.close(); }
+    const repeated = await startStoryJob({
+      story, job: repeatedJobId, worktreeCacheRoot: scoped,
+    });
+    const repeatedCalls: Call[] = [];
+    const repeatedRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    repeatedRuntime.registerNativeProvider(scripted(repeatedCalls, "repeat"));
+    await repeatedRuntime.refresh({ allowNetwork: false });
+    await assert.rejects(() => withJobModelRuntime(repeatedRuntime, () =>
+      withStoryJobLock(repeated, "global-architecture", () =>
+        createReviewedBlueprint(repeated, snapshot, plan, model.provider, model.id,
+          task, baseSha))), /requires author-guided escalation for identical source evidence/);
+    const repeatedDir = join(repeated.stateDir, "architecture-blueprints");
+    assert.ok(existsSync(join(repeatedDir, "plan-1-diagnostic-2.json")));
+    assert.equal(existsSync(join(repeatedDir, "plan-1-diagnostic-4.json")), false);
+    assert.equal(repeatedCalls.filter(call =>
+      call.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW") &&
+      call.lastRole === "toolResult").length, 1);
+    assert.equal(existsSync(join(repeatedDir, "plan-1-approved.json")), false);
+    assert.equal(git(repeated.worktreeRoot, "status", "--porcelain"), "");
 
     // End-to-end Architecture entry point: a fully staged, source-bound
     // initial Blueprint pauses before reviewer admission, survives inspect,
@@ -726,6 +894,9 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     if (controller && activeGraphJobId) await controller.dispose(activeGraphJobId);
     if (controller && crashGraphJobId) await controller.dispose(crashGraphJobId);
     if (controller && graphJobId) await controller.dispose(graphJobId);
+    if (controller && repeatedJobId) await controller.dispose(repeatedJobId);
+    if (controller && resumedJobId) await controller.dispose(resumedJobId);
+    if (controller && disputedJobId) await controller.dispose(disputedJobId);
     if (controller && stalledJobId) await controller.dispose(stalledJobId);
     if (controller) await controller.dispose(id);
     if (server) await new Promise<void>(done => server!.close(() => done()));

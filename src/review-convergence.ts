@@ -1,7 +1,7 @@
 /** Source-grounded progress accounting for a persistent independent Review cycle.
  * The reviewer judges causal improvement; the controller checks exact source
  * anchors, lineage, affected evidence and oscillation, without a finding ledger.
- * Diagnostic reassessment of stalled cycles belongs to the next boundary. */
+ * Diagnostic reassessment is a separate independent review, never an approval. */
 import { createHash } from "node:crypto";
 import type { CausalBlueprint } from "./architecture-blueprint.js";
 
@@ -42,7 +42,7 @@ const exact = (value: unknown, keys: string[]): value is Record<string, unknown>
   Object.keys(value).sort().join(",") === [...keys].sort().join(",");
 const statuses = ["resolved", "improved", "persisting", "regressed"];
 const origins = ["initial", "continuing", "introduced", "overlooked"];
-function cited(blueprint: CausalBlueprint, value: unknown, from?: string) {
+export function cited(blueprint: CausalBlueprint, value: unknown, from?: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const citation = value as Partial<ReviewCitation>;
   if (!filled(citation.quote) || citation.quote.length < 8 ||
@@ -126,6 +126,7 @@ function checkReviewShape(review: unknown, blueprint: CausalBlueprint,
 export function evaluateReviewConvergence(
   review: unknown, blueprint: CausalBlueprint, previous: readonly ReviewRound[],
   sources: { foundation: string; task: string; contract: unknown }, stalledBefore = 0,
+  independentReplacement = false,
 ): { review: ConvergentReview; productive: boolean; stalled: number; reassess: boolean; oscillating: boolean } {
   checkReviewShape(review, blueprint, previous, sources);
   const reviewValid = review as ConvergentReview;
@@ -144,8 +145,11 @@ export function evaluateReviewConvergence(
   });
   const regressed = reviewValid.prior.some(item => item.status === "regressed");
   const productive = !!last && !oscillating && material && !regressed;
-  if (reviewValid.status === "pass" && last && !productive)
+  if (reviewValid.status === "pass" && last && !productive && !independentReplacement)
     throw Error("Convergent Blueprint pass has no verified material source progress or repeats an old draft.");
+  // A separately authenticated reviewer may settle a disputed negative judgment
+  // on exactly the same source. This is allowed only at the diagnostic replacement
+  // boundary; it never turns the diagnostic's opinion into a passing verdict.
   const stalled = !last || productive ? 0 : stalledBefore + 1;
   return { review: reviewValid, productive, stalled,
     reassess: reviewValid.status === "revise" && stalled >= 2, oscillating };

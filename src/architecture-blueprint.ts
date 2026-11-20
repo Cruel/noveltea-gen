@@ -18,6 +18,8 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { assertReviewCycleSession, reviewCycleId } from "./review-cycle.js";
 import { evaluateReviewConvergence, type ConvergentReview, type ReviewRound } from "./review-convergence.js";
+import { diagnosticCaseFingerprint, diagnosticEvidence, diagnosticTrigger, parseBlueprintDiagnosis,
+  type BlueprintDiagnosis, type DiagnosticTrigger } from "./blueprint-diagnostic.js";
 import { buildBlueprintObligations, validateBlueprintObligations,
   type BlueprintObligations, type ObligationSources } from "./architecture-blueprint-obligations.js";
 import { parseBlueprintPatch, applyBlueprintPatch,
@@ -41,6 +43,7 @@ const HASH = /^[a-f0-9]{64}$/;
 export function classifyBlueprintFailure(reason: string):
   "invalid-plan" | "review-rejected" | "interrupted" {
   if (reason.includes("requires independent reassessment") ||
+      reason.includes("Diagnostic review requires") ||
       reason.includes("exhausted bounded corrections")) return "review-rejected";
   if (/\b(?:interrupted|cancelled|canceled|aborted|timed out|timeout)\b/i.test(reason))
     return "interrupted";
@@ -217,7 +220,12 @@ const reviewSessionPath = (job: JobStartResult, version: number, iteration: numb
   join(root(job), "plan-" + version + "-review-session-" + iteration + ".json");
 const convergencePath = (job: JobStartResult, version: number, iteration: number) =>
   join(root(job), "plan-" + version + "-convergence-" + iteration + ".json");
-const pausePath = (job: JobStartResult, version: number, iteration: number, boundary: "writer" | "review") =>
+const diagnosticPath = (job: JobStartResult, version: number, iteration: number) =>
+  join(root(job), "plan-" + version + "-diagnostic-" + iteration + ".json");
+const replacementPath = (job: JobStartResult, version: number, iteration: number) =>
+  join(root(job), "plan-" + version + "-replacement-" + iteration + ".json");
+const pausePath = (job: JobStartResult, version: number, iteration: number,
+  boundary: "writer" | "review" | "diagnostic" | "replacement") =>
   join(root(job), "plan-" + version + "-pause-" + iteration + "-" + boundary + ".json");
 const initialPausePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-pause-initial-review.json");
@@ -354,8 +362,99 @@ async function verifyStageChain(job: JobStartResult, plan: Plan, stageDigest?: s
   }
   return { initial, outline, stages };
 }
+interface BlueprintDiagnosticReceipt {
+  schema: "noveltea-blueprint-diagnostic-receipt/v1";
+  cycleId: string;
+  evidenceDigest: string;
+  caseFingerprint: string;
+  trigger: DiagnosticTrigger;
+  draftDigest: string;
+  reviewDigest: string;
+  reviewerSessionId: string;
+  diagnosis: BlueprintDiagnosis;
+  sessionId: string;
+  sessionFile: string;
+  transcriptBytes: number;
+  transcriptDigest: string;
+}
+interface BlueprintReplacementReceipt {
+  schema: "noveltea-blueprint-replacement-receipt/v1";
+  cycleId: string;
+  diagnosisDigest: string;
+  draftDigest: string;
+  reviewDigest: string;
+  verdict: ConvergentReview;
+  sessionId: string;
+  sessionFile: string;
+  transcriptBytes: number;
+  transcriptDigest: string;
+}
+async function verifiedAuxiliaryTranscript(job: JobStartResult, directory: string,
+  file: string, id: string, length: number, hash: string) {
+  if (!Number.isSafeInteger(length) || length <= 0 || !HASH.test(hash))
+    throw Error("Independent diagnostic/replacement review transcript receipt is invalid.");
+  await transcript(job, file, id, directory);
+  const bytes = await readFile(file);
+  if (bytes.length < length ||
+      createHash("sha256").update(bytes.subarray(0, length)).digest("hex") !== hash)
+    throw Error("Independent diagnostic/replacement review transcript changed after sealing.");
+}
+async function readDiagnosis(job: JobStartResult, plan: Plan, version: number,
+  cycleId: string, rounds: readonly ReviewRound[], sources: ObligationSources,
+  reviewerSessionId: string, writerSessionId: string): Promise<BlueprintDiagnosticReceipt | null> {
+  const path = diagnosticPath(job, plan.version, version);
+  if (!existsSync(path)) return null;
+  const receipt = await safeRead(path, root(job)) as BlueprintDiagnosticReceipt;
+  if (!strict(receipt, ["schema", "cycleId", "evidenceDigest", "caseFingerprint", "trigger",
+    "draftDigest", "reviewDigest", "reviewerSessionId", "diagnosis",
+    "sessionId", "sessionFile", "transcriptBytes", "transcriptDigest"]) ||
+      receipt.schema !== "noveltea-blueprint-diagnostic-receipt/v1" ||
+      receipt.cycleId !== cycleId ||
+      receipt.evidenceDigest !== diagnosticEvidence(cycleId, rounds, sources) ||
+      receipt.caseFingerprint !== diagnosticCaseFingerprint(cycleId,
+        rounds.at(-1)!.blueprint, rounds.at(-1)!.verdict, sources) ||
+      receipt.draftDigest !== sha(rounds.at(-1)?.blueprint) ||
+      receipt.reviewDigest !== sha(rounds.at(-1)?.verdict) ||
+      receipt.reviewerSessionId !== reviewerSessionId ||
+      !["stagnation", "late-blockers", "review-depth"].includes(receipt.trigger) ||
+      receipt.sessionId === reviewerSessionId || receipt.sessionId === writerSessionId)
+    throw Error("Independent Blueprint diagnosis changed its source or reviewer provenance.");
+  const diagnosis = parseBlueprintDiagnosis(JSON.stringify(receipt.diagnosis),
+    rounds.at(-1)!.blueprint, sources);
+  if (!isDeepStrictEqual(diagnosis, receipt.diagnosis))
+    throw Error("Independent Blueprint diagnosis did not match its sealed evidence.");
+  await verifiedAuxiliaryTranscript(job, "architecture-blueprint-diagnostic-sessions",
+    receipt.sessionFile, receipt.sessionId, receipt.transcriptBytes, receipt.transcriptDigest);
+  return receipt;
+}
+async function readReplacement(job: JobStartResult, plan: Plan, version: number,
+  cycleId: string, blueprint: CausalBlueprint, history: readonly ReviewRound[],
+  sources: ObligationSources, diagnostic: BlueprintDiagnosticReceipt | null,
+  writerSessionId: string, previousReviewerSessionId: string): Promise<BlueprintReplacementReceipt | null> {
+  const path = replacementPath(job, plan.version, version);
+  if (!existsSync(path)) return null;
+  const receipt = await safeRead(path, root(job)) as BlueprintReplacementReceipt;
+  if (!diagnostic || diagnostic.diagnosis.action !== "replace" ||
+      !strict(receipt, ["schema", "cycleId", "diagnosisDigest", "draftDigest",
+        "reviewDigest", "verdict", "sessionId", "sessionFile",
+        "transcriptBytes", "transcriptDigest"]) ||
+      receipt.schema !== "noveltea-blueprint-replacement-receipt/v1" ||
+      receipt.cycleId !== cycleId ||
+      receipt.diagnosisDigest !== sha(diagnostic) ||
+      receipt.draftDigest !== sha(blueprint) ||
+      receipt.reviewDigest !== sha(history.at(-1)?.verdict) ||
+      [writerSessionId, previousReviewerSessionId, diagnostic.sessionId].includes(receipt.sessionId) ||
+      receipt.sessionFile === diagnostic.sessionFile)
+    throw Error("Independent replacement review has stale or unauthorized provenance.");
+  const parsed = parseBlueprintReview(JSON.stringify(receipt.verdict), blueprint);
+  evaluateReviewConvergence(parsed, blueprint, history, sources, 0, true);
+  await verifiedAuxiliaryTranscript(job, "architecture-blueprint-review-sessions",
+    receipt.sessionFile, receipt.sessionId, receipt.transcriptBytes, receipt.transcriptDigest);
+  return receipt;
+}
 async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
-  provider: string, model: string, task: string, head: string, pausedPin?: BlueprintPin): Promise<{
+  provider: string, model: string, task: string, head: string,
+  pausedPin?: BlueprintPin, pendingDiagnostic = false): Promise<{
     blueprint: CausalBlueprint; pin: BlueprintPin; rounds: ReviewRound[]; stalled: number;
   } | null> {
   const path = approvedPath(job, plan.version);
@@ -397,6 +496,10 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
   let previousTranscriptBytes = 0;
   const priorRounds: ReviewRound[] = [];
   let stalled = 0;
+  let diagnosisCount = 0;
+  const seenCases = new Set<string>();
+  let activeReviewer: { id: string; file: string } | undefined;
+  const cycleId = record.reviewCycleId ?? "";
   for (let i = 0; i <= record.draftVersion; i++) {
     const stored = await safeRead(draftPath(job, plan.version, i), root(job));
     if (sha(blueprint) !== sha(stored))
@@ -405,8 +508,8 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
     const review = parseBlueprintReview(JSON.stringify(verdict), blueprint);
     if ("schema" in review && review.schema === "noveltea-blueprint-review/v2") {
       const convergence = evaluateReviewConvergence(review, blueprint, priorRounds, sources, stalled);
-      if (convergence.reassess)
-        throw Error("Approved causal blueprint contains a stalled review requiring independent reassessment.");
+      // A sealed diagnosis may safely authorize continuation of a stalled
+      // negative verdict; its independent evidence is verified below.
       const receipt = await safeRead(convergencePath(job, plan.version, i), root(job));
       if (!isDeepStrictEqual(receipt, {
         schema: "noveltea-blueprint-convergence/v1", draftDigest: sha(blueprint),
@@ -419,7 +522,6 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
       // cannot downgrade to the old unaccountable response format.
       throw Error("Approved causal blueprint lost its convergence review evidence.");
     }
-    priorRounds.push({ blueprint, verdict: review });
     const reviewSession = await safeRead(reviewSessionPath(job, plan.version, i), root(job)) as {
       schema?: string; cycleId?: string; sessionId: string; sessionFile: string;
       verdictDigest: string; blueprintDigest: string; transcriptBytes?: number;
@@ -437,14 +539,14 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
             !Number.isSafeInteger(reviewSession.transcriptBytes) ||
             reviewSession.transcriptBytes! <= previousTranscriptBytes ||
             !HASH.test(reviewSession.transcriptDigest ?? "") ||
-            (i > 0 && (reviewSession.sessionId !== record.reviewerSessionId ||
-              reviewSession.sessionFile !== record.reviewerSessionFile))
+            (i > 0 && (reviewSession.sessionId !== activeReviewer?.id ||
+              reviewSession.sessionFile !== activeReviewer?.file))
           : reviewers.has(reviewSession.sessionId) || reviewers.has(reviewSession.sessionFile)))
       throw Error("Causal blueprint independent review provenance changed.");
     assertReviewCycleSession(
       { id: record.plannerSessionId, file: record.plannerSessionFile },
-      { id: reviewSession.sessionId, file: reviewSession.sessionFile },
-      persistent ? { id: record.reviewerSessionId, file: record.reviewerSessionFile } : undefined);
+      { id: reviewSession.sessionId, file: reviewSession.sessionFile });
+    activeReviewer = { id: reviewSession.sessionId, file: reviewSession.sessionFile };
     reviewers.add(reviewSession.sessionId);
     reviewers.add(reviewSession.sessionFile);
     await transcript(job, reviewSession.sessionFile, reviewSession.sessionId,
@@ -457,16 +559,47 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
         throw Error("Causal blueprint review transcript changed after sealed verdict.");
       previousTranscriptBytes = reviewSession.transcriptBytes!;
     }
+    let effective = review;
+    const rounds = [...priorRounds, { blueprint, verdict: review }];
+    if (persistent) {
+      const diagnosis = await readDiagnosis(job, plan, i, cycleId, rounds, sources,
+        reviewSession.sessionId, record.plannerSessionId);
+      const expectedTrigger = diagnosticTrigger(rounds, stalled, diagnosisCount);
+      if (diagnosis) {
+        if (!expectedTrigger || diagnosis.trigger !== expectedTrigger ||
+            seenCases.has(diagnosis.caseFingerprint))
+          throw Error("Blueprint diagnosis was repeated or not requested by the verified Review cycle.");
+        seenCases.add(diagnosis.caseFingerprint);
+        diagnosisCount++;
+        if (["split", "escalate"].includes(diagnosis.diagnosis.action))
+          throw Error("Historical Blueprint diagnostic escalated; no automatic review continuation is authorized.");
+        const replacement = await readReplacement(job, plan, i, cycleId, blueprint,
+          rounds, sources, diagnosis, record.plannerSessionId, reviewSession.sessionId);
+        if (replacement) {
+          effective = replacement.verdict;
+          activeReviewer = { id: replacement.sessionId, file: replacement.sessionFile };
+          previousTranscriptBytes = 0;
+        } else if (diagnosis.diagnosis.action === "replace" &&
+            !(pendingDiagnostic && i === record.draftVersion)) {
+          throw Error("Blueprint replacement requires an independent current review.");
+        }
+        stalled = 0;
+      } else if (expectedTrigger === "stagnation" &&
+          !(pendingDiagnostic && i === record.draftVersion)) {
+        throw Error("Approved causal blueprint contains a stalled review requiring independent reassessment.");
+      }
+    }
+    priorRounds.push({ blueprint, verdict: effective });
     if (i === record.draftVersion) {
-      if (review.status !== (pausedPin ? "revise" : "pass") ||
+      if (effective.status !== (pausedPin ? "revise" : "pass") ||
           sha(blueprint) !== record.blueprintDigest ||
-          sha(verdict) !== record.reviewDigest ||
-          reviewSession.sessionId !== record.reviewerSessionId ||
-          reviewSession.sessionFile !== record.reviewerSessionFile)
+          sha(effective) !== record.reviewDigest ||
+          activeReviewer?.id !== record.reviewerSessionId ||
+          activeReviewer?.file !== record.reviewerSessionFile)
         throw Error("Approved causal blueprint or independent verdict changed after review.");
     } else {
       const patch = await safeRead(patchPath(job, plan.version, i + 1), root(job));
-      blueprint = applyBlueprintPatch(blueprint, review, patch).blueprint;
+      blueprint = applyBlueprintPatch(blueprint, effective, patch).blueprint;
     }
   }
   await transcript(job, record.plannerSessionFile, record.plannerSessionId, "architecture-blueprint-sessions");
@@ -583,7 +716,7 @@ async function readInitialReviewPause(job: JobStartResult, plan: Plan, snapshot:
 
 type BlueprintPause = {
   schema: "noveltea-blueprint-safe-pause/v1";
-  boundary: "writer" | "review";
+  boundary: "writer" | "review" | "diagnostic" | "replacement";
   nextVersion: number;
   pin: BlueprintPin;
   nextDraftDigest: string | null;
@@ -602,9 +735,11 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
   const { readdir } = await import("node:fs/promises");
   const escaped = String(plan.version);
   const matches = (await readdir(root(job))).flatMap(name => {
-    const match = new RegExp("^plan-" + escaped + "-pause-([0-9]+)-(writer|review)\\.json$").exec(name);
-    return match ? [{ version: Number(match[1]), boundary: match[2] as "writer" | "review" }] : [];
-  }).sort((a, b) => b.version - a.version || (a.boundary === "review" ? -1 : 1));
+    const match = new RegExp("^plan-" + escaped + "-pause-([0-9]+)-(writer|review|diagnostic|replacement)\\.json$").exec(name);
+    return match ? [{ version: Number(match[1]), boundary: match[2] as BlueprintPause["boundary"] }] : [];
+  }).sort((a, b) => b.version - a.version ||
+    ["writer", "review", "diagnostic", "replacement"].indexOf(b.boundary) -
+    ["writer", "review", "diagnostic", "replacement"].indexOf(a.boundary));
   if (!matches.length) return null;
   const { version, boundary } = matches[0]!;
   const marker = await safeRead(pausePath(job, plan.version, version, boundary), root(job));
@@ -615,8 +750,9 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
       marker.boundary !== boundary || marker.nextVersion !== version ||
       !Number.isSafeInteger(version) || version < 1 ||
       !marker.pin || typeof marker.pin !== "object" ||
-      (marker.pin as BlueprintPin).draftVersion !== version - 1 ||
-      (boundary === "writer" ? marker.nextDraftDigest !== null :
+      (marker.pin as BlueprintPin).draftVersion !== (boundary === "diagnostic" ||
+        boundary === "replacement" ? version : version - 1) ||
+      (boundary !== "review" ? marker.nextDraftDigest !== null :
         typeof marker.nextDraftDigest !== "string" || !HASH.test(marker.nextDraftDigest)) ||
       ![marker.writerTranscriptDigest, marker.reviewerTranscriptDigest]
         .every(value => typeof value === "string" && HASH.test(value)) ||
@@ -647,22 +783,37 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
       "-(draft|patch|verdict|review-session|convergence)-([0-9]+)\\.json$").exec(name);
     if (match && (Number(match[2]) > version ||
         (Number(match[2]) === version &&
-          (boundary === "writer" || !["draft", "patch"].includes(match[1]!)))))
+          (boundary === "writer" ||
+            (boundary === "review" && !["draft", "patch"].includes(match[1]!))))))
       throw Error("Causal blueprint progressed beyond the last safe pause; inspect instead of replay.");
   }
+  const diagnosisBoundary = boundary === "diagnostic" || boundary === "replacement";
   const verified = await readRecordedBlueprint(job, plan, snapshot, provider, model, task, head,
-    marker.pin as BlueprintPin);
+    marker.pin as BlueprintPin, diagnosisBoundary);
   if (!verified || verified.pin.schema !== "noveltea-approved-blueprint/v4" ||
       verified.rounds.at(-1)?.verdict.status !== "revise" ||
-      existsSync(verdictPath(job, plan.version, version)))
+      (!diagnosisBoundary && existsSync(verdictPath(job, plan.version, version))) ||
+      (diagnosisBoundary && !existsSync(verdictPath(job, plan.version, version))))
     throw Error("Causal blueprint budget pause does not end at a sealed negative verdict.");
+  if (diagnosisBoundary) {
+    const sources = await obligationSources(job, plan, task);
+    const cycleId = verified.pin.reviewCycleId!;
+    const original = await safeRead(reviewSessionPath(job, plan.version, version), root(job)) as
+      { sessionId: string };
+    const diagnosis = await readDiagnosis(job, plan, version, cycleId,
+      verified.rounds, sources, original.sessionId, verified.pin.plannerSessionId);
+    if ((boundary === "diagnostic" && diagnosis) ||
+        (boundary === "replacement" && (!diagnosis || diagnosis.diagnosis.action !== "replace" ||
+          existsSync(replacementPath(job, plan.version, version)))))
+      throw Error("Causal Blueprint diagnostic pause no longer matches the sealed action.");
+  }
   let nextDraft: CausalBlueprint | undefined;
   let nextPatch: unknown;
   if (boundary === "writer") {
     if (existsSync(draftPath(job, plan.version, version)) ||
         existsSync(patchPath(job, plan.version, version)))
       throw Error("Causal blueprint writer progressed beyond its safe pause; inspect Pi evidence.");
-  } else {
+  } else if (boundary === "review") {
     nextPatch = await safeRead(patchPath(job, plan.version, version), root(job));
     nextDraft = applyBlueprintPatch(verified.blueprint, verified.rounds.at(-1)!.verdict, nextPatch).blueprint;
     const stored = await safeRead(draftPath(job, plan.version, version), root(job));
@@ -686,7 +837,7 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
  * authenticated, sealed budget boundary, not arbitrary incomplete Pi work. */
 export async function inspectPausedBlueprint(job: JobStartResult, plan: Plan,
   snapshot: SkillSnapshot, provider: string, model: string, task: string, head: string):
-  Promise<{ boundary: "planner-admission" | "initial-review" | "writer" | "review"; nextVersion: number } | null> {
+  Promise<{ boundary: "planner-admission" | "initial-review" | BlueprintPause["boundary"]; nextVersion: number } | null> {
   const paused = await readPausedBlueprint(job, plan, snapshot, provider, model, task, head);
   if (paused) return { boundary: paused.boundary, nextVersion: paused.nextVersion };
   const initial = await readInitialReviewPause(job, plan, snapshot, provider, model, task, head);
@@ -1130,6 +1281,173 @@ function blueprintCorrectionPrompt(blueprint: CausalBlueprint, verdict: Blueprin
           " FINDINGS: " + JSON.stringify(verdict.findings);
 }
 
+/** A diagnosis is an independent read-only opinion, not a substitute for a
+ * current verdict. Seal the exact source and transcript before acting. */
+async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSnapshot,
+  plan: Plan, provider: string, model: string, task: string, cycleId: string,
+  rounds: readonly ReviewRound[], sources: ObligationSources, trigger: DiagnosticTrigger,
+  writer: { id: string; file: string }, reviewer: { id: string; file: string },
+  patches: readonly unknown[]): Promise<BlueprintDiagnosticReceipt> {
+  const version = rounds.length - 1;
+  const saved = await readDiagnosis(job, plan, version, cycleId, rounds, sources,
+    reviewer.id, writer.id);
+  if (saved) return saved;
+  const fingerprint = diagnosticCaseFingerprint(cycleId,
+    rounds.at(-1)!.blueprint, rounds.at(-1)!.verdict, sources);
+  for (let earlier = 0; earlier < version; earlier++) {
+    const path = diagnosticPath(job, plan.version, earlier);
+    if (!existsSync(path)) continue;
+    const historical = await safeRead(path, root(job)) as BlueprintDiagnosticReceipt;
+    if (historical.caseFingerprint === fingerprint)
+      throw Error("Diagnostic review requires author-guided escalation for identical source evidence.");
+  }
+  const diagnosisSession = await sessionFor(job, snapshot, provider, model,
+    "blueprint-diagnostic:" + cycleId + ":" + version,
+    "architecture-blueprint-diagnostic-sessions");
+  try {
+    if ([writer.id, reviewer.id].includes(diagnosisSession.session.sessionId) ||
+        [writer.file, reviewer.file].includes(diagnosisSession.file))
+      throw Error("Diagnostic reviewer is not independent of the Review cycle.");
+    const start = diagnosisSession.session.messages.length;
+    await promptStorySpecialist(diagnosisSession.session,
+      diagnosisSession.context.contextNote +
+      "INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW. " +
+      "Read skill://nt-story-architecture/SKILL.md, skill://nt-catalog/SKILL.md " +
+      "and creative-direction/foundation.md. No writing, approval, shell or tools " +
+      "outside the pinned read-only source readers. " +
+      "Assess material current-stage defects versus downstream implementation " +
+      "requests, cosmetic tastes, reviewer goalpost drift, genuine regression and " +
+      "excessively broad scope. Do not presume that the persistent reviewer is " +
+      "right or wrong; judge the exact actual current source and accepted task. " +
+      "A replacement reviewer requires a NEW INDEPENDENT, CURRENT verdict; " +
+      "your diagnosis NEVER approves, waives a sealed failure, changes the " +
+      "author's protected decisions, or authorizes any expanded writes. " +
+      "Recommend continue for a bounded further correction, replace for a fresh " +
+      "independent reviewer, split for authorized replanning, or escalate for " +
+      "unresolved authority/scope disputes. " +
+      "TRIGGER: " + trigger +
+      "\\nCYCLE ID: " + cycleId +
+      "\\nFOUNDATION SOURCE: " + JSON.stringify(sources.foundation) +
+      "\\nTASK SOURCE: " + JSON.stringify(task) +
+      "\\nACCEPTED CONTRACT: " + JSON.stringify(plan.contract) +
+      "\\nPAST VERDICTS AND CORRECTIONS (historical, immutable): " +
+      JSON.stringify(rounds.map((round, i) => ({
+        round: i, draftDigest: sha(round.blueprint),
+        verdict: round.verdict, patch: patches[i] ?? null,
+      }))) +
+      "\\nCURRENT EXACT BLUEPRINT: " + JSON.stringify(rounds.at(-1)!.blueprint) +
+      "\\nReturn ONLY strict JSON {schema:'noveltea-blueprint-diagnosis/v1'," +
+      "action:'continue|replace|split|escalate',explanation:string," +
+      "assessments:[{kind:'material|deferred|cosmetic|scope',reason:string," +
+      "requirement:{source:'foundation|task|contract',quote:exact 8+ character " +
+      "source substring},evidence:{beatId:string,quote:exact 8+ character current " +
+      "beat substring}}]}. A resolution evidence citation may instead use " +
+      "{beatId:'resolution',field:'conclusion|uncertainty|supportedBy',quote:string}. " +
+      "Each assessment must cite real current work and an actual accepted source. " +
+      "Do not output a pass/fail verdict or invent new acceptance requirements.");
+    const parse = () => {
+      verifyReadSources(diagnosisSession.session.messages.slice(start),
+        diagnosisSession.project.root, snapshot);
+      return parseBlueprintDiagnosis(lastText(diagnosisSession.session),
+        rounds.at(-1)!.blueprint, sources);
+    };
+    let diagnosis: BlueprintDiagnosis;
+    try { diagnosis = parse(); }
+    catch (error) {
+      await promptStorySpecialist(diagnosisSession.session,
+        "CONTROLLER REJECTED DIAGNOSTIC RESPONSE: " +
+        (error instanceof Error ? error.message : "invalid evidence") +
+        ". This is format/source-read correction only, not a new semantic judgment. " +
+        "Read required sources, preserve substantive conclusions and return " +
+        "ONE complete strict diagnostic JSON response with exact citations.");
+      diagnosis = parse();
+    }
+    await diagnosisSession.context.completed(diagnosisSession.file, diagnosisSession.session.sessionId);
+    const bytes = await readFile(diagnosisSession.file);
+    const receipt: BlueprintDiagnosticReceipt = {
+      schema: "noveltea-blueprint-diagnostic-receipt/v1", cycleId,
+      evidenceDigest: diagnosticEvidence(cycleId, rounds, sources),
+      caseFingerprint: diagnosticCaseFingerprint(cycleId,
+        rounds.at(-1)!.blueprint, rounds.at(-1)!.verdict, sources),
+      trigger, draftDigest: sha(rounds.at(-1)!.blueprint),
+      reviewDigest: sha(rounds.at(-1)!.verdict), reviewerSessionId: reviewer.id,
+      diagnosis, sessionId: diagnosisSession.session.sessionId,
+      sessionFile: diagnosisSession.file, transcriptBytes: bytes.length,
+      transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+    };
+    await immutable(diagnosticPath(job, plan.version, version), receipt);
+    return receipt;
+  } finally { diagnosisSession.session.dispose(); }
+}
+
+/** A replacement verdict never rewrites a negative judgment. A fresh Pi
+ * conversation must independently inspect the current exact Blueprint. */
+async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillSnapshot,
+  plan: Plan, provider: string, model: string, task: string, cycleId: string,
+  rounds: readonly ReviewRound[], sources: ObligationSources,
+  diagnosis: BlueprintDiagnosticReceipt, writer: { id: string; file: string },
+  reviewer: { id: string; file: string }, obligations: BlueprintObligations,
+  outline: BlueprintOutline, changes: unknown): Promise<{
+    receipt: BlueprintReplacementReceipt;
+    session: Awaited<ReturnType<typeof sessionFor>>;
+  }> {
+  const version = rounds.length - 1;
+  if (diagnosis.diagnosis.action !== "replace")
+    throw Error("Only an independently diagnosed reviewer replacement is permitted.");
+  if (existsSync(replacementPath(job, plan.version, version)))
+    throw Error("Completed replacement review must be resumed from its sealed writer boundary.");
+  const fresh = await sessionFor(job, snapshot, provider, model,
+    "blueprint-review-replacement:" + cycleId + ":" + version,
+    "architecture-blueprint-review-sessions");
+  try {
+    if ([writer.id, reviewer.id, diagnosis.sessionId].includes(fresh.session.sessionId) ||
+        [writer.file, reviewer.file, diagnosis.sessionFile].includes(fresh.file))
+      throw Error("Replacement reviewer reused a writer, diagnostic or disputed review session.");
+    const start = fresh.session.messages.length;
+    await promptStorySpecialist(fresh.session,
+      fresh.context.contextNote +
+      "YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER. " +
+      "The previous negative verdict and diagnosis are historical evidence, " +
+      "not a pass, permission to waive defects or a reason to agree. " +
+      "Your source-bound current verdict must independently satisfy all " +
+      "current-stage obligations. Return a normal v2 verdict after inspecting " +
+      "the pinned sources and exact current Blueprint. " +
+      "\\nDIAGNOSIS: " + JSON.stringify(diagnosis.diagnosis) +
+      "\\n" + reviewPrompt(plan, rounds.at(-1)!.blueprint, obligations,
+        task, outline, rounds, changes));
+    const parse = () => {
+      verifyReadSources(fresh.session.messages.slice(start), fresh.project.root, snapshot);
+      const verdict = parseBlueprintReview(lastText(fresh.session),
+        rounds.at(-1)!.blueprint);
+      return evaluateReviewConvergence(verdict, rounds.at(-1)!.blueprint,
+        rounds, sources, 0, true).review;
+    };
+    let verdict: ConvergentReview;
+    try { verdict = parse(); }
+    catch (error) {
+      await promptStorySpecialist(fresh.session,
+        "CONTROLLER REJECTED REPLACEMENT REVIEW PROTOCOL: " +
+        (error instanceof Error ? error.message : "invalid reviewer evidence") +
+        ". Re-read pinned sources, preserve your substantive assessment, " +
+        "and return one complete source-grounded current v2 verdict.");
+      verdict = parse();
+    }
+    await fresh.context.completed(fresh.file, fresh.session.sessionId);
+    const bytes = await readFile(fresh.file);
+    const receipt: BlueprintReplacementReceipt = {
+      schema: "noveltea-blueprint-replacement-receipt/v1", cycleId,
+      diagnosisDigest: sha(diagnosis),
+      draftDigest: sha(rounds.at(-1)!.blueprint),
+      reviewDigest: sha(rounds.at(-1)!.verdict), verdict,
+      sessionId: fresh.session.sessionId, sessionFile: fresh.file,
+      transcriptBytes: bytes.length,
+      transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+    };
+    await immutable(replacementPath(job, plan.version, version), receipt);
+    return { receipt, session: fresh };
+  } catch (error) { fresh.session.dispose(); throw error; }
+}
+
 /** A fail-closed, checkpointed original planner session, with independently
  * reviewed immutable versions and a final approved pin published last. */
 export async function createReviewedBlueprint(job: JobStartResult, snapshot: SkillSnapshot,
@@ -1289,15 +1607,23 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           ...(index ? { patch: await safeRead(patchPath(job, plan.version, index), root(job)) } : {}) })))
       : [];
     let stalled = paused?.stalled ?? 0;
-    let sourceChanges: unknown = paused?.nextPatch;
+    let sourceChanges: unknown = paused?.nextPatch ??
+      (paused?.boundary === "diagnostic" || paused?.boundary === "replacement"
+        ? reviewHistory.at(-1)?.patch : undefined);
     const cycleId = reviewCycleId(sameLineage(job, plan, snapshot, provider, model, task, head));
+    const latestRotation = paused?.rounds.map((_, index) =>
+      existsSync(replacementPath(job, plan.version, index)) ? index : -1)
+      .filter(index => index >= 0).at(-1);
+    const reviewerGroup = latestRotation === undefined
+      ? "blueprint-review-cycle:" + cycleId
+      : "blueprint-review-replacement:" + cycleId + ":" + latestRotation;
     // A fully staged initial draft is durable before the first reviewer
     // budget gate. Pausing here must not force the planner to run again.
     if (!paused && !initialPause)
       await planner.context.completed(planner.file, planner.session.sessionId);
     try {
       reviewer = await sessionFor(job, snapshot, provider, model,
-        "blueprint-review-cycle:" + cycleId, "architecture-blueprint-review-sessions",
+        reviewerGroup, "architecture-blueprint-review-sessions",
         paused ? { file: paused.pin.reviewerSessionFile, id: paused.pin.reviewerSessionId } : undefined);
     } catch (error) {
       if (error instanceof PiBudgetPause && !paused && !initialPause) {
@@ -1333,7 +1659,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         "conversation; source and authority are unchanged. " +
         blueprintCorrectionPrompt(last.blueprint, last.verdict, outline));
     }
-    const sealBudgetPause = async (boundary: "writer" | "review",
+    const sealBudgetPause = async (boundary: BlueprintPause["boundary"],
       nextVersion: number, pin: BlueprintPin, nextDraftDigest: string | null) => {
       const writerBytes = await readFile(planner.file);
       const reviewerBytes = await readFile(reviewer!.file);
@@ -1347,8 +1673,12 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     };
     let lastPin: BlueprintPin | undefined = paused?.pin;
     for (let version = paused?.nextVersion ?? 0; ; version++) {
+      const resumingDiagnosis = !!paused && version === paused.nextVersion &&
+        (paused.boundary === "diagnostic" || paused.boundary === "replacement");
       let blueprint: CausalBlueprint;
-      if (version === 0) {
+      if (resumingDiagnosis) {
+        blueprint = paused.blueprint;
+      } else if (version === 0) {
         blueprint = initialBlueprint;
       } else if (paused?.boundary === "review" && version === paused.nextVersion) {
         blueprint = paused.nextDraft!;
@@ -1385,7 +1715,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       }
       // An authored correction is complete before a reviewer-budget pause.
       // Its exact patch/draft are immutable and can be inspected on resume.
-      if (version > 0) {
+      if (version > 0 && !resumingDiagnosis) {
         await planner.context.completed(planner.file, planner.session.sessionId);
         try { await reviewer.context.beforeTurn(reviewer.file); }
         catch (error) {
@@ -1395,58 +1725,65 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         }
       }
       let verdict: BlueprintReview;
-      if (version === 0) {
-        await immutable(initialReviewStartedPath(job, plan.version), {
-          schema: "noveltea-blueprint-initial-review-start/v1",
-          ...sameLineage(job, plan, snapshot, provider, model, task, head),
-          reviewCycleId: cycleId, blueprintDigest: sha(blueprint),
-          plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
-          reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
+      let convergence: ReturnType<typeof evaluateReviewConvergence>;
+      if (resumingDiagnosis) {
+        // The negative verdict was already sealed before the budget pause.
+        // Never ask the original reviewer to repeat it or count another round.
+        verdict = paused.rounds.at(-1)!.verdict;
+        convergence = { review: verdict as ConvergentReview, productive: false,
+          stalled, reassess: stalled >= 2, oscillating: false };
+      } else {
+        if (version === 0) {
+          await immutable(initialReviewStartedPath(job, plan.version), {
+            schema: "noveltea-blueprint-initial-review-start/v1",
+            ...sameLineage(job, plan, snapshot, provider, model, task, head),
+            reviewCycleId: cycleId, blueprintDigest: sha(blueprint),
+            plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
+            reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
+          });
+        }
+        const messageStart = reviewer.session.messages.length;
+        await promptStorySpecialist(reviewer.session,
+          (version === 0 ? reviewer.context.contextNote :
+            "CONTINUING YOUR EXISTING INDEPENDENT REVIEW CYCLE. Your prior analysis " +
+            "is context, not authority. Re-read the pinned methodology and current " +
+            "Creative Direction before returning a new source-bound verdict. ") +
+          reviewPrompt(plan, blueprint, manifest!, task, outline, reviewHistory, sourceChanges));
+        const parseReview = () => {
+          verifyReadSources(reviewer!.session.messages.slice(messageStart), reviewer!.project.root, snapshot);
+          const parsed = parseBlueprintReview(lastText(reviewer!.session), blueprint);
+          return evaluateReviewConvergence(parsed, blueprint, reviewHistory, sources, stalled);
+        };
+        try { convergence = parseReview(); }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : "Invalid Blueprint review evidence";
+          await promptStorySpecialist(reviewer.session,
+            "CONTROLLER REJECTED YOUR REVIEW PROTOCOL: " + reason + ". " +
+            "This is a response/source-read correction, NOT a semantic review round. " +
+            "Read the required pinned skills and Creative Direction NOW if not " +
+            "already read in this review turn. Return ONE COMPLETE v2 JSON verdict " +
+            "with every previous finding accounted for, current source citations, " +
+            "and the same substantive findings; do not omit or invent an approval.");
+          convergence = parseReview();
+        }
+        verdict = convergence.review;
+        await reviewer.context.completed(reviewer.file, reviewer.session.sessionId);
+        const bytes = await readFile(reviewer.file);
+        await immutable(verdictPath(job, plan.version, version), verdict);
+        await immutable(reviewSessionPath(job, plan.version, version), {
+          schema: "noveltea-blueprint-review-turn/v1", cycleId,
+          sessionId: reviewer.session.sessionId, sessionFile: reviewer.file,
+          blueprintDigest: sha(blueprint), verdictDigest: sha(verdict),
+          transcriptBytes: bytes.length,
+          transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+        });
+        await immutable(convergencePath(job, plan.version, version), {
+          schema: "noveltea-blueprint-convergence/v1", draftDigest: sha(blueprint),
+          verdictDigest: sha(verdict), productive: convergence.productive,
+          stalled: convergence.stalled, oscillating: convergence.oscillating,
         });
       }
-      const messageStart = reviewer.session.messages.length;
-      await promptStorySpecialist(reviewer.session,
-        (version === 0 ? reviewer.context.contextNote :
-          "CONTINUING YOUR EXISTING INDEPENDENT REVIEW CYCLE. Your prior analysis " +
-          "is context, not authority. Re-read the pinned methodology and current " +
-          "Creative Direction before returning a new source-bound verdict. ") +
-        reviewPrompt(plan, blueprint, manifest!, task, outline, reviewHistory, sourceChanges));
-      const parseReview = () => {
-        verifyReadSources(reviewer!.session.messages.slice(messageStart), reviewer!.project.root, snapshot);
-        const parsed = parseBlueprintReview(lastText(reviewer!.session), blueprint);
-        const result = evaluateReviewConvergence(parsed, blueprint, reviewHistory, sources, stalled);
-        return result;
-      };
-      let convergence: ReturnType<typeof parseReview>;
-      try { convergence = parseReview(); }
-      catch (error) {
-        const reason = error instanceof Error ? error.message : "Invalid Blueprint review evidence";
-        await promptStorySpecialist(reviewer.session,
-          "CONTROLLER REJECTED YOUR REVIEW PROTOCOL: " + reason + ". " +
-          "This is a response/source-read correction, NOT a semantic review round. " +
-          "Read the required pinned skills and Creative Direction NOW if not " +
-          "already read in this review turn. Return ONE COMPLETE v2 JSON verdict " +
-          "with every previous finding accounted for, current source citations, " +
-          "and the same substantive findings; do not omit or invent an approval.");
-        convergence = parseReview();
-      }
-      verdict = convergence.review;
-      await reviewer.context.completed(reviewer.file, reviewer.session.sessionId);
-      const bytes = await readFile(reviewer.file);
-      await immutable(verdictPath(job, plan.version, version), verdict);
-      await immutable(reviewSessionPath(job, plan.version, version), {
-        schema: "noveltea-blueprint-review-turn/v1", cycleId,
-        sessionId: reviewer.session.sessionId, sessionFile: reviewer.file,
-        blueprintDigest: sha(blueprint), verdictDigest: sha(verdict),
-        transcriptBytes: bytes.length,
-        transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
-      });
-      await immutable(convergencePath(job, plan.version, version), {
-        schema: "noveltea-blueprint-convergence/v1", draftDigest: sha(blueprint),
-        verdictDigest: sha(verdict), productive: convergence.productive,
-        stalled: convergence.stalled, oscillating: convergence.oscillating,
-      });
-      const pin: BlueprintPin = {
+      let pin: BlueprintPin = {
         schema: "noveltea-approved-blueprint/v4", reviewCycleId: cycleId,
         ...sameLineage(job, plan, snapshot, provider, model, task, head),
         draftVersion: version, blueprintDigest: sha(blueprint), reviewDigest: sha(verdict),
@@ -1454,18 +1791,78 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
         reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
       };
+      if (verdict.status !== "pass") {
+        const rounds: Array<ReviewRound & { patch?: unknown }> = resumingDiagnosis
+          ? [...reviewHistory]
+          : [...reviewHistory, { blueprint, verdict,
+              ...(version ? { patch: sourceChanges } : {}) }];
+        const previouslyDiagnosed = rounds.slice(0, -1).filter((_, i) =>
+          existsSync(diagnosticPath(job, plan.version, i))).length;
+        const sealedDiagnosis = resumingDiagnosis &&
+          existsSync(diagnosticPath(job, plan.version, version))
+          ? await readDiagnosis(job, plan, version, cycleId, rounds, sources,
+              reviewer.session.sessionId, planner.session.sessionId)
+          : null;
+        const trigger = sealedDiagnosis?.trigger ??
+          diagnosticTrigger(rounds, convergence.stalled, previouslyDiagnosed);
+        if (convergence.stalled >= 2 && previouslyDiagnosed >= 2)
+          throw Error("Diagnostic review requires author-guided escalation after repeated stagnation.");
+        if (trigger) {
+          let diagnosis: BlueprintDiagnosticReceipt;
+          try {
+            diagnosis = await performBlueprintDiagnosis(job, snapshot, plan, provider, model,
+              task, cycleId, rounds, sources, trigger,
+              { id: planner.session.sessionId, file: planner.file },
+              { id: reviewer.session.sessionId, file: reviewer.file },
+              rounds.map(round => round.patch ?? null));
+          } catch (error) {
+            if (error instanceof PiBudgetPause)
+              await sealBudgetPause("diagnostic", version, pin, null);
+            throw error;
+          }
+          if (diagnosis.diagnosis.action === "split" ||
+              diagnosis.diagnosis.action === "escalate")
+            throw Error("Diagnostic review requires author-guided " +
+              (diagnosis.diagnosis.action === "split" ? "plan restructuring" : "escalation") +
+              "; no automatic scope expansion or review approval.");
+          if (diagnosis.diagnosis.action === "replace") {
+            let replacement: Awaited<ReturnType<typeof performBlueprintReplacement>>;
+            try {
+              replacement = await performBlueprintReplacement(job, snapshot, plan,
+                provider, model, task, cycleId, rounds, sources, diagnosis,
+                { id: planner.session.sessionId, file: planner.file },
+                { id: reviewer.session.sessionId, file: reviewer.file },
+                manifest!, outline, sourceChanges);
+            } catch (error) {
+              if (error instanceof PiBudgetPause)
+                await sealBudgetPause("replacement", version, pin, null);
+              throw error;
+            }
+            reviewer.session.dispose();
+            reviewer = replacement.session;
+            verdict = replacement.receipt.verdict;
+            pin = { ...pin, reviewDigest: sha(verdict),
+              reviewerSessionId: reviewer.session.sessionId,
+              reviewerSessionFile: reviewer.file };
+          }
+          stalled = 0;
+        } else {
+          stalled = convergence.stalled;
+        }
+      }
       lastPin = pin;
       if (verdict.status === "pass") {
         await planner.context.completed(planner.file, planner.session.sessionId);
         await immutable(approvedPath(job, plan.version), pin);
         return pin;
       }
-      if (convergence.reassess)
-        throw Error("Independent causal blueprint review requires independent reassessment " +
-          "after two nonproductive corrections; preserve source, verdicts and original Pi sessions.");
-      stalled = convergence.stalled;
       previous = { blueprint, verdict };
-      reviewHistory.push({ blueprint, verdict, ...(version ? { patch: sourceChanges } : {}) });
+      if (resumingDiagnosis) {
+        reviewHistory[reviewHistory.length - 1] = { blueprint, verdict,
+          ...(version ? { patch: sourceChanges } : {}) };
+      } else {
+        reviewHistory.push({ blueprint, verdict, ...(version ? { patch: sourceChanges } : {}) });
+      }
       await planner.context.completed(planner.file, planner.session.sessionId);
       try { await planner.context.beforeTurn(planner.file); }
       catch (error) {
