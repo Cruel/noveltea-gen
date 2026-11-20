@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { execFileSync } from "./git-read-cache.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
@@ -21,7 +22,9 @@ import { admitPrerequisiteRepair, submitPrerequisiteRepair, settlePrerequisiteRe
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
-import { reviewNarrative, type EditorialVerdict, type ReviewAssignment } from "./narrative-review-specialist.js";
+import { reviewNarrative, checkEditorialVerdict,
+  type EditorialVerdict, type ReviewAssignment } from "./narrative-review-specialist.js";
+import { parseSpecialistJson } from "./composition-specialist.js";
 import { repairProgressScope, productiveEditorialRepair } from "./editorial-repair-progress.js";
 import { validCloseoutProposal, retryCloseoutProposal, closeoutReviewMayRetry,
   type CloseoutProposal } from "./cross-domain-prerequisite.js";
@@ -102,6 +105,44 @@ async function checkedSessionDigest(job: JobStartResult, file: string | undefine
     throw Error("Original Pi transcript has no authentic durable session header.");
   return hash(content);
 }
+/** #211 upgrade recovery: the old reviewed-phase digest did not seal the
+ * progress diagnosis. Never use that unsealed field to authorize a retry.
+ * Reauthenticate the original settled Pi transcript and source-grounded
+ * verdict, without opening a model session or replaying a writer. The old
+ * digest remains stable for already-submitted repair ledger attempts. */
+export async function verifyLegacyCloseoutReviewTranscript(
+  job: JobStartResult, file: string, expectedDigest: string,
+  review: EditorialVerdict, assignment: ReviewAssignment,
+) {
+  if (await checkedSessionDigest(job, file, "review-sessions") !== expectedDigest)
+    throw Error("Legacy closeout requires its unchanged original reviewer transcript.");
+  const stat = await lstat(file);
+  if (stat.size > 16 * 1024 * 1024)
+    throw Error("Legacy closeout reviewer transcript exceeds its bounded proof.");
+  const lines = (await readFile(file, "utf8")).trimEnd().split("\n");
+  let records: Array<{ type?: string; id?: string;
+    message?: { role?: string; stopReason?: string;
+      content?: Array<{ type?: string; text?: string }> } }>;
+  try { records = lines.map(line => JSON.parse(line)); }
+  catch { throw Error("Legacy closeout reviewer transcript contains malformed history."); }
+  if (records[0]?.type !== "session" || !records[0].id)
+    throw Error("Legacy closeout reviewer transcript lost its original Pi session identity.");
+  const answers = records.filter(r => r.type === "message" &&
+    r.message?.role === "assistant" && r.message.stopReason === "stop" &&
+    Array.isArray(r.message.content)).map(r =>
+    r.message!.content!.filter(c => c.type === "text")
+      .map(c => c.text ?? "").join("\n"));
+  if (!answers.length) throw Error("Legacy closeout transcript has no completed independent verdict.");
+  const recovered = checkEditorialVerdict(parseSpecialistJson(answers.at(-1)!), assignment);
+  if (!isDeepStrictEqual({
+    verdict: recovered.verdict, findings: recovered.findings,
+    evidence: recovered.evidence, progressDiagnosis: recovered.progressDiagnosis,
+  }, {
+    verdict: review.verdict, findings: review.findings,
+    evidence: review.evidence, progressDiagnosis: review.progressDiagnosis,
+  })) throw Error("Legacy closeout diagnosis differs from the pinned independent reviewer transcript.");
+}
+
 async function load(file: string): Promise<Receipt | null> {
   if (!existsSync(file)) return null;
   const info = await lstat(file);
@@ -506,12 +547,30 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
             state.reviewerSessionFile, "review-sessions") ||
           state.writerSessionDigest !== await checkedSessionDigest(job,
             state.sessionFile, "prerequisite-sessions") ||
-          await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path ||
-          state.reviewDigest !== closeoutReviewDigest({
-            reviewerSessionDigest: state.reviewerSessionDigest,
-            proposal: state.proposal.digest, commitSha: state.commitSha,
-            review: state.review }))
-        throw Error("Independent closeout review lacks pinned source or a sealed progress diagnosis.");
+          await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path)
+        throw Error("Independent closeout review lacks pinned source or session.");
+      const sealed = closeoutReviewDigest({
+        reviewerSessionDigest: state.reviewerSessionDigest,
+        proposal: state.proposal.digest, commitSha: state.commitSha,
+        review: state.review,
+      });
+      if (state.reviewDigest !== sealed) {
+        const legacy = closeoutReviewDigest({
+          reviewerSessionDigest: state.reviewerSessionDigest,
+          proposal: state.proposal.digest, commitSha: state.commitSha,
+          review: state.review,
+        }, false);
+        if (state.reviewDigest !== legacy || !state.review.progressDiagnosis)
+          throw Error("Independent closeout review has a changed or unsealed disposition.");
+        const originalAssignment = await reviewerAssignment(job, request, proposal, state.commitSha);
+        const previous = state.history?.at(-1);
+        if (previous) originalAssignment.progressScope = repairProgressScope(job,
+          previous.commitSha, state.commitSha, proposal.allowedPaths, previous.review.findings);
+        await verifyLegacyCloseoutReviewTranscript(job, state.reviewerSessionFile,
+          state.reviewerSessionDigest, state.review, originalAssignment);
+        // Settlement must use the original sealed negative review digest.
+        // Upgrading it here would invalidate any already-submitted ledger row.
+      }
       verifyCommitted(job, state);
       const verdict = state.review.verdict === "pass" ? "passed" : "failed";
       await settlePrerequisiteRepair(job, { turnDigest: state.turnDigest, id: state.repairId,

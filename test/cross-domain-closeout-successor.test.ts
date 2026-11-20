@@ -9,7 +9,9 @@ import { createSkillSnapshot } from "../src/snapshot.js";
 import { removeTestTree } from "./helpers.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair,
   settlePrerequisiteRepair } from "../src/repair-ledger.js";
-import { verifyCrossDomainCloseoutSuccessor, closeoutReviewDigest } from "../src/cross-domain-closeout-work.js";
+import { verifyCrossDomainCloseoutSuccessor, closeoutReviewDigest,
+  verifyLegacyCloseoutReviewTranscript } from "../src/cross-domain-closeout-work.js";
+import type { ReviewAssignment } from "../src/narrative-review-specialist.js";
 import { validCloseoutProposal, retryCloseoutProposal,
   type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
 import type { JobStartResult } from "../src/job.js";
@@ -223,6 +225,59 @@ test("#211: closeout progress diagnosis is sealed; older reviewed receipts retai
   assert.notEqual(sealed, closeoutReviewDigest({ reviewerSessionDigest, proposal, commitSha,
     review: { ...review, progressDiagnosis: { ...progressDiagnosis, status: "stalled" } } }));
 });
+test("#211: an in-flight legacy reviewed closeout resumes from its pinned transcript without model replay", async t => {
+  const f = await setup(t, "failed");
+  const diagnosis = { status: "material" as const,
+    reason: "The corrected Milestone now contains explicitly reachable Event evidence.",
+    evidence: { path: f.path, quote: "event.setup", change: "added" as const } };
+  const review = { verdict: "block" as const, findings: [{
+    severity: "blocking" as const, dimension: "continuity" as const,
+    source: f.path + ":5", message: "Unresolved downstream witness contradiction",
+    repair: "event" as const }], evidence: [f.path + ":5"],
+    progressDiagnosis: diagnosis };
+  const assignment: ReviewAssignment = {
+    contract: {}, planVersion: 2, scopeIds: ["milestone.choice-enacted"],
+    paths: [f.path], routes: [], milestoneRoutes: [], puzzleRoutes: [],
+    outstanding: [], uncertainties: [], progressScope: {
+      previousSha: f.before, currentSha: f.after,
+      priorFindings: [{ severity: "blocking", source: f.path + ":5",
+        message: "Missing Event evidence" }],
+      added: [{ path: f.path, line: "    - [event.setup]" }], removed: [],
+    },
+  };
+  const sessionId = "reviewer";
+  const raw = { verdict: review.verdict, findings: review.findings,
+    evidence: review.evidence, progressDiagnosis: review.progressDiagnosis };
+  const transcript = JSON.stringify({ type: "session", id: sessionId }) + "\n" +
+    JSON.stringify({ type: "message", message: { role: "assistant",
+      stopReason: "stop", content: [{ type: "text", text: JSON.stringify(raw) }] } }) + "\n";
+  writeFileSync(f.state.reviewerSessionFile, transcript);
+  const sessionSha = hash(transcript);
+  const legacy = closeoutReviewDigest({
+    reviewerSessionDigest: sessionSha, proposal: f.proposal.digest,
+    commitSha: f.after, review,
+  }, false);
+  const current = closeoutReviewDigest({
+    reviewerSessionDigest: sessionSha, proposal: f.proposal.digest,
+    commitSha: f.after, review,
+  });
+  assert.notEqual(current, legacy, "The old digest omitted material progress advice.");
+  await verifyLegacyCloseoutReviewTranscript(f.job, f.state.reviewerSessionFile,
+    sessionSha, review, assignment);
+  await assert.rejects(verifyLegacyCloseoutReviewTranscript(f.job,
+    f.state.reviewerSessionFile, sessionSha,
+    { ...review, progressDiagnosis: { status: "stalled",
+      reason: "Forged status that must not authorize the original retry.", evidence: null } },
+    assignment), /differs from the pinned independent reviewer transcript/);
+  await assert.rejects(verifyLegacyCloseoutReviewTranscript(f.job,
+    f.state.reviewerSessionFile, "f".repeat(64), review, assignment),
+    /unchanged original reviewer transcript/);
+  writeFileSync(f.state.reviewerSessionFile, transcript.replace("event.setup", "event.invented"));
+  await assert.rejects(verifyLegacyCloseoutReviewTranscript(f.job,
+    f.state.reviewerSessionFile, sessionSha, review, assignment),
+    /unchanged original reviewer transcript/);
+});
+
 test("a forged reviewed phase, record path or original source hash cannot grant downstream admission", async t => {
   const f = await setup(t);
   const check = () => verifyCrossDomainCloseoutSuccessor(f.job, f.after,

@@ -135,18 +135,35 @@ export function hasPlanContinuity(
   const latest = architecture.plan;
   if (!latest || architecture.jobId !== job.jobId || architecture.phase !== "committed") return false;
   const fork = readRecoveryFork(job);
-  if (fork && (stage === "foundations" || /^(event|interactive|composition):/.test(stage)) &&
-      digest(latest) === fork.checkpoint.planDigest) {
-    const original = fork.receipts[relative(job.stateDir, receiptFile(job, stage))];
-    if (original?.planVersion === receiptVersion &&
-        (fingerprint === undefined || fingerprint === (contractOnly ? original.contractDigest : original.planDigest))) return true;
+  const original = fork && (stage === "foundations" || /^(event|interactive|composition):/.test(stage))
+    ? fork.receipts[relative(job.stateDir, receiptFile(job, stage))] : undefined;
+  const forkPlan = fork?.receipts["architecture.json"]?.plan as Plan | undefined;
+  const inherited = !!fork && !!original && !!forkPlan &&
+    fork.receipts["architecture.json"]?.jobId === fork.sourceJobId &&
+    digest(forkPlan) === fork.checkpoint.planDigest &&
+    original.jobId === fork.sourceJobId &&
+    original.planVersion === receiptVersion &&
+    (fingerprint === undefined ||
+      fingerprint === (contractOnly ? original.contractDigest : original.planDigest));
+  if (inherited && forkPlan!.version === latest.version) {
+    // The child starts from the exact parent-certified baseline. No parent
+    // approval keys or mutable history are imported into the child.
+    return digest(latest) === fork!.checkpoint.planDigest;
   }
   if (receiptVersion === latest.version) {
     return fingerprint === undefined || fingerprint === digest(contractOnly ? latest.contract : latest);
   }
   if (!Number.isSafeInteger(receiptVersion) || receiptVersion < 1 || receiptVersion > latest.version) return false;
   const history = architecture.history ?? [];
-  for (let version = receiptVersion; version < latest.version; version++) {
+  // An inherited v1 receipt can predate the fork's approved v2 baseline.
+  // Validate its parent identity once against the immutable bundle, then
+  // authenticate every NEW child-signed revision starting at v2.
+  const baselineVersion = inherited ? forkPlan!.version : receiptVersion;
+  if (inherited && (baselineVersion < receiptVersion || baselineVersion > latest.version ||
+      !history.some(h => h.plan?.version === baselineVersion &&
+        digest(h.plan) === fork!.checkpoint.planDigest)))
+    return false;
+  for (let version = baselineVersion; version < latest.version; version++) {
     const step = history.find(h => h.plan?.version === version);
     if (!step) return false;
     const signed = verifyAuthorEvidence(job, step.signed);
@@ -158,7 +175,7 @@ export function hasPlanContinuity(
     if (payload.kind !== "plan" || payload.planVersion !== version + 1 ||
         payload.proposalSha256 !== step.proposal || payload.verifiedHead !== step.verifiedHead ||
         step.proposal !== digest(proposed) ||
-        (version === receiptVersion && fingerprint !== undefined &&
+        (!inherited && version === receiptVersion && fingerprint !== undefined &&
           fingerprint !== digest(contractOnly ? step.plan.contract : step.plan))) {
       throw new Error("Historical plan carry-forward does not match its signed proposal or original work.");
     }
@@ -193,10 +210,11 @@ export function assertFoundationArchitectureContinuity(
     return;
   }
   const fork = readRecoveryFork(job);
-  if (fork && digest(architecture.plan) === fork.checkpoint.planDigest) {
+  const forkPlan = fork?.receipts["architecture.json"]?.plan as Plan | undefined;
+  if (fork && forkPlan && foundation.planVersion <= forkPlan.version) {
     // Child Architecture intentionally drops parent signing credentials and
-    // history. Its pinned bundle was independently admitted by the parent
-    // against those signed steps before it was copied into this new Thread.
+    // history. The immutable parent-approved baseline remains authoritative
+    // even after later child-signed plan revisions.
     const pinned = fork.receipts["character-world.json"];
     const architecturePin = fork.receipts["architecture.json"];
     if (!pinned || !architecturePin ||
@@ -205,12 +223,18 @@ export function assertFoundationArchitectureContinuity(
         pinned.architectureHead !== foundation.architectureHead ||
         architecturePin.jobId !== fork.sourceJobId ||
         architecturePin.phase !== "committed" ||
-        architecturePin.expectedHead !== architecture.expectedHead ||
-        digest(architecturePin.plan) !== fork.checkpoint.planDigest)
+        digest(architecturePin.plan) !== fork.checkpoint.planDigest ||
+        architecturePin.expectedHead !== (architecturePin.plan as Plan).items[0]?.verifiedSha ||
+        (foundation.planVersion === forkPlan.version &&
+          foundation.architectureHead !== architecturePin.expectedHead) ||
+        (architecture.plan?.version === forkPlan.version &&
+          architecturePin.expectedHead !== architecture.expectedHead))
       throw Error("Carried Foundations do not match their immutable recovery fork source.");
     try {
       git(job, "merge-base", "--is-ancestor", foundation.architectureHead,
         fork.checkpoint.commitSha);
+      git(job, "merge-base", "--is-ancestor", fork.checkpoint.commitSha,
+        architecture.expectedHead);
     } catch {
       throw Error("Fork Foundations Architecture source is not an ancestor of its verified checkpoint.");
     }
