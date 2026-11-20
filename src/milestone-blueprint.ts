@@ -78,6 +78,23 @@ function milestoneFieldQuote(event: MilestoneEvent, field: MilestoneField, quote
   return !!quote && (quote === serialized ||
     quote.length >= 8 && serialized.includes(quote));
 }
+/** Citation admission and claim retention are different checks: a short,
+ * valid whole-field quote remains present when other text is appended.
+ * For an exact whole-array citation, retained members still count after an
+ * array grows, while an empty array ceases to exist once populated. */
+function milestoneFieldRetainsQuote(original: MilestoneEvent, current: MilestoneEvent,
+  field: MilestoneField, quote: string): boolean {
+  if (!quote) return false;
+  const oldValue = original[field];
+  const newValue = current[field];
+  if (Array.isArray(oldValue) && Array.isArray(newValue) &&
+      quote === JSON.stringify(oldValue)) {
+    if (!oldValue.length) return newValue.length === 0;
+    return oldValue.every(item => newValue.some(next =>
+      JSON.stringify(next) === JSON.stringify(item)));
+  }
+  return milestoneFieldText(current, field).includes(quote);
+}
 const milestoneEvent = (draft: MilestoneBlueprint, id: string) =>
   draft.events.find(event => event.id === id);
 
@@ -119,11 +136,11 @@ function milestoneCorrectionEvidence(p: NonNullable<MilestoneBlueprintReview["pr
     // Replacement removes the quoted defect. An omission correction may
     // instead RETAIN valid text, provided new field-specific evidence appears.
     return evidence.kind === "added"
-      ? milestoneFieldQuote(target, evidence.field, evidence.before)
-      : !milestoneFieldQuote(target, evidence.field, evidence.before);
+      ? milestoneFieldRetainsQuote(source, target, evidence.field, evidence.before)
+      : !milestoneFieldRetainsQuote(source, target, evidence.field, evidence.before);
   }
   return evidence.kind === "current" &&
-    milestoneFieldQuote(target, evidence.field, evidence.quote);
+    milestoneFieldRetainsQuote(source, target, evidence.field, evidence.quote);
 }
 
 /** Require changed, source-bound evidence against EACH rejected target before
@@ -178,12 +195,14 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
         if (p.evidence.kind === "removed") return !!before && !after;
         if (!["revised", "added"].includes(p.evidence.kind) || !before || !after ||
             !("before" in p.evidence) || !("after" in p.evidence)) return false;
-        return milestoneFieldQuote(before, p.evidence.field, p.evidence.before) &&
+        const original = milestoneEvent(source.draft, finding.eventId);
+        return !!original &&
+          milestoneFieldRetainsQuote(original, before, p.evidence.field, p.evidence.before) &&
           (p.evidence.kind === "added"
-            ? milestoneFieldQuote(after, p.evidence.field, p.evidence.before)
-            : !milestoneFieldQuote(after, p.evidence.field, p.evidence.before)) &&
+            ? milestoneFieldRetainsQuote(original, after, p.evidence.field, p.evidence.before)
+            : !milestoneFieldRetainsQuote(original, after, p.evidence.field, p.evidence.before)) &&
           milestoneFieldQuote(after, p.evidence.field, p.evidence.after) &&
-          !milestoneFieldQuote(before, p.evidence.field, p.evidence.after);
+          !milestoneFieldRetainsQuote(after, before, p.evidence.field, p.evidence.after);
       }
       // Older sealed v2 reviews retain their historical convergence policy.
       if ("kind" in p.evidence) return false;

@@ -294,6 +294,139 @@ test("#207 an explicitly rejected claim cannot be approved by adding unrelated t
   }), old, assignment), /cited defective Event field/);
 });
 
+
+test("#207 short rejected claim remains present after unrelated text is appended", () => {
+  const assignment = { milestonePath: "milestones/key.md",
+    sourcePaths: ["milestones/key.md"] };
+  const oldClaim = "No key.";
+  const filler = "The sun is shining.";
+  const draft = (knowledge: string): MilestoneBlueprint => ({
+    schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.key",
+    events: [{ id: "entry", purpose: "Observe the gate", knowledge,
+      dependsOn: [], evidence: [], participants: [], routes: [] }],
+    downstream: [],
+  });
+  const original = draft(oldClaim);
+  const finding = { eventId: "entry", anchorPath: "milestones/key.md",
+    requirement: "Do not assert the player has no key without evidence",
+    reason: "The claim is unsupported", correction: "Remove the unearned claim",
+    evidence: { field: "knowledge", quote: oldClaim, repair: "replace" } };
+  const negative = parseMilestoneBlueprintReview(JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    findings: [finding], prior: [],
+  }), original, assignment);
+  const history = [{ draft: original, review: negative,
+    draftDigest: "old", reviewDigest: "negative" }];
+  const appended = draft(oldClaim + " " + filler);
+  const proof = (kind: "revised" | "current") => JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v4",
+    status: kind === "revised" ? "pass" : "revise",
+    findings: kind === "revised" ? [] : [{
+      ...finding, evidence: { ...finding.evidence, quote: oldClaim + " " + filler },
+    }],
+    prior: [{ round: 0, findingIndex: 0,
+      status: kind === "revised" ? "resolved" : "persisting",
+      reason: "The unsupported claim remains",
+      evidence: kind === "revised"
+        ? { kind, eventId: "entry", field: "knowledge",
+          before: oldClaim, after: filler }
+        : { kind, eventId: "entry", field: "knowledge", quote: oldClaim } }],
+  });
+  assert.throws(() => parseMilestoneBlueprintReview(
+    proof("revised"), appended, assignment, history), /rejected field|verified correction/);
+  assert.equal(parseMilestoneBlueprintReview(
+    proof("current"), appended, assignment, history).status, "revise");
+});
+
+test("#207 short valid claim can be retained by an additive qualification", () => {
+  const assignment = { milestonePath: "milestones/key.md",
+    sourcePaths: ["milestones/key.md"] };
+  const oldClaim = "No key.";
+  const qualifier = "The player has not checked the guard's keyring.";
+  const draft = (knowledge: string): MilestoneBlueprint => ({
+    schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.key",
+    events: [{ id: "entry", purpose: "Observe the gate", knowledge,
+      dependsOn: [], evidence: [], participants: [], routes: [] }],
+    downstream: [],
+  });
+  const original = draft(oldClaim);
+  const negative = parseMilestoneBlueprintReview(JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    findings: [{ eventId: "entry", anchorPath: "milestones/key.md",
+      requirement: "Clarify whose missing key is actually confirmed",
+      reason: "The claim lacks the player's observation limit",
+      correction: "Add the uncertainty without removing the current fact",
+      evidence: { field: "knowledge", quote: oldClaim, repair: "extend" } }],
+    prior: [],
+  }), original, assignment);
+  const history = [{ draft: original, review: negative,
+    draftDigest: "old", reviewDigest: "negative" }];
+  const amended = draft(oldClaim + " " + qualifier);
+  const accepted = parseMilestoneBlueprintReview(JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    findings: [], prior: [{ round: 0, findingIndex: 0,
+      status: "resolved", reason: "The observable limitation was added",
+      evidence: { kind: "added", eventId: "entry", field: "knowledge",
+        before: oldClaim, after: qualifier } }],
+  }), amended, assignment, history);
+  assert.equal(accepted.status, "pass");
+  assert.equal(milestoneReviewStagnation([...history, {
+    draft: amended, review: accepted, draftDigest: "amended", reviewDigest: "accepted",
+  }]), 0);
+});
+
+
+test("#207 a short whole-array dependency remains present after another dependency is added", () => {
+  const assignment = { milestonePath: "milestones/entry.md",
+    sourcePaths: ["milestones/entry.md"] };
+  const draft = (dependsOn: string[]): MilestoneBlueprint => ({
+    schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.entry",
+    events: [
+      { id: "key", purpose: "Find the key", knowledge: "The key exists",
+        dependsOn: [], evidence: [], participants: [], routes: [] },
+      { id: "helper", purpose: "Meet a helper", knowledge: "The helper is present",
+        dependsOn: [], evidence: [], participants: [], routes: [] },
+      { id: "entry", purpose: "Enter the room", knowledge: "The door is guarded",
+        dependsOn, evidence: [], participants: [], routes: [] },
+    ],
+    downstream: [],
+  });
+  const old = draft(["key"]);
+  const assignmentPath = "milestones/entry.md";
+  const priorReview = (repair: "replace" | "extend") =>
+    parseMilestoneBlueprintReview(JSON.stringify({
+      schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+      findings: [{ eventId: "entry", anchorPath: assignmentPath,
+        requirement: repair === "replace"
+          ? "Remove the unauthorized key dependency" : "Include the helper dependency",
+        reason: "The dependency set is incomplete or unsupported",
+        correction: "Correct the dependency set",
+        evidence: { field: "dependsOn", quote: '["key"]', repair } }],
+      prior: [],
+    }), old, assignment);
+  const now = draft(["key", "helper"]);
+  const verdict = (kind: "revised" | "added") => JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    findings: [], prior: [{ round: 0, findingIndex: 0, status: "resolved",
+      reason: "The dependency list has changed",
+      evidence: { kind, eventId: "entry", field: "dependsOn",
+        before: '["key"]', after: '["key","helper"]' } }],
+  });
+  const replaceHistory = [{ draft: old, review: priorReview("replace"),
+    draftDigest: "old", reviewDigest: "replace" }];
+  assert.throws(() => parseMilestoneBlueprintReview(
+    verdict("revised"), now, assignment, replaceHistory),
+  /rejected field|verified correction/);
+  const extendHistory = [{ draft: old, review: priorReview("extend"),
+    draftDigest: "old", reviewDigest: "extend" }];
+  const passing = parseMilestoneBlueprintReview(
+    verdict("added"), now, assignment, extendHistory);
+  assert.equal(passing.status, "pass");
+  assert.equal(milestoneReviewStagnation([...extendHistory, {
+    draft: now, review: passing, draftDigest: "new", reviewDigest: "pass",
+  }]), 0);
+});
+
 test("#207 short entire dependency value proves correction of an empty dependency", () => {
   const assignment = { milestonePath: "milestones/gate.md",
     sourcePaths: ["milestones/gate.md"] };
