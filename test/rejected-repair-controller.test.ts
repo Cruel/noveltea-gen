@@ -151,6 +151,58 @@ test("argument-only disagreement never invokes validator or reviewer until trust
   ]);
 });
 
+test("answering a choice inside one controller run can revisit the same source with newly authorized state", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "ready", sourceCommitSha: original }, log);
+  let writerCalls = 0;
+  flow.ops.correct = async () => {
+    const state: State = ++writerCalls === 1
+      ? { phase: "awaiting-author", sourceCommitSha: original, choiceId: choice.id }
+      : { phase: "validating", sourceCommitSha: original, choiceId: choice.id,
+          assignmentVersion: 2 };
+    flow.set(state);
+    return state;
+  };
+  flow.ops.choice = async () => ({ ...choice, phase: "answered" });
+  flow.ops.consume = async () => {
+    const next: State = { phase: "ready", sourceCommitSha: original,
+      choiceId: choice.id, assignmentVersion: 2 };
+    flow.set(next);
+    return next;
+  };
+  const result = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(result.next, "completed");
+  assert.equal(writerCalls, 2);
+  assert.equal(result.state.assignmentVersion, 2);
+});
+
+test("a completed source chain may exceed the former 160-transition controller ceiling", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "ready", sourceCommitSha: original,
+    attempts: 0 }, log);
+  flow.ops.commit = async () => {
+    const current = flow.get();
+    const next: State = { ...current, phase: "reviewing",
+      repairedCommitSha: (current.attempts ?? 0).toString(16).padStart(40, "0") };
+    flow.set(next); return next;
+  };
+  flow.ops.finishReview = async () => {
+    const current = flow.get();
+    const next: State = { ...current, phase:
+      (current.attempts ?? 0) >= 34 ? "passed" : "failed" };
+    flow.set(next); return next;
+  };
+  flow.ops.nextFailure = async () => {
+    const current = flow.get();
+    const next: State = { ...current, phase: "ready",
+      sourceCommitSha: current.repairedCommitSha! };
+    flow.set(next); return next;
+  };
+  const result = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(result.next, "completed");
+  assert.equal(result.state.attempts, 34);
+});
+
 test("two failed independent rereviews exhaust bounded correction without touching independent work", async () => {
   const log: string[] = [];
   const independent = { stage: "choice-point", sha: "d".repeat(40), status: "ready" };

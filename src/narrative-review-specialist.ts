@@ -19,13 +19,16 @@ import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import type { SkillConfig } from "./skills.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
+import { postcommitDiagnosticAdmission, parsePostcommitDiagnosis,
+  savePostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
 import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
 import { PUZZLE_GOAL_REVIEW } from "./puzzle-goal-fidelity.js";
 import { normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKinds,
   validateSemanticVerdict } from "./semantic-assignment-review.js";
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
-import { beginProtocolInvocation, recoverWithOneFreshSession, refuseReplayedProtocolInvocation,
+import { beginProtocolInvocation, recoverResponseContract,
+  recoverWithOneFreshSession, refuseReplayedProtocolInvocation,
   resumeExhaustedFreshProtocol, inspectResumableProtocolExhaustion, ProtocolExhaustedError,
   inspectAcceptedFreshProtocolHandoff, inspectCompletedProtocolResponse, inspectCompletedProtocolReads,
   ProtocolIntegrityBlockedError, type ResponseContractFailure } from "./response-contract-recovery.js";
@@ -138,7 +141,8 @@ export function checkEditorialVerdict(value: unknown, assignment: ReviewAssignme
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider: string,
   modelId: string, thinking: "low" | "high" | undefined, role: "review" | "repair",
   originalSessionFile?: string, assignment?: ReviewAssignment,
-  reviewKind: "narrative" | "turn-completeness" | "assignment-fidelity" = "narrative",
+  reviewKind: "narrative" | "turn-completeness" | "assignment-fidelity" |
+    "assignment-diagnostic" = "narrative",
   freshProtocol = false,
   postcommit?: { id: string; reviewer?: { id: string; file: string }; protocolFresh?: boolean }) {
   const project = await openStoryProject(job.worktreeStoryRoot);
@@ -164,7 +168,8 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
         reviewKind + ":" + assignment.planVersion + (freshProtocol ? ":protocol-fresh" : ""),
       step: reviewKind + ":" + assignment.planVersion + ":" + job.headSha +
         (freshProtocol ? ":protocol-fresh" : ""),
-      paths: reviewKind === "assignment-fidelity" ? [] : assignment.paths, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
+      paths: ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
+        ? [] : assignment.paths, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
       ...(postcommit?.reviewer && !freshProtocol ? { resumeSession: postcommit.reviewer } : {}),
       task: { kind: "review", ids: assignment.scopeIds, scope: "related" },
     }, runtime) : undefined;
@@ -175,15 +180,18 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   await mkdir(dir, { recursive: true });
   const sandboxTools = await selectSandboxPiTools(job, snapshot, loader.getSkills().skills, undefined,
     role === "review" ? "read-only" : "writer", role === "review" ? "reviewer" : "specialist",
-    reviewKind === "assignment-fidelity" ? "pinned-skills-only" : "story-and-skills");
+    ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
+      ? "pinned-skills-only" : "story-and-skills");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, thinkingLevel: selectedThinking,
     resourceLoader: loader, settingsManager,
     sessionManager: role === "repair" && originalSessionFile
       ? SessionManager.open(originalSessionFile, dirname(originalSessionFile), project.root)
       : context?.manager ?? SessionManager.create(project.root, dir),
-    customTools: [...(sandboxTools ?? []), ...(context && reviewKind !== "assignment-fidelity" ? [context.contextTool] : []), createPiStatusTool()],
-    noTools: "all", tools: reviewKind === "assignment-fidelity"
+    customTools: [...(sandboxTools ?? []),
+      ...(context && !["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
+        ? [context.contextTool] : []), createPiStatusTool()],
+    noTools: "all", tools: ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
       ? ["read", "report_status"] : role === "review"
         ? [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"] : ["read", "edit", "write", "grep", "find", "ls", "report_status"],
   });
@@ -603,6 +611,110 @@ export function assignmentVerdictResponseContract(packet: SemanticReviewPacket) 
   };
 }
 
+/** A fresh diagnostic conversation provides advice, not a second semantic
+ * approval. An accepted protocol and its exact transcript survive restarts;
+ * an ambiguous started call is never replayed. The original sealed negative
+ * verdict remains authoritative until an ordinary source-bound re-review. */
+async function reviewPostcommitDiagnosis(job: JobStartResult, snapshot: SkillSnapshot,
+  packet: SemanticReviewPacket, verdict: SemanticVerdict,
+  cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle,
+  provider: string, model: string, thinking: "low" | "high" | undefined) {
+  const admission = postcommitDiagnosticAdmission(job, cycle, packet, verdict);
+  if (!admission) return;
+  const contract = admission.contract, receiptFile = admission.protocolRoot;
+  const item = packet.items[0]!;
+  const source = { ...packet, items: packet.items.map(current => ({
+    ...current, canonicalContext: current.canonicalContext.map(record => ({
+      path: record.path, content: record.content,
+    })),
+  })) };
+  const required = pinnedSourcePaths(snapshot, boundedPinnedSources("nt-narrative-review"));
+  const parse = (raw: string) => parsePostcommitDiagnosis(raw, admission, packet);
+  const validate = (raw: string): ResponseContractFailure[] => {
+    try { parse(raw); return []; }
+    catch { return [{ path: "$.diagnosis", expected:
+      "strict source-bound diagnosis with exact current source and assignment-criterion quotes" }]; }
+  };
+  const sessionRoot = join(job.stateDir, "review-sessions", "assignment-diagnostic");
+  const checkReads = (reads: readonly string[]) => {
+    const accepted = reads.map(path =>
+      canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
+    if (required.some(path => !accepted.includes(path)) ||
+        accepted.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
+      throw Error("Postcommit Diagnostic omitted pinned methods or read outside independent review authority.");
+  };
+  let diagnosis: ReturnType<typeof parse>;
+  if (existsSync(receiptFile + ".started.json") ||
+      existsSync(receiptFile + ".initial.json")) {
+    diagnosis = await inspectCompletedProtocolResponse({
+      receiptFile, sourceDigest: admission.sourceDigest,
+      contract, sessionRoots: [sessionRoot], validate, parse,
+    });
+    checkReads((await inspectCompletedProtocolReads({
+      receiptFile, sourceDigest: admission.sourceDigest,
+      contract, sessionRoots: [sessionRoot],
+    })).reads);
+  } else {
+    const assignment: ReviewAssignment = {
+      contract: { kind: "assignment-fidelity-diagnostic", sourceDigest: admission.sourceDigest },
+      planVersion: 1, scopeIds: item.assignment.targets,
+      paths: item.canonicalContext.map(record => record.path),
+      routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
+    };
+    const opened = await sessionFor(job, snapshot, provider, model, thinking,
+      "review", undefined, assignment, "assignment-diagnostic", false,
+      { id: cycle.id + ":diagnostic:" + item.assurance.commitSha });
+    const { session, context } = opened;
+    try {
+      const file = session.sessionManager.getSessionFile();
+      if (!file || file === cycle.reviewer.file || session.sessionId === cycle.reviewer.id)
+        throw Error("Independent Diagnostic must use a fresh read-only Pi conversation.");
+      // No persisted started marker or external prompt until the resource gate.
+      await context!.beforeTurn(file);
+      await beginProtocolInvocation({
+        receiptFile, sourceDigest: admission.sourceDigest, contract, session,
+      });
+      await promptStorySpecialist(session,
+        "INDEPENDENT POSTCOMMIT DIAGNOSTIC. You are not the writer or the continuing " +
+        "reviewer. No writes, approvals, waived obligations or expanded work grants. " +
+        "Determine whether the current failed source actually improves on the previous " +
+        "rejected submissions, whether the reviewer is drifting, or whether an " +
+        "owner/scope conflict requires escalation. Review both the ACTUAL current " +
+        "pinned source and the original assignment, including two potentially distinct " +
+        "material issues on the same record. Existing negative verdicts remain sealed. " +
+        "Return ONLY JSON with exact keys schema,sourceDigest,action,explanation,assessments. " +
+        "schema: noveltea-postcommit-diagnosis/v1; sourceDigest: " +
+        admission.sourceDigest + "; action: continue|replace|split|escalate. " +
+        "assessments: 1-8 objects with kind: material|cosmetic|deferred|scope, reason, " +
+        "requirement:{quote}, evidence:{path,quote}. Every requirement quote must " +
+        "literally occur in the original assignment outcome or unit outcome; every " +
+        "evidence quote must literally occur in the current sealed record. Use >=8 " +
+        "characters per quote, evidence from current canonicalContext, no invented " +
+        "source or plan authorization. Read pinned nt-narrative-review and nt-catalog " +
+        "methodology first using read; you may not read the mutable Story. " +
+        "A diagnosis is ADVISORY, never a PASS. Trigger: " + admission.reason +
+        ".\nIMMUTABLE SOURCE AND REQUIREMENTS: " + JSON.stringify(source) +
+        "\nORIGINAL ASSIGNMENT OUTCOME: " + JSON.stringify(item.assignment.outcome) +
+        "\nCURRENT UNIT OUTCOME: " + JSON.stringify(item.unitOutcome) +
+        "\nSEALED REVIEW LINEAGE: " + JSON.stringify(cycle.rounds) +
+        "\nMOST RECENT VERIFIED NEGATIVE: " + JSON.stringify(verdict.findings) +
+        "\nPINNED METHODS: " + pinnedSkillReferences(snapshot, required));
+      checkReads(completedReads(session, job.worktreeStoryRoot, snapshot.path));
+      diagnosis = await recoverResponseContract({
+        session, contract, validate, parse, sourceDigest: admission.sourceDigest,
+        receiptFile: receiptFile + ".initial.json",
+        prompt: text => promptStorySpecialist(session, text),
+        beforeCorrection: () => context!.beforeTurn(file),
+        feedback: () => "DIAGNOSTIC PROTOCOL CORRECTION ONLY. Return strict " +
+          "source-bound JSON with exact literal requirement/current source quotes. " +
+          "Keep the negative review sealed; do not write or approve the Story.",
+      });
+      await context!.completed(file, session.sessionId);
+    } finally { session.dispose(); }
+  }
+  await savePostcommitDiagnosis(job, cycle, packet, verdict, admission, diagnosis);
+}
+
 export async function reviewSpecialistAssignments(job: JobStartResult, snapshot: SkillSnapshot,
   packet: SemanticReviewPacket, provider: string, model: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
@@ -854,7 +966,14 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     if (!freshIdentity) await context!.completed(file, session.sessionId);
     if (freshIdentity && cycle)
       cycle = await replacePostcommitProtocolReviewer(job, packet, cycle, freshIdentity);
-    if (cycle) await acceptPostcommitReviewRound(job, packet, verdict, cycle);
+    if (cycle) {
+      await acceptPostcommitReviewRound(job, packet, verdict, cycle);
+      const checked = await (await import("./postcommit-review-cycle.js"))
+        .inspectPostcommitReviewCycle(job, cycle.rootSha, cycle.assignmentDigest);
+      if (!checked) throw Error("Accepted postcommit review cycle was not retained.");
+      await reviewPostcommitDiagnosis(job, snapshot, packet, verdict,
+        checked, provider, model, thinking);
+    }
     return verdict;
   } finally { session.dispose(); }
 }

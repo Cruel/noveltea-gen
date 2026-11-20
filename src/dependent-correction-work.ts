@@ -1,4 +1,4 @@
-/** Bounded same-owner correction after a historically PASSED checkpoint is
+/** Source-bound same-owner correction after a historically PASSED checkpoint is
  * invalidated by a later independently reviewed upstream source.
  *
  * Same Story writer lane, original Pi history, native validator and Repair
@@ -16,7 +16,7 @@ import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { readRejectedRepairOrigin, type RepairOrigin } from "./rejected-review-repair.js";
 import { inspectRepairLedger, submitRepairCorrection, settleRepairReview,
-  admitCausalRevalidationFinding, MAX_LOCAL_CORRECTIONS } from "./repair-ledger.js";
+  admitCausalRevalidationFinding } from "./repair-ledger.js";
 import { validateStoryJob } from "./validator.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -120,7 +120,6 @@ export async function inspectDependentCorrection(job: JobStartResult,
       !/^[a-f0-9]{64}$/.test(state.originalCheckpointProofDigest) ||
       JSON.stringify(state.proposal) !== JSON.stringify(proposal) ||
       !SHA.test(state.currentSourceSha) || !Array.isArray(state.attempts) ||
-      state.attempts.length > MAX_LOCAL_CORRECTIONS ||
       !["ready", "writing", "authored", "committed", "reviewing",
         "reviewed", "verified", "blocked"].includes(state.phase) ||
       await openSkillSnapshot(state.origin.snapshot.id) !== state.origin.snapshot.path ||
@@ -380,7 +379,7 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
     await reconcileDependentCommit(job, state);
   if (state.phase === "writing" || state.phase === "reviewing")
     throw Error("Interrupted original-owner writer/reviewer has a preserved session; inspect before replay.");
-  if (state.phase === "blocked") throw Error(state.failure ?? "Dependent correction exhausted");
+  if (state.phase === "blocked") throw Error(state.failure ?? "Dependent correction requires owner or controller review");
   if (state.phase === "verified") {
     const last = state.attempts.at(-1);
     if (!last || last.review.verdict !== "pass")
@@ -389,8 +388,14 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
     return { commitSha: last.commitSha, reviewDigest: last.reviewDigest };
   }
   const s = state;
-  for (let i = s.attempts.length; i < MAX_LOCAL_CORRECTIONS; i++) {
+  const traversed = new Set<string>();
+  for (;;) {
+    const i = s.attempts.length;
     const source = s.currentSourceSha;
+    const transition = s.phase + ":" + source;
+    if (traversed.has(transition))
+      throw Error("Dependent correction repeated an unchanged controller transition.");
+    traversed.add(transition);
     if (s.phase === "ready") {
       if (git(job, "rev-parse", "HEAD") !== source || changed(job).length ||
           (i === 0 && await trustedHead(job) !== source))
@@ -493,10 +498,9 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
           !proposal.authorizedPaths.includes(f.source.split(":")[0]!))) {
         s.phase = "blocked";
         s.failure = "Independent rereview requires another owner's source; correction refused.";
-      } else if (s.attempts.length >= MAX_LOCAL_CORRECTIONS) {
-        s.phase = "blocked";
-        s.failure = "Original-owner dependent correction exhausted the local repair ceiling.";
       } else {
+        // Revalidation requires a genuinely new independently reviewed source,
+        // not another allowance or a stable semantic finding category.
         await admitCausalRevalidationFinding(job, {
           turnDigest: proposal.turnDigest, rootFailureSha: proposal.originalCommitSha,
           sourceSha: s.commitSha, causedBy: s.commitSha,
@@ -524,7 +528,6 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
       if (s.phase === "blocked") throw Error(s.failure);
     }
   }
-  throw Error("Dependent correction did not acquire an independent positive verdict.");
 }
 async function publishDependentHead(job: JobStartResult, expected: string, commit: string) {
   const head = join(job.stateDir, "revisions", "verified-head.json");

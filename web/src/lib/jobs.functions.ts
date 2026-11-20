@@ -44,10 +44,10 @@ export type JobControls = {
       cacheRead: number; cacheWrite: number; total: number }
     pause?: { reason: string } }
   repair: null | {
-    attempts: number; limit: number
+    attempts: number
     findings: Array<{ id: string; type: string; specialist: string; outcome: string;
       paths: string[]; status: string; sourceSha: string; reviewDigest: string;
-      attempts: number; allowance: number; message: string;
+      attempts: number; message: string;
       requiredCorrection: string | null }>
     recent: Array<{ sourceSha: string; paths: string[]; outcome: string; successorSha: string | null }>
     prerequisites: Array<{ type: string; specialist: string; path: string;

@@ -17,7 +17,7 @@ import { preflightCompositionBoundary, type CompositionBoundaryDecision,
   type CompositionBoundaryRequest } from "./cross-domain-prerequisite-controller.js";
 import { authorMilestoneCloseout } from "./cross-domain-closeout-specialist.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair, settlePrerequisiteRepair,
-  inspectRepairLedger, MAX_DEPENDENCY_CYCLES } from "./repair-ledger.js";
+  inspectRepairLedger } from "./repair-ledger.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -169,8 +169,6 @@ function verifyCommitted(job: JobStartResult, state: Receipt) {
  * each original source, field-only diff and negative reviewer is reauthenticated. */
 async function verifyRejectedChain(job: JobStartResult, state: Receipt) {
   const history = state.history ?? [];
-  if (history.length >= MAX_DEPENDENCY_CYCLES)
-    throw Error("Prerequisite correction exceeded the three-cycle bound.");
   if (!history.length) return;
   const ledger = await inspectRepairLedger(job, state.turnDigest);
   let parent = history[0]!.proposal.sourceSha;
@@ -354,8 +352,16 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         state.phase === "reviewing")
       throw Error("Interrupted or rejected closeout must be reconciled at its preserved " +
         "original specialist/reviewer session, never replayed.");
-    for (let cycle = 0; cycle < MAX_DEPENDENCY_CYCLES; cycle++) {
+    // Every round changes the authenticated source and proposal. Repeating an
+    // identical controller transition is a recovery error, not semantic
+    // stagnation or a reason to impose an arbitrary correction count.
+    const traversed = new Set<string>();
+    for (;;) {
     const proposal = state.proposal;
+    const transition = state.phase + ":" + proposal.digest;
+    if (traversed.has(transition))
+      throw Error("Prerequisite correction repeated an unchanged controller transition.");
+    traversed.add(transition);
     const head = git(job, "rev-parse", "HEAD");
     if (state.phase === "ready" || state.phase === "retry-ready") {
       const first = state.phase === "ready";
@@ -487,12 +493,11 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
             !state.sessionFile || !state.reviewerSessionFile || !state.reviewSnapshot)
           throw Error("Negative dependency review has no preserved sessions.");
         const feedback = JSON.stringify(state.review.findings);
-        const mayRetry = closeoutReviewMayRetry(state.review, proposal) &&
-          (state.history?.length ?? 0) + 1 < MAX_DEPENDENCY_CYCLES;
+        const mayRetry = closeoutReviewMayRetry(state.review, proposal);
         if (!mayRetry) {
           state.phase = "blocked"; state.failure =
-            "Independent reviewer found another-owner/protected prerequisite or exhausted the " +
-            "three-cycle limit. Preserve the negative review; request controller amendment: " +
+            "Independent reviewer requires another owner's or protected source. " +
+            "Preserve the negative review and request a controller amendment: " +
             feedback.slice(0, 1800);
           await persist(file, state);
           throw Error(state.failure);
@@ -560,7 +565,6 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
     return { status: "verified" as const, headSha: await trustedHead(job),
       workItemId: state.workItemId };
     }
-    throw Error("Dependency correction exceeded its three-cycle limit without a reviewed result.");
   });
 }
 /** Recognized by the existing narrative successor verifier. An arbitrary

@@ -66,7 +66,7 @@ test("saved Autonomous Event findings replay as immutable source-bound repair fe
     assert.deepEqual(completed.findings, original.findings);
     assert.deepEqual(completed.successorFindings, successor.findings);
     assert.deepEqual(completed.origin, state.origin);
-    assert.equal(completed.phase, successor.status === "passed" ? "passed" : state.attempts === 2 ? "blocked" : "failed");
+    assert.equal(completed.phase, successor.status === "passed" ? "passed" : "failed");
     t.diagnostic(`source=${source} successor=${state.repairedCommitSha} phase=${completed.phase}`);
   }
 });
@@ -87,9 +87,11 @@ test("negative Event rereview preserves source findings while reporting exact su
   assert.deepEqual(failed.findings, before.findings);
   assert.deepEqual(failed.successorFindings, review.findings);
   assert.deepEqual(state, before);
-  const blocked = repairReviewOutcome({ ...state, attempts: 2 }, review);
+  assert.equal(repairReviewOutcome({ ...state, attempts: 20 }, review).phase, "failed",
+    "failed semantic review does not count toward a fixed allowance");
+  const blocked = repairReviewOutcome(state, review, true);
   assert.equal(blocked.phase, "blocked");
-  assert.match(blocked.failure!, /Two real corrections/);
+  assert.match(blocked.failure!, /did not converge/);
   assert.deepEqual(blocked.successorFindings, review.findings);
   assert.throws(() => repairReviewOutcome(state, { ...review,
     source: { ...review.source, commitSha: sha } }), /successor/);
@@ -103,7 +105,7 @@ test("source-linked repair feedback remains scoped and cannot silently expand pr
   const feedback = repairFeedback(state);
   assert.deepEqual(feedback.allowedPaths, ["characters/nia.md"]);
   assert.equal(feedback.attempt, 2);
-  assert.equal(feedback.maxAttempts, 2);
+  assert.equal(Object.hasOwn(feedback, "maxAttempts"), false);
   assert.equal(feedback.assignment.outcome, "Give Nia a coherent reason to wait");
   const question = parseSpecialistChoice(disagreementQuestion(state));
   assert.equal(question.kind, "alternatives");

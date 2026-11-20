@@ -44,8 +44,9 @@ function regular(path: string) {
 }
 /** Review repairs have immutable, independently verified commits, but are not
  * normal plan work items. A repair may be inherited only when it points to a
- * recorded failed review rooted in a completed specialist (max two repairs).
- * The entire coverage ledger remains bound by the immutable bundle digest. */
+ * recorded failed review rooted in a completed specialist, however many
+ * productive independently reviewed revisions were needed. The entire
+ * coverage ledger remains bound by the immutable bundle digest. */
 export function validRecoveryReviewCoverage(
   coverage: RecoveryForkBundle["reviewCoverage"],
   completed: string[],
@@ -61,11 +62,10 @@ export function validRecoveryReviewCoverage(
   const completedSet = new Set(completed);
   for (const item of coverage) {
     let cursor = item;
-    let repairs = 0;
     const seen = new Set<string>();
     while (!completedSet.has(cursor.workItem)) {
       const sourceSha = /^repair-([a-f0-9]{40})$/.exec(cursor.workItem)?.[1];
-      if (!sourceSha || ++repairs > 2 || seen.has(sourceSha)) return false;
+      if (!sourceSha || seen.has(sourceSha)) return false;
       seen.add(sourceSha);
       const source = byCommit.get(sourceSha);
       if (!source || source.status !== "failed") return false;
@@ -87,9 +87,12 @@ export function resolvedInheritedRecoveryReviews(
     if (entry.status !== "passed" || !entry.workItem.startsWith("repair-")) continue;
     let current = entry;
     const sources: string[] = [];
-    for (let depth = 0; depth < 2; depth++) {
+    const seen = new Set<string>();
+    while (true) {
       const sourceSha = /^repair-([a-f0-9]{40})$/.exec(current.workItem)?.[1];
       if (!sourceSha) break;
+      if (seen.has(sourceSha)) break;
+      seen.add(sourceSha);
       const source = byCommit.get(sourceSha);
       if (!source || source.status !== "failed") break;
       sources.push(source.commitSha);

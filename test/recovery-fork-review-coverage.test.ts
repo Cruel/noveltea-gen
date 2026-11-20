@@ -47,7 +47,7 @@ test('a passing repair unlocks inherited dependencies without changing historica
   ])[0]?.status, 'failed', 'A failed repair does not unblock the source')
 })
 
-test('repair coverage rejects absent, unrelated, cyclic or excessive failed-review ancestry', () => {
+test('repair coverage rejects absent, unrelated or cyclic ancestry but allows longer verified chains', () => {
   assert.equal(validRecoveryReviewCoverage(coverage.slice(1), completed, required), false)
   assert.equal(validRecoveryReviewCoverage([
     { ...coverage[0], status: 'passed' }, ...coverage.slice(1),
@@ -57,13 +57,25 @@ test('repair coverage rejects absent, unrelated, cyclic or excessive failed-revi
   ], completed, required), false)
   assert.equal(validRecoveryReviewCoverage([...coverage, { ...coverage[0] }],
     completed, required), false)
+  const extended = [
+    coverage[0],
+    { workItem: 'repair-' + world, commitSha: sha('d'), status: 'failed' as const },
+    { workItem: 'repair-' + sha('d'), commitSha: repair, status: 'failed' as const },
+    { workItem: 'repair-' + repair, commitSha: sha('e'), status: 'failed' as const },
+    { workItem: 'repair-' + sha('e'), commitSha: sha('f'), status: 'passed' as const },
+    coverage[2],
+  ]
+  assert.equal(validRecoveryReviewCoverage(extended, completed, required), true)
+  const resolved = resolvedInheritedRecoveryReviews(extended)
+  assert.deepEqual(resolved.slice(0, 5).map(item => item.status), [
+    'not-required', 'not-required', 'not-required', 'not-required', 'passed',
+  ], 'all independently reviewed rejected ancestors may be covered by a later passing revision')
+  assert.equal(extended[0]!.status, 'failed', 'original negative remains immutable')
   assert.equal(validRecoveryReviewCoverage([
     coverage[0],
-    { workItem: 'repair-' + world, commitSha: sha('d'), status: 'failed' },
-    { workItem: 'repair-' + sha('d'), commitSha: repair, status: 'failed' },
-    { workItem: 'repair-' + repair, commitSha: sha('e'), status: 'passed' },
-    coverage[2],
-  ], completed, required), false, 'More than two review repairs must not be inherited')
+    { workItem: 'repair-' + sha('e'), commitSha: sha('d'), status: 'failed' },
+    { workItem: 'repair-' + sha('d'), commitSha: sha('e'), status: 'passed' },
+  ], completed), false, 'cyclic repair provenance must remain inadmissible')
 })
 
 test('selected assurance must be covered by its exact work item and commit', () => {

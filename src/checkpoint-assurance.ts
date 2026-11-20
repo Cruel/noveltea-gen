@@ -176,7 +176,6 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
         throw Error("Passing repair cannot supersede an unverified or unrelated failure.");
       ancestors.push(parent.commitSha);
       source = parent;
-      if (ancestors.length > 2) throw Error("Review repair chain exceeded bounded attempts.");
     }
     for (const ancestor of ancestors) covered.set(ancestor, "not-required");
   }

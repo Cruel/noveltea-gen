@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { JobStartResult } from "../src/job.js";
-import { admitPrerequisiteRepair, inspectRepairLedger, MAX_DEPENDENCY_CYCLES,
-  settlePrerequisiteRepair, submitPrerequisiteRepair,
-  admitRepairFinding, admitCausalRevalidationFinding, submitRepairCorrection,
-  totalTurnCorrections } from "../src/repair-ledger.js";
+import { admitPrerequisiteRepair, inspectRepairLedger, settlePrerequisiteRepair,
+  submitPrerequisiteRepair, admitRepairFinding, admitCausalRevalidationFinding,
+  submitRepairCorrection, settleRepairReview, totalTurnCorrections } from "../src/repair-ledger.js";
 import { removeTestTree } from "./helpers.js";
+
 const sha = (c: string) => c.repeat(40);
 const digest = (c: string) => c.repeat(64);
 const turnDigest = digest("b");
@@ -17,16 +17,16 @@ const proposal = (head = sha("1")) => ({
   path: "milestones/choice-enacted.md", sourceEventSha: sha("a"),
   proposalDigest: digest(head[0]!), sourceSha: head, planVersion: 2,
 });
-function job(t: import("node:test").TestContext) {
+function job(t: import("node:test").TestContext): JobStartResult {
   const stateDir = mkdtempSync(join(tmpdir(), "nt-prerequisite-repair-"));
   t.after(() => removeTestTree(stateDir));
   return { stateDir, jobId: "job-1", threadId: "thread-1" } as JobStartResult;
 }
-test("a preflight finding retains identity through three rejected cycles and blocks a fourth", async t => {
+test("four independently rejected prerequisite cycles can converge without a fixed local limit", async t => {
   const j = job(t);
   const first = await admitPrerequisiteRepair(j, proposal());
   assert.equal((await admitPrerequisiteRepair(j, proposal())).id, first.id);
-  for (let n = 1; n <= MAX_DEPENDENCY_CYCLES; n++) {
+  for (let n = 1; n <= 4; n++) {
     const base = sha(String(n)), after = sha(String(n + 1));
     await admitPrerequisiteRepair(j, proposal(base));
     const submission = { turnDigest, id: first.id, sourceSha: base,
@@ -34,18 +34,21 @@ test("a preflight finding retains identity through three rejected cycles and blo
     await submitPrerequisiteRepair(j, submission);
     await submitPrerequisiteRepair(j, submission);
     await settlePrerequisiteRepair(j, { turnDigest, id: first.id,
-      submittedSha: after, reviewDigest: digest(String(n)), verdict: "failed" });
+      submittedSha: after, reviewDigest: digest(String(n)),
+      verdict: n === 4 ? "passed" : "failed" });
   }
-  assert.equal(totalTurnCorrections(await inspectRepairLedger(j, turnDigest)), 3);
-  await assert.rejects(() => admitPrerequisiteRepair(j, proposal(sha("4"))),
-    /Dependency repair cycles exhausted/);
-  assert.equal((await inspectRepairLedger(j, turnDigest)).prerequisites?.[0]?.attempts.length, 3);
+  const saved = await inspectRepairLedger(j, turnDigest);
+  assert.equal(totalTurnCorrections(saved), 4);
+  assert.equal(saved.prerequisites?.[0]?.status, "resolved");
+  assert.equal(saved.prerequisites?.[0]?.attempts.length, 4);
 });
-test("out-of-scope, unsettled, conflicting and exhausted corrections fail closed", async t => {
+
+test("out-of-scope, unsettled and conflicting narrow correction is refused", async t => {
   const j = job(t);
   const finding = await admitPrerequisiteRepair(j, proposal());
   await assert.rejects(() => submitPrerequisiteRepair(j, { turnDigest, id: finding.id,
-    sourceSha: sha("1"), submittedSha: sha("2"), paths: ["events/other.md"] }), /bounded authorized/);
+    sourceSha: sha("1"), submittedSha: sha("2"), paths: ["events/other.md"] }),
+  /bounded authorized/);
   await submitPrerequisiteRepair(j, { turnDigest, id: finding.id,
     sourceSha: sha("1"), submittedSha: sha("2"), paths: [finding.path] });
   await assert.rejects(() => admitPrerequisiteRepair(j, proposal(sha("2"))), /Unsettled/);
@@ -55,60 +58,57 @@ test("out-of-scope, unsettled, conflicting and exhausted corrections fail closed
     submittedSha: sha("2"), reviewDigest: digest("4"), verdict: "passed" });
   assert.equal((await inspectRepairLedger(j, turnDigest)).prerequisites?.[0]?.status, "resolved");
 });
-test("a newly discovered downstream defect inherits the same Turn budget and causal predecessor", async t => {
+
+test("later dependent revalidation preserves original assignment, not prior semantic issue labels", async t => {
   const j = job(t);
-  const report = (message: string, sourceSha = sha("c"), path = "choice-points/reviewed.md") => ({
+  const report = (sourceSha: string, reviewDigest: string, message: string) => ({
     turnDigest, rootFailureSha: sha("a"), sourceSha, causedBy: sourceSha,
-    reviewDigest: digest("d"), assignmentId: "interactive",
-    obligation: "Preserve the earlier reviewed Choice after Event correction.",
-    findings: [{ path, kind: "continuity" as const, message,
-      affectedPaths: [path] }],
+    reviewDigest, assignmentId: "interactive",
+    obligation: "Preserve the earlier Choice after Event correction.",
+    findings: [{ path: "choice-points/reviewed.md", kind: "continuity" as const,
+      message, affectedPaths: ["choice-points/reviewed.md"] }],
   });
-  const first = await admitCausalRevalidationFinding(j, report("After correction, payoff contradicts Choice"));
-  const old = first.findings[0]!;
-  assert.equal(old.causedBy, sha("c"));
-  const again = await admitCausalRevalidationFinding(j, report("Choice payoff remains impossible"));
-  assert.equal(again.findings.length, 1);
-  assert.equal(again.findings[0]!.id, old.id);
-  assert.equal(totalTurnCorrections(again), 0);
+  const first = await admitCausalRevalidationFinding(j,
+    report(sha("c"), digest("d"), "Contradictory original payoff"));
+  const saved = first.findings[0]!;
+  assert.equal(saved.causedBy, sha("c"));
+  await assert.rejects(() => admitCausalRevalidationFinding(j,
+    report(sha("c"), digest("d"), "Another issue in same sealed review")),
+  /Conflicting sealed review/);
   await submitRepairCorrection(j, { turnDigest, rootFailureSha: sha("a"),
     sourceSha: sha("c"), changedPaths: ["choice-points/reviewed.md"] });
-  assert.equal(totalTurnCorrections(await inspectRepairLedger(j, turnDigest)), 1);
-  const rephrased = await admitCausalRevalidationFinding(j, {
-    ...report("A second source revision still fails", sha("b")),
-    reviewDigest: digest("e"),
+  await settleRepairReview(j, {
+    ...report(sha("c"), digest("e"), "A separately surfaced missing consequence"),
+    successorSha: sha("b"), status: "failed",
   });
-  assert.equal(rephrased.findings.length, 1);
-  assert.equal(rephrased.findings[0]!.id, old.id);
-  assert.equal(rephrased.findings[0]!.causedBy, sha("c"),
-    "Original causal predecessor is immutable even after later source changes.");
+  const second = await admitCausalRevalidationFinding(j,
+    report(sha("b"), digest("e"), "A separately surfaced missing consequence"));
+  assert.equal(second.findings.filter(f => f.status === "open").length, 1);
+  assert.notEqual(second.findings.at(-1)!.id, saved.id);
   await assert.rejects(() => admitCausalRevalidationFinding(j, {
-    ...report("Moved owner"), assignmentId: "event",
+    ...report(sha("b"), digest("e"), "A separately surfaced missing consequence"),
+    assignmentId: "event",
   }), /originally assigned owner/);
 });
-test("dependency and original-session corrections consume the same 12-attempt Turn budget", async t => {
+
+test("dependency and ordinary correction submissions share accounting without a Turn count stop", async t => {
   const j = job(t);
-  const finding = await admitPrerequisiteRepair(j, proposal());
-  await submitPrerequisiteRepair(j, { turnDigest, id: finding.id,
-    sourceSha: sha("1"), submittedSha: sha("2"), paths: [finding.path] });
-  await settlePrerequisiteRepair(j, { turnDigest, id: finding.id,
+  const prereq = await admitPrerequisiteRepair(j, proposal());
+  await submitPrerequisiteRepair(j, { turnDigest, id: prereq.id, sourceSha: sha("1"),
+    submittedSha: sha("2"), paths: [prereq.path] });
+  await settlePrerequisiteRepair(j, { turnDigest, id: prereq.id,
     submittedSha: sha("2"), reviewDigest: digest("4"), verdict: "passed" });
-  for (let n = 0; n < 11; n++) {
+  for (let n = 0; n < 12; n++) {
     const root = n.toString(16).padStart(40, "0");
+    const path = "events/test-" + n + ".md";
     await admitRepairFinding(j, {
       turnDigest, rootFailureSha: root, sourceSha: root,
       reviewDigest: digest("e"), assignmentId: "event", obligation: "Real Event evidence",
-      findings: [{ path: `events/test-${n}.md`, kind: "continuity",
+      findings: [{ path, kind: "continuity",
         message: "Unfulfilled testimony", requiredCorrection: "Actual evidence" }],
     });
-    await submitRepairCorrection(j, { turnDigest, rootFailureSha: root, sourceSha: root,
-      changedPaths: [`events/test-${n}.md`] });
+    await submitRepairCorrection(j, { turnDigest, rootFailureSha: root,
+      sourceSha: root, changedPaths: [path] });
   }
-  assert.equal(totalTurnCorrections(await inspectRepairLedger(j, turnDigest)), 12);
-  await assert.rejects(() => admitRepairFinding(j, {
-    turnDigest, rootFailureSha: sha("f"), sourceSha: sha("f"),
-    reviewDigest: digest("e"), assignmentId: "event", obligation: "Real Event evidence",
-    findings: [{ path: "events/last.md", kind: "continuity",
-      message: "Missing", requiredCorrection: "Correct it" }],
-  }), /Turn correction ceiling/);
+  assert.equal(totalTurnCorrections(await inspectRepairLedger(j, turnDigest)), 13);
 });

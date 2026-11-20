@@ -18,8 +18,7 @@ import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { inspectRejectedRepair, acceptGuidedRepairContinuation, type RepairReceipt } from '../../../src/rejected-review-repair'
 import { inspectRepairLedger, authorizeRepairGuidance, totalTurnCorrections,
-  MAX_AUTHOR_REPAIR_GRANTS, MAX_AUTHOR_GRANTS_PER_ROOT, type AuthorRepairGrant,
-  turnCorrectionLimit, localCorrectionLimit } from '../../../src/repair-ledger'
+  MAX_AUTHOR_REPAIR_GRANTS, MAX_AUTHOR_GRANTS_PER_ROOT, type AuthorRepairGrant } from '../../../src/repair-ledger'
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../src/recovery-checkpoints'
 import { inspectCheckpointReview } from '../../../src/checkpoint-assurance'
 import { inspectPiPolicy, configurePiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
@@ -67,10 +66,23 @@ async function inspectPublicRepairFindings(job: Awaited<ReturnType<typeof author
     if (!review || review.status !== 'failed' || !review.result ||
         digest !== finding.source.reviewDigest)
       throw Error('Repair finding lost its original independently sealed review evidence.')
-    const detail = review.result.findings.find(f =>
-      (f.kind ?? 'other') === finding.category &&
-      JSON.stringify([...new Set(f.affectedPaths ?? [f.path])].sort()) ===
-      JSON.stringify(finding.targets))
+    // New receipts refer to one precise observation inside a sealed verdict.
+    // Authenticate the complete source observation set before using an index:
+    // two defects in the same file/category must not be interchangeable.
+    if (finding.findingIndex !== undefined && createHash('sha256')
+      .update(JSON.stringify(review.result.findings)).digest('hex') !== finding.reviewFindingsDigest)
+      throw Error('Indexed Repair finding differs from its sealed observation set.')
+    // Legacy receipts predate indexed observations and retain shape lookup.
+    const detail = finding.findingIndex !== undefined
+      ? review.result.findings[finding.findingIndex]
+      : review.result.findings.find(f =>
+        (f.kind ?? 'other') === finding.category &&
+        JSON.stringify([...new Set(f.affectedPaths ?? [f.path])].sort()) ===
+        JSON.stringify(finding.targets))
+    if (detail && ((detail.kind ?? 'other') !== finding.category ||
+      JSON.stringify([...new Set(detail.affectedPaths ?? [detail.path])].sort()) !==
+      JSON.stringify(finding.targets)))
+      throw Error('Indexed Repair finding changed its sealed source observation.')
     if (!detail) throw Error('Repair finding no longer matches the sealed source review.')
     return {
       id: finding.id, type: finding.category, specialist: finding.assignmentId,
@@ -140,10 +152,10 @@ export function matchesReviewRepairResumeBoundary(
     authorChoiceMatchesActiveAssignment(point.workItem, saved.active)
 }
 
-/** A guidance grant is not a new specialist dispatch. Only a blocked
+/** A guidance grant is not a new specialist dispatch. Only a stopped,
  * independently rejected stage whose original committed result remains saved
- * may re-enter its original review node after the author has raised the
- * existing Repair ledger's exact source-bound allowance. */
+ * may re-enter its exact original review node after authenticated author
+ * steering. Ordinary progressing corrections do not require such grants. */
 export function matchesGuidedRepairResumeBoundary(
   saved: PendingReviewChoiceState,
   repair: Pick<RepairReceipt, 'phase' | 'rootFailureSha' | 'sourceCommitSha' |
@@ -357,10 +369,8 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
         f.rootFailureSha === failed.rootFailureSha && f.status === 'open' &&
         f.source.sourceSha === failed.result?.successorSha)
       const repair = ledger && (ledger.findings.length || ledger.prerequisites?.length) ? {
-        attempts: totalTurnCorrections(ledger), limit: turnCorrectionLimit(ledger),
-        findings: (await inspectPublicRepairFindings(job, ledger.findings.slice(-12)))
-          .map(f => ({ ...f, allowance: localCorrectionLimit(ledger, ledger.findings.find(
-            saved => saved.id === f.id)!.rootFailureSha) })),
+        attempts: totalTurnCorrections(ledger),
+        findings: await inspectPublicRepairFindings(job, ledger.findings.slice(-12)),
         recent: ledger.corrections.slice(-12).map(c => ({
           sourceSha: c.sourceSha, paths: c.changedPaths,
           outcome: c.result?.status ?? 'pending',

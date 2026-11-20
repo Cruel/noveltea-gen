@@ -1,5 +1,5 @@
 /**
- * Pure, bounded orchestration for a rejected specialist assignment.
+ * Pure, crash-fenced orchestration for a rejected specialist assignment.
  *
  * Storage, Pi, native validation, Git, author identity and sealed review
  * enforcement belong to the trusted adapters in rejected-review-repair.ts.
@@ -42,14 +42,20 @@ export type RepairCycleResult<S extends RepairCycleState> =
 /** Never retries a claimed Pi turn after interruption. Each transition is
  * one-way and durable before any subsequent external side effect. */
 export async function driveRejectedRepairCycle<S extends RepairCycleState>(
-  // At most 12 ordinary + 6 explicit author-granted corrections per Turn,
-  // each potentially traversing a writer, validator, checkpoint and separate
-  // independent rereview. The ledger owns attempt limits, not this guard.
-  ops: RepairCycleOps<S>, maxTransitions = 160,
+  // The optional transition budget is useful for deterministic harnesses;
+  // production does not impose a semantic retry count. A repeated COMPLETE
+  // durable state (including approved assignment revisions) fails closed; the
+  // same phase/source may legitimately reappear after an author decision.
+  ops: RepairCycleOps<S>, maxTransitions?: number,
 ): Promise<RepairCycleResult<S>> {
   let state = await ops.begin();
-  for (let step = 0; step < maxTransitions; step++) {
+  const seen = new Set<string>();
+  for (let step = 0; maxTransitions === undefined || step < maxTransitions; step++) {
     state = await ops.inspect(state.sourceCommitSha);
+    const transition = JSON.stringify(state);
+    if (seen.has(transition))
+      throw Error("Review repair controller repeated a bounded transition without durable progress.");
+    seen.add(transition);
     switch (state.phase) {
       case "ready":
         state = await ops.correct(state.sourceCommitSha);

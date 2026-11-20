@@ -39,6 +39,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
+import { postcommitDiagnosticReason, readPostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
 import { assertReviewCycleSession } from "./review-cycle.js";
 import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
@@ -49,8 +50,7 @@ import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeeds
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
 import { admitRepairFinding, inspectRepairLedger, submitRepairCorrection,
-  settleRepairReview, totalTurnCorrections, turnCorrectionLimit, localCorrectionLimit,
-  MAX_LOCAL_CORRECTIONS, MAX_TURN_CORRECTIONS, MAX_AUTHOR_REPAIR_GRANTS } from "./repair-ledger.js";
+  settleRepairReview } from "./repair-ledger.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -378,7 +378,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
         (path.startsWith("creative-direction/") && state.origin?.workItem !== "foundation")) ||
       (state.origin?.workItem === "foundation" &&
         (state.allowedPaths.length !== 1 || !state.allowedPaths[0]?.startsWith("creative-direction/"))) ||
-      !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > MAX_TURN_CORRECTIONS + MAX_AUTHOR_REPAIR_GRANTS ||
+      !Number.isSafeInteger(state.attempts) || state.attempts < 0 ||
       !["ready", "repairing", "awaiting-author", "needs-plan", "disputing",
         "adjudicating", "validating", "awaiting-checkpoint", "reviewing", "passed", "failed", "blocked"].includes(state.phase) ||
       (state.outOfAuthority && (state.phase !== "needs-plan" ||
@@ -470,33 +470,31 @@ export function repairFeedback(state: RepairReceipt) {
     assignment: state.revision?.assignment ?? state.assignment,
     findings: state.findings, amendment: state.planAmendment,
     allowedPaths: state.planAmendment?.assignment.authority.existingPaths ?? state.allowedPaths,
-    attempt: state.attempts + 1, maxAttempts: MAX_LOCAL_CORRECTIONS,
+    attempt: state.attempts + 1,
   };
 }
 type EventRepairSources = Pick<import("./event-specialist.js").EventAssignment, "sourcePaths">;
 /** Build actionable feedback before claiming a paid turn or touching the writer
  * transcript. The failed source and adjacent records remain immutable. */
 export async function prepareRejectedRepairFeedback(job: JobStartResult, state: RepairReceipt) {
-  // Attempt numbers are per stable finding, not per changing source commit.
-  // A distinct downstream defect inherits the Turn-wide total but gets its own
-  // local correction allowance; do not tell the writer it is on attempt 3/2.
+  // Attempt numbers are execution history, not a per-finding semantic limit.
+  // Reviewer judgments own progress, not category/path identity matching.
   const turn = state.originalSource?.turnDigest;
   const ledger = turn && HASH.test(turn) ? await inspectRepairLedger(job, turn) : null;
-  const open = ledger?.findings.filter(f => f.rootFailureSha === state.rootFailureSha &&
-    f.status === "open") ?? [];
+  const submitted = ledger?.corrections.filter(c =>
+    c.rootFailureSha === state.rootFailureSha).length ?? state.attempts;
   const guidance = ledger?.authorGrants?.filter(grant =>
     grant.rootFailureSha === state.rootFailureSha).at(-1);
   const steering = turn
     ? await steeringForAssignment(job, turn, state.assignment.id, await trustedHead(job))
     : "";
   const feedback = { ...repairFeedback(state),
-    maxAttempts: ledger ? localCorrectionLimit(ledger, state.rootFailureSha) : MAX_LOCAL_CORRECTIONS,
     ...(guidance ? { authorGuidance: {
       direction: guidance.guidance, grantId: guidance.id,
       warning: "Author guidance does not change the original protected canon, approved objective, or write scope. Obtain separate exact approval for any such change.",
     } } : {}),
     ...(steering ? { authenticatedSafeBoundarySteering: steering } : {}),
-    attempt: open.length ? Math.max(...open.map(f => f.attempts.length)) + 1 : state.attempts + 1 };
+    attempt: Math.max(submitted, state.attempts) + 1 };
   const event = state.origin.workItem.startsWith("event-");
   let sourcePaths: string[] = [];
   if (event) {
@@ -808,18 +806,20 @@ export async function acceptRejectedRepairCheckpoint(job: JobStartResult,
   await save(job, state);
   return state;
 }
-/** A correction which leaves the original failing records byte-identical,
- * or restores a previously rejected version, made no source progress on the
- * still-rejected obligation. This comparison uses committed Git blobs, never
- * model wording or an uncommitted worktree, and cannot overturn any review. */
+/** A correction with no changed previously rejected source, or one which
+ * restores all such sources to their original rejected bytes, cannot claim
+ * material source progress. This checks committed Git blobs only, never
+ * matches semantic issue identities or overrules independent review. */
 export function detectRepairStagnation(job: JobStartResult, state: RepairReceipt,
   review: IndependentReviewResult): "no-progress" | "oscillation" | null {
   if (review.status !== "failed" || !state.repairedCommitSha) return null;
-  const recurring = [...new Set(state.findings.filter(before =>
-    review.findings.some(after => after.path === before.path &&
-      (after.kind ?? "other") === (before.kind ?? "other"))).map(f => f.path))];
-  if (!recurring.length) return null;
-  const sameAs = (previousSha: string) => recurring.every(path =>
+  // The prior reviewer may accept one corrected concern while exposing a
+  // different same-file or downstream issue. Do not count issues by matching
+  // their type, category or targets; check whether *any* previously rejected
+  // owned source materially changed before declaring complete stagnation.
+  const rejectedPaths = [...new Set(state.findings.map(f => f.path))];
+  if (!rejectedPaths.length) return null;
+  const sameAs = (previousSha: string) => rejectedPaths.every(path =>
     gitRaw(job, "show", previousSha + ":" + repoPath(job, path)) ===
       gitRaw(job, "show", state.repairedCommitSha! + ":" + repoPath(job, path)));
   if (sameAs(state.sourceCommitSha)) return "no-progress";
@@ -831,16 +831,16 @@ export function detectRepairStagnation(job: JobStartResult, state: RepairReceipt
  * successor receipt. Keeping both verdicts separate makes restart validation
  * against the original source possible after a second negative finding. */
 export function repairReviewOutcome(state: RepairReceipt, review: IndependentReviewResult,
-  exhausted = state.attempts >= MAX_LOCAL_CORRECTIONS): RepairReceipt {
+  stopForNonconvergence = false): RepairReceipt {
   if (state.phase !== "reviewing" || !state.repairedCommitSha ||
       review.source.commitSha !== state.repairedCommitSha)
     throw Error("Repair verdict must refer to its reviewed successor.");
   const failed = review.status === "failed";
-  const phase = !failed ? "passed" : exhausted ? "blocked" : "failed";
+  const phase = !failed ? "passed" : stopForNonconvergence ? "blocked" : "failed";
   return { ...state, phase, successorFindings: structuredClone(review.findings),
     ...(failed ? { baselineHead: state.repairedCommitSha,
       failure: phase === "blocked"
-        ? "Two real corrections failed independent rereview; inspect saved sessions, drafts and immutable findings."
+        ? "Correction did not converge; inspect the preserved source, sessions and independent findings."
         : undefined } : {}),
   };
 }
@@ -854,18 +854,33 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   const review = await inspectCheckpointReview(job, point);
   if (!review || !["passed", "failed"].includes(review.status) || !review.result)
     throw Error("A new independent semantic verdict is mandatory after repaired file changes.");
-  const ledger = await settleRepairReview(job, {
+  await settleRepairReview(job, {
     turnDigest: state.originalSource.turnDigest,
     rootFailureSha: state.rootFailureSha, sourceSha: sha,
     successorSha: state.repairedCommitSha, reviewDigest: sourceOf(review.result),
     assignmentId: state.assignment.id, obligation: state.assignment.outcome,
     status: review.result.status, findings: review.result.findings,
   });
-  const unresolved = ledger.findings.filter(f =>
-    f.rootFailureSha === state.rootFailureSha && f.status === "open");
-  const exhausted = totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger) ||
-    unresolved.some(f => f.attempts.length >= localCorrectionLimit(ledger, f.rootFailureSha));
-  const finished = repairReviewOutcome(state, review.result, exhausted);
+  // The ledger seals one completed submission and its verdict. Whether the
+  // correction improved the narrative belongs to the independent Review cycle,
+  // never a numerical local/Turn retry allowance.
+  const finished = repairReviewOutcome(state, review.result);
+  if (review.status === "failed" && point.assurance) {
+    const cycle = await inspectPostcommitReviewCycle(job,
+      state.rootFailureSha, point.assurance.assignmentDigest);
+    if (cycle && postcommitDiagnosticReason(cycle.rounds.length)) {
+      const diagnosis = await readPostcommitDiagnosis(job, cycle, state.repairedCommitSha);
+      if (!diagnosis)
+        throw Error("Postcommit Diagnostic source-bound review is missing; reconcile its immutable Pi transcript.");
+      if (diagnosis.diagnosis.action !== "continue") {
+        finished.phase = "blocked";
+        finished.failure = "Independent Diagnostic requested " +
+          diagnosis.diagnosis.action + " after review of the same verified source: " +
+          diagnosis.diagnosis.explanation + ". Preserve the negative verdict; obtain " +
+          "controller-authorized reviewer replacement, plan amendment or author escalation.";
+      }
+    }
+  }
   const stagnation = detectRepairStagnation(job, state, review.result);
   if (stagnation) {
     finished.phase = "blocked";
@@ -928,11 +943,7 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
       direction: authorChoiceDirection(choice.question, choice.answer, choice.delegationAllowed === true) };
     state.revision = { ...revision, digest: hash(revision) };
   }
-  const ledger = await inspectRepairLedger(job, state.originalSource.turnDigest);
-  const unresolved = ledger.findings.filter(f => f.rootFailureSha === state.rootFailureSha && f.status === "open");
-  state.phase = totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger) ||
-    unresolved.some(f => f.attempts.length >= localCorrectionLimit(ledger, f.rootFailureSha))
-    ? "blocked" : "ready";
+  state.phase = "ready";
   state.sessionSha256 = hash(await readFile(state.origin.sessionFile));
   await save(job, state);
   await completeSpecialistChoice(job, state.choiceId);
@@ -1475,9 +1486,8 @@ export async function adjudicateRejectedRepair(job: JobStartResult, sha: string)
   return current;
 }
 
-/** Same-Thread author continuation of an exhausted, independently reviewed
- * repair. This transition is one-way and source bound; the next graph review
- * boundary must still verify the new failed successor before any writer. */
+/** Same-Thread author continuation after a reviewer-confirmed nonconvergence
+ * stop. Historical bounded grants remain source-bound and replay-safe. */
 export async function acceptGuidedRepairContinuation(job: JobStartResult,
   sha: string, grantId: string) {
   const state = await inspectRejectedRepair(job, sha);

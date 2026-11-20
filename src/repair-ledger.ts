@@ -1,9 +1,10 @@
-/** Thin, controller-owned index of substantive specialist repair findings.
+/** Controller-owned index of submitted corrections, sealed verdicts and
+ * authenticated corrective scope. Independent reviewers own semantic
+ * continuity; the ledger never matches creative defects by file/category or
+ * imposes a fixed number of productive correction rounds.
  *
- * The job's sealed review/checkpoint receipts remain the source of truth for
- * semantic verdicts and Git revisions. This file only joins their identities
- * across paraphrased reviews and accounts for completed correction submissions
- * in the original Turn. All mutations run under the existing job writer lease.
+ * Version 1 entries and prior author grants remain readable for recovery.
+ * All mutations run under the existing job writer lease.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -15,6 +16,8 @@ import type { IndependentReviewResult } from "./checkpoint-assurance.js";
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const PATH = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
+/** Historical v1 allowance values, used only to authenticate old author grants.
+ * New semantic progress is governed by independent review and Pi job budgets. */
 export const MAX_LOCAL_CORRECTIONS = 2;
 export const MAX_DEPENDENCY_CYCLES = 3;
 export const MAX_TURN_CORRECTIONS = 12;
@@ -54,6 +57,10 @@ export interface RepairFinding {
   source: ReviewReference;
   /** First correction responsible for a genuinely new downstream finding. */
   causedBy?: string;
+  /** New entries are indexed within ONE immutable negative verdict, not across reviews. */
+  findingIndex?: number;
+  reviewFindingsDigest?: string;
+  /** Historical submission references are retained for legacy recovery. */
   attempts: string[];
 }
 export interface RepairCorrection {
@@ -135,10 +142,6 @@ function shape(finding: RepairFindingInput) {
   return { category: finding.kind ?? "other" as Category,
     targets: [...new Set(finding.affectedPaths ?? [finding.path])].sort() };
 }
-function sameShape(left: RepairFinding, right: ReturnType<typeof shape>) {
-  return left.category === right.category &&
-    JSON.stringify(left.targets) === JSON.stringify(right.targets);
-}
 function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedger) {
   if (raw.version !== 1 || raw.jobId !== job.jobId || raw.threadId !== job.threadId ||
       raw.turnDigest !== turnDigest || !Array.isArray(raw.findings) ||
@@ -154,7 +157,7 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
           !DIGEST.test(p.proposalDigest) || !Number.isSafeInteger(p.planVersion) ||
           p.planVersion < 1 || !["open", "resolved"].includes(p.status) ||
           (p.causedBy !== undefined && !SHA.test(p.causedBy)) ||
-          !Array.isArray(p.attempts) || p.attempts.length > MAX_DEPENDENCY_CYCLES ||
+          !Array.isArray(p.attempts) ||
           p.attempts.some(a => !SHA.test(a.sourceSha) || !SHA.test(a.submittedSha) ||
             !Array.isArray(a.paths) || !a.paths.length ||
             a.paths.some(path => !PATH.test(path)) ||
@@ -177,15 +180,20 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
             localLimit: grant.localLimit, turnLimit: grant.turnLimit }) ||
           raw.authorGrants!.filter(g => g.rootFailureSha === grant.rootFailureSha).length >
             MAX_AUTHOR_GRANTS_PER_ROOT))) ||
-      totalTurnCorrections(raw) > turnCorrectionLimit(raw) ||
       new Set(raw.findings.map(f => f.id)).size !== raw.findings.length ||
       new Set(raw.corrections.map(c => c.rootFailureSha + ":" + c.sourceSha)).size !== raw.corrections.length ||
       raw.findings.some(f => !DIGEST.test(f.id) || !SHA.test(f.rootFailureSha) ||
         !f.assignmentId || !f.obligation || !["open", "resolved", "escalated"].includes(f.status) ||
         !SHA.test(f.source?.sourceSha) || !DIGEST.test(f.source?.reviewDigest) ||
         !Array.isArray(f.targets) || !f.targets.length || f.targets.some(p => !PATH.test(p)) ||
-        !Array.isArray(f.attempts) || f.attempts.length > turnCorrectionLimit(raw) ||
-        f.attempts.some(s => !SHA.test(s))) ||
+        (f.findingIndex !== undefined && (!Number.isSafeInteger(f.findingIndex) ||
+          f.findingIndex < 0 || f.findingIndex >= 100 ||
+          !DIGEST.test(f.reviewFindingsDigest ?? "") ||
+          f.id !== digest({ root: f.rootFailureSha, assignment: f.assignmentId,
+            sourceSha: f.source.sourceSha, reviewDigest: f.source.reviewDigest,
+            index: f.findingIndex }))) ||
+        (f.findingIndex === undefined && f.reviewFindingsDigest !== undefined) ||
+        !Array.isArray(f.attempts) || f.attempts.some(s => !SHA.test(s))) ||
       raw.corrections.some(c => !SHA.test(c.rootFailureSha) || !SHA.test(c.sourceSha) ||
         !Array.isArray(c.changedPaths) || !c.changedPaths.length ||
         c.changedPaths.some(p => !PATH.test(p)) ||
@@ -214,9 +222,9 @@ async function save(job: JobStartResult, ledger: RepairLedger) {
   await writeFile(tmp, JSON.stringify(ledger, null, 2) + "\n", { mode: 0o600, flag: "wx" });
   await rename(tmp, file);
 }
-/** Only the authenticated Studio control adapter may request a grant, under
- * the existing Story job writer lease. A model/author message never changes
- * attempt caps implicitly and replay cannot create another allowance. */
+/** Only the authenticated Studio control adapter may request post-stop
+ * guidance under the job writer lease. Historic allowance metadata is kept
+ * for compatibility, never used to gate ordinary semantic progress. */
 export async function authorizeRepairGuidance(job: JobStartResult, input: {
   turnDigest: string; authorId: string; rootFailureSha: string; sourceSha: string;
   headSha: string; guidance: string;
@@ -233,9 +241,10 @@ export async function authorizeRepairGuidance(job: JobStartResult, input: {
     f.rootFailureSha === input.rootFailureSha && f.status === "open");
   if (!unresolved.length || !unresolved.some(f => f.source.sourceSha === input.headSha) ||
       !ledger.corrections.some(c => c.rootFailureSha === input.rootFailureSha &&
-        c.result?.status === "failed") ||
+        c.sourceSha === input.sourceSha && c.result?.successorSha === input.headSha &&
+        c.result.status === "failed") ||
       ledger.corrections.some(c => c.rootFailureSha === input.rootFailureSha && !c.result))
-    throw Error("Author continuation requires an exhausted, independently rejected source.");
+    throw Error("Author continuation requires the exact independently rejected correction source.");
   const grants = ledger.authorGrants ?? (ledger.authorGrants = []);
   const same = grants.find(grant => grant.authorId === input.authorId &&
     grant.rootFailureSha === input.rootFailureSha && grant.sourceSha === input.sourceSha &&
@@ -250,9 +259,8 @@ export async function authorizeRepairGuidance(job: JobStartResult, input: {
       grants.filter(grant => grant.rootFailureSha === input.rootFailureSha).length >=
         MAX_AUTHOR_GRANTS_PER_ROOT)
     throw Error("Explicit repair allowance ceiling reached; a new reviewed Turn is required.");
-  if (totalTurnCorrections(ledger) < turnCorrectionLimit(ledger) &&
-      unresolved.every(f => f.attempts.length < localCorrectionLimit(ledger, f.rootFailureSha)))
-    throw Error("The original correction allowance is not exhausted; guidance may steer an ordinary safe boundary.");
+  // A fresh semantic correction does not need an allowance. This explicit
+  // source-bound grant only enables author steering after a genuine safe stop.
   const localLimit = localCorrectionLimit(ledger, input.rootFailureSha) + 1;
   const turnLimit = turnCorrectionLimit(ledger) + 1;
   const grant = { ...input, localLimit, turnLimit,
@@ -264,47 +272,40 @@ export async function authorizeRepairGuidance(job: JobStartResult, input: {
   return grant;
 }
 
-/** Match by controller-authenticated obligation/category/affected records, not
- * by the reviewer's mutable wording, source commit, or line number. Multiple
- * same-shape defects share the stricter correction allowance: a review cannot
- * reset its budget by splitting or recombining prose findings. Each full
- * original finding remains available in its immutable review receipt. */
+/** One index entry per observation in an authenticated, immutable review.
+ * The source/review/index is identity ONLY for recovery and UI presentation.
+ * Distinct creative findings in the same file remain distinct, and a reviewer
+ * may reframe, combine or replace them on the next changed source. */
 function recordFindings(ledger: RepairLedger, report: FindingReport, causedBy?: string) {
   const existing = ledger.findings.filter(f =>
     f.rootFailureSha === report.rootFailureSha && f.assignmentId === report.assignmentId);
-  const active: RepairFinding[] = [];
-  for (const f of report.findings) {
-    const key = shape(f);
-    // Defect splitting/merging must not replenish the correction budget.
-    const matches = existing.filter(prev => sameShape(prev, key));
-    let selected = matches[0];
-    if (!selected) {
-      selected = {
-        id: digest({ root: report.rootFailureSha, assignment: report.assignmentId,
-          category: key.category, targets: key.targets,
-          ordinal: ledger.findings.length }),
-        rootFailureSha: report.rootFailureSha, assignmentId: report.assignmentId,
-        obligation: report.obligation, category: key.category, targets: key.targets,
-        status: "open", source: { sourceSha: report.sourceSha, reviewDigest: report.reviewDigest },
-        ...(causedBy ? { causedBy } : {}), attempts: [],
-      };
-      ledger.findings.push(selected);
-      existing.push(selected);
-    } else if (selected.source.sourceSha === report.sourceSha &&
-        selected.source.reviewDigest !== report.reviewDigest) {
+  const onSource = existing.filter(f => f.source.sourceSha === report.sourceSha);
+  const fingerprint = digest(report.findings);
+  if (onSource.length) {
+    if (onSource.some(f => f.source.reviewDigest !== report.reviewDigest ||
+        (f.reviewFindingsDigest && f.reviewFindingsDigest !== fingerprint)) ||
+        (onSource.some(f => f.findingIndex !== undefined) &&
+          onSource.length !== report.findings.length))
       throw Error("Conflicting sealed review for one repair source.");
-    }
-    selected.source = { sourceSha: report.sourceSha, reviewDigest: report.reviewDigest };
-    selected.status = "open";
-    if (!active.some(finding => finding.id === selected.id)) active.push(selected);
+    if (onSource.some(f => f.status !== "open"))
+      throw Error("Previously resolved review source cannot reopen a finding.");
+    // Pre-v2 records may have combined same-shape defects. Preserve these
+    // immutable historical entries; only newly sealed reviews get per-index
+    // execution references.
+    return onSource;
   }
+  for (const f of existing) if (f.status === "open") f.status = "resolved";
+  const active = report.findings.map((item, index): RepairFinding => ({
+    id: digest({ root: report.rootFailureSha, assignment: report.assignmentId,
+      sourceSha: report.sourceSha, reviewDigest: report.reviewDigest, index }),
+    rootFailureSha: report.rootFailureSha, assignmentId: report.assignmentId,
+    obligation: report.obligation, ...shape(item),
+    status: "open", source: { sourceSha: report.sourceSha, reviewDigest: report.reviewDigest },
+    findingIndex: index, reviewFindingsDigest: fingerprint,
+    ...(causedBy ? { causedBy } : {}), attempts: [],
+  }));
+  ledger.findings.push(...active);
   return active;
-}
-function ensureRoom(ledger: RepairLedger, findings: RepairFinding[]) {
-  if (totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger))
-    throw Error("Turn correction ceiling exhausted; preserve verified work and findings.");
-  if (findings.some(f => f.attempts.length >= localCorrectionLimit(ledger, f.rootFailureSha)))
-    throw Error("Local corrections exhausted for a source-linked Repair finding.");
 }
 
 /** This is an independently sourced prerequisite finding, not a fabricated
@@ -330,10 +331,8 @@ export async function admitPrerequisiteRepair(job: JobStartResult, input: {
       item.path !== input.path || item.sourceEventSha !== input.sourceEventSha ||
       item.causedBy !== input.causedBy))
     throw Error("Prerequisite repair changed its canonical owner or origin.");
-  if (totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger))
-    throw Error("Turn correction ceiling exhausted; preserve prerequisite findings.");
-  if (item && item.attempts.length >= MAX_DEPENDENCY_CYCLES && item.status !== "resolved")
-    throw Error("Dependency repair cycles exhausted; preserve original finding.");
+  // Execution-resource budgets, not semantic retry counts, govern another
+  // independently reviewed narrow prerequisite correction.
   if (!item) {
     item = { id, obligation: "milestone-closeout", milestoneId: input.milestoneId,
       path: input.path, sourceEventSha: input.sourceEventSha,
@@ -373,10 +372,8 @@ export async function submitPrerequisiteRepair(job: JobStartResult, input: {
     return finding;
   }
   if (finding.sourceSha !== input.sourceSha ||
-      finding.attempts.some(a => !a.verdict) ||
-      finding.attempts.length >= MAX_DEPENDENCY_CYCLES ||
-      totalTurnCorrections(ledger) >= turnCorrectionLimit(ledger))
-    throw Error("Stale, unsettled or exhausted prerequisite correction.");
+      finding.attempts.some(a => !a.verdict))
+    throw Error("Stale or unsettled prerequisite correction.");
   finding.attempts.push({ sourceSha: input.sourceSha, submittedSha: input.submittedSha,
     paths: input.paths });
   await save(job, ledger);
@@ -413,9 +410,8 @@ export async function admitRepairFinding(job: JobStartResult, report: FindingRep
   const existing = ledger.findings.filter(f => f.rootFailureSha === report.rootFailureSha);
   if (existing.length && existing[0]!.assignmentId !== report.assignmentId)
     throw Error("Repair root switched its originally authorized assignment.");
-  const findings = recordFindings(ledger, report);
-  await save(job, ledger); // Also preserve findings when admission is exhausted.
-  ensureRoom(ledger, findings);
+  recordFindings(ledger, report);
+  await save(job, ledger);
   return ledger;
 }
 /** A later independent reviewer may expose a *new* defect in work that was
@@ -431,14 +427,10 @@ export async function admitCausalRevalidationFinding(job: JobStartResult,
   const existing = ledger.findings.filter(f => f.rootFailureSha === report.rootFailureSha);
   if (existing.length && existing.some(f => f.assignmentId !== report.assignmentId))
     throw Error("Causal revalidation changed its originally assigned owner.");
-  // A paraphrased finding after a later correction retains its stable identity,
-  // original causal origin and completed attempt history; genuinely different
-  // target/category shapes receive a new, source-linked causal predecessor.
-  const findings = recordFindings(ledger, report, report.causedBy);
-  // A valid late negative review remains immutable evidence even when the
-  // Turn is out of correction attempts. Refusal must not erase the finding.
+  // Retain immutable previous negative reviews; the new review independently
+  // owns its current semantic findings, even when paths/categories coincide.
+  recordFindings(ledger, report, report.causedBy);
   await save(job, ledger);
-  ensureRoom(ledger, findings);
   return ledger;
 }
 /** A model/provider failure or an interrupted Pi turn never enters here.
@@ -459,15 +451,15 @@ export async function submitRepairCorrection(job: JobStartResult, input: Submiss
   const active = ledger.findings.filter(f => f.rootFailureSha === rootFailureSha &&
     f.source.sourceSha === sourceSha && f.status === "open");
   if (!active.length) throw Error("A repair submission has no admitted sealed finding.");
-  ensureRoom(ledger, active);
+  if (ledger.corrections.some(c => c.rootFailureSha === rootFailureSha && !c.result))
+    throw Error("A previous submitted correction still requires independent review.");
   ledger.corrections.push({ rootFailureSha, sourceSha, changedPaths });
   active.forEach(f => f.attempts.push(sourceSha));
   await save(job, ledger);
   return ledger;
 }
-/** Only the independent sealed successor verdict resolves a finding. A
- * different damaged target becomes a causally linked new finding, not a reset
- * of the previous finding's attempts or the Turn-wide ceiling. */
+/** Only an independently sealed successor verdict resolves a submitted
+ * correction. Its current findings are independent of older semantic labels. */
 export async function settleRepairReview(job: JobStartResult, report: Verdict) {
   if (!SHA.test(report.successorSha) || !["passed", "failed"].includes(report.status) ||
       report.status === "passed" && report.findings.length)
