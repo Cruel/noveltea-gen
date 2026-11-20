@@ -22,7 +22,9 @@ const config = {
 }
 
 test('Pi model credentials are user-scoped, encrypted, restart-safe and never expose host auth', {
-  timeout: 100_000,
+  // Multiple Pi catalog refreshes and sandboxed auth rehydration take about a
+  // minute even in isolation; parallel CI workers need additional headroom.
+  timeout: 180_000,
 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'nt-pi-credentials-'))
   const saved = { key: process.env.NT_PI_CREDENTIAL_KEY, host: process.env.OPENAI_API_KEY }
