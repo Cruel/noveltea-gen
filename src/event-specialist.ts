@@ -44,6 +44,8 @@ export interface EventAssignment {
   contract: CompletionContract;
   workItemId: string;
   authorTask?: string;
+  /** Reviewed private local plan is a bounded obligation, never canonical authority. */
+  milestoneBlueprint?: { digest: string; design: import("./milestone-blueprint.js").MilestoneBlueprint };
   authority: { existingProtectedChoices: "no-retcon"; delegatedChoices: "draft"; signingRequiredForProtectedChanges: true };
 }
 export interface EventEvidence {
@@ -396,7 +398,13 @@ export function eventSpecialistPrompt(
       "completed route or change protected canon to pass this gate. " +
       "For a completed nondecision Milestone, bind only genuinely fulfilled routes. " +
       "Call story_validate without arguments, repair introduced errors and revalidate; " +
-      "independent controller checks remain authoritative.",
+      "independent controller checks remain authoritative." +
+      (assignment.milestoneBlueprint ? " REVIEWED LOCAL PLAN: The independent Milestone " +
+      "Blueprint is PROVISIONAL, not canonical evidence that any Event exists. Implement " +
+      "its current Event obligations through actual reachable observations and earned " +
+      "Character knowledge; preserve later interactive/Composition ownership. Its private " +
+      "plan and digest grant no new writable paths or protected-canon decisions. " +
+      "If upstream requirements cannot be met, report the blocker without out-of-scope edits." : ""),
     laterObligations:
       "Include a concrete laterObligations entry naming formal Choice binding, " +
       "missing outcome effects and later consumers; defer Puzzle and final prose. " +

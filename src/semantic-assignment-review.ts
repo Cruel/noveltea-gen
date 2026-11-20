@@ -208,13 +208,28 @@ export async function prepareSemanticReview(job: JobStartResult,
       eventMilestone);
     const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
     let eventConsequenceProof: EventConsequenceProof | undefined;
+    let milestoneBlueprintObligations = "";
     if (point.workItem.startsWith("event-")) {
       const slug = point.workItem.slice("event-".length);
       if (/^[a-z][a-z0-9-]*$/.test(slug)) {
         const file = join(job.stateDir, "event-items", slug + ".json");
         try {
           const receipt = JSON.parse(await readFile(file, "utf8")) as {
-            commitSha?: string; expectedHead?: string; consequenceProof?: EventConsequenceProof };
+            commitSha?: string; expectedHead?: string; consequenceProof?: EventConsequenceProof;
+            blueprintPin?: import("./milestone-blueprint.js").MilestoneBlueprintPin;
+            assignment?: import("./event-specialist.js").EventAssignment };
+          if (receipt.commitSha === point.commitSha && receipt.expectedHead === point.parentSha &&
+              receipt.blueprintPin) {
+            if (!receipt.assignment || !git(job, "log", "-1", "--format=%B", point.commitSha)
+              .split("\n").includes("NovelTea-Milestone-Blueprint: " + receipt.blueprintPin.digest))
+              throw Error("Reviewed Event lost its source-bound Milestone planning handoff.");
+            const { readReviewedMilestoneBlueprint } = await import("./milestone-blueprint.js");
+            const local = await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
+            milestoneBlueprintObligations = "\nINDEPENDENTLY REVIEWED PRIVATE MILESTONE OBLIGATIONS: " +
+              JSON.stringify(local) + ". Check actual committed Event evidence against current-stage " +
+              "local promises; defer only named interactive/Composition obligations. " +
+              "The private plan is NOT canonical Story proof and grants NO additional write scope.";
+          }
           // A later Event receipt or an old checkpoint never supplies evidence
           // for this exact reviewed SHA. The sealed sources remain primary.
           if (receipt.commitSha === point.commitSha &&
@@ -279,7 +294,7 @@ export async function prepareSemanticReview(job: JobStartResult,
       }
     }
     items.push({ assignment, reviewedWorkItem: point.workItem,
-      unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist) +
+      unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist) + milestoneBlueprintObligations +
         (refinement ? " Additional controller-admitted, source-bound assignment outcome (" +
           refinement.item + ", " + (refinement.sourcePath ?? "verified Architecture") + " at " + refinement.sourceSha +
           "): " + refinement.outcome +

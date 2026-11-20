@@ -26,6 +26,8 @@ import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
 import { preflightPiAssignment } from "./job-pi-policy.js";
+import { ensureMilestoneBlueprint, inspectMilestoneBlueprint, readReviewedMilestoneBlueprint,
+  type MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { recordSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
@@ -38,6 +40,8 @@ interface EventReceipt {
   expectedHead: string; phase: Phase; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot;
   sessionFile?: string; sessionId?: string; authorChoiceId?: string;
+  /** Older Event items predate the local Blueprint gate; new items require it. */
+  blueprintRequired?: boolean; blueprintTask?: string; blueprintPin?: MilestoneBlueprintPin;
   assignment?: EventAssignment;
   skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
@@ -406,7 +410,10 @@ function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string
       git(job, "rev-parse", commit + "^") !== receipt.expectedHead ||
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Event-Design: " + receipt.contentDigest) ||
       !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Work-Item: " + receipt.workItemId + "\n") ||
-      !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Plan-Version: " + receipt.planVersion + "\n")) {
+      !git(job, "log", "-1", "--format=%B", commit).includes("NovelTea-Plan-Version: " + receipt.planVersion + "\n") ||
+      (receipt.blueprintRequired && (!receipt.blueprintPin ||
+        !git(job, "log", "-1", "--format=%B", commit).split("\n")
+          .includes("NovelTea-Milestone-Blueprint: " + receipt.blueprintPin.digest)))) {
     throw new Error("Event commit provenance or previous verified HEAD changed.");
   }
   if (receipt.consequenceProof && !git(job, "log", "-1", "--format=%B", commit)
@@ -439,6 +446,7 @@ function output(job: JobStartResult, state: EventReceipt) {
     failure: state.failure, prerequisite: state.prerequisite, reroutedFrom: state.reroutedFrom,
     sessionFile: state.sessionFile, skillReads: state.skillReads,
     consequenceProof: state.consequenceProof,
+    milestoneBlueprint: state.blueprintPin ? { status: "approved", ...state.blueprintPin } : undefined,
     skillSnapshot: state.snapshot?.id,
     completionEvidence: { eventReachability: state.phase === "committed",
       milestoneState: state.validation?.milestoneState ?? "unverified",
@@ -613,10 +621,21 @@ export async function runEventWorkItem(input: EventOptions) {
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         milestoneId: input.milestone, workItemId, planVersion: arch.plan.version,
         planDigest, expectedHead: head, phase: "ready", worker: input.fixture ? "fixture" : "pi",
+        blueprintRequired: true, blueprintTask: input.task ?? "",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna" };
       await persist(receiptFile, receipt);
     }
-    if (input.action === "inspect") return output(job, receipt);
+    if (input.action === "inspect") {
+      if (receipt.blueprintRequired && !receipt.blueprintPin && receipt.phase !== "ready")
+        throw Error("Event inspection found a missing required Milestone Blueprint approval.");
+      if (receipt.blueprintPin && receipt.assignment)
+        await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
+      return { ...output(job, receipt),
+        localPlanning: await inspectMilestoneBlueprint(job, receipt.milestoneId) };
+    }
+    if (receipt.blueprintRequired && input.task !== undefined && !receipt.reroutedFrom &&
+        input.task !== receipt.blueprintTask)
+      throw Error("Event author objective changed after its source-bound Milestone planning admission.");
     if (Boolean(input.fixture) !== (receipt.worker === "fixture") ||
         input.provider && input.provider !== receipt.provider ||
         input.model && input.model !== receipt.model) {
@@ -740,14 +759,17 @@ export async function runEventWorkItem(input: EventOptions) {
           workItemId, milestoneId: input.milestone, planVersion: arch.plan.version,
           planDigest, expectedHead: receipt.expectedHead, phase: "ready",
           worker: receipt.worker, provider: receipt.provider, model: receipt.model,
-          snapshot: receipt.snapshot, reroutedFrom: input.reroute.reportDigest,
-          reroutedTask: input.reroute.task };
+          snapshot: receipt.snapshot, blueprintRequired: receipt.blueprintRequired,
+          blueprintTask: receipt.blueprintTask, blueprintPin: receipt.blueprintPin,
+          reroutedFrom: input.reroute.reportDigest, reroutedTask: input.reroute.task };
         await persist(receiptFile, receipt);
       } else return output(job, receipt);
     }
     if (receipt.phase === "committed") {
       if (!receipt.commitSha) throw new Error("Committed Event work item lacks a commit.");
       verifyCommit(job, receipt, receipt.commitSha);
+      if (receipt.blueprintPin && receipt.assignment)
+        await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
       try { rawGit(job, "merge-base", "--is-ancestor", receipt.commitSha, "HEAD"); }
       catch { throw new Error("Verified Event commit no longer belongs to the job branch."); }
       if (git(job, "rev-parse", "HEAD") === receipt.commitSha) {
@@ -755,6 +777,17 @@ export async function runEventWorkItem(input: EventOptions) {
         await publishHead(job, receipt.expectedHead, receipt.commitSha, receipt.workItemId);
       }
       return output(job, receipt);
+    }
+    if (receipt.blueprintRequired && receipt.phase === "ready") {
+      assertHead(job, receipt.expectedHead);
+      const source = reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
+      const assign = selectedAssignment(job, arch.plan!, source, receipt.milestoneId, receipt.workItemId);
+      const task = receipt.blueprintTask ?? "";
+      const local = await ensureMilestoneBlueprint(job, arch.plan!, assign, receipt.snapshot!,
+        receipt.provider, receipt.model, task, receipt.expectedHead, receipt.worker === "fixture");
+      receipt.blueprintPin = local.pin;
+      receipt.blueprintTask = task;
+      await persist(receiptFile, receipt);
     }
     const Channels = Annotation.Root({ receipt: Annotation<EventReceipt>() });
     const graph = new StateGraph(Channels)
@@ -772,11 +805,17 @@ export async function runEventWorkItem(input: EventOptions) {
         if (!resuming && dirty(job).length)
           throw new Error("Event specialist requires a clean work-item boundary.");
         const prior = resuming ? null : reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
-        const assign = resuming ? receipt.assignment! : {
+        const assign: EventAssignment = resuming ? receipt.assignment! : {
           ...selectedAssignment(job, arch.plan!, prior!, receipt.milestoneId, receipt.workItemId),
           ...(receipt.reroutedTask ? { authorTask: receipt.reroutedTask } :
-            input.task ? { authorTask: input.task } : {}),
+            (receipt.blueprintTask || input.task) ? { authorTask: receipt.blueprintTask ?? input.task } : {}),
         };
+        if (receipt.blueprintRequired && !receipt.blueprintPin)
+          throw Error("Event writer has no independently reviewed local Milestone Blueprint.");
+        if (receipt.blueprintPin) {
+          const design = await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, assign);
+          assign.milestoneBlueprint = { digest: receipt.blueprintPin.digest, design };
+        }
         await preflightPiAssignment(job, "event:" + receipt.workItemId,
           receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
         if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
@@ -989,6 +1028,10 @@ export async function runEventWorkItem(input: EventOptions) {
         try {
         const prior = receipt.expectedHead;
         if (receipt.phase === "prerequisite-reported") return { receipt };
+        if (receipt.blueprintRequired && (!receipt.blueprintPin || !receipt.assignment))
+          throw Error("Event commit requires its independently reviewed Milestone plan.");
+        if (receipt.blueprintPin && receipt.assignment)
+          await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
         const recovering = git(job, "rev-parse", "HEAD") !== prior;
         if (recovering && (!receipt.contentDigest || !receipt.paths || dirty(job).length ||
             git(job, "rev-parse", "HEAD^") !== prior ||
@@ -1020,7 +1063,8 @@ export async function runEventWorkItem(input: EventOptions) {
           }
           git(job, "add", "--", ...paths.map(p => repoPath(job, p)));
           git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com",
-            "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}\nNovelTea-Event-Completion: ${completionDigest}\nNovelTea-Event-Consequence: ${typedDigest}`);
+            "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}\nNovelTea-Event-Completion: ${completionDigest}\nNovelTea-Event-Consequence: ${typedDigest}${receipt.blueprintPin ?
+              `\nNovelTea-Milestone-Blueprint: ${receipt.blueprintPin.digest}` : ""}`);
         }
         if (dirty(job).length) throw new Error("Event commit left unexpected modifications.");
         const commit = git(job, "rev-parse", "HEAD");

@@ -1468,6 +1468,22 @@ pnpm dev job event inspect --story /path/to/story --job draft-1 \
 pnpm dev job validate --story /path/to/story --job draft-1
 ```
 
+For new Event work items, the controller first creates a **just-in-time
+Milestone Blueprint** (#207), scoped to the single selected Milestone and the
+current verified Architecture, Character/World and canonical source revision.
+It records provisional Event causality, inspectable evidence and access,
+Character knowledge, route consequences and explicit downstream owners. A
+separate read-only reviewer checks feasibility at this planning depth, retaining
+its own Pi conversation across corrections. Private receipts live in
+`milestone-blueprints/<milestone-slug>.json` under the job state directory;
+`job event inspect` exposes a bounded `localPlanning` summary. The reviewed
+plan's digest is carried into the Event assignment and commit provenance, but
+it does not create canonical records, grant additional write scope or establish
+that evidence has been implemented. Later Milestones are **not preplanned**.
+Uncertain interrupted Pi planner/reviewer turns remain preserved for inspection
+rather than being blindly replayed. Older in-progress Event receipts retain
+their historical admission contract.
+
 The LangGraph work item delegates canonical `events/*.md` to a **real, pinned
 `nt-event-design` Pi specialist**, carrying the authorized architecture
 contract, existing Creative Direction, selected Milestone/Arcs, linked Character,

@@ -9,6 +9,8 @@ import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding,
   currentMilestoneChoiceBinding } from "../src/event-work.js";
 import { milestoneBodyOnlyDrift, milestoneBaselineBody,
   assertMilestoneFulfillmentOnly } from "../src/milestone-field-scope.js";
+import { parseMilestoneBlueprint, parseMilestoneBlueprintReview,
+  readReviewedMilestoneBlueprint } from "../src/milestone-blueprint.js";
 import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
   eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
@@ -344,6 +346,21 @@ test("Event prompt distinguishes material nondecision evidence from later Choice
   const snapshot = { id: "f".repeat(64), path: "/pinned/skills", commit: "a".repeat(40) } as any;
   const prompt = eventSpecialistPrompt(snapshot, assignment, true);
   assert.match(prompt, /nondecision Milestone/i);
+  const planned = eventSpecialistPrompt(snapshot, { ...assignment,
+    milestoneBlueprint: { digest: "b".repeat(64), design: {
+      schema: "noveltea-milestone-blueprint/v1", milestoneId: assignment.milestoneId,
+      events: [{ id: "discovery", purpose: "Reachable proof", dependsOn: [],
+        evidence: [{ anchorPath: assignment.milestonePath, source: "Witness",
+          observation: "A visible trace", access: "Investigator can inspect",
+          establishes: "Limited discrepancy", limits: "No timing certainty" }],
+        participants: ["character.one"], knowledge: "Witnessed evidence only", routes: [] }],
+      downstream: [{ owner: "composition", obligation: "Present proof" }],
+    } },
+  }, true);
+  assert.match(planned, /REVIEWED LOCAL PLAN/);
+  assert.match(planned, /not canonical evidence/);
+  assert.match(planned, /visible trace/);
+  assert.match(planned, /additional writable paths|new writable paths/i);
   assert.match(prompt, /fulfillment\.any_of/);
   assert.match(prompt, /Independent review occurs AFTER/);
   assert.match(prompt, /Do not confuse the selected Milestone's YAML decisions:/);
@@ -463,6 +480,86 @@ A missing witness leaves a ledger and suspicion between two former collaborators
   }
   return { repo, story, job, baseline, cli, prepare, event };
 }
+
+test("#207 Milestone plan validates local causality and rejects invented source/participant authority", () => {
+  const assignment = { milestoneId: "milestone.disclosure", milestonePath: "milestones/disclosure.md",
+    sourcePaths: ["milestones/disclosure.md", "arcs/truth.md"],
+    characterIds: ["character.ada", "character.ben"] };
+  const local = { schema: "noveltea-milestone-blueprint/v1", milestoneId: assignment.milestoneId,
+    events: [{ id: "observe-proof", purpose: "Find inspectable evidence", dependsOn: [],
+      evidence: [{ anchorPath: assignment.milestonePath, source: "A witness and recorded trace",
+        observation: "Inspect an in-scene trace", access: "Player can reach witness",
+        establishes: "A limited discrepancy", limits: "Timing remains unverified" }],
+      participants: ["character.ada"], knowledge: "Only Ada sees the trace",
+      routes: [{ condition: "Witness cooperates", consequence: "Later trust becomes possible" }] }],
+    downstream: [{ owner: "composition", obligation: "Make evidence visible in player prose" }] };
+  assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(local), assignment), local);
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...local,
+    events: [{ ...local.events[0], participants: ["character.not-authorized"] }] }), assignment),
+  /Character knowledge/);
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...local,
+    events: [{ ...local.events[0], evidence: [{ ...local.events[0].evidence[0],
+      anchorPath: "events/imaginary.md" }] }] }), assignment), /canonical anchor/);
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...local,
+    downstream: [{ owner: "none", obligation: "Someone handles the future" }] }), assignment),
+  /downstream obligation/);
+  const pass = { schema: "noveltea-milestone-blueprint-review/v1", status: "pass", findings: [] };
+  assert.deepEqual(parseMilestoneBlueprintReview(JSON.stringify(pass), local as any, assignment), pass);
+  assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify({ ...pass,
+    findings: [{ eventId: "observe-proof", anchorPath: "events/unwritten.md",
+      requirement: "Evidence", reason: "Not plausible", correction: "Clarify" }] }), local as any, assignment),
+  /source-bound verdict|current Event\/source/);
+});
+
+test("#207 plans just the reached Milestone, binds Event handoff and rejects stale private proof", { skip: !available }, async () => {
+  const f = setup("local-milestone-gate");
+  assert.notEqual(f.event().status, 0, "Planning before canonical Architecture/World/Character must fail");
+  const sourceHead = f.prepare();
+  const folder = join(f.job.stateDir, "milestone-blueprints");
+  assert.equal(existsSync(folder), false, "Architecture and foundations cannot preplan future Milestones");
+  const first = f.event();
+  assert.equal(first.status, 0, first.stderr);
+  const result = JSON.parse(first.stdout);
+  assert.equal(result.status, "event-cluster-committed");
+  const blueprintFile = join(folder, "disclosure.json");
+  assert.equal(existsSync(blueprintFile), true);
+  const files = spawnSync("find", [folder, "-type", "f", "-name", "*.json"], { encoding: "utf8" });
+  assert.deepEqual(files.stdout.trim().split("\n"), [blueprintFile],
+    "Other Milestones must not receive private plans early");
+  const local = JSON.parse(readFileSync(blueprintFile, "utf8"));
+  assert.equal(local.phase, "approved");
+  assert.equal(local.lineage.executionHead, sourceHead);
+  assert.equal(local.rounds.length, 1);
+  assert.equal(local.rounds[0].review.status, "pass");
+  assert.equal(local.draft.milestoneId, "milestone.disclosure");
+  const eventReceipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  assert.equal(eventReceipt.blueprintPin.digest, local.approvedDigest);
+  assert.equal(eventReceipt.assignment.milestoneBlueprint.digest, local.approvedDigest);
+  assert.match(git(f.job.worktreeRoot, "log", "-1", "--format=%B"),
+    new RegExp("NovelTea-Milestone-Blueprint: " + local.approvedDigest));
+  assert.deepEqual(await readReviewedMilestoneBlueprint(f.job, eventReceipt.blueprintPin,
+    eventReceipt.assignment), local.draft);
+  const inspect = f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]);
+  assert.equal(inspect.status, 0, inspect.stderr);
+  assert.equal(JSON.parse(inspect.stdout).localPlanning.phase, "approved");
+  const second = f.event();
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).milestoneBlueprint.digest, local.approvedDigest);
+  assert.equal(readFileSync(blueprintFile, "utf8"), JSON.stringify(local, null, 2) + "\n",
+    "Inspect/restart must not regenerate or rewrite the approved plan");
+  await assert.rejects(readReviewedMilestoneBlueprint(f.job, { ...eventReceipt.blueprintPin,
+    sourceSha: "a".repeat(40) }, eventReceipt.assignment), /another job, Thread or source/);
+  writeFileSync(blueprintFile, JSON.stringify({ ...local, approvedDigest: "b".repeat(64) }));
+  assert.notEqual(f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]).status, 0,
+    "Read-only inspection must reject tampered approval, not display it as verified");
+  await assert.rejects(readReviewedMilestoneBlueprint(f.job, eventReceipt.blueprintPin,
+    eventReceipt.assignment), /no approved independent/);
+  writeFileSync(blueprintFile, JSON.stringify({ ...local, lineage: {
+    ...local.lineage, model: "forged-model" } }));
+  await assert.rejects(readReviewedMilestoneBlueprint(f.job, eventReceipt.blueprintPin,
+    eventReceipt.assignment), /another job, Thread or source/,
+  "Even unchanged plan bytes cannot inherit a different model's review identity");
+});
 
 test("revising an existing Event does not require rewriting an already fulfilled Milestone", { skip: !available }, async () => {
   const { job, prepare, event } = setup("existing-fulfilled-milestone");
