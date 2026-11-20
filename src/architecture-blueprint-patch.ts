@@ -101,7 +101,26 @@ export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintRevi
         throw Error("Blueprint patch contains an invalid exact text replacement.");
       let holder: Record<string, unknown>;
       let key: string;
-      if (op.path.startsWith("resolution/")) {
+      if (base.schema === "noveltea-causal-blueprint/v2" &&
+          (op.path.startsWith("causalAnswer/") || op.path.startsWith("feasibility/"))) {
+        const parts = op.path.split("/");
+        const [section, field] = parts;
+        const allowed = section === "causalAnswer" ?
+          ["answer", "mechanism", "responsibility", "motive", "proofApproach"] :
+          ["playthrough", "interaction", "production", "endings"];
+        if (parts.length !== 2 || !field || !allowed.includes(field))
+          throw Error("Compact Blueprint patch may not rewrite original protected questions.");
+        holder = next[section as "causalAnswer" | "feasibility"] as Record<string, unknown>;
+        key = field;
+      } else if (base.schema === "noveltea-causal-blueprint/v2" &&
+                 op.path.startsWith("arcs/")) {
+        const parts = op.path.split("/");
+        const arc = parts.length === 3 && parts[2] === "goal" &&
+          next.arcs?.find(item => item.id === parts[1]);
+        if (!arc) throw Error("Compact Blueprint patch references an unknown Arc goal.");
+        holder = arc as unknown as Record<string, unknown>;
+        key = "goal";
+      } else if (op.path.startsWith("resolution/")) {
         key = op.path.slice("resolution/".length);
         if (!["conclusion", "uncertainty"].includes(key))
           throw Error("Blueprint patch may not rewrite its source-grounded question.");
@@ -138,6 +157,8 @@ export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintRevi
       if (holder[key] !== op.expected) throw Error("Blueprint patch expected old value is stale.");
       holder[key] = op.value;
     } else if (op.kind === "append-observation") {
+      if (base.schema === "noveltea-causal-blueprint/v2")
+        throw Error("Compact Story Blueprint corrections cannot add local evidence inventories.");
       if (!exact(op, ["kind", "findingBeatId", "beatId", "value"]))
         throw Error("Blueprint patch evidence operation is malformed.");
       const beat = next.beats.find(b => b.id === op.beatId);
@@ -176,6 +197,9 @@ export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintRevi
   // Validate the whole design after every patch; this also detects new cycles,
   // structurally invalid evidence and additions that break the byte budget.
   const resolved = parseCausalBlueprint(JSON.stringify(next));
+  if (resolved.schema === "noveltea-causal-blueprint/v2" &&
+      resolved.beats.some(beat => beat.observations.length))
+    throw Error("Compact Story Blueprint correction introduced local evidence inventory.");
   // No preexisting beat, decision, alternative, observation or source promise
   // can disappear just because the model rewrote its proposed patch.
   const oldIds = base.beats.map(b => b.id);

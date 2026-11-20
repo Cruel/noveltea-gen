@@ -203,6 +203,61 @@ test("existing replay framework reproduces exact saved blueprint review and boun
     }
   }));
 
+test("#205 compact Story Blueprint replay authenticates a single global draft and original source digests", () =>
+  withFixture(({ root, temporary, file, save }) => {
+    const draft = parseCausalBlueprint(JSON.stringify({
+      schema: "noveltea-causal-blueprint/v2",
+      premise: initial.premise,
+      arcs: [{ id: "investigation", goal: "Resolve the clerk's disappearance" }],
+      beats: initial.beats.map(({ observations: _observations, ...beat }) => ({
+        ...beat, arcId: "investigation", observations: [],
+      })),
+      resolution: initial.resolution,
+      causalAnswer: {
+        question: "Where did the clerk go?", answer: "The clerk hid at the shelter.",
+        mechanism: "The caretaker admitted the clerk through the service gate.",
+        responsibility: "The caretaker concealed the admission.",
+        motive: "Protect the clerk from the creditor.",
+        proofApproach: "Compare the gate roster with a separate dated shift register.",
+      },
+      feasibility: {
+        playthrough: "One plausible single-hour route.",
+        interaction: "Narrative-led with a major optional protection Choice.",
+        production: "Reuse archive and shelter art across endings.",
+        endings: "Either ending confirms refuge while disclosure changes trust.",
+      },
+    }));
+    const verdict = { status: "pass" as const, findings: [] };
+    const sourceReceipt = {
+      schema: "noveltea-blueprint-sources/v1",
+      sources: {
+        foundationDigest: "f".repeat(64),
+        taskDigest: "d".repeat(64),
+        contractDigest: "c".repeat(64),
+      },
+    };
+    save("draft-0", draft);
+    save("stages", { schema: "noveltea-blueprint-stages/v4", draftDigest: digest(draft) });
+    save("obligations", sourceReceipt);
+    save("verdict-0", verdict);
+    save("review-session-0", {
+      sessionId: "reviewer0",
+      sessionFile: join(dirname(root), "architecture-blueprint-review-sessions", "reviewer0.jsonl"),
+      blueprintDigest: digest(draft),
+      verdictDigest: digest(verdict),
+    });
+    const replay = (name: string) =>
+      captureBlueprintReplay(root, 1, 0, "blueprint-review-verdict", join(temporary, name));
+    replay("valid-compact");
+    assert.equal(replayCase(join(temporary, "valid-compact")).matched, true);
+    save("stages", { schema: "noveltea-blueprint-stages/v4", draftDigest: "a".repeat(64) });
+    assert.throws(() => replay("tampered-draft"), /stage evidence differs/);
+    save("stages", { schema: "noveltea-blueprint-stages/v4", draftDigest: digest(draft) });
+    save("obligations", { ...sourceReceipt,
+      sources: { ...sourceReceipt.sources, contractDigest: "a".repeat(64) } });
+    assert.throws(() => replay("tampered-source"), /stale source evidence/);
+  }));
+
 test("split core/Choice stage replay is tied to both immutable stage digests", () =>
   withFixture(({ root, temporary, save, file }) => {
     const oldOutline = JSON.parse(readFileSync(file("outline"), "utf8"));

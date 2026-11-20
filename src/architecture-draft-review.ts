@@ -498,6 +498,7 @@ export async function createArchitectureDraftReviewCycle(
     let stalled = 0;
     let lastDigest: string | null = null;
     let lastPin: ArchitectureDraftReviewPin | undefined;
+
     const required = [
       ...paths.map((p) => join(project.root, p)),
       join(project.root, "creative-direction/foundation.md"),
@@ -578,6 +579,15 @@ export async function createArchitectureDraftReviewCycle(
             "Provisional reviewed Blueprint: " +
             requirements.blueprint +
             "\n" +
+            (blueprint?.schema === "noveltea-causal-blueprint/v2"
+              ? "This is a COMPACT, private, provisional Story Blueprint, not protected canon. " +
+                "Check canonical Arc/Milestone prose against its major causal answer, dependencies, " +
+                "decisions, compatible endings, Interaction profile, first-playthrough duration " +
+                "and Production budget. A plausible future independent evidence source can " +
+                "be specified here without having authored Events or complete local proof. " +
+                "Do not demand scene, clue-custody or Puzzle inventories from the Blueprint; " +
+                "do require Architecture to commit to inspectable planned evidence when needed.\n"
+              : "") +
             "Authorized paths: " +
             JSON.stringify(paths) +
             "\n" +

@@ -177,11 +177,18 @@ export function architectureSpecialistPrompt(
       "report the conflict rather than silently relaxing protected requirements. " +
       "Validate with story_validate and repair errors before reporting. " +
       "Preserve the plan's depth, targets and protections. " +
-      (blueprint ? "The independently reviewed PROVISIONAL causal blueprint " +
-        "appears below. Implement its inspectable evidence, causal links, route " +
-        "alternatives, consequences and bounded resolution in Arc/Milestone records. " +
-        "Beat slugs are NOT canonical IDs and future clues are NOT established facts. " +
-        "Do not silently weaken the reviewed conclusion or protected alternatives." : ""),
+      (blueprint ? (blueprint.schema === "noveltea-causal-blueprint/v2" ?
+        "The independently reviewed COMPACT Story Blueprint appears below. " +
+        "Translate its major Arcs/Milestones, causal answer, turning points, " +
+        "meaningful choices, endings and whole-Story feasibility into canonical " +
+        "Architecture. Invent plausible future evidence within delegated authority " +
+        "when needed, without treating provisional details as protected canon. " +
+        "Beat slugs are NOT canonical IDs. Preserve approved author decisions." :
+        "The independently reviewed PROVISIONAL causal blueprint appears below. " +
+        "Implement its inspectable evidence, causal links, route alternatives, " +
+        "consequences and bounded resolution in Arc/Milestone records. Beat " +
+        "slugs are NOT canonical IDs and future clues are NOT established facts. " +
+        "Do not silently weaken the reviewed conclusion or protected alternatives.") : ""),
     laterObligations:
       "World and Character Foundations, Event prerequisites and " +
       "fulfillment routes, Choice/Puzzle and final prose are later owners. " +

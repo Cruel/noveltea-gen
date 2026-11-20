@@ -8,6 +8,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseCausalBlueprint,
+  parseCompactStoryBlueprint,
   parseBlueprintReview,
   type CausalBlueprint,
   type BlueprintReview,
@@ -109,11 +110,11 @@ export function captureBlueprintReplay(
     "architecture-blueprint-sessions",
   );
 
-  // The original outline and evidence batches must reconstruct the recorded
-  // initial draft exactly, or a later review cannot be reproduced faithfully.
-  const outline = parseBlueprintOutline(JSON.stringify(json(file("outline"))));
+  // Compact receipts contain no individual evidence/route stages; older
+  // receipts still require exact reconstruction of every historical batch.
   const stage = json(file("stages")) as {
     schema?: string;
+    draftDigest?: string;
     outlineDigest?: string;
     headerDigest?: string;
     beatDigests?: string[];
@@ -121,6 +122,25 @@ export function captureBlueprintReplay(
     routesDigest?: string;
     evidenceDigests?: string[];
   };
+  let current: CausalBlueprint;
+  if (stage.schema === "noveltea-blueprint-stages/v4") {
+    current = parseCompactStoryBlueprint(JSON.stringify(json(file("draft-0"))));
+    if (Object.keys(stage).sort().join(",") !== "draftDigest,schema" ||
+        stage.draftDigest !== blueprintDigest(current))
+      throw Error("Compact Story Blueprint replay stage evidence differs from the sealed draft.");
+    const sources = json(file("obligations")) as { schema?: string; sources?: {
+      foundationDigest?: string; taskDigest?: string; contractDigest?: string } };
+    if (sources.schema !== "noveltea-blueprint-sources/v1" ||
+        !sources.sources || Object.keys(sources.sources).sort().join(",") !==
+          "contractDigest,foundationDigest,taskDigest" ||
+        sources.sources.contractDigest !== admitted.contractDigest ||
+        sources.sources.taskDigest !== admitted.taskDigest ||
+        !HASH.test(sources.sources.foundationDigest ?? ""))
+      throw Error("Compact Story Blueprint replay has missing or stale source evidence.");
+  } else {
+  // The original outline and evidence batches must reconstruct the recorded
+  // initial draft exactly, or a later review cannot be reproduced faithfully.
+  const outline = parseBlueprintOutline(JSON.stringify(json(file("outline"))));
   const batched = stage.schema === "noveltea-blueprint-stages/v3";
   const split = batched || stage.schema === "noveltea-blueprint-stages/v2";
   if (
@@ -172,11 +192,12 @@ export function captureBlueprintReplay(
       ...parseBlueprintEvidence(rows.map((row) => JSON.stringify(row)).join("\n"), outline, first),
     );
   }
-  let current = assembleBlueprintStages(outline, evidence);
+  current = assembleBlueprintStages(outline, evidence);
   if (!isDeepStrictEqual(current, json(file("draft-0"))))
     throw Error("Blueprint replay initial draft differs from its staged evidence.");
   // Obligations are not reauthorized here; prove at least their saved presence.
   regular(file("obligations"));
+  }
 
   let preceding: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined;
   let latestPatch: BlueprintPatch | undefined;
