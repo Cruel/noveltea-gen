@@ -137,6 +137,49 @@ test("a complete verdict cannot substitute unrelated metadata or empty lines for
   }, completeVerdict), /unsupported|stale/);
 });
 
+test("#208 refuses final Milestone-plan closure without stage-owned canonical evidence", () => {
+  const packet = makePacket();
+  const localObjectives = [
+    { id: "milestone-plan:milestone.reveal:event:0", text: "Prove actual Event evidence." },
+    { id: "milestone-plan:milestone.reveal:interactive:0", text: "Prove durable route state." },
+    { id: "milestone-plan:milestone.reveal:composition:0", text: "Prove player-visible discovery." },
+  ];
+  const bound: TurnFulfillmentPacket = {
+    ...packet, source: { ...packet.source, milestonePlans: [{
+      milestoneId: "milestone.reveal", digest: h, eventHead: b,
+    }] }, objectives: [...packet.objectives, ...localObjectives],
+  };
+  const green = complete(bound);
+  const proof = (path: string) => ({
+    path, line: 2, explanation: "Verified canonical stage-owned evidence.",
+  });
+  const update = (owner: string, path: string) => ({
+    ...green, checks: green.checks.map(check =>
+      check.objectiveId === "milestone-plan:milestone.reveal:" + owner + ":0"
+        ? { ...check, evidence: [proof(path)] }
+        : check),
+  });
+  assert.throws(() => validateTurnFulfillment(bound, green), /unsupported|stale/,
+    "An Event-line quotation cannot fulfill a Composition promise.");
+  assert.throws(() => validateTurnFulfillment(bound, update("event", "milestones/reveal.md")),
+    /unsupported|stale/, "Planned Milestone metadata is not implemented Event evidence.");
+  assert.throws(() => validateTurnFulfillment(bound, update("interactive", "arcs/archive.md")),
+    /unsupported|stale/, "An Arc promise is not a playable interactive route.");
+  const accepted = { ...green, checks: green.checks.map(check =>
+    check.objectiveId === "milestone-plan:milestone.reveal:composition:0"
+      ? { ...check, evidence: [proof("authored-content/reveal.md")] } : check) };
+  assert.equal(validateTurnFulfillment(bound, accepted).verdict, "complete");
+  const unfulfilled = { ...accepted, verdict: "incomplete" as const,
+    checks: accepted.checks.map(check =>
+      check.objectiveId === "milestone-plan:milestone.reveal:composition:0"
+        ? { ...check, fulfilled: false, evidence: [] } : check),
+    findings: [{ objectiveId: "milestone-plan:milestone.reveal:composition:0",
+      message: "Player never sees the proposed evidence.", followUp: null }] };
+  assert.equal(validateTurnFulfillment(bound, unfulfilled).verdict, "incomplete");
+  assert.throws(() => validateTurnFulfillment(bound, { ...unfulfilled, verdict: "complete" }),
+    /unsupported|stale/, "A nominally successful plan cannot silently waive a missing owner obligation.");
+});
+
 test("an outlined branch has Arc/Milestone evidence without requiring an Event witness", () => {
   const packet = makePacket();
   const outlineContract = { ...contract, scope: { ...contract.scope, depth: "architecture" as const } };

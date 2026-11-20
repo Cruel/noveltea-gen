@@ -18,6 +18,7 @@ import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { CHOICE_PAYOFF_AUTHOR, CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
 import { PUZZLE_GOAL_AUTHOR, PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
+import type { ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
 export interface InteractiveAssignment {
@@ -29,6 +30,7 @@ export interface InteractiveAssignment {
   factIds: string[];
   eventIds: string[];
   /** Original verified Event source, not a grant to edit its entry gates. */
+  milestoneBlueprint?: ReviewedMilestoneHandoff;
   eventSource?: {
     headSha: string;
     snapshotId: string;
@@ -105,7 +107,9 @@ export function interactiveSpecialistPrompt(
             "or return a blocking dependency, never claim completion without it."),
     sources: boundedPinnedSources(SPECIALISTS[domain].name),
     sourceUse:
-      "Read ASSIGNMENT.eventSource (when provided), assigned canonical sources and only " +
+      "Read ASSIGNMENT.eventSource and the reviewed milestoneBlueprint (when provided), " +
+      "its named owner obligations and assigned canonical sources; the private Blueprint is " +
+      "provisional and cannot substitute for verified Event, route or clue evidence. Read only " +
       "necessary typed links. Use installed skills for schema fields, craft and validation.",
     writableScope:
       "ASSIGNMENT.sourcePaths and authorContract.scope.targets are read-only context " +
@@ -147,6 +151,9 @@ export function interactiveSpecialistPrompt(
           "modify original Choice outcomes. " +
           PUZZLE_GOAL_AUTHOR) +
       " Author schema 0.1 Markdown and run story_validate, repair and revalidate. " +
+      "Discharge every reviewed interactive-owner Milestone obligation against reachable " +
+      "canonical routes and consequences, or report a source-bound blocker. No uniform " +
+      "Puzzle/Choice quota is implied by the Milestone plan. " +
       "The controller checks actual final-state coverage, not output-file count.",
     laterObligations: choice
       ? "Leave Milestone fulfillment/completeness for a separately authorized closeout; " +

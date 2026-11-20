@@ -1484,6 +1484,20 @@ Uncertain interrupted Pi planner/reviewer turns remain preserved for inspection
 rather than being blindly replayed. Older in-progress Event receipts retain
 their historical admission contract.
 
+The reviewed Blueprint's source-bound obligations remain attached to the
+subsequent Interactive Choice/Puzzle and Composition assignments (#208), and
+also enter their independent postcommit reviews. An Event-only no-write
+disposition cannot discard a named Interactive owner; a later specialist must
+prove its applicable obligations using reachable canonical Events, effects,
+clues and playable prose rather than the provisional plan or a writer's report.
+The final independent Turn review checks each applicable named owner against
+canonical source evidence. For full Composition delivery, native Milestone
+fulfillment must also have reachable routes and cannot remain explicitly
+partial. Choice and Composition may still finish their own authorized stages
+before a separately approved Milestone closeout. Existing pre-Blueprint Event
+receipts retain their historical interpretation; changed or missing new pins
+fail closed, and completed writers are not replayed to repair provenance.
+
 The LangGraph work item delegates canonical `events/*.md` to a **real, pinned
 `nt-event-design` Pi specialist**, carrying the authorized architecture
 contract, existing Creative Direction, selected Milestone/Arcs, linked Character,

@@ -5,12 +5,15 @@ import { hostname as requireHostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { validateStoryJob } from "../src/validator.js";
 import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding,
   currentMilestoneChoiceBinding } from "../src/event-work.js";
 import { milestoneBodyOnlyDrift, milestoneBaselineBody,
   assertMilestoneFulfillmentOnly } from "../src/milestone-field-scope.js";
 import { parseMilestoneBlueprint, parseMilestoneBlueprintReview,
   readReviewedMilestoneBlueprint } from "../src/milestone-blueprint.js";
+import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition,
+  assertMilestoneCanonicalClosure } from "../src/milestone-obligation-handoff.js";
 import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
   eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
@@ -559,6 +562,74 @@ test("#207 plans just the reached Milestone, binds Event handoff and rejects sta
   await assert.rejects(readReviewedMilestoneBlueprint(f.job, eventReceipt.blueprintPin,
     eventReceipt.assignment), /another job, Thread or source/,
   "Even unchanged plan bytes cannot inherit a different model's review identity");
+});
+
+test("#208 carries only the source-verified reached Milestone into downstream review", { skip: !available }, async () => {
+  const f = setup("reviewed-milestone-handoff");
+  f.prepare();
+  const written = f.event();
+  assert.equal(written.status, 0, written.stderr);
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  const reviewed = await reviewedMilestoneHandoff(f.job, receipt);
+  assert.ok(reviewed);
+  assert.equal(reviewed!.pin.digest, receipt.blueprintPin.digest);
+  assert.equal(reviewed!.eventHead, receipt.commitSha);
+  assert.equal(reviewed!.design.milestoneId, "milestone.disclosure");
+  assert.equal(reviewed!.design.downstream[0].owner, "composition");
+  assert.doesNotThrow(() => assertMilestoneInteractiveDisposition(reviewed, true),
+    "The reviewed Event-only plan does not create an arbitrary Choice quota.");
+  assert.throws(() => assertMilestoneInteractiveDisposition({
+    ...reviewed!, design: { ...reviewed!.design, downstream: [
+      { owner: "interactive", obligation: "Bind this Milestone's real decision and lasting consequences" },
+    ] },
+  }, true), /interactive Milestone obligations/);
+  assert.throws(() => assertMilestoneCanonicalClosure(reviewed,
+    "milestone.disclosure", [
+      { metadata: { id: "milestone.disclosure", type: "milestone", status: "active",
+        completeness: "partial", fulfillment: { any_of: [] } } },
+    ], [{ id: "milestone.disclosure", routes: [] }]), /unresolved canonical fulfillment/);
+  const validated = await validateStoryJob(f.job);
+  assert.equal(validated.status, "passed");
+  const catalog = validated.report as { records: Array<{ metadata: Record<string, any> }>;
+    coverage: { milestoneRoutes: Array<{ id: string; routes: Array<{ status: string }> }> } };
+  assert.doesNotThrow(() => assertMilestoneCanonicalClosure(reviewed,
+    "milestone.disclosure", catalog.records, catalog.coverage.milestoneRoutes),
+  "A genuinely completed, native-verified Event Milestone can close.");
+  assert.doesNotThrow(() => assertMilestoneCanonicalClosure(reviewed,
+    "milestone.disclosure", [
+      { metadata: { id: "milestone.disclosure", type: "milestone", status: "active",
+        completeness: "complete", fulfillment: { any_of: [["event.disclose-ledger"]] } } },
+    ], [{ id: "milestone.disclosure", routes: [{ status: "reachable" }] }]));
+  await assert.rejects(reviewedMilestoneHandoff(f.job, { ...receipt,
+    validation: { ...receipt.validation, milestoneState: "partial-choice-pending" } }),
+  /original committed completion/, "A forged deferred Choice cannot alter an Event's sealed obligations.");
+  await assert.rejects(reviewedMilestoneHandoff(f.job, { ...receipt,
+    blueprintRequired: false, blueprintPin: undefined }),
+  /Required Milestone Blueprint/, "Removing the pin and flag cannot downgrade a committed Event to legacy.");
+  await assert.rejects(reviewedMilestoneHandoff(f.job, { ...receipt,
+    blueprintPin: { ...receipt.blueprintPin, digest: "f".repeat(64) } }),
+  /not linked/, "Changing the private approval digest cannot survive the Event commit trailer.");
+  await assert.rejects(reviewedMilestoneHandoff(f.job, { ...receipt,
+    assignment: { ...receipt.assignment, sourcePaths: ["milestones/other.md"] } }),
+  /source record digest|bounded canonical|does not exist/, "An altered original source inventory cannot launder a plan.");
+});
+
+test("#208 final native closeout refuses the real unbound-decision partial Milestone", { skip: !available }, async () => {
+  const f = setup("reviewed-partial-milestone");
+  f.prepare();
+  const result = f.event("decision-pending");
+  assert.equal(result.status, 0, result.stderr);
+  const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  const handoff = await reviewedMilestoneHandoff(f.job, event);
+  assert.equal(handoff?.milestoneState, "partial-choice-pending");
+  const validated = await validateStoryJob(f.job);
+  assert.equal(validated.status, "passed", "A stage-valid Event may keep its Milestone partial.");
+  const report = validated.report as { records: Array<{ metadata: Record<string, any> }>;
+    coverage: { milestoneRoutes: Array<{ id: string; routes: Array<{ status: string }> }> } };
+  assert.throws(() => assertMilestoneCanonicalClosure(handoff,
+    "milestone.disclosure", report.records, report.coverage.milestoneRoutes),
+  /unresolved canonical fulfillment/,
+  "The final goal cannot treat a deferred Choice as completed based only on an approved plan.");
 });
 
 test("revising an existing Event does not require rewriting an already fulfilled Milestone", { skip: !available }, async () => {

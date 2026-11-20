@@ -27,6 +27,7 @@ import {
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
 export interface CompositionAssignment {
+  milestoneBlueprint?: import("./milestone-obligation-handoff.js").ReviewedMilestoneHandoff;
   milestoneId: string;
   workItemId: string;
   authorTask?: string;
@@ -285,7 +286,10 @@ export async function authorComposition(
     let prompt =
       "You are a pinned nt-narrative-composition author for one bounded composition milestone. " +
       "FIRST read ALL pinned guidance files below using read, then read sourcePaths including Event steps, " +
-      "Character voices, Relationship, Facts, Revelations, any optional clue discovery, and existing content.\n" +
+      "Character voices, Relationship, Facts, Revelations, any optional clue discovery, and existing content. " +
+      "If assignment.milestoneBlueprint is present, reconcile its named composition-owner " +
+      "promises with actual, reachable canonical Event/Choice/Puzzle outcomes; provisional plan " +
+      "text is NEVER proof that an Event or clue occurred.\n" +
       pinnedSkillReferences(snapshot, pinned) +
       "\n" +
       "Write real player-facing dialogue/narration in canonical authored-content/*.md only. " +
@@ -874,7 +878,11 @@ export async function createCompositionReviewCycle(
           "as proof of earned player knowledge. Preserve protected wording; optional testimony " +
           "is not enacted without typed effects. Do not impose cosmetic preferences or later-stage " +
           "requirements on this assignment. Route evidence must cover all actual assigned " +
-          "Choice outcomes and Puzzle solutions; a pass needs a full present-stage rereview.\n" +
+          "Choice outcomes and Puzzle solutions; inspect reviewed Milestone Blueprint " +
+          "obligations in ASSIGNMENT when supplied, but accept only verified canonical " +
+          "Event routes and player-facing prose as evidence of discharge. In particular, " +
+          "do not narrate refused evidence, branch-only knowledge at shared entry, or " +
+          "a provisional Event as enacted. A pass needs a full present-stage rereview.\n" +
           "PINNED SKILLS:\n" +
           pinnedSkillReferences(snapshot, pinned) +
           "\nCURRENT FILES:\n" +

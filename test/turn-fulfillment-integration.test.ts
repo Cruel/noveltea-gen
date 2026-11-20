@@ -43,6 +43,13 @@ test("real Git source, pinned Turn and approved plan yield a restart-safe target
       id: "focus-character-nia", kind: "realization", targetIds: ["character.nia"], status: "verified",
     }] };
     writeFileSync(join(stateDir, "architecture.json"), JSON.stringify({ plan: approved, history: [] }));
+    // Historical receipt inventory is not a quota on unrelated local plans.
+    mkdirSync(join(stateDir, "event-items"));
+    for (let i = 0; i < 35; i++) {
+      writeFileSync(join(stateDir, "event-items", `historical-${i}.json`),
+        JSON.stringify({ jobId: "old-job", milestoneId: `milestone.historical-${i}`,
+          phase: "pending" }));
+    }
     writeFileSync(join(stateDir, "narrative-review.json"), JSON.stringify({
       planVersion: 1, headSha: head, phase: "completed", worker: "pi", editorial: { verdict: "pass" },
     }));

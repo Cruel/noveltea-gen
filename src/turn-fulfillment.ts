@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { JobReport } from "./job-report.js";
@@ -12,6 +12,10 @@ import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
 import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
 import { projectAdaptiveFinal } from "./adaptive-final-review.js";
+import { reviewedMilestoneHandoff,
+  assertMilestoneCanonicalClosure } from "./milestone-obligation-handoff.js";
+import { validateStoryJob } from "./validator.js";
+import type { MilestoneEventSource, ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const safePath = /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/;
@@ -43,6 +47,7 @@ export interface TurnFulfillmentPacket {
   source: { jobId: string; baseSha: string; headSha: string; turnDigest: string;
     planVersion: number; planDigest: string; scopeReviewDigest: string;
     adaptive?: { version: number; digest: string; amendments: string[] };
+    milestonePlans?: Array<{ milestoneId: string; digest: string; eventHead: string }>;
     checkpoints: Array<{ commitSha: string; assignmentId: string; proofDigest: string;
       review: string; assignmentDigest: string }> };
   goal: string;
@@ -90,6 +95,88 @@ function git(job: JobStartResult, ...args: string[]) {
 }
 function receiptPath(job: JobStartResult, packet: TurnFulfillmentPacket) {
   return join(job.stateDir, "turn-fulfillment", packet.digest + ".json");
+}
+/** Only Event commits that descend into the final verified Story may bring a
+ * local private plan to the final independent reviewer. The plan is a set of
+ * questions to verify, never an automatic completion receipt. */
+async function reviewedMilestoneObjectives(job: JobStartResult, plan: Plan): Promise<{
+  objectives: TurnObjective[];
+  pins: NonNullable<TurnFulfillmentPacket["source"]["milestonePlans"]>;
+  paths: string[];
+}> {
+  const dir = join(job.stateDir, "event-items");
+  if (!existsSync(dir) || plan.contract.scope.depth === "architecture")
+    return { objectives: [], pins: [], paths: [] };
+  const names = (await readdir(dir)).filter(name =>
+    /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.json$/.test(name)).sort();
+  const objectives: TurnObjective[] = [];
+  const pins: NonNullable<TurnFulfillmentPacket["source"]["milestonePlans"]> = [];
+  const paths: string[] = [];
+  const handoffs: ReviewedMilestoneHandoff[] = [];
+  const authorized = new Set(plan.items.flatMap(item => item.targetIds));
+  for (const name of names) {
+    const milestoneId = "milestone." + name.slice(0, -5);
+    const file = join(dir, name);
+    const stat = await lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw Error("Unsafe Milestone obligation source receipt.");
+    const event = JSON.parse(await readFile(file, "utf8")) as MilestoneEventSource;
+    if (event.milestoneId !== milestoneId) throw Error("Milestone Event receipt identity changed.");
+    if (event.phase !== "committed") continue; // Unfinished work is blocked by inventory.
+    // A later authorized replan may narrow the current work inventory, but
+    // must never erase obligations from a Milestone already committed in this
+    // Turn. Earlier unrelated historical items remain out of scope.
+    if (!authorized.has(milestoneId)) {
+      if (!event.commitSha || !/^[a-f0-9]{40}$/.test(event.commitSha) ||
+          !/^[a-f0-9]{40}$/.test(job.baseSha)) continue;
+      try { git(job, "merge-base", "--is-ancestor", job.baseSha, event.commitSha); }
+      catch { continue; }
+    }
+    const handoff = await reviewedMilestoneHandoff(job, event);
+    if (!handoff) continue; // Explicit historical pre-Blueprint source.
+    if (handoffs.length >= MAX_PATHS)
+      throw Error("Final Milestone review exceeds bounded Story scope.");
+    try { git(job, "merge-base", "--is-ancestor", handoff.eventHead, job.headSha); }
+    catch { throw Error("Final Story lost the reviewed Milestone Event source ancestry."); }
+    handoffs.push(handoff);
+    pins.push({ milestoneId, digest: handoff.pin.digest, eventHead: handoff.eventHead });
+    paths.push(...new Set([
+      ...(event.assignment?.milestonePath ? [event.assignment.milestonePath] : []),
+      ...handoff.design.events.flatMap(local => local.evidence.map(e => e.anchorPath)),
+    ]));
+    for (const [index, local] of handoff.design.events.entries()) {
+      objectives.push({ id: "milestone-plan:" + milestoneId + ":event:" + index,
+        text: "At " + milestoneId + ", verify actual canonical, reachable Event evidence and earned " +
+          "knowledge against the reviewed provisional local design, not the plan's claims. " +
+          JSON.stringify(local) + " (reviewed plan digest " + handoff.pin.digest + ")." });
+    }
+    for (const [index, obligation] of handoff.design.downstream.entries()) {
+      if (plan.contract.scope.depth === "interactive" && obligation.owner === "composition")
+        continue; // Composition is explicitly outside this Turn, not falsely fulfilled.
+      objectives.push({ id: "milestone-plan:" + milestoneId + ":" + obligation.owner + ":" + index,
+        text: "Required " + obligation.owner + " owner must discharge this reviewed " +
+          "Milestone obligation with verified current canonical Story content: " +
+          obligation.obligation + ". Planning or a deferred writer report is not fulfillment. " +
+          "Plan digest " + handoff.pin.digest + "." });
+    }
+  }
+  if (pins.length && plan.contract.scope.depth === "composition") {
+    // Final goal acceptance is the first boundary authorized to require the
+    // Milestone closeout itself. The Choice/Composition stages may legitimately
+    // finish while completeness is partial and a closeout is still outstanding.
+    const verified = await validateStoryJob(job);
+    const report = verified.report as {
+      records?: Array<{ metadata: Record<string, any> }>;
+      coverage?: { milestoneRoutes?: Array<{ id: string; routes: Array<{ status: string }> }> };
+    } | undefined;
+    if (verified.status !== "passed" || !report?.records ||
+        !report.coverage?.milestoneRoutes)
+      throw Error("Final Story cannot discharge Milestone obligations without native validation.");
+    for (const handoff of handoffs)
+      assertMilestoneCanonicalClosure(handoff, handoff.pin.milestoneId,
+        report.records, report.coverage.milestoneRoutes);
+  }
+  return { objectives, pins, paths };
 }
 async function regular(path: string) {
   if (!existsSync(path)) return null;
@@ -151,7 +238,9 @@ export async function prepareTurnFulfillment(job: JobStartResult,
     .map(path => path.slice(prefix.length));
   if (adaptive && turn.kind === "full-story" && !directionPaths.length)
     throw Error("Amended whole-Story completion lacks an approved Creative Direction source.");
+  const milestonePlans = await reviewedMilestoneObjectives(job, arch.plan);
   const paths = [...new Set([
+    ...milestonePlans.paths,
     ...directionPaths,
     ...input.scopedPaths,
     ...turn.assignments.flatMap(a => a.authority.existingPaths),
@@ -185,11 +274,14 @@ export async function prepareTurnFulfillment(job: JobStartResult,
     ...turn.assignments.filter(a => a.id !== "review").map(a =>
       ({ id: "assignment:" + a.id, text: a.outcome })),
     ...(adaptive?.objectives ?? []),
+    ...milestonePlans.objectives,
   ];
   const source = { jobId: job.jobId, baseSha: job.baseSha, headSha: job.headSha,
     turnDigest: turn.digest, planVersion: arch.plan.version, planDigest: hash(arch.plan),
     scopeReviewDigest: hash(scopeReview),
-    ...(adaptive ? { adaptive: adaptive.source } : {}), checkpoints };
+    ...(adaptive ? { adaptive: adaptive.source } : {}),
+    ...(milestonePlans.pins.length ? { milestonePlans: milestonePlans.pins } : {}),
+    checkpoints };
   const originalWork = arch.plan.items.map(i => ({ id: i.id, kind: i.kind,
     targets: i.targetIds, status: i.status }));
   const latest = new Map<string, TurnFulfillmentPacket["plannedWork"][number]>(
@@ -230,6 +322,16 @@ export function validateTurnFulfillment(packet: TurnFulfillmentPacket,
     "delivery:complete-story": ["authored-content/"],
     "delivery:payoff": ["authored-content/"],
   };
+  const stageWitness = (id: string, path: string): boolean => {
+    if (!id.startsWith("milestone-plan:")) return true;
+    const owner = /^milestone-plan:milestone\.[a-z0-9-]+:(event|interactive|composition):\d+$/
+      .exec(id)?.[1];
+    if (!owner) return false;
+    if (owner === "event") return path.startsWith("events/");
+    if (owner === "interactive") return ["events/", "choice-points/", "puzzles/"]
+      .some(prefix => path.startsWith(prefix));
+    return path.startsWith("authored-content/");
+  };
   const expectedIds = expectedCriteria.objectives.map(o => o.id);
   const packetObjectives = new Map(packet.objectives.map(o => [o.id, o.text]));
   if (JSON.stringify(packet.criteria) !== JSON.stringify(expectedCriteria) ||
@@ -250,7 +352,9 @@ export function validateTurnFulfillment(packet: TurnFulfillmentPacket,
               ? ["arcs/", "milestones/"] : ["events/", "choice-points/", "puzzles/"])
               .some(p => e.path.startsWith(p)))) ||
           (witnessRoot[c.objectiveId] &&
-            !c.evidence.some(e => witnessRoot[c.objectiveId]!.some(p => e.path.startsWith(p))))))) ||
+            !c.evidence.some(e => witnessRoot[c.objectiveId]!.some(p => e.path.startsWith(p)))) ||
+          (c.objectiveId.startsWith("milestone-plan:") &&
+            !c.evidence.some(e => stageWitness(c.objectiveId, e.path)))))) ||
       v.findings.some(f => !objectives.has(f.objectiveId) || !f.message?.trim() ||
         (f.followUp !== null && (!f.followUp ||
           !(assignmentIds.has(f.followUp.assignmentId) ||

@@ -254,6 +254,43 @@ export async function prepareSemanticReview(job: JobStartResult,
         }
       }
     }
+    // A postcommit review must receive the same authenticated local obligations
+    // that guided its writer. A specialist's self-reported "laterObligations"
+    // cannot erase a reviewed downstream owner at this boundary.
+    const localStage = /^(interactive-choice|interactive-puzzle|composition)-([a-z][a-z0-9-]*)$/
+      .exec(point.workItem);
+    if (localStage) {
+      const [, stage, slug] = localStage;
+      const milestoneId = "milestone." + slug;
+      const stageFile = stage === "composition"
+        ? join(job.stateDir, "composition-items", slug + ".json")
+        : join(job.stateDir, "interactive-items", slug + ".json");
+      const stageReceipt = JSON.parse(await readFile(stageFile, "utf8")) as {
+        jobId: string; milestoneId: string; commitSha?: string; eventHead?: string;
+        units?: Array<{ id: string; commitSha?: string }>;
+      };
+      const unit = stage === "composition" ? stageReceipt :
+        stageReceipt.units?.find(item => item.id === point.workItem);
+      if (stageReceipt.jobId !== job.jobId || stageReceipt.milestoneId !== milestoneId ||
+          unit?.commitSha !== point.commitSha)
+        throw Error("Independent downstream Milestone review lost its authenticated work item.");
+      const source = JSON.parse(await readFile(join(job.stateDir, "event-items",
+        slug + ".json"), "utf8")) as import("./milestone-obligation-handoff.js").MilestoneEventSource;
+      const { reviewedMilestoneHandoff } = await import("./milestone-obligation-handoff.js");
+      const handoff = await reviewedMilestoneHandoff(job, source);
+      if (handoff) {
+        git(job, "merge-base", "--is-ancestor", handoff.eventHead, point.commitSha);
+        if (stage !== "composition" && stageReceipt.eventHead !== handoff.eventHead)
+          throw Error("Interactive Milestone review lost its original Event baseline.");
+        milestoneBlueprintObligations = "\nREVIEWED MILESTONE STAGE OBLIGATIONS (" +
+          handoff.pin.digest + ", Event source " + handoff.eventHead + "): " +
+          JSON.stringify(handoff.design) + ". Evaluate the actual committed canonical " +
+          (stage === "composition" ? "prose, Events and conditional outcome knowledge" :
+            "reachable Choice/Puzzle, clue-access routes and downstream consequences") +
+          " for this specialist's named owner obligations. Defer other owners only; " +
+          "private provisional plans and writer reports are not proof or write authority.";
+      }
+    }
     let priorNegative: SemanticReviewItem["priorNegative"];
     if (point.workItem.startsWith("repair-")) {
       const sourceSha = point.workItem.slice("repair-".length);

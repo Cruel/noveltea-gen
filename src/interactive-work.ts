@@ -24,6 +24,10 @@ import type { Plan } from "./architecture.js";
 import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { decideEventOnlyOmission, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
+import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition,
+  type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
+import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
+import type { EventAssignment } from "./event-specialist.js";
 
 type Phase = "pending" | "writing" | "authored" | "committed" | "not-applicable";
 interface Unit {
@@ -46,6 +50,8 @@ interface SourceReceipt {
   jobId: string; phase: string; milestoneId: string; commitSha?: string;
   planVersion: number; workItemId: string; snapshot?: SkillSnapshot;
   paths?: string[]; contentDigest?: string; obligations?: string[];
+  blueprintRequired?: boolean; blueprintPin?: MilestoneBlueprintPin;
+  assignment?: EventAssignment;
   validation?: { status: "passed"; eventIds: string[];
     milestoneState?: "complete" | "partial-choice-pending" };
 }
@@ -119,7 +125,8 @@ function reportOf(result: ValidationResult, head: string): Report {
   return report;
 }
 export function selectAssignment(plan: Plan, report: Report, milestoneId: string,
-  eventSource?: InteractiveAssignment["eventSource"]): InteractiveAssignment {
+  eventSource?: InteractiveAssignment["eventSource"],
+  milestoneBlueprint?: ReviewedMilestoneHandoff): InteractiveAssignment {
   if (plan.contract.scope.depth === "architecture") throw new Error("Completion contract does not authorize interactive work.");
   const architecture = plan.items.find(i => i.id === "global-architecture");
   if (architecture?.status !== "verified" || !architecture.targetIds.includes(milestoneId)) {
@@ -193,6 +200,7 @@ export function selectAssignment(plan: Plan, report: Report, milestoneId: string
     factIds: related.filter(r => r.metadata.type === "fact").map(r => r.metadata.id),
     eventIds: [...new Set(staged ? eventIds : adjacent.map(r => r.metadata.id))].sort(),
     ...(eventSource ? { eventSource } : {}),
+    ...(milestoneBlueprint ? { milestoneBlueprint } : {}),
     sourcePaths: [...new Set(related.map(r => r.path))].sort(),
     authorContract: plan.contract, protectedRouteGates: "immutable-existing-event-prerequisites",
     authorizedPaths: ["events/", "choice-points/", "puzzles/", "authored-content/", "revelations/", "facts/", "relationships/", "narrative-positions/"],
@@ -987,6 +995,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           }))) {
       throw new Error("Event source and deferred obligations changed after their original sealed commit.");
     }
+    const milestoneBlueprint = await reviewedMilestoneHandoff(job, event);
     const eventSource: NonNullable<InteractiveAssignment["eventSource"]> = {
       headSha: event.commitSha, snapshotId: event.snapshot.id,
       eventIds: event.validation.eventIds,
@@ -1039,6 +1048,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
           });
         if (omission) {
+          assertMilestoneInteractiveDisposition(milestoneBlueprint, true);
           const unit = (domain: InteractiveDomain): Unit => ({
             id: "interactive-" + domain + "-" + input.milestone.slice(10), domain,
             phase: "not-applicable", beforeHead: head, paths: [],
@@ -1077,6 +1087,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           first.claimedPaths?.length || second.claimedPaths?.length ||
           first.commitSha || second.commitSha || receipt.planDigest !== planDigest)
         throw Error("Event-only omission receipt is not a complete, commitless controller decision.");
+      assertMilestoneInteractiveDisposition(milestoneBlueprint, true);
       const proof = await readEventOnlyOmission(job, input.milestone, first.eventOnly, {
         eventHead: event.commitSha, planDigest, eventSnapshotId: event.snapshot.id,
         validatorVersion: job.validatorVersion });
@@ -1196,7 +1207,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
       const baseline = reportOf(await validate(before), before);
       const selected = selectAssignment(architecture.plan!, baseline, state.milestoneId,
-        state.eventSource ?? eventSource);
+        state.eventSource ?? eventSource, milestoneBlueprint);
       const puzzleDecision = unit.domain === "puzzle"
         ? await puzzleObligation(job, architecture.plan!, baseline.records,
             selected.eventIds, eventSource.missingObligations) : undefined;

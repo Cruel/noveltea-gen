@@ -130,14 +130,19 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       assert.ok(point?.assurance, "Missing fixture checkpoint " + workItem);
       if (point.semanticReview === "not-required") return;
       assert.equal(point.semanticReview, "required-pending");
-      await reviewBoundedAssignments(current, [point], async packet => ({
-        sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
+      await reviewBoundedAssignments(current, [point], async packet => {
+        if (workItem.startsWith("composition-")) {
+          assert.match(packet.items[0]!.unitOutcome,
+            /REVIEWED MILESTONE STAGE OBLIGATIONS/,
+            "Composition postcommit reviewer must see the sealed local plan obligations.");
+        }
+        return ({ sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
         evidence: packet.items.map(item => ({
           commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: item.assurance.changedPaths[0]!, line: 1,
           explanation: "Deterministic fixture: source- and native-validated prerequisite.",
         })),
-      }), "deterministic-prerequisite-fixture", true);
+      }); }, "deterministic-prerequisite-fixture", true);
     } finally {
       for (const [key, value] of Object.entries(old)) {
         if (value === undefined) delete process.env[key];

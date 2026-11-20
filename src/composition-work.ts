@@ -22,6 +22,10 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
+import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition,
+  type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
+import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
+import type { EventAssignment } from "./event-specialist.js";
 import { puzzleObligation, readPuzzleNoWrite,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
@@ -34,12 +38,16 @@ interface Report {
   coverage: { search: { truncated: boolean };
     eventProgress: Array<{ id: string; status: string; witness?: string[] }>;
     branchProgress: Array<{ event: string; step: string; branch: string; status: string; witness?: string[] }>;
+    milestoneRoutes: Array<{ id: string; routes: Array<{ status: string }> }>;
     puzzleSolutions: Array<{ id: string; solutions: Array<{ event: string; status: string;
       clueAccess: { status: string } }> }> };
 }
 interface EventSourceReceipt {
   jobId: string; milestoneId: string; phase: string; paths?: string[]; commitSha?: string;
-  snapshot?: SkillSnapshot;
+  snapshot?: SkillSnapshot; validation?: { status: string; eventIds: string[];
+    milestoneState?: "complete" | "partial-choice-pending" };
+  blueprintRequired?: boolean; blueprintPin?: MilestoneBlueprintPin;
+  assignment?: EventAssignment;
 }
 interface InteractiveReceipt {
   jobId: string; milestoneId: string; planVersion: number; planDigest: string;
@@ -145,7 +153,8 @@ export function optionalDialogueDeferralFeedback(
     JSON.stringify(conflicts).slice(0, 2200);
 }
 export function selectAssignment(plan: Plan, r: Report, source: InteractiveReceipt,
-  eventSource: EventSourceReceipt, milestoneId: string): CompositionAssignment {
+  eventSource: EventSourceReceipt, milestoneId: string,
+  milestoneBlueprint?: ReviewedMilestoneHandoff): CompositionAssignment {
   const arch = plan.items.find(i => i.id === "global-architecture");
   if (plan.contract.scope.depth !== "composition" || arch?.status !== "verified" ||
       !arch.targetIds.includes(milestoneId)) throw new Error("Scope does not authorize composition.");
@@ -245,6 +254,7 @@ export function selectAssignment(plan: Plan, r: Report, source: InteractiveRecei
     x.metadata.type === "narrative-position" && eventIds.includes(x.metadata.event) ||
     x.metadata.type === "world-entity");
   return { milestoneId, workItemId: "composition-" + milestoneId.slice(10),
+    ...(milestoneBlueprint ? { milestoneBlueprint } : {}),
     authorContract: plan.contract, eventOnly: !!source.units[0]?.eventOnly,
     eventIds, composeTargets, choicePoints, puzzleSolutions,
     branchWitnesses, requiredSources, allowedExistingContent,
@@ -305,6 +315,9 @@ function sections(body: string) {
 /** Syntactic/source checks only; a separate read-only Pi reviewer checks semantics. */
 export async function verifyCompositionProse(job: JobStartResult, r: Report,
   a: CompositionAssignment, paths: string[]) {
+  // A Choice author cannot edit Milestone fulfillment. Composition is allowed
+  // to render independently verified outcomes before authorized closeout;
+  // strict canonical closure belongs to final Story acceptance, not prose admission.
   const changed = r.records.filter(x => paths.includes(x.path) && x.metadata.type === "authored-content");
   if (changed.length !== paths.length) throw new Error("Composition output is not canonical Authored Content.");
   // Inspect the authorized existing prose as well as the edited files.
@@ -540,6 +553,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     const architecture = JSON.parse(await readFile(join(root, "architecture.json"), "utf8")) as ArchReceipt;
     const units = source.units;
     const eventOnly = units?.[0]?.phase === "not-applicable" && !!units?.[0]?.eventOnly;
+    const milestoneBlueprint = await reviewedMilestoneHandoff(job, eventSource);
+    assertMilestoneInteractiveDisposition(milestoneBlueprint, eventOnly);
     if (source.jobId !== job.jobId || source.milestoneId !== input.milestone ||
         eventSource.jobId !== job.jobId || eventSource.milestoneId !== input.milestone ||
         eventSource.phase !== "committed" || !eventSource.commitSha || !eventSource.paths?.length ||
@@ -705,7 +720,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           throw new Error("Composition writer requires clean Story boundary.");
       }
       const baseline = verified(await validate(base), base);
-      const assign = { ...selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone),
+      const assign = { ...selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone,
+        milestoneBlueprint),
         ...(s.authorTask ? { authorTask: s.authorTask } : {}) };
       if (s.phase === "pending") {
         await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"

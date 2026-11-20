@@ -96,14 +96,19 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       assert.ok(point?.assurance, "Missing fixture checkpoint " + workItem);
       if (point.semanticReview === "not-required") return;
       assert.equal(point.semanticReview, "required-pending");
-      await reviewBoundedAssignments(current, [point], async packet => ({
-        sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
+      await reviewBoundedAssignments(current, [point], async packet => {
+        if (workItem.startsWith("interactive-choice-")) {
+          assert.match(packet.items[0]!.unitOutcome,
+            /REVIEWED MILESTONE STAGE OBLIGATIONS/,
+            "Choice postcommit reviewer must see the original approved local plan.");
+        }
+        return ({ sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
         evidence: packet.items.map(item => ({
           commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: item.assurance.changedPaths[0]!, line: 1,
           explanation: "Deterministic fixture: source- and native-validated prerequisite.",
         })),
-      }), "deterministic-prerequisite-fixture", true);
+      }); }, "deterministic-prerequisite-fixture", true);
     } finally {
       for (const [key, value] of Object.entries(old)) {
         if (value === undefined) delete process.env[key];
@@ -474,6 +479,34 @@ test("stale Event-source receipt cannot authorize Choice edits", { skip: !availa
   assert.match(denied.stderr, /Missing or unreachable verified|sealed Event work evidence|Event source/);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
   assert.equal(existsSync(join(x.job.worktreeStoryRoot, "choice-points/loyalty.md")), false);
+});
+
+test("#208 stale reviewed Milestone owner pin blocks Interactive admission and replay", { skip: !available }, () => {
+  const x = setup("stale-review-plan");
+  const eventHead = x.prepare("decision-pending");
+  const path = join(x.job.stateDir, "event-items/disclosure.json");
+  const original = readFileSync(path, "utf8");
+  const event = JSON.parse(original);
+  assert.ok(event.blueprintPin?.digest);
+  writeFileSync(path, JSON.stringify({ ...event, blueprintPin: {
+    ...event.blueprintPin, digest: "e".repeat(64),
+  } }));
+  const blocked = x.interactive();
+  assert.notEqual(blocked.status, 0);
+  assert.match(blocked.stderr, /Milestone Blueprint|planning handoff|approval/);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), eventHead,
+    "Forged private plan must not trigger a Choice writer.");
+  writeFileSync(path, original);
+  const accepted = x.interactive();
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const choiceHead = JSON.parse(accepted.stdout).headSha as string;
+  writeFileSync(path, JSON.stringify({ ...event, blueprintRequired: false,
+    blueprintPin: undefined }));
+  const replay = x.interactive();
+  assert.notEqual(replay.status, 0);
+  assert.match(replay.stderr, /Required Milestone Blueprint/);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), choiceHead,
+    "An already completed Choice must not replay after its original owner plan vanishes.");
 });
 
 test("verified deferred capture between Event and Interactive remains independent", { skip: !available }, () => {
