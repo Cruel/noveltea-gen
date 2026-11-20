@@ -221,6 +221,8 @@ const pausePath = (job: JobStartResult, version: number, iteration: number, boun
   join(root(job), "plan-" + version + "-pause-" + iteration + "-" + boundary + ".json");
 const initialPausePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-pause-initial-review.json");
+const plannerAdmissionPausePath = (job: JobStartResult, version: number) =>
+  join(root(job), "plan-" + version + "-pause-planner-admission.json");
 const initialReviewStartedPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-initial-review-started.json");
 async function obligationSources(job: JobStartResult, plan: Plan, task: string): Promise<ObligationSources> {
@@ -479,6 +481,39 @@ export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, sna
 }
 
 
+type PlannerAdmissionPause = {
+  schema: "noveltea-blueprint-planner-admission-pause/v1";
+  lineage: ReturnType<typeof sameLineage>;
+  step: string;
+  reason: string;
+};
+
+/** A budget gate can expire after the graph's preflight but before the
+ * planner session exists. Only a write-once receipt at that exact safe
+ * boundary admits a new planner; arbitrary admitted-but-unstarted work is
+ * still blocked as an ambiguous interruption. */
+async function readPlannerAdmissionPause(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
+  provider: string, model: string, task: string, head: string) {
+  if (!existsSync(plannerAdmissionPausePath(job, plan.version))) return false;
+  const marker = await safeRead(plannerAdmissionPausePath(job, plan.version), root(job));
+  const lineage = sameLineage(job, plan, snapshot, provider, model, task, head);
+  if (!strict(marker, ["schema", "lineage", "step", "reason"]) ||
+      marker.schema !== "noveltea-blueprint-planner-admission-pause/v1" ||
+      !isDeepStrictEqual(marker.lineage, lineage) ||
+      marker.step !== "blueprint:" + plan.version ||
+      !["steps", "modelCalls", "cost-unavailable", "costUsd", "activeSeconds"].includes(
+        String(marker.reason)) ||
+      !isDeepStrictEqual(await safeRead(admittedPath(job, plan.version), root(job)), lineage))
+    throw Error("Planner admission budget pause has stale or invalid source-bound evidence.");
+  const { readdir } = await import("node:fs/promises");
+  const files = (await readdir(root(job))).filter(name =>
+    name.startsWith("plan-" + plan.version + "-"));
+  if (files.some(name => name !== "plan-" + plan.version + "-admitted.json" &&
+      name !== "plan-" + plan.version + "-pause-planner-admission.json"))
+    throw Error("Planner advanced beyond its budget pause; inspect Pi work instead of replay.");
+  return true;
+}
+
 type InitialReviewPause = {
   schema: "noveltea-blueprint-initial-review-pause/v1";
   lineage: ReturnType<typeof sameLineage>;
@@ -651,11 +686,13 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
  * authenticated, sealed budget boundary, not arbitrary incomplete Pi work. */
 export async function inspectPausedBlueprint(job: JobStartResult, plan: Plan,
   snapshot: SkillSnapshot, provider: string, model: string, task: string, head: string):
-  Promise<{ boundary: "initial-review" | "writer" | "review"; nextVersion: number } | null> {
+  Promise<{ boundary: "planner-admission" | "initial-review" | "writer" | "review"; nextVersion: number } | null> {
   const paused = await readPausedBlueprint(job, plan, snapshot, provider, model, task, head);
   if (paused) return { boundary: paused.boundary, nextVersion: paused.nextVersion };
   const initial = await readInitialReviewPause(job, plan, snapshot, provider, model, task, head);
-  return initial ? { boundary: "initial-review", nextVersion: 0 } : null;
+  if (initial) return { boundary: "initial-review", nextVersion: 0 };
+  return await readPlannerAdmissionPause(job, plan, snapshot, provider, model, task, head)
+    ? { boundary: "planner-admission", nextVersion: 0 } : null;
 }
 
 /** A reviewer must be a separate read-only Pi session. All prompts and source
@@ -1102,8 +1139,10 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
   const paused = await readPausedBlueprint(job, plan, snapshot, provider, model, task, head);
   const initialPause = paused ? null :
     await readInitialReviewPause(job, plan, snapshot, provider, model, task, head);
+  const plannerAdmissionPause = !paused && !initialPause &&
+    await readPlannerAdmissionPause(job, plan, snapshot, provider, model, task, head);
   // Never quietly replay a partially executed planner or reviewer after crash.
-  if (!paused && !initialPause && existsSync(root(job))) {
+  if (!paused && !initialPause && !plannerAdmissionPause && existsSync(root(job))) {
     const { readdir } = await import("node:fs/promises");
     if ((await readdir(root(job))).some(name => name.startsWith("plan-" + plan.version + "-")))
       throw Error("Unfinished causal blueprint sessions/evidence exist; inspect rather than replay an ambiguous Pi plan.");
@@ -1111,12 +1150,24 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
   const sources = await obligationSources(job, plan, task);
   // Durable admission precedes the Pi SDK session creation. A process crash
   // in the sessionFor/started-receipt gap must never re-enter a new planner.
-  if (!paused && !initialPause) await immutable(admittedPath(job, plan.version),
-    sameLineage(job, plan, snapshot, provider, model, task, head));
-  const planner = await sessionFor(job, snapshot, provider, model,
-    "blueprint:" + plan.version, "architecture-blueprint-sessions",
-    paused ? { file: paused.pin.plannerSessionFile, id: paused.pin.plannerSessionId } :
-      initialPause ? { file: initialPause.plannerSessionFile, id: initialPause.plannerSessionId } : undefined);
+  if (!paused && !initialPause && !plannerAdmissionPause)
+    await immutable(admittedPath(job, plan.version),
+      sameLineage(job, plan, snapshot, provider, model, task, head));
+  let planner: Awaited<ReturnType<typeof sessionFor>>;
+  try {
+    planner = await sessionFor(job, snapshot, provider, model,
+      "blueprint:" + plan.version, "architecture-blueprint-sessions",
+      paused ? { file: paused.pin.plannerSessionFile, id: paused.pin.plannerSessionId } :
+        initialPause ? { file: initialPause.plannerSessionFile, id: initialPause.plannerSessionId } : undefined);
+  } catch (error) {
+    if (error instanceof PiBudgetPause && !paused && !initialPause && !plannerAdmissionPause)
+      await immutable(plannerAdmissionPausePath(job, plan.version), {
+        schema: "noveltea-blueprint-planner-admission-pause/v1",
+        lineage: sameLineage(job, plan, snapshot, provider, model, task, head),
+        step: "blueprint:" + plan.version, reason: error.reason,
+      } satisfies PlannerAdmissionPause);
+    throw error;
+  }
   let reviewer: Awaited<ReturnType<typeof sessionFor>> | undefined;
   try {
     let initialBlueprint!: CausalBlueprint;

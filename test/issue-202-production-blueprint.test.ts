@@ -282,6 +282,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
   let stalledJobId: string | undefined;
   let graphJobId: string | undefined;
   let crashGraphJobId: string | undefined;
+  let activeGraphJobId: string | undefined;
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -644,11 +645,85 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     await assert.rejects(crashRun(), /Architecture recovery blocked/);
     assert.equal(crashCalls.length, callsBefore,
       "crashed first review cannot be replayed by any Pi session");
+
+    // Simulate active-time expiring deterministically AFTER the graph's
+    // admitted preflight and during model resolution, but BEFORE the
+    // planner session is created. The persisted meter is the budget source.
+    activeGraphJobId = randomUUID();
+    const activeDb = new DatabaseSync(join(app, "studio.sqlite"));
+    try {
+      activeDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(activeGraphJobId, owner, "story", graphBase, null);
+    } finally { activeDb.close(); }
+    const activeJob = await startStoryJob({ story: graphStory, job: activeGraphJobId,
+      worktreeCacheRoot: scoped });
+    const activeCalls: Call[] = [];
+    const activeRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    activeRuntime.registerNativeProvider(scripted(activeCalls));
+    await activeRuntime.refresh({ allowNetwork: false });
+    const originalAvailable = activeRuntime.getAvailable.bind(activeRuntime);
+    let elapsedAdvanced = false;
+    activeRuntime.getAvailable = async provider => {
+      const available = await originalAvailable(provider);
+      if (!elapsedAdvanced) {
+        elapsedAdvanced = true;
+        assert.equal(existsSync(join(activeJob.stateDir, "architecture-blueprints",
+          "plan-1-admitted.json")), false,
+          "simulated time crosses the budget during graph preflight model resolution");
+        writeFileSync(join(activeJob.stateDir, "pi-active-time.json"),
+          JSON.stringify({ version: 1, elapsedMs: 2500 }));
+      }
+      return available;
+    };
+    const activeRun = () => withJobModelRuntime(activeRuntime, () =>
+      runArchitectureJob({ story: graphStory, job: activeGraphJobId!,
+        action: "run", contract: graphContract, task, provider: model.provider,
+        model: model.id, skillsSource: source, validatorSource: source }));
+    const activeInspect = () => runArchitectureJob({
+      story: graphStory, job: activeGraphJobId!, action: "inspect",
+    });
+    await configurePiPolicy(activeJob, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { activeSeconds: 1 } });
+    await assert.rejects(activeRun(), (error: unknown) =>
+      error instanceof PiBudgetPause && error.reason === "activeSeconds",
+      "elapsed time after successful graph preflight pauses before planner starts");
+    assert.equal(elapsedAdvanced, true);
+    const activeDir = join(activeJob.stateDir, "architecture-blueprints");
+    const admissionMarker = join(activeDir, "plan-1-pause-planner-admission.json");
+    assert.ok(existsSync(admissionMarker), "safe pre-planner budget pause is sealed");
+    assert.equal(existsSync(join(activeDir, "plan-1-started.json")), false);
+    assert.equal(activeCalls.length, 0, "budget boundary prevents ALL planner Pi calls");
+    const inspectedActive = await activeInspect();
+    assert.equal(inspectedActive.recovery?.status, "ready");
+    assert.match(inspectedActive.recovery.reason ?? "", /planner-admission/);
+    const admissionBytes = readFileSync(admissionMarker);
+    try {
+      const altered = JSON.parse(admissionBytes.toString("utf8"));
+      writeFileSync(admissionMarker, JSON.stringify({ ...altered,
+        lineage: { ...altered.lineage, threadId: "other-thread" } }));
+      assert.equal((await activeInspect()).recovery?.status, "blocked",
+        "forged pre-planner pause cannot authorize a new session");
+    } finally { writeFileSync(admissionMarker, admissionBytes); }
+    await configurePiPolicy(activeJob, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { activeSeconds: 1000, modelCalls: 5 } });
+    await assert.rejects(activeRun(), (error: unknown) =>
+      error instanceof PiBudgetPause && error.reason === "modelCalls",
+      "after raising active time, graph resumes planner and reaches initial reviewer boundary");
+    const started = JSON.parse(readFileSync(join(activeDir, "plan-1-started.json"), "utf8"));
+    assert.ok(started.plannerSessionId);
+    assert.ok(existsSync(join(activeDir, "plan-1-pause-initial-review.json")));
+    assert.equal((await activeInspect()).recovery?.status, "ready");
+    assert.equal(activeCalls.filter(call => call.prompt.includes(
+      "READ-ONLY CAUSAL STORY ARCHITECT") && call.lastRole === "toolResult").length, 1,
+    "the graph launches the original planning assignment only once");
   } finally {
     for (const key of keys) {
       if (old[key] === undefined) delete process.env[key];
       else process.env[key] = old[key];
     }
+    if (controller && activeGraphJobId) await controller.dispose(activeGraphJobId);
     if (controller && crashGraphJobId) await controller.dispose(crashGraphJobId);
     if (controller && graphJobId) await controller.dispose(graphJobId);
     if (controller && stalledJobId) await controller.dispose(stalledJobId);

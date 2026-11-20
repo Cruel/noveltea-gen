@@ -89,7 +89,9 @@ function checkReviewShape(review: unknown, blueprint: CausalBlueprint,
         !sourceText[finding.requirement.source as keyof typeof sourceText]
           .includes(finding.requirement.quote as string) ||
         !cited(blueprint, finding.evidence, finding.beatId as string) ||
-        !["resolution", finding.beatId].includes((finding.evidence as ReviewCitation).beatId))
+        ((finding.evidence as ReviewCitation).beatId !== finding.beatId &&
+          !((finding.evidence as ReviewCitation).beatId === "resolution" &&
+            "field" in (finding.evidence as ReviewCitation))))
       throw Error("Convergent Blueprint finding lacks a current beat and exact authorized source citation.");
     if (previous.length) {
       const earlier = previous.at(-1)!.blueprint;

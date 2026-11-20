@@ -203,6 +203,38 @@ test("a beat named resolution and the actual resolution field are distinct cited
     "a root citation must never search a same-named beat");
 });
 
+test("new findings cannot cite a different beat named resolution; prior blockers may cite descendants", () => {
+  const previousBlueprint = structuredClone(draft0);
+  previousBlueprint.beats.push({
+    id: "resolution", purpose: "Verify the final record", dependsOn: ["arrival"],
+    change: "The final gate record has not been corroborated",
+    decisions: [], observations: [],
+  });
+  const updated = structuredClone(previousBlueprint);
+  updated.beats.find(beat => beat.id === "resolution")!.change =
+    "Final proof at gate: a signed receipt corroborates departure";
+  const wrongFinding: ConvergentReview = {
+    schema: "noveltea-blueprint-review/v2", status: "revise", prior: [],
+    findings: [{
+      ...finding("arrival", "Departure near dusk"),
+      evidence: { beatId: "resolution", quote: "Final proof at gate" },
+    }],
+  };
+  assert.throws(() => evaluateReviewConvergence(wrongFinding, updated, [], sources),
+    /source citation/, "a downstream beat named resolution cannot stand in for an arrival finding");
+  const legitimatePass: ConvergentReview = {
+    schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
+    prior: [{
+      round: 0, findingIndex: 0, status: "resolved",
+      reason: "The descendant's signed record now corroborates the causal chain.",
+      evidence: { beatId: "resolution", quote: "Final proof at gate" },
+    }],
+  };
+  assert.equal(evaluateReviewConvergence(legitimatePass, updated,
+    [{ blueprint: previousBlueprint, verdict: initial }], sources).productive, true,
+    "previous findings can still be reassessed using a causally dependent beat");
+});
+
 test("missing earlier blockers, fabricated source quotes and false new origins fail closed", () => {
   const old = [{ blueprint: draft0, verdict: initial }];
   assert.throws(() => evaluateReviewConvergence(
