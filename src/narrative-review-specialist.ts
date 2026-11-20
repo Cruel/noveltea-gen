@@ -137,7 +137,8 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   modelId: string, thinking: "low" | "high" | undefined, role: "review" | "repair",
   originalSessionFile?: string, assignment?: ReviewAssignment,
   reviewKind: "narrative" | "turn-completeness" | "assignment-fidelity" = "narrative",
-  freshProtocol = false) {
+  freshProtocol = false,
+  postcommit?: { id: string; reviewer?: { id: string; file: string }; protocolFresh?: boolean }) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: role === "review"
@@ -153,13 +154,16 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   }
   const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "review-sessions", reviewKind === "narrative" ? role : reviewKind,
-    ...(freshProtocol ? ["protocol-fresh"] : []));
+    ...(freshProtocol || postcommit?.protocolFresh ? ["protocol-fresh"] : []));
   const context = role === "review" && assignment
     ? await preparePiContext(job, project, {
-      group: reviewKind + ":" + assignment.planVersion + (freshProtocol ? ":protocol-fresh" : ""),
+      group: postcommit ? "assignment-fidelity:" + postcommit.id +
+        (freshProtocol || postcommit.protocolFresh ? ":protocol-fresh" : "") :
+        reviewKind + ":" + assignment.planVersion + (freshProtocol ? ":protocol-fresh" : ""),
       step: reviewKind + ":" + assignment.planVersion + ":" + job.headSha +
         (freshProtocol ? ":protocol-fresh" : ""),
       paths: reviewKind === "assignment-fidelity" ? [] : assignment.paths, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
+      ...(postcommit?.reviewer && !freshProtocol ? { resumeSession: postcommit.reviewer } : {}),
       task: { kind: "review", ids: assignment.scopeIds, scope: "related" },
     }, runtime) : undefined;
   if (!context) await guardPiBudget(job, "narrative-repair:" + job.headSha, originalSessionFile);
@@ -601,6 +605,15 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
   packet: SemanticReviewPacket, provider: string, model: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
 ): Promise<SemanticVerdict> {
+  const { openPostcommitReviewCycle, postcommitCycleId,
+    bindPostcommitReviewCycle, replacePostcommitProtocolReviewer,
+    acceptPostcommitReviewRound } = await import("./postcommit-review-cycle.js");
+  const existingCycle = await openPostcommitReviewCycle(job, packet, snapshot,
+    provider, model, thinking);
+  const cycleId = postcommitCycleId(job, packet, snapshot, provider, model);
+  const scope = cycleId ? { id: cycleId,
+    ...(existingCycle ? { reviewer: existingCycle.reviewer,
+      protocolFresh: !!existingCycle.protocolFresh } : {}) } : undefined;
   const paths = [...new Set(packet.items.flatMap(item => item.canonicalContext.map(c => c.path)))];
   const assignment: ReviewAssignment = {
     contract: { kind: "assignment-fidelity", policy: packet.policy },
@@ -629,13 +642,23 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     if (required.some(path => !reads.includes(path)) ||
         reads.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
       throw new ProtocolIntegrityBlockedError("Recovered reviewer lacks original pinned methodology reads");
+    if (existingCycle) {
+      if (original.sessionFile !== existingCycle.reviewer.file)
+        throw new ProtocolIntegrityBlockedError("Recovered reviewer has a different cycle conversation");
+      await acceptPostcommitReviewRound(job, packet, verdict, existingCycle);
+    } else if (cycleId) {
+      throw new ProtocolIntegrityBlockedError("Review predates its cycle provenance; explicit reconciliation required");
+    }
     return verdict;
   }
   await refuseReplayedProtocolInvocation(protocolReceipt);
   const { session, context } = await sessionFor(job, snapshot, provider, model,
-    thinking, "review", undefined, assignment, "assignment-fidelity");
+    thinking, "review", undefined, assignment, "assignment-fidelity", false, scope);
   try {
     const file = session.sessionManager.getSessionFile();
+    if (!file) throw Error("Postcommit review requires a durable read-only Pi session.");
+    let cycle = await bindPostcommitReviewCycle(job, packet, snapshot,
+      provider, model, thinking, { id: session.sessionId, file });
     // A preflight budget pause must not strand an invocation that never made
     // its first model call. Seal the start marker after admission, before prompt.
     await context!.beforeTurn(file ?? undefined);
@@ -757,7 +780,14 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     if (otherReads.length)
       throw new Error("Assignment reviewer read outside verified reviewer skill snapshot: " +
         otherReads.join(", "));
-    await context!.completed(file!, session.sessionId);
+    if (reviewedSession === session) await context!.completed(file, session.sessionId);
+    if (reviewedSession !== session && cycle) {
+      const replacement = reviewedSession.sessionManager.getSessionFile();
+      if (!replacement) throw Error("Protocol replacement reviewer has no transcript.");
+      cycle = await replacePostcommitProtocolReviewer(job, packet, cycle,
+        { id: reviewedSession.sessionId, file: replacement });
+    }
+    if (cycle) await acceptPostcommitReviewRound(job, packet, verdict, cycle);
     return verdict;
   } finally { session.dispose(); }
 }

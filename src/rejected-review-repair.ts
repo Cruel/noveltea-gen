@@ -38,6 +38,8 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
+import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
+import { assertReviewCycleSession } from "./review-cycle.js";
 import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { currentSteeringBoundary } from "./steering-boundary.js";
@@ -1400,18 +1402,24 @@ async function reviewerFor(job: JobStartResult, sha: string, options: RejectedRe
   }
   if (state.phase !== "ready")
     throw Error("The repair reviewer must be pinned before the first writer attempt.");
-  const config = options.skillsSource
-    ? { discovery: "explicit-only" as const, novelteaSkills: options.skillsSource,
-      skillDirs: [], requiredSkills: [] }
-    : await loadSkillConfig(undefined, false);
-  const snapshot = await createSkillSnapshot({
-    ...config, requiredSkills: ["nt-narrative-review", "nt-catalog"] });
-  if (!snapshot) throw Error("No pinned independent narrative-review skill is available.");
-  state.reviewer = { snapshot, source: options.skillsSource ?? null,
-    provider: options.provider ?? state.origin.provider,
-    model: options.model ?? state.origin.model,
-    thinking: options.thinking ?? (state.origin.thinking === "medium" ? undefined : state.origin.thinking),
-    sessionFiles: [] };
+  // The first negative postcommit verdict already has a controller-owned,
+  // source-bound reviewer identity. Corrections inherit that exact read-only
+  // conversation and pinned method/model, not a newly sampled reviewer.
+  const cycle = await inspectPostcommitReviewCycle(job, state.rootFailureSha,
+    state.originalSource.assignmentDigest);
+  if (!cycle || !cycle.rounds.some(r => r.commitSha === state.rootFailureSha))
+    throw Error("Original rejected review lacks a reconciled reviewer cycle; do not silently replace it.");
+  assertReviewCycleSession({ id: state.origin.sessionId, file: state.origin.sessionFile },
+    cycle.reviewer);
+  if (options.provider && options.provider !== cycle.provider ||
+      options.model && options.model !== cycle.model ||
+      options.thinking && options.thinking !== cycle.thinking)
+    throw Error("Repair reviewer model policy differs from the source-bound original cycle.");
+  if (await openSkillSnapshot(cycle.snapshot.id) !== cycle.snapshot.path)
+    throw Error("Original reviewer skill snapshot is no longer verified.");
+  state.reviewer = { snapshot: cycle.snapshot, source: options.skillsSource ?? null,
+    provider: cycle.provider, model: cycle.model, thinking: cycle.thinking,
+    sessionFiles: [cycle.reviewer.file] };
   await save(job, state);
   return state.reviewer;
 }
@@ -1564,7 +1572,24 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
             const current = await inspectRejectedRepair(job, state.sourceCommitSha);
             if (!current.reviewer || current.phase !== "reviewing")
               throw Error("Reviewer session cannot attach to an unrelated repair.");
-            current.reviewer.sessionFiles.push(file);
+            const cycle = await inspectPostcommitReviewCycle(job, current.rootFailureSha,
+              point.assurance!.assignmentDigest);
+            if (!cycle) throw Error("Independent reviewer cycle disappeared during correction.");
+            const identity = { id: cycle.reviewer.id, file };
+            if (current.originalSource.assignmentDigest === point.assurance!.assignmentDigest)
+              assertReviewCycleSession({ id: current.origin.sessionId, file: current.origin.sessionFile },
+                identity, cycle.reviewer);
+            else {
+              // A verified author-directed scope revision owns a NEW cycle,
+              // not the original reviewer's apparent memory or authority.
+              if (!current.revision ||
+                  hash(current.revision.assignment) !== point.assurance!.assignmentDigest)
+                throw Error("Changed reviewer scope has no trusted plan revision.");
+              assertReviewCycleSession({ id: current.origin.sessionId, file: current.origin.sessionFile },
+                identity);
+            }
+            if (!current.reviewer.sessionFiles.includes(file))
+              current.reviewer.sessionFiles.push(file);
             await save(job, current);
           },
         }));
