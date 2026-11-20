@@ -20,7 +20,7 @@ import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence }
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { validateFocusedCreationGrants } from "./creation-grants.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
-import { createReviewedBlueprint, readApprovedBlueprint, classifyBlueprintFailure,
+import { createReviewedBlueprint, readApprovedBlueprint, inspectPausedBlueprint, classifyBlueprintFailure,
   type BlueprintPin } from "./architecture-blueprint.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics,
   type ArchitectureBudgetReview } from "./story-metrics.js";
@@ -298,11 +298,20 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
         return blocked("Interrupted causal blueprint lacks its original source-bound plan.");
       const approved = await readApprovedBlueprint(job, state.plan, state.snapshot,
         state.provider, state.model, state.blueprintTask, workingHead);
-      if (!approved) return blocked(state.blueprintFailure
-        ? "Causal blueprint " + state.blueprintFailure.kind + ": " + state.blueprintFailure.reason +
-          ". Original Pi sessions and private drafts preserved; no automatic retry."
-        : "Interrupted causal blueprint has no reviewed checkpoint. " +
-          "Preserve original Pi sessions and private drafts; do not silently replay the planner.");
+      if (!approved) {
+        if (!state.blueprintFailure) {
+          const pause = await inspectPausedBlueprint(job, state.plan, state.snapshot,
+            state.provider, state.model, state.blueprintTask, workingHead);
+          if (pause) return { status: "ready", actualHead, changes,
+            reason: "Verified source-bound Blueprint budget pause at " +
+              pause.boundary + " (next review " + pause.nextVersion + ")." };
+        }
+        return blocked(state.blueprintFailure
+          ? "Causal blueprint " + state.blueprintFailure.kind + ": " + state.blueprintFailure.reason +
+            ". Original Pi sessions and private drafts preserved; no automatic retry."
+          : "Interrupted causal blueprint has no reviewed checkpoint or verified budget pause. " +
+            "Preserve original Pi sessions and private drafts; do not silently replay the planner.");
+      }
       return { status: "ready", actualHead, changes };
     }
     if (state.worker === "pi" && ["writing", "authored"].includes(state.phase)) {

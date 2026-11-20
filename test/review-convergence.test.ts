@@ -126,6 +126,41 @@ test("late regression cancels apparent progress and cannot be accepted as pass",
   assert.throws(() => evaluateReviewConvergence(
     { ...regressed, status: "pass", findings: [] }, draft2, earlier, sources), /cannot approve/);
 });
+test("a precise resolution-only correction passes with every beat byte-identical", () => {
+  const narrowed = structuredClone(draft0);
+  narrowed.resolution.conclusion =
+    "The shelter gate opened, but the clerk's arrival is still unproven";
+  assert.equal(JSON.stringify(narrowed.beats), JSON.stringify(draft0.beats));
+  const oldReview: ConvergentReview = {
+    schema: "noveltea-blueprint-review/v2", status: "revise", prior: [],
+    findings: [finding("archive", "A shelter gate opened at dusk")],
+  };
+  const passResolution: ConvergentReview = {
+    schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
+    prior: [{
+      round: 0, findingIndex: 0, status: "resolved",
+      reason: "The conclusion no longer overstates the documented gate opening.",
+      evidence: { beatId: "resolution", field: "conclusion",
+        quote: "The shelter gate opened, but the clerk's arrival is still unproven" },
+    }],
+  };
+  const result = evaluateReviewConvergence(passResolution, narrowed,
+    [{ blueprint: draft0, verdict: oldReview }], sources);
+  assert.equal(result.productive, true);
+  const extraSupport = structuredClone(draft0);
+  extraSupport.resolution.supportedBy.push("arrival");
+  const supportReview = structuredClone(passResolution);
+  supportReview.prior[0]!.evidence = {
+    beatId: "resolution", field: "supportedBy", quote: '["archive","arrival"]',
+  };
+  assert.equal(evaluateReviewConvergence(supportReview, extraSupport,
+    [{ blueprint: draft0, verdict: oldReview }], sources).productive, true);
+  assert.throws(() => evaluateReviewConvergence({ ...passResolution, prior: [{
+    ...passResolution.prior[0]!,
+    evidence: { beatId: "resolution", field: "conclusion", quote: "Invented finding never on disk" },
+  }] }, narrowed, [{ blueprint: draft0, verdict: oldReview }], sources), /evidence is stale/);
+});
+
 test("missing earlier blockers, fabricated source quotes and false new origins fail closed", () => {
   const old = [{ blueprint: draft0, verdict: initial }];
   assert.throws(() => evaluateReviewConvergence(

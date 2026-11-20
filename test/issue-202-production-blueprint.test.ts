@@ -20,6 +20,7 @@ import { blueprintDigest } from "../src/architecture-blueprint-patch.js";
 import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
 import type { Plan } from "../src/architecture.js";
 import { startStoryJob } from "../src/job.js";
+import { runArchitectureJob } from "../src/architecture.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { configurePiPolicy, inspectPiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
@@ -76,8 +77,8 @@ const evidence = [
     supports: "The clerk entered the shelter", limits: "Does not independently prove motive" }] },
 ];
 const obligation = {
-  id: "proof-without-exposure", category: "route", source: "foundation",
-  quote: "without exposing the protected witness",
+  id: "proof-without-exposure", category: "route", source: "task",
+  quote: "independent proof of the missing clerk's refuge",
   question: "Can players resolve the disappearance without exposing the witness?",
   proof: "Match the dated service-gate and shift logs",
   route: "Independent records remain available when testimony is refused",
@@ -86,7 +87,7 @@ const obligation = {
 const negative: BlueprintReview = {
   schema: "noveltea-blueprint-review/v2", status: "revise", prior: [],
   findings: [{ beatId: "arrival", origin: "initial",
-    requirement: { source: "foundation", quote: "Prove the truth from dated records" },
+    requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
     evidence: { beatId: "arrival", quote: "A departure entry was entered at dusk" },
     reason: "The arrival timeline relies on an uncorroborated town entry.",
     correction: "Append an independent dated shift record corroborating arrival." }],
@@ -103,7 +104,7 @@ const negative1: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
   status: "revise",
   prior: [progress0],
   findings: [{ beatId: "archive", origin: "overlooked",
-    requirement: { source: "foundation", quote: "Prove the truth from dated records" },
+    requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
     evidence: { beatId: "archive", quote: "An entry records a protected arrival at dusk" },
     reason: "The arrival's gate log is not independently cross-checked.",
     correction: "Add a separate guard ledger entry to the archive beat." }],
@@ -111,7 +112,7 @@ const negative1: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
 const negative2: BlueprintReview = { schema: "noveltea-blueprint-review/v2",
   status: "revise", prior: [progress0, progress1],
   findings: [{ beatId: "archive", origin: "introduced",
-    requirement: { source: "foundation", quote: "Prove the truth from dated records" },
+    requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
     evidence: { beatId: "archive", quote: "Guard ledger separately records a protected arrival" },
     reason: "The newly introduced record needs a linking registrar entry.",
     correction: "Add the registrar's independent link between both dated logs." }],
@@ -273,6 +274,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
   const old = Object.fromEntries(keys.map(k => [k, process.env[k]]));
   let controller: SandboxController | undefined;
   let stalledJobId: string | undefined;
+  let graphJobId: string | undefined;
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -482,11 +484,108 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL ARCHITECTURE BLUEPRINT REVIEWER") &&
       c.lastRole === "toolResult").length, 3);
     assert.equal(git(stuck.worktreeRoot, "status", "--porcelain"), "");
+
+    // End-to-end Architecture entry point: a fully staged, source-bound
+    // initial Blueprint pauses before reviewer admission, survives inspect,
+    // then resumes through the SAME production graph after budget increase.
+    const graphStory = story;
+    writeFileSync(join(graphStory, "creative-direction/foundation.md"), "---\nschema: '0.1'\ntype: creative-direction\nid: creative-direction.foundation\ntitle: \"The missing clerk\"\nstatus: approved\ndecisions: []\npremise: \"The clerk disappears during the night\"\ncentral_conflict: \"Prove the refuge without naming the source\"\ngenre: \"Mystery\"\ntone: \"Investigative\"\nplayer_experience: \"Independent evidence tests\"\nscope: \"A short dialogue-led mystery\"\n---\n\nA missing clerk was secretly sheltered. Prove the truth from dated records without exposing the protected witness.\n");
+    git(repo, "add", "."); git(repo, "commit", "-qm", "Approved graph certification Foundation");
+    const graphBase = git(repo, "rev-parse", "HEAD");
+    graphJobId = randomUUID();
+    const graphDb = new DatabaseSync(join(app, "studio.sqlite"));
+    try {
+      graphDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(graphJobId, owner, "story", graphBase, null);
+    } finally { graphDb.close(); }
+    const graphJob = await startStoryJob({
+      story: graphStory, job: graphJobId, worktreeCacheRoot: scoped,
+    });
+    const graphCalls: Call[] = [];
+    const graphRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    graphRuntime.registerNativeProvider(scripted(graphCalls));
+    await graphRuntime.refresh({ allowNetwork: false });
+    const graphContract = {
+      scope: { kind: "full-story", depth: "composition", targets: [], branches: [] },
+      constraints: [], envelope: { presentation: "Dialogue mystery", hardLimits: [], preferences: [] },
+    };
+    const graphRun = () => withJobModelRuntime(graphRuntime, () =>
+      runArchitectureJob({ story: graphStory, job: graphJobId!,
+        action: "run", contract: graphContract, task, provider: model.provider,
+        model: model.id, skillsSource: source, validatorSource: source }));
+    const graphInspect = () => runArchitectureJob({
+      story: graphStory, job: graphJobId!, action: "inspect",
+    });
+    await configurePiPolicy(graphJob, { version: 1,
+      profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 5 } });
+    await assert.rejects(graphRun(), (error: unknown) =>
+      error instanceof PiBudgetPause && error.reason === "modelCalls",
+      "production graph pauses after full initial stages but before first reviewer");
+    const graphDir = join(graphJob.stateDir, "architecture-blueprints");
+    assert.ok(existsSync(join(graphDir, "plan-1-pause-initial-review.json")),
+      "initial review boundary must be durable before its budget exception");
+    assert.equal(existsSync(join(graphDir, "plan-1-verdict-0.json")), false);
+    const inspectedPause = await graphInspect();
+    assert.equal(inspectedPause.recovery?.status, "ready",
+      "graph reconciliation recognizes the sealed initial-review budget pause");
+    assert.match(inspectedPause.recovery.reason ?? "", /initial-review/);
+    const initialMarkerPath = join(graphDir, "plan-1-pause-initial-review.json");
+    const originalMarker = readFileSync(initialMarkerPath);
+    const originalSealed = JSON.parse(originalMarker.toString("utf8"));
+    try {
+      writeFileSync(initialMarkerPath, JSON.stringify({ ...originalSealed,
+        lineage: { ...originalSealed.lineage, threadId: "wrong-thread" },
+      }));
+      const invalidPause = await graphInspect();
+      assert.equal(invalidPause.recovery?.status, "blocked",
+        "reconciliation must reject a forged initial-review pause before resuming Pi");
+    } finally { writeFileSync(initialMarkerPath, originalMarker); }
+    const graphWriterBefore = originalSealed.plannerSessionId;
+    // Exercise the exact-session recovery contract when legitimate historical
+    // Pi session data exceeds the opportunistic 1.5 MB reuse threshold. The
+    // fixture extends history before resealing its synthetic safe boundary.
+    const oldHistory = readFileSync(originalSealed.plannerSessionFile);
+    const lastEntry = JSON.parse(oldHistory.toString("utf8").trim().split("\n").at(-1)!);
+    assert.ok(typeof lastEntry.id === "string", "synthetic history must follow a real Pi session leaf");
+    const historicalTurn = Buffer.from(JSON.stringify({
+      type: "message", id: randomUUID(), parentId: lastEntry.id,
+      message: { role: "user", content: [{
+        type: "text", text: "Historical analysis context. ".repeat(67000),
+      }], timestamp: Date.now() },
+    }) + "\n");
+    const fullHistory = Buffer.concat([oldHistory, historicalTurn]);
+    assert.ok(fullHistory.length > 1_500_000);
+    writeFileSync(originalSealed.plannerSessionFile, fullHistory);
+    writeFileSync(initialMarkerPath, JSON.stringify({
+      ...originalSealed, plannerTranscriptBytes: fullHistory.length,
+      plannerTranscriptDigest: createHash("sha256").update(fullHistory).digest("hex"),
+    }));
+    const largeHistoryInspect = await graphInspect();
+    assert.equal(largeHistoryInspect.recovery?.status, "ready",
+      "large original session remains verifiable before authenticated continuation");
+    const completeBudget = (await inspectPiPolicy(job)).budget.modelCalls;
+    await configurePiPolicy(graphJob, { version: 1,
+      profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: completeBudget } });
+    await assert.rejects(graphRun(), (error: unknown) =>
+      error instanceof PiBudgetPause && error.reason === "modelCalls",
+      "graph reaches verified Blueprint approval, then pauses before canonical writer");
+    const afterResume = await graphInspect();
+    assert.equal(afterResume.status, "ready");
+    assert.equal(afterResume.recovery?.status, "ready");
+    const graphPin = JSON.parse(readFileSync(join(graphDir, "plan-1-approved.json"), "utf8"));
+    assert.equal(graphPin.plannerSessionId, graphWriterBefore);
+    assert.equal(graphPin.draftVersion, 3);
+    assert.equal(graphCalls.filter(c =>
+      c.prompt.includes("READ-ONLY CAUSAL STORY ARCHITECT") && c.lastRole === "toolResult").length,
+    1, "graph resume does not regenerate original staged Blueprint");
+    assert.equal(git(graphJob.worktreeRoot, "status", "--porcelain"), "");
   } finally {
     for (const key of keys) {
       if (old[key] === undefined) delete process.env[key];
       else process.env[key] = old[key];
     }
+    if (controller && graphJobId) await controller.dispose(graphJobId);
     if (controller && stalledJobId) await controller.dispose(stalledJobId);
     if (controller) await controller.dispose(id);
     if (server) await new Promise<void>(done => server!.close(() => done()));

@@ -340,6 +340,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   group: string; step: string; paths: string[]; snapshot: string;
   provider: string; model: string; thinking?: "low" | "medium" | "high";
   directory: string;
+  /** Sealed safe-boundary resume: reopen this exact original Pi session, even
+   * beyond the normal opportunistic 1.5 MB context-fork threshold. */
+  resumeSession?: { file: string; id: string };
   /** Public native task-scoped Context Manifest query. Omit for discovery-only work. */
   task?: StoryContextRequest;
   /** An independent review nested inside an active writer must not pause mid-edit. */
@@ -372,6 +375,12 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   let manager: SessionManager | undefined;
   let reused = false;
   await mkdir(options.directory, { recursive: true });
+  if (options.resumeSession && (!previous || previous.snapshot !== options.snapshot ||
+      previous.model !== expectedModel || previous.group !== options.group ||
+      previous.file !== options.resumeSession.file ||
+      previous.sessionId !== options.resumeSession.id || redesigned || !clean ||
+      !within(resolve(options.directory), previous.file)))
+    throw new Error("Cannot resume sealed Pi session: original context, sources or identity changed.");
   if (previous && previous.snapshot === options.snapshot && previous.model === expectedModel &&
       previous.group === options.group && !redesigned && clean) {
     const base = stateDir(job);
@@ -386,7 +395,7 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
     if (verified.getSessionId() !== previous.sessionId) {
       throw new Error("Cannot reuse Pi context: session identity mismatch.");
     }
-    if ((await stat(previous.file)).size < 1_500_000) {
+    if (options.resumeSession || (await stat(previous.file)).size < 1_500_000) {
       manager = within(resolve(options.directory), previous.file)
         ? SessionManager.open(previous.file, dirname(previous.file), project.root)
         : SessionManager.forkFrom(previous.file, project.root, options.directory);

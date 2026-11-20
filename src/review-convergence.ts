@@ -5,10 +5,9 @@
 import { createHash } from "node:crypto";
 import type { CausalBlueprint } from "./architecture-blueprint.js";
 
-export interface ReviewCitation {
-  beatId: string;
-  quote: string;
-}
+export type ReviewCitation =
+  | { beatId: string; quote: string; field?: never }
+  | { beatId: "resolution"; field: "conclusion" | "uncertainty" | "supportedBy"; quote: string };
 export interface ConvergentFinding {
   beatId: string;
   reason: string;
@@ -44,15 +43,25 @@ const exact = (value: unknown, keys: string[]): value is Record<string, unknown>
 const statuses = ["resolved", "improved", "persisting", "regressed"];
 const origins = ["initial", "continuing", "introduced", "overlooked"];
 function cited(blueprint: CausalBlueprint, value: unknown, from?: string) {
-  if (!exact(value, ["beatId", "quote"]) || !filled(value.quote) ||
-      value.quote.length < 8 || typeof value.beatId !== "string") return false;
-  const candidates = new Set([from]);
-  for (const beat of blueprint.beats) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const citation = value as Partial<ReviewCitation>;
+  if (!filled(citation.quote) || citation.quote.length < 8 ||
+      typeof citation.beatId !== "string") return false;
+  const candidates = new Set(from ? [from] : []);
+  for (const beat of blueprint.beats)
     if (beat.dependsOn.some(id => candidates.has(id))) candidates.add(beat.id);
+  if (citation.beatId === "resolution") {
+    if (!exact(citation, ["beatId", "field", "quote"]) ||
+        !["conclusion", "uncertainty", "supportedBy"].includes(String(citation.field)) ||
+        (from && !blueprint.resolution.supportedBy.some(id => candidates.has(id))))
+      return false;
+    return JSON.stringify(blueprint.resolution[citation.field as
+      "conclusion" | "uncertainty" | "supportedBy"]).includes(citation.quote);
   }
-  const beat = blueprint.beats.find(beat => beat.id === value.beatId);
+  if (!exact(citation, ["beatId", "quote"])) return false;
+  const beat = blueprint.beats.find(beat => beat.id === citation.beatId);
   return !!beat && (!from || candidates.has(beat.id)) &&
-    JSON.stringify(beat).includes(value.quote);
+    JSON.stringify(beat).includes(citation.quote);
 }
 function checkReviewShape(review: unknown, blueprint: CausalBlueprint,
   previous: readonly ReviewRound[], sources: { foundation: string; task: string; contract: unknown },
@@ -79,7 +88,7 @@ function checkReviewShape(review: unknown, blueprint: CausalBlueprint,
         !sourceText[finding.requirement.source as keyof typeof sourceText]
           .includes(finding.requirement.quote as string) ||
         !cited(blueprint, finding.evidence, finding.beatId as string) ||
-        (finding.evidence as ReviewCitation).beatId !== finding.beatId)
+        !["resolution", finding.beatId].includes((finding.evidence as ReviewCitation).beatId))
       throw Error("Convergent Blueprint finding lacks a current beat and exact authorized source citation.");
     if (previous.length) {
       const earlier = previous.at(-1)!.blueprint;
