@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,7 +12,8 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { startStoryJob } from "../src/job.js";
 import { openStoryProject } from "../src/project.js";
 import { configurePiPolicy, guardPiBudget, inspectPiPolicy, PiBudgetPause,
-  preparePiContext, piNarrativeGroup, resolvePiModel, type PiPolicy } from "../src/job-pi-policy.js";
+  preparePiContext, piNarrativeGroup, resolvePiModel,
+  restoreAcceptedPiReviewContext, type PiPolicy } from "../src/job-pi-policy.js";
 
 const fixtures = mkdtempSync(join(tmpdir(), "nt-gen-pi-policy-"));
 after(() => rmSync(fixtures, { recursive: true, force: true }));
@@ -169,6 +171,62 @@ test("one Blueprint review cycle retains its independent Pi transcript across co
   assert.equal(third.manager.getSessionId(), second.manager.getSessionId());
   assert.equal(third.manager.getSessionFile(), secondFile);
   assert.match(readFileSync(secondFile, "utf8"), /Second independent review/);
+});
+
+
+test("#210 accepted protocol-fresh FAIL restores context and continues the same reviewer on corrected commit", async () => {
+  const { job, project } = await fixture();
+  const cycleId = "a".repeat(64);
+  const snapshot = "snapshot-1";
+  const directory = join(job.stateDir, "review-sessions", "assignment-fidelity", "protocol-fresh");
+  const group = "assignment-fidelity:" + cycleId + ":protocol-fresh";
+  const base = { group, paths: [], snapshot, provider: "example", model: "required",
+    directory };
+  // Exact crash window: response and protocol receipt already accepted, but
+  // preparePiContext.completed() never ran. Nothing has written a context receipt.
+  const first = await preparePiContext(job, project,
+    { ...base, step: "assignment-fidelity:initial:protocol-fresh" }, runtime());
+  first.manager.appendMessage({ role: "user",
+    content: "Review the immutable first packet", timestamp: Date.now() });
+  first.manager.appendMessage({ role: "assistant", content: [{
+    type: "text", text: "FAIL: unsupported Character knowledge; correct this exact Event",
+  }], stopReason: "stop", timestamp: Date.now() });
+  const session = { file: first.manager.getSessionFile()!, id: first.manager.getSessionId() };
+  const contextReceipt = join(job.stateDir, "pi-contexts", createHash("sha256")
+    .update(group).digest("hex") + ".json");
+  assert.equal(existsSync(contextReceipt), false, "the accepted fallback has no saved context");
+  await assert.rejects(preparePiContext(job, project,
+    { ...base, step: "assignment-fidelity:corrected", resumeSession: session },
+    runtime()), /Cannot resume sealed Pi session/);
+  await restoreAcceptedPiReviewContext(job, project,
+    { cycleId, snapshot, session });
+  const saved = readFileSync(contextReceipt, "utf8");
+  assert.match(saved, /protocol-fresh/);
+  // A second recovery cannot rewrite a previously sealed context receipt.
+  await restoreAcceptedPiReviewContext(job, project, { cycleId, snapshot, session });
+  assert.equal(readFileSync(contextReceipt, "utf8"), saved);
+  const resumed = await preparePiContext(job, project,
+    { ...base, step: "assignment-fidelity:corrected", resumeSession: session },
+    runtime());
+  assert.equal(resumed.manager.getSessionId(), session.id);
+  assert.equal(resumed.manager.getSessionFile(), session.file);
+  assert.match(readFileSync(session.file, "utf8"), /unsupported Character knowledge/);
+  resumed.manager.appendMessage({ role: "user",
+    content: "Re-review the corrected source-bound packet", timestamp: Date.now() });
+  resumed.manager.appendMessage({ role: "assistant", content: [{
+    type: "text", text: "PASS: the originally rejected knowledge is now limited",
+  }], stopReason: "stop", timestamp: Date.now() });
+  await resumed.completed(session.file, session.id);
+  const third = await preparePiContext(job, project,
+    { ...base, step: "assignment-fidelity:next-correction", resumeSession: session },
+    runtime());
+  assert.equal(third.manager.getSessionId(), session.id);
+  assert.match(readFileSync(session.file, "utf8"), /originally rejected knowledge is now limited/);
+  await assert.rejects(restoreAcceptedPiReviewContext(job, project,
+    { cycleId, snapshot: "changed-snapshot", session }), /conflicts with an existing Pi context/);
+  await assert.rejects(restoreAcceptedPiReviewContext(job, project,
+    { cycleId, snapshot, session: { ...session, id: "forged" } }),
+    /transcript identity differs/);
 });
 
 test("changed source versions supersede prior context and significant redesign restarts", async () => {

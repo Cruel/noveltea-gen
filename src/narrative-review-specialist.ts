@@ -11,7 +11,8 @@ import { completedContextReads } from "./story-context.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { reviewerPinnedSkillPath } from "./skills.js";
 import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
-import { preparePiContext, resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
+import { preparePiContext, resolvePiModel, guardPiBudget,
+  restoreAcceptedPiReviewContext } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import type { JobStartResult } from "./job.js";
 import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
@@ -748,6 +749,13 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
             required.some(path => !earlierReads.includes(path)) ||
             earlierReads.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
           throw new ProtocolIntegrityBlockedError("Exhausted original review lacks pinned methods");
+        // .fresh.json is sealed BEFORE fresh.completed() records the Pi context.
+        // Recover that exact verified session before adopting a negative verdict:
+        // the next corrected checkpoint must reopen this same reviewer.
+        await restoreAcceptedPiReviewContext(job,
+          await openStoryProject(job.worktreeStoryRoot), {
+            cycleId: existingCycle.id, snapshot: snapshot.id, session: handoff.fresh,
+          });
         await adoptAcceptedPostcommitFallback(job, packet, existingCycle, handoff, verdict);
       } else {
         if (original.sessionFile !== existingCycle.reviewer.file)

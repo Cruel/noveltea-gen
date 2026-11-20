@@ -142,6 +142,104 @@ test("#207 PASS requires a correction to the rejected Event field, not an unrela
   }), removed, assignment, history), /rejected field|verified correction/);
 });
 
+
+test("#207 omitted route/dependency/participant accepts only an exact empty-array citation", () => {
+  const assignment = { milestonePath: "milestones/entry.md",
+    sourcePaths: ["milestones/entry.md"] };
+  const initial: MilestoneBlueprint = {
+    schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.entry",
+    events: [{ id: "gate", purpose: "Offer the refusal route",
+      dependsOn: [], participants: [], knowledge: "Player witnesses an unanswered request",
+      routes: [], evidence: [] }],
+    downstream: [],
+  };
+  const cite = (field: string, quote: string) => ({
+    eventId: "gate", anchorPath: "milestones/entry.md",
+    requirement: "Make the omitted step explicit",
+    reason: "The specified Event is missing an authorized obligation",
+    correction: "Supply the missing member in the cited field",
+    evidence: { field, quote },
+  });
+  const review = (finding: unknown) => JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v3", status: "revise",
+    findings: [finding], prior: [],
+  });
+  for (const field of ["routes", "dependsOn", "participants", "evidence"]) {
+    assert.equal(parseMilestoneBlueprintReview(
+      review(cite(field, "[]")), initial, assignment).status, "revise");
+    for (const forged of ["", "[", "missing", "[] "]) {
+      assert.throws(() => parseMilestoneBlueprintReview(
+        review(cite(field, forged)), initial, assignment), /cited defective Event field/);
+    }
+  }
+  const populated = structuredClone(initial);
+  populated.events[0]!.routes = [{ condition: "Refused admission",
+    consequence: "The player receives a written denial" }];
+  assert.throws(() => parseMilestoneBlueprintReview(
+    review(cite("routes", "[]")), populated, assignment), /cited defective Event field/);
+  const negative = parseMilestoneBlueprintReview(review(cite("routes", "[]")),
+    initial, assignment);
+  const history = [{ draft: initial, review: negative,
+    draftDigest: "a", reviewDigest: "b" }];
+  const fixed = parseMilestoneBlueprintReview(JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v3", status: "pass",
+    findings: [], prior: [{ round: 0, findingIndex: 0,
+      status: "resolved", reason: "Refusal branch now has lasting consequence",
+      evidence: { kind: "revised", eventId: "gate", field: "routes",
+        before: "[]", after: "Refused admission" } }],
+  }), populated, assignment, history);
+  assert.equal(fixed.status, "pass");
+  assert.equal(milestoneReviewStagnation([...history, {
+    draft: populated, review: fixed, draftDigest: "c", reviewDigest: "d",
+  }]), 0);
+});
+
+test("#207 additive correction retains valid text but cannot use unrelated edits", () => {
+  const assignment = { milestonePath: "milestones/ledger.md",
+    sourcePaths: ["milestones/ledger.md"] };
+  const beforeQuote = "The witness signed the ledger.";
+  const addedQuote = "The player cannot tell when.";
+  const draft = (knowledge: string, purpose = "Inspect the ledger"): MilestoneBlueprint => ({
+    schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.ledger",
+    events: [{ id: "ledger", purpose, knowledge, dependsOn: [],
+      participants: [], evidence: [], routes: [] }],
+    downstream: [],
+  });
+  const initial = draft(beforeQuote);
+  const review = parseMilestoneBlueprintReview(JSON.stringify({
+    schema: "noveltea-milestone-blueprint-review/v3", status: "revise",
+    findings: [{ eventId: "ledger", anchorPath: "milestones/ledger.md",
+      requirement: "State uncertainty about the ledger's signing time",
+      reason: "The current knowledge says nothing about its temporal limit",
+      correction: "Qualify what the player cannot establish from the signature",
+      evidence: { field: "knowledge", quote: beforeQuote } }], prior: [],
+  }), initial, assignment);
+  const history = [{ draft: initial, review, draftDigest: "a", reviewDigest: "b" }];
+  const result = (status = "resolved", field = "knowledge", after = addedQuote) =>
+    JSON.stringify({ schema: "noveltea-milestone-blueprint-review/v3",
+      status: "pass", findings: [], prior: [{ round: 0, findingIndex: 0,
+        status, reason: "The source now names the knowledge limit",
+        evidence: { kind: "added", eventId: "ledger", field,
+          before: beforeQuote, after } }] });
+  const fixed = draft(beforeQuote + " " + addedQuote);
+  const admitted = parseMilestoneBlueprintReview(result(), fixed, assignment, history);
+  assert.equal(admitted.status, "pass");
+  assert.equal(milestoneReviewStagnation([...history, {
+    draft: fixed, review: admitted, draftDigest: "c", reviewDigest: "d",
+  }]), 0);
+  assert.throws(() => parseMilestoneBlueprintReview(result(),
+    draft(beforeQuote, "Inspect the ledger and note its age"),
+    assignment, history), /rejected field|verified correction/);
+  assert.throws(() => parseMilestoneBlueprintReview(result(),
+    draft(beforeQuote, "Inspect the ledger. " + addedQuote),
+    assignment, history), /rejected field|verified correction/);
+  assert.throws(() => parseMilestoneBlueprintReview(result("resolved", "purpose"),
+    draft(beforeQuote, "Inspect the ledger. " + addedQuote),
+    assignment, history), /rejected field|verified correction/);
+  assert.throws(() => parseMilestoneBlueprintReview(result("resolved", "knowledge", beforeQuote),
+    fixed, assignment, history), /rejected field|verified correction/);
+});
+
 test("#207 v3 consecutive corrections on one Event/path remain productive", () => {
   const assignment = { milestonePath: "milestones/test.md",
     sourcePaths: ["milestones/test.md"] };

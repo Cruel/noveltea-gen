@@ -335,6 +335,53 @@ export function piNarrativeGroup(role: string, paths: string[], fallback: string
   return role + ":" + (arcs.length ? arcs.join("|") : fallback);
 }
 
+
+/** Reconcile a protocol-fresh assignment reviewer accepted by the authenticated
+ * response-contract controller but interrupted before context.completed().
+ * The caller must first verify the exhausted-original/accepted-fresh handoff
+ * and pinned methodology reads. No model turn is started here. */
+export async function restoreAcceptedPiReviewContext(
+  job: JobStartResult, project: StoryProject, args: {
+    cycleId: string; snapshot: string; session: { id: string; file: string };
+  }): Promise<void> {
+  const group = "assignment-fidelity:" + args.cycleId + ":protocol-fresh";
+  const directory = join(job.stateDir, "review-sessions", "assignment-fidelity", "protocol-fresh");
+  const { id, file } = args.session;
+  if (!/^[a-f0-9]{64}$/.test(args.cycleId) || !args.snapshot ||
+      !id || !within(resolve(directory), file) || resolve(directory) === file ||
+      !existsSync(file) || await realpath(file) !== file ||
+      !(await stat(file)).isFile())
+    throw new Error("Accepted fallback Pi context has an unsafe identity or transcript.");
+  const transcript = await readFile(file, "utf8");
+  let header: { type?: string; id?: string };
+  try { header = JSON.parse(transcript.split("\n")[0] ?? "{}"); }
+  catch { throw new Error("Accepted fallback Pi context has an invalid transcript header."); }
+  if (header.type !== "session" || header.id !== id)
+    throw new Error("Accepted fallback Pi context transcript identity differs.");
+  const resolution = await json<Resolution>(resolutionPath(job));
+  if (!resolution || resolution.version !== 1 ||
+      !resolution.selected?.provider || !resolution.selected?.model)
+    throw new Error("Accepted fallback Pi context has no pinned model resolution.");
+  const model = resolution.selected.provider + "/" + resolution.selected.model +
+    ":" + (resolution.thinking ?? "pi-default");
+  const path = contextPath(job, group);
+  const previous = await json<ContextReceipt>(path);
+  if (previous) {
+    if (previous.version !== 1 || previous.group !== group ||
+        previous.file !== file || previous.sessionId !== id ||
+        previous.snapshot !== args.snapshot || previous.model !== model)
+      throw new Error("Accepted fallback conflicts with an existing Pi context identity.");
+    return;
+  }
+  // Assignment fidelity is a pinned-skills-only reviewer. Its context has no
+  // native Story reads or task paths to infer from an interrupted reader.
+  // Preserve exactly the read-tool source tracking that completed() would save.
+  const sources = await sourceVersions(project.root, await loadedStoryPaths(file, project.root));
+  await recordPiSession(job, file);
+  await persist(path, { version: 1, group, file, sessionId: id,
+    snapshot: args.snapshot, model, sources, nativeRevisions: {} } satisfies ContextReceipt);
+}
+
 /** Each completed, clean specialist turn may be reused within its scoped narrative group. */
 export async function preparePiContext(job: JobStartResult, project: StoryProject, options: {
   group: string; step: string; paths: string[]; snapshot: string;
