@@ -169,6 +169,28 @@ test("#205 a source-bound global fix can converge without inventing evidence bat
   /cannot approve/);
 });
 
+test("#205 previously sealed legacy Blueprint patches replay without retroactive global citation rules", () => {
+  const legacy = {
+    status: "revise" as const,
+    findings: [{ beatId: "gate", reason: "Global resolution needs clarification",
+      correction: "Specify where the source is stored." }],
+  };
+  const old = { ...patch, reviewDigest: blueprintDigest(legacy),
+    operations: [{ kind: "replace", findingBeatId: "gate",
+      path: "resolution/conclusion", expected: blueprint.resolution.conclusion,
+      value: "The clerk reached the shelter through the guarded service gate" }] };
+  assert.throws(() => applyBlueprintPatch(blueprint, legacy, old),
+    /global replacement lacks a finding/);
+  assert.equal(applyBlueprintPatch(blueprint, legacy, old, "sealed-replay")
+    .blueprint.resolution.conclusion, old.operations[0]!.value);
+  assert.throws(() => applyBlueprintPatch(blueprint, legacy, {
+    ...old, baseDigest: "0".repeat(64),
+  }, "sealed-replay"), /stale/);
+  assert.throws(() => applyBlueprintPatch(blueprint, legacy, {
+    ...old, operations: [{ ...old.operations[0]!, expected: "unrelated text" }],
+  }, "sealed-replay"), /expected old value is stale/);
+});
+
 test("#205 a local Beat finding cannot authorize unrelated global answer or Arc rewrites", () => {
   const local = clone(review);
   local.findings[0]!.evidence = { beatId: "gate",

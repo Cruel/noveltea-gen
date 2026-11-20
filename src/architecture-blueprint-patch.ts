@@ -58,7 +58,7 @@ export function allowedBlueprintPatchTargets(base: CausalBlueprint, review: Blue
 /** Parse then apply to a clone; only the resolved full blueprint is reviewed.
  * Every op must reference an actual finding from the immediately prior verdict. */
 export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintReview,
-  raw: unknown): { patch: BlueprintPatch; blueprint: CausalBlueprint } {
+  raw: unknown, policy: "admission" | "sealed-replay" = "admission"): { patch: BlueprintPatch; blueprint: CausalBlueprint } {
   if (review.status !== "revise" || !review.findings.length)
     throw Error("A blueprint patch requires an independent revise verdict.");
   if (!exact(raw, ["schema", "baseDigest", "reviewDigest", "operations"]) ||
@@ -159,7 +159,11 @@ export function applyBlueprintPatch(base: CausalBlueprint, review: BlueprintRevi
       // answers, another Arc goal, feasibility or the resolution. Require an
       // exact citation to the ORIGINAL global field/Arc being replaced.
       const section = op.path.split("/")[0];
-      if (["causalAnswer", "feasibility", "arcs", "resolution"].includes(section!)) {
+      // Historical approved patch receipts predate the new global-citation
+      // policy. Their unchanged SHA-bound draft/round chain is checked by
+      // readRecordedBlueprint; do not retroactively reject their admission.
+      if (policy === "admission" &&
+          ["causalAnswer", "feasibility", "arcs", "resolution"].includes(section!)) {
         const matching = review.findings.some(finding => {
           if (finding.beatId !== op.findingBeatId || !("evidence" in finding)) return false;
           const citation = (finding as ConvergentReview["findings"][number]).evidence;

@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, appendFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assignmentVerdictResponseContract } from "../src/narrative-review-specialist.js";
+import { configurePiPolicy, guardPiBudget, PiBudgetPause } from "../src/job-pi-policy.js";
+import type { JobStartResult } from "../src/job.js";
 import type { SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import {
   recoverResponseContract, recoverWithOneFreshSession, ProtocolExhaustedError,
   beginProtocolInvocation, refuseReplayedProtocolInvocation,
+  inspectResumableProtocolExhaustion, resumeExhaustedFreshProtocol,
   type ResponseContractSession,
 } from "../src/response-contract-recovery.js";
 
@@ -85,6 +89,81 @@ test("planner/reviewer shared recovery has exactly one fresh session, separate t
         contract: "reviewer.assignment-verdict.v1", validate, parse },
       fresh: async () => { throw Error("Must never make a third session"); },
     }), /requires reconciliation/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("#210 exhausted reviewer budget pause admits no fallback until limit increases, then resumes without original replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nt-210-fresh-budget-"));
+  try {
+    const receiptFile = join(root, "review");
+    const originalFile = join(root, "original.jsonl");
+    const digest = "d".repeat(64);
+    const contract = "reviewer.assignment-verdict.v1";
+    const original = conversation("original-budget", invalid, [invalid, invalid]);
+    original.session.sessionManager.getSessionFile = () => originalFile;
+    const message = (text: string) => JSON.stringify({ type: "message", message: {
+      role: "assistant", stopReason: "stop", content: [{ type: "text", text }],
+    } }) + "\n";
+    await writeFile(originalFile, JSON.stringify({ type: "session", id: original.session.sessionId }) + "\n");
+    await beginProtocolInvocation({ receiptFile, sourceDigest: digest,
+      contract, session: original.session });
+    await appendFile(originalFile, message(invalid));
+    const originalPrompt = async (instruction: string) => {
+      await original.prompt(instruction);
+      await appendFile(originalFile, message(invalid));
+    };
+    const job = { stateDir: root } as JobStartResult;
+    await configurePiPolicy(job, { version: 1,
+      profile: { provider: "script", model: "script-model" }, limits: { steps: 0 } });
+    let freshStarts = 0;
+    let freshAllocations = 0;
+    const makeFresh = async () => {
+      freshAllocations++;
+      const name = "fresh-" + freshAllocations;
+      const file = join(root, name + ".jsonl");
+      const fresh = conversation(name, valid, []);
+      fresh.session.sessionManager.getSessionFile = () => file;
+      await writeFile(file, JSON.stringify({ type: "session", id: name }) + "\n");
+      return {
+        session: fresh.session,
+        admit: () => guardPiBudget(job, "assignment-fidelity:fresh"),
+        start: async () => {
+          freshStarts++;
+          await appendFile(file, message(valid));
+        },
+        prompt: fresh.prompt, dispose: () => {},
+      };
+    };
+    await assert.rejects(recoverWithOneFreshSession({
+      receiptFile, sourceDigest: digest,
+      initial: { session: original.session, prompt: originalPrompt,
+        contract, validate, parse },
+      fresh: makeFresh,
+    }), (error: unknown) => error instanceof PiBudgetPause && error.reason === "steps");
+    assert.equal(original.prompts.length, 2);
+    assert.equal(freshStarts, 0, "fallback had NO model call before budget admission");
+    assert.equal(existsSync(receiptFile + ".fresh-allowance.json"), false);
+    const first = JSON.parse(await readFile(receiptFile + ".initial.json", "utf8"));
+    assert.equal(first.status, "protocol-exhausted");
+    await inspectResumableProtocolExhaustion({ receiptFile, sourceDigest: digest,
+      contract, sessionRoots: [root], validate });
+    await configurePiPolicy(job, { version: 1,
+      profile: { provider: "script", model: "script-model" }, limits: { steps: 1 } });
+    const result = await resumeExhaustedFreshProtocol({
+      receiptFile, sourceDigest: digest, contract, sessionRoots: [root],
+      validate, parse, fresh: makeFresh,
+    });
+    assert.deepEqual(result, { status: "valid" });
+    assert.equal(original.prompts.length, 2, "original exhausted replies cannot rerun");
+    assert.equal(freshStarts, 1);
+    assert.equal(freshAllocations, 2, "only unadmitted fallback allocation is discarded");
+    const allowance = JSON.parse(await readFile(receiptFile + ".fresh-allowance.json", "utf8"));
+    assert.equal(allowance.freshSessionId, "fresh-2");
+    await assert.rejects(resumeExhaustedFreshProtocol({
+      receiptFile, sourceDigest: digest, contract, sessionRoots: [root],
+      validate, parse, fresh: makeFresh,
+    }), /already admitted/);
+    assert.equal(freshStarts, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

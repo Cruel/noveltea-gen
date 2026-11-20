@@ -331,11 +331,13 @@ export async function inspectCompletedProtocolResponse<T>(options: {
  * crash between response completion and their next Graph checkpoint. */
 export async function inspectCompletedProtocolReads(options: {
   receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
+  allowExhausted?: boolean;
 }): Promise<{ sessionFile: string; reads: string[] }> {
   const first = await regularJson<ContractReceipt>(options.receiptFile + ".initial.json");
   const fresh = await regularJson<ContractReceipt>(options.receiptFile + ".fresh.json");
   const selected = fresh ?? first;
-  if (!selected || selected.status !== "accepted" ||
+  if (!selected || !(selected.status === "accepted" ||
+      options.allowExhausted && selected.status === "protocol-exhausted") ||
       selected.sourceDigest !== options.sourceDigest ||
       selected.contract !== options.contract)
     throw new ProtocolIntegrityBlockedError("Accepted invocation has no source-bound terminal receipt");
@@ -469,71 +471,132 @@ export async function recoverResponseContract<T>(options: {
   throw new Error("Unreachable response-contract state.");
 }
 
-/** One optional source-bound fresh invocation after the original three complete
- * responses. The authorization is sealed BEFORE opening another Pi session.
- * An interrupted fallback must be reconciled, never silently replayed. */
-export async function recoverWithOneFreshSession<T>(options: {
-  initial: Parameters<typeof recoverResponseContract<T>>[0];
-  receiptFile: string;
-  sourceDigest: string;
-  fresh: () => Promise<{
-    session: ResponseContractSession;
-    start: () => Promise<void>;
-    prompt: (feedback: string) => Promise<void>;
-    beforeCorrection?: () => Promise<void>;
-    feedback?: (failures: readonly ResponseContractFailure[]) => string;
-    completed?: () => Promise<void>;
-    dispose: () => void;
-  }>;
-}): Promise<T> {
-  const firstFile = options.receiptFile + ".initial.json";
+/** A fresh reviewer is not committed until admission succeeds. Pre-admission
+ * budget pauses leave the exhausted first response sealed and resumable. */
+export interface FreshProtocolSession {
+  session: ResponseContractSession;
+  admit?: () => Promise<void>;
+  start: () => Promise<void>;
+  prompt: (feedback: string) => Promise<void>;
+  beforeCorrection?: () => Promise<void>;
+  feedback?: (failures: readonly ResponseContractFailure[]) => string;
+  completed?: () => Promise<void>;
+  dispose: () => void;
+}
+interface FreshProtocolRecovery<T> {
+  receiptFile: string; sourceDigest: string; contract: string;
+  validate: (text: string) => ResponseContractFailure[];
+  parse: (text: string) => T;
+  feedback?: (failures: readonly ResponseContractFailure[]) => string;
+  schema?: string;
+  fresh: () => Promise<FreshProtocolSession>;
+}
+
+/** Read the original persisted exhausted conversation before honoring an
+ * unconsumed fresh allowance after restart. Never rerun the initial prompt. */
+export async function inspectResumableProtocolExhaustion(options: {
+  receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
+  validate: (text: string) => ResponseContractFailure[];
+}): Promise<{ sessionId: string; sessionFile: string }> {
+  const { receiptFile, sourceDigest, contract, sessionRoots } = options;
+  if (await regularJson(receiptFile + ".fresh-allowance.json") ||
+      await regularJson(receiptFile + ".fresh.json"))
+    throw new ProtocolIntegrityBlockedError("Fresh fallback was already admitted");
+  const started = await regularJson<StartedInvocation>(receiptFile + ".started.json");
+  const first = await regularJson<ContractReceipt>(receiptFile + ".initial.json");
+  if (!started || !first || first.status !== "protocol-exhausted" ||
+      first.attempts !== 3 || first.responseOrdinal === undefined ||
+      started.version !== 1 || started.contract !== contract ||
+      started.sourceDigest !== sourceDigest ||
+      started.sessionId !== first.sessionId || started.sessionFile !== first.sessionFile)
+    throw new ProtocolIntegrityBlockedError("No exact source-bound exhausted invocation to resume");
+  checkedReceipt(first, sourceDigest, contract, started, null);
+  const evidence = await transcriptResponses(first.sessionFile, sessionRoots, first.sessionId);
+  const last = evidence.complete.at(-1);
+  const failures = last ? options.validate(last) : [];
+  if (!last || first.responseOrdinal !== evidence.complete.length ||
+      createHash("sha256").update(last).digest("hex") !== first.responseHash ||
+      !failures.length ||
+      JSON.stringify(failures.map(f => f.path)) !== JSON.stringify(first.failedPaths) ||
+      started.transcriptBytesBeforePrompt !== undefined &&
+        (evidence.bytes.length < started.transcriptBytesBeforePrompt ||
+          createHash("sha256").update(evidence.bytes.subarray(0,
+            started.transcriptBytesBeforePrompt)).digest("hex") !==
+              started.transcriptSha256BeforePrompt))
+    throw new ProtocolIntegrityBlockedError("Exhausted original response or receipt was altered");
+  return { sessionId: first.sessionId, sessionFile: first.sessionFile };
+}
+
+async function startAdmittedFresh<T>(options: FreshProtocolRecovery<T>,
+  original: { sessionId: string; sessionFile: string }): Promise<T> {
   const allowanceFile = options.receiptFile + ".fresh-allowance.json";
-  try {
-    return await recoverResponseContract({ ...options.initial,
-      sourceDigest: options.sourceDigest, receiptFile: firstFile });
-  } catch (error) {
-    if (!(error instanceof ProtocolExhaustedError)) throw error;
-  }
-  try {
-    await readFile(allowanceFile, "utf8");
-    throw new Error("Fresh protocol invocation already authorized; reconcile the preserved session.");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const sessionFile = options.initial.session.sessionManager.getSessionFile();
-  if (!sessionFile) throw new Error("Original protocol invocation has no transcript.");
-  const authorization = {
-    version: 1, contract: options.initial.contract, sourceDigest: options.sourceDigest,
-    originalInvocationId: invocationId(options.initial.contract,
-      options.initial.session.sessionId, sessionFile),
-    originalSessionId: options.initial.session.sessionId, originalSessionFile: sessionFile,
-    freshAllowanceConsumed: true, freshInvocationId: null as string | null,
-    freshSessionId: null as string | null,
-    freshSessionFile: null as string | null,
-  };
-  await saveReceipt(allowanceFile, authorization);
+  if (await regularJson(allowanceFile))
+    throw new ProtocolIntegrityBlockedError("Fresh allowance already consumed");
+  // Session creation and budget preflight can pause safely before the
+  // one-use allowance is committed; no fallback prompt has run yet.
   const fresh = await options.fresh();
   try {
     const file = fresh.session.sessionManager.getSessionFile();
-    if (!file || file === sessionFile || fresh.session.sessionId === authorization.originalSessionId)
+    if (!file || file === original.sessionFile ||
+        fresh.session.sessionId === original.sessionId)
       throw new Error("Fresh protocol recovery must use a separate durable Pi conversation.");
+    await fresh.admit?.();
     await saveReceipt(allowanceFile, {
-      ...authorization, freshSessionId: fresh.session.sessionId, freshSessionFile: file,
-      freshInvocationId: invocationId(options.initial.contract, fresh.session.sessionId, file),
+      version: 1, contract: options.contract, sourceDigest: options.sourceDigest,
+      originalInvocationId: invocationId(options.contract, original.sessionId, original.sessionFile),
+      originalSessionId: original.sessionId, originalSessionFile: original.sessionFile,
+      freshAllowanceConsumed: true,
+      freshSessionId: fresh.session.sessionId, freshSessionFile: file,
+      freshInvocationId: invocationId(options.contract, fresh.session.sessionId, file),
     });
+    // From this point onward an ambiguous execution blocks recovery; the
+    // allowance is never silently issued twice.
     await fresh.start();
     const result = await recoverResponseContract({
-      session: fresh.session, contract: options.initial.contract,
-      validate: options.initial.validate, parse: options.initial.parse,
+      session: fresh.session, contract: options.contract,
+      validate: options.validate, parse: options.parse,
       prompt: fresh.prompt, beforeCorrection: fresh.beforeCorrection,
-      feedback: fresh.feedback ?? options.initial.feedback,
-      schema: options.initial.schema,
-      sourceDigest: options.sourceDigest,
+      feedback: fresh.feedback ?? options.feedback,
+      schema: options.schema, sourceDigest: options.sourceDigest,
       receiptFile: options.receiptFile + ".fresh.json",
     });
     await fresh.completed?.();
     return result;
-  } finally {
-    fresh.dispose();
+  } finally { fresh.dispose(); }
+}
+
+/** Continue only a *verified* exhausted original invocation after a budget
+ * pause, never replaying the completed three-response original conversation. */
+export async function resumeExhaustedFreshProtocol<T>(options: FreshProtocolRecovery<T> & {
+  sessionRoots: string[];
+}): Promise<T> {
+  const original = await inspectResumableProtocolExhaustion(options);
+  return startAdmittedFresh(options, original);
+}
+
+/** One optional source-bound fresh invocation after the original three complete
+ * responses. The allowance is sealed after budget admission and before the
+ * fallback's first model prompt. */
+export async function recoverWithOneFreshSession<T>(options: {
+  initial: Parameters<typeof recoverResponseContract<T>>[0];
+  receiptFile: string;
+  sourceDigest: string;
+  fresh: () => Promise<FreshProtocolSession>;
+}): Promise<T> {
+  try {
+    return await recoverResponseContract({ ...options.initial,
+      sourceDigest: options.sourceDigest,
+      receiptFile: options.receiptFile + ".initial.json" });
+  } catch (error) {
+    if (!(error instanceof ProtocolExhaustedError)) throw error;
   }
+  const sessionFile = options.initial.session.sessionManager.getSessionFile();
+  if (!sessionFile) throw Error("Original protocol invocation has no transcript.");
+  return startAdmittedFresh({
+    receiptFile: options.receiptFile, sourceDigest: options.sourceDigest,
+    contract: options.initial.contract,
+    validate: options.initial.validate, parse: options.initial.parse,
+    feedback: options.initial.feedback, schema: options.initial.schema,
+    fresh: options.fresh,
+  }, { sessionId: options.initial.session.sessionId, sessionFile });
 }

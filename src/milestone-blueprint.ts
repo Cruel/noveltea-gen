@@ -38,10 +38,14 @@ export interface MilestoneBlueprint {
   downstream: Array<{ owner: Owner; obligation: string }>;
 }
 export interface MilestoneBlueprintReview {
-  schema: "noveltea-milestone-blueprint-review/v1";
+  /** v1 remains readable for previously sealed plans; new Pi verdicts use v2. */
+  schema: "noveltea-milestone-blueprint-review/v1" | "noveltea-milestone-blueprint-review/v2";
   status: "pass" | "revise";
   findings: Array<{ eventId: string; anchorPath: string; requirement: string;
     reason: string; correction: string }>;
+  prior?: Array<{ round: number; findingIndex: number;
+    status: "resolved" | "improved" | "persisting" | "regressed";
+    reason: string; evidence: { eventId: string; quote: string } }>;
 }
 interface Lineage {
   jobId: string; threadId: string; baseSha: string; executionHead: string;
@@ -65,13 +69,15 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
     const prior = rounds[i - 1]!;
     const current = rounds[i]!;
     const oscillating = rounds.slice(0, i).some(r => r.draftDigest === current.draftDigest);
-    const previousBlockers = prior.review.findings;
-    const remaining = new Set(current.review.findings.map(f => f.eventId + "\0" + f.anchorPath));
-    const improved = !oscillating && previousBlockers.some(f => {
-      const before = prior.draft.events.find(e => e.id === f.eventId);
-      const after = current.draft.events.find(e => e.id === f.eventId);
-      return !remaining.has(f.eventId + "\0" + f.anchorPath) &&
-        !!before && !!after && sha(before) !== sha(after);
+    const improved = !oscillating && (current.review.prior ?? []).some(p => {
+      if (p.status !== "resolved" && p.status !== "improved") return false;
+      const finding = rounds[p.round]?.review.findings[p.findingIndex];
+      if (!finding || finding.eventId !== p.evidence.eventId) return false;
+      const before = prior.draft.events.find(e => e.id === finding.eventId);
+      const after = current.draft.events.find(e => e.id === finding.eventId);
+      return !!before && !!after && sha(before) !== sha(after) &&
+        JSON.stringify(after).includes(p.evidence.quote) &&
+        !JSON.stringify(before).includes(p.evidence.quote);
     });
     stalled = improved ? 0 : stalled + 1;
   }
@@ -170,11 +176,15 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
   return raw as unknown as MilestoneBlueprint;
 }
 export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlueprint,
-  assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">): MilestoneBlueprintReview {
+  assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">,
+  previous: readonly Round[] = []): MilestoneBlueprintReview {
   let raw: unknown;
   try { raw = parse(text); } catch { throw Error("Independent Milestone review returned invalid JSON."); }
-  if (!exact(raw, ["schema", "status", "findings"]) ||
-      raw.schema !== "noveltea-milestone-blueprint-review/v1" ||
+  const current = object(raw) && raw.schema === "noveltea-milestone-blueprint-review/v2";
+  if (!exact(raw, current ? ["schema", "status", "findings", "prior"] :
+        ["schema", "status", "findings"]) ||
+      (current ? raw.schema !== "noveltea-milestone-blueprint-review/v2" :
+        raw.schema !== "noveltea-milestone-blueprint-review/v1") ||
       !["pass", "revise"].includes(String(raw.status)) ||
       !Array.isArray(raw.findings) || raw.findings.length > 12 ||
       (raw.status === "pass") !== (raw.findings.length === 0))
@@ -185,6 +195,30 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
         !assignment.sourcePaths.includes(String(item.anchorPath)) ||
         ![item.requirement, item.reason, item.correction].every(v => string(v)))
       throw Error("Independent Milestone review finding has no current Event/source evidence.");
+  }
+  if (current) {
+    const review = raw as unknown as MilestoneBlueprintReview;
+    const count = previous.reduce((total, round) => total + round.review.findings.length, 0);
+    if (!Array.isArray(review.prior) || review.prior.length !== count)
+      throw Error("Milestone review must account for every prior material finding.");
+    const seen = new Set<string>();
+    for (const p of review.prior) {
+      const key = p.round + ":" + p.findingIndex;
+      const original = previous[p.round]?.review.findings[p.findingIndex];
+      const event = draft.events.find(item => item.id === original?.eventId);
+      if (!Number.isSafeInteger(p.round) || !Number.isSafeInteger(p.findingIndex) ||
+          seen.has(key) || !original ||
+          !["resolved", "improved", "persisting", "regressed"].includes(p.status) ||
+          !string(p.reason) ||
+          !exact(p.evidence, ["eventId", "quote"]) ||
+          p.evidence.eventId !== original.eventId ||
+          !string(p.evidence.quote) || p.evidence.quote.length < 8 ||
+          !event || !JSON.stringify(event).includes(p.evidence.quote))
+        throw Error("Milestone previous finding assessment lacks exact current Event evidence.");
+      seen.add(key);
+    }
+    if (review.status === "pass" && review.prior.some(p => p.status !== "resolved"))
+      throw Error("Milestone reviewer cannot pass with unresolved historical blockers.");
   }
   return raw as unknown as MilestoneBlueprintReview;
 }
@@ -238,9 +272,10 @@ function pinOf(value: Receipt): MilestoneBlueprintPin {
 }
 function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
   "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">) {
-  for (const round of value.rounds) {
+  for (const [index, round] of value.rounds.entries()) {
     const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment);
-    const review = parseMilestoneBlueprintReview(JSON.stringify(round.review), draft, assignment);
+    const review = parseMilestoneBlueprintReview(JSON.stringify(round.review), draft,
+      assignment, value.rounds.slice(0, index));
     if (round.draftDigest !== sha(draft) || round.reviewDigest !== sha(review))
       throw Error("Milestone review evidence changed after its sealed verdict.");
   }
@@ -310,10 +345,15 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "Do not insist on canon or playable prose not yet authored, and do not call a future stage's " +
     "obligation a current-stage blocker. Flag actual unsupported/contradictory plan claims with an " +
     "EXISTING anchorPath and proposed eventId. Preserve your prior findings and reassess the actual " +
-    "new draft, distinguishing resolved blockers and regressions. A pass has no findings; revise " +
-    "must contain actual material blockers. Return ONLY JSON " +
-    "{schema:'noveltea-milestone-blueprint-review/v1',status:'pass|revise'," +
-    "findings:[{eventId,anchorPath,requirement,reason,correction}]}. " +
+    "new draft, distinguishing resolved blockers and regressions. Assess EACH prior " +
+    "finding by exact round and findingIndex, including distinct findings on the same " +
+    "Event/source path. Cosmetic rewrites and newly discovered blockers alone are not " +
+    "progress. A pass has no findings and every previous finding resolved; revise " +
+    "reports material blockers. Return ONLY JSON " +
+    "{schema:'noveltea-milestone-blueprint-review/v2',status:'pass|revise'," +
+    "findings:[{eventId,anchorPath,requirement,reason,correction}]," +
+    "prior:[{round,findingIndex,status:'resolved|improved|persisting|regressed'," +
+    "reason,evidence:{eventId,quote:exact CURRENT Event text 8+ chars}}]}. " +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
     "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map(r => ({ draftDigest: r.draftDigest,
       review: r.review }))) + "\nCURRENT PLAN: " + JSON.stringify(draft);
@@ -527,7 +567,10 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
         reviewerPrompt(assignment, receipt.draft, receipt.rounds));
       verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
-      const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft, assignment);
+      const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft,
+        assignment, receipt.rounds);
+      if (verdict.schema !== "noveltea-milestone-blueprint-review/v2")
+        throw Error("New Milestone reviews require per-finding source-grounded reassessment.");
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
       receipt.reviewer = await seal(reviewer.session);
       const previousRound = receipt.rounds.at(-1);

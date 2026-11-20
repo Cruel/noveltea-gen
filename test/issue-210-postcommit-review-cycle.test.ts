@@ -329,6 +329,17 @@ test("#210 bounded protocol-fresh handoff preserves review identity and refuses 
     assert.equal(fresh.protocolFresh, true);
     addReview(newFile, "fresh full independent source review");
     await acceptPostcommitReviewRound(job, p, verdict(p, false), fresh);
+    const corrected = packet(second, true);
+    const resumed = await openPostcommitReviewCycle(job, corrected,
+      snapshot, "openai", "gpt-6");
+    assert.deepEqual(resumed?.reviewer, replacement,
+      "a negative protocol-fresh fallback must continue onto the corrected commit");
+    assert.equal(resumed?.protocolFresh, true);
+    const continued = await bindPostcommitReviewCycle(job, corrected, snapshot,
+      "openai", "gpt-6", undefined, replacement, writer);
+    assert.equal(continued?.id, fresh.id);
+    addReview(newFile, "corrected successor retains original negative review and read-only methodology");
+    await acceptPostcommitReviewRound(job, corrected, verdict(corrected, true), continued!);
     await assert.rejects(
       () => replacePostcommitProtocolReviewer(job, p, fresh, reviewer),
       /cannot be replaced/,

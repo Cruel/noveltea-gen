@@ -221,9 +221,11 @@ function promptText(messages: readonly unknown[]): string {
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
 function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-pass" | "continue" | "repeat" = "productive",
-  crashFirstReviewer = false): Provider {
+  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean }): Provider {
   let reviewerRound = 0;
   let reviewerCrashed = false;
+  let malformedDiagnosticSent = false;
+  let malformedReplacementSent = false;
   let writerRound = 0;
   let protocolRepaired = false;
   const verdicts = scenario === "productive"
@@ -239,6 +241,24 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
         findings: [{ ...negative.findings[0]!, origin: "continuing" as const }],
       }))]
       : [negative, stalled1, stalled2];
+  const diagnosticAnswer = {
+    schema: "noveltea-blueprint-diagnosis/v1",
+    action: scenario === "replace-pass" ? "replace" :
+      scenario === "continue" || scenario === "repeat" ? "continue" : "escalate",
+    explanation: "Two ineffective source changes require independent escalation, not automatic approval.",
+    assessments: [{ kind: "material",
+      reason: "The source still lacks the independently verified arrival evidence.",
+      requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
+      evidence: { beatId: "arrival", quote: "A dated departure entry establishes when the clerk went missing" },
+    }],
+  };
+  const replacementAnswer = {
+    schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
+    prior: [0, 1, 2].map(round => ({ round, findingIndex: 0, status: "resolved",
+      reason: "The original reviewer did not account for the independent shelter record.",
+      evidence: { beatId: "archive", quote: "The dated gate and shift logs confirm entry without witness testimony" },
+    })),
+  };
   const writerPatches = scenario === "productive" ? corrections : scenario === "continue"
     ? [...stalledPatches, corrections[0]!] : scenario === "repeat"
       ? [...stalledPatches, ...stalledPatches] : stalledPatches;
@@ -292,24 +312,18 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
       content = asText(evidence.map(v => JSON.stringify(v)).join("\n"));
     else if (prompt.includes("READ-ONLY SOURCE-GROUNDED CAUSAL OBLIGATION INVENTORY"))
       content = asText(JSON.stringify(obligation));
-    else if (diagnostic) content = asText(JSON.stringify({
-      schema: "noveltea-blueprint-diagnosis/v1",
-      action: scenario === "replace-pass" ? "replace" :
-        scenario === "continue" || scenario === "repeat" ? "continue" : "escalate",
-      explanation: "Two ineffective source changes require independent escalation, not automatic approval.",
-      assessments: [{ kind: "material",
-        reason: "The source still lacks the independently verified arrival evidence.",
-        requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
-        evidence: { beatId: "arrival", quote: "A dated departure entry establishes when the clerk went missing" },
-      }],
-    }));
-    else if (replacement) content = asText(JSON.stringify({
-      schema: "noveltea-blueprint-review/v2", status: "pass", findings: [],
-      prior: [0, 1, 2].map(round => ({ round, findingIndex: 0, status: "resolved",
-        reason: "The original reviewer did not account for the independent shelter record.",
-        evidence: { beatId: "archive", quote: "The dated gate and shift logs confirm entry without witness testimony" },
-      })),
-    }));
+    else if (diagnostic) {
+      const invalid = format?.diagnostic && !malformedDiagnosticSent;
+      if (invalid) malformedDiagnosticSent = true;
+      content = asText(invalid ? '{"invalidDiagnosis":true}' : JSON.stringify(diagnosticAnswer));
+    } else if (replacement) {
+      const invalid = format?.replacement && !malformedReplacementSent;
+      if (invalid) malformedReplacementSent = true;
+      content = asText(invalid ? '{"invalidReplacement":true}' : JSON.stringify(replacementAnswer));
+    } else if (prompt.includes("CONTROLLER REJECTED DIAGNOSTIC RESPONSE"))
+      content = asText(JSON.stringify(diagnosticAnswer));
+    else if (prompt.includes("CONTROLLER REJECTED REPLACEMENT REVIEW PROTOCOL"))
+      content = asText(JSON.stringify(replacementAnswer));
     else if (reviewer) {
       const round = reviewerRound++;
       // Round 2 intentionally violates the response contract once. Its
@@ -384,6 +398,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
   let controller: SandboxController | undefined;
   let stalledJobId: string | undefined;
   let disputedJobId: string | undefined;
+  const formatJobIds: string[] = [];
   let resumedJobId: string | undefined;
   let repeatedJobId: string | undefined;
   let graphJobId: string | undefined;
@@ -683,6 +698,75 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       await assert.rejects(readApprovedBlueprint(disputed, plan, snapshot,
         model.provider, model.id, task, baseSha), /diagnosis changed its source/);
     } finally { writeFileSync(diagnosticFile, diagnosticBytes); }
+
+    // When budget expires AFTER a malformed diagnostic or replacement
+    // response, resume corrects it in the SAME independent Pi conversation.
+    // Neither assessment may run a second time or gain a new reviewer.
+    for (const role of ["diagnostic", "replacement"] as const) {
+      const formatId = randomUUID();
+      formatJobIds.push(formatId);
+      const formatDb = new DatabaseSync(join(app, "studio.sqlite"));
+      try {
+        formatDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+          .run(formatId, owner, "story", baseSha, null);
+      } finally { formatDb.close(); }
+      const formatJob = await startStoryJob({
+        story, job: formatId, worktreeCacheRoot: scoped,
+      });
+      const formatCalls: Call[] = [];
+      const formatRuntime = await ModelRuntime.create({
+        modelsPath: null, refreshOnCreate: false,
+      });
+      formatRuntime.registerNativeProvider(scripted(formatCalls, "replace-pass", false,
+        role === "diagnostic" ? { diagnostic: true } : { replacement: true }));
+      await formatRuntime.refresh({ allowNetwork: false });
+      const runFormat = () => withJobModelRuntime(formatRuntime, () =>
+        withStoryJobLock(formatJob, "global-architecture", () =>
+          createReviewedBlueprint(formatJob, snapshot, plan,
+            model.provider, model.id, task, baseSha)));
+      // Baseline has two calls for the initial independent diagnostic;
+      // replacement adds a read and a verdict call before its correction.
+      const exhaustedAt = stalledModelCalls + (role === "replacement" ? 2 : 0);
+      await configurePiPolicy(formatJob, { version: 1,
+        profile: { provider: model.provider, model: model.id },
+        limits: { modelCalls: exhaustedAt } });
+      await assert.rejects(runFormat(), (error: unknown) =>
+        error instanceof PiBudgetPause && error.reason === "modelCalls");
+      const planDir = join(formatJob.stateDir, "architecture-blueprints");
+      const marker = join(planDir, "plan-1-" + role + "-format-pending-2.json");
+      assert.ok(existsSync(marker), "malformed first " + role + " response is sealed before pause");
+      const pending = JSON.parse(readFileSync(marker, "utf8"));
+      const savedSessionId = pending.sessionId;
+      const startedCalls = formatCalls.filter(c =>
+        role === "diagnostic" ?
+          c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW") :
+          c.prompt.includes("YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER")).length;
+      assert.ok(startedCalls >= 1);
+      assert.deepEqual(await inspectPausedBlueprint(formatJob, plan, snapshot,
+        model.provider, model.id, task, baseSha),
+        { boundary: role, nextVersion: 2 });
+      const before = readFileSync(marker);
+      try {
+        writeFileSync(marker, JSON.stringify({ ...pending, transcriptDigest: "0".repeat(64) }));
+        await configurePiPolicy(formatJob, { version: 1,
+          profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 60 } });
+        await assert.rejects(runFormat(), /malformed-answer transcript|review lineage/);
+      } finally { writeFileSync(marker, before); }
+      const approved = await runFormat();
+      assert.equal(approved.draftVersion, 2);
+      const finalReceipt = JSON.parse(readFileSync(join(planDir,
+        "plan-1-" + role + "-2.json"), "utf8"));
+      assert.equal(finalReceipt.sessionId, savedSessionId,
+        "format correction retains exact independent " + role + " session");
+      assert.equal(formatCalls.filter(c =>
+        role === "diagnostic" ?
+          c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW") :
+          c.prompt.includes("YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER")).length,
+        startedCalls, "an assessment is not repeated when resuming format-only correction");
+      assert.ok(formatCalls.some(c => c.prompt.includes(
+        role === "diagnostic" ? "CONTROLLER REJECTED DIAGNOSTIC RESPONSE" :
+          "CONTROLLER REJECTED REPLACEMENT REVIEW PROTOCOL")));
+    }
 
     // A diagnosis may instead authorize exactly one more bounded attempt.
     // It must retain the original reviewer session, not auto-approve drift.
@@ -995,6 +1079,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     if (controller && graphJobId) await controller.dispose(graphJobId);
     if (controller && repeatedJobId) await controller.dispose(repeatedJobId);
     if (controller && resumedJobId) await controller.dispose(resumedJobId);
+    if (controller) for (const formatId of formatJobIds) await controller.dispose(formatId);
     if (controller && disputedJobId) await controller.dispose(disputedJobId);
     if (controller && stalledJobId) await controller.dispose(stalledJobId);
     if (controller) await controller.dispose(id);

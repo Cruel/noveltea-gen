@@ -264,6 +264,9 @@ const diagnosticPath = (job: JobStartResult, version: number, iteration: number)
   join(root(job), "plan-" + version + "-diagnostic-" + iteration + ".json");
 const replacementPath = (job: JobStartResult, version: number, iteration: number) =>
   join(root(job), "plan-" + version + "-replacement-" + iteration + ".json");
+const formatPendingPath = (job: JobStartResult, version: number, iteration: number,
+  role: "diagnostic" | "replacement") =>
+  join(root(job), "plan-" + version + "-" + role + "-format-pending-" + iteration + ".json");
 const pausePath = (job: JobStartResult, version: number, iteration: number,
   boundary: "writer" | "review" | "diagnostic" | "replacement") =>
   join(root(job), "plan-" + version + "-pause-" + iteration + "-" + boundary + ".json");
@@ -424,6 +427,58 @@ interface BlueprintDiagnosticReceipt {
   sessionFile: string;
   transcriptBytes: number;
   transcriptDigest: string;
+}
+/** A budget pause AFTER a malformed independent verdict needs the same
+ * conversation's sealed first answer, not another semantic assessment. */
+interface BlueprintFormatPending {
+  schema: "noveltea-blueprint-format-pending/v1";
+  cycleId: string; role: "diagnostic" | "replacement"; round: number;
+  draftDigest: string; reviewDigest: string;
+  writerSessionId: string; reviewerSessionId: string;
+  sessionId: string; sessionFile: string;
+  transcriptBytes: number; transcriptDigest: string;
+}
+async function readBlueprintFormatPending(job: JobStartResult, plan: Plan,
+  role: BlueprintFormatPending["role"], cycleId: string, rounds: readonly ReviewRound[],
+  writer: { id: string }, reviewer: { id: string }): Promise<BlueprintFormatPending | null> {
+  const round = rounds.length - 1;
+  const file = formatPendingPath(job, plan.version, round, role);
+  if (!existsSync(file)) return null;
+  const value = await safeRead(file, root(job)) as BlueprintFormatPending;
+  if (!strict(value, ["schema", "cycleId", "role", "round", "draftDigest", "reviewDigest",
+        "writerSessionId", "reviewerSessionId", "sessionId", "sessionFile",
+        "transcriptBytes", "transcriptDigest"]) ||
+      value.schema !== "noveltea-blueprint-format-pending/v1" ||
+      value.cycleId !== cycleId || value.role !== role || value.round !== round ||
+      value.draftDigest !== sha(rounds.at(-1)!.blueprint) ||
+      value.reviewDigest !== sha(rounds.at(-1)!.verdict) ||
+      value.writerSessionId !== writer.id || value.reviewerSessionId !== reviewer.id ||
+      [writer.id, reviewer.id].includes(value.sessionId) ||
+      !HASH.test(value.transcriptDigest) ||
+      !Number.isSafeInteger(value.transcriptBytes) || value.transcriptBytes < 1)
+    throw Error("Blueprint pending format correction has changed its review lineage.");
+  const directory = role === "diagnostic" ?
+    "architecture-blueprint-diagnostic-sessions" : "architecture-blueprint-review-sessions";
+  await transcript(job, value.sessionFile, value.sessionId, directory);
+  const bytes = await readFile(value.sessionFile);
+  if (bytes.length !== value.transcriptBytes ||
+      createHash("sha256").update(bytes).digest("hex") !== value.transcriptDigest)
+    throw Error("Blueprint malformed-answer transcript changed after the format budget pause.");
+  return value;
+}
+async function sealBlueprintFormatPending(job: JobStartResult, plan: Plan,
+  role: BlueprintFormatPending["role"], cycleId: string, rounds: readonly ReviewRound[],
+  writer: { id: string }, reviewer: { id: string },
+  session: { id: string; file: string }): Promise<void> {
+  const bytes = await readFile(session.file);
+  await immutable(formatPendingPath(job, plan.version, rounds.length - 1, role), {
+    schema: "noveltea-blueprint-format-pending/v1", cycleId, role, round: rounds.length - 1,
+    draftDigest: sha(rounds.at(-1)!.blueprint), reviewDigest: sha(rounds.at(-1)!.verdict),
+    writerSessionId: writer.id, reviewerSessionId: reviewer.id,
+    sessionId: session.id, sessionFile: session.file,
+    transcriptBytes: bytes.length,
+    transcriptDigest: createHash("sha256").update(bytes).digest("hex"),
+  } satisfies BlueprintFormatPending);
 }
 interface BlueprintReplacementReceipt {
   schema: "noveltea-blueprint-replacement-receipt/v1";
@@ -649,7 +704,7 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
         throw Error("Approved causal blueprint or independent verdict changed after review.");
     } else {
       const patch = await safeRead(patchPath(job, plan.version, i + 1), root(job));
-      blueprint = applyBlueprintPatch(blueprint, effective, patch).blueprint;
+      blueprint = applyBlueprintPatch(blueprint, effective, patch, "sealed-replay").blueprint;
     }
   }
   await transcript(job, record.plannerSessionFile, record.plannerSessionId, "architecture-blueprint-sessions");
@@ -870,7 +925,8 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
       throw Error("Causal blueprint writer progressed beyond its safe pause; inspect Pi evidence.");
   } else if (boundary === "review") {
     nextPatch = await safeRead(patchPath(job, plan.version, version), root(job));
-    nextDraft = applyBlueprintPatch(verified.blueprint, verified.rounds.at(-1)!.verdict, nextPatch).blueprint;
+    nextDraft = applyBlueprintPatch(verified.blueprint, verified.rounds.at(-1)!.verdict,
+      nextPatch, "sealed-replay").blueprint;
     const stored = await safeRead(draftPath(job, plan.version, version), root(job));
     if (sha(stored) !== marker.nextDraftDigest || sha(nextDraft) !== marker.nextDraftDigest)
       throw Error("Causal blueprint paused draft does not match its sealed source patch.");
@@ -1398,15 +1454,18 @@ async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSna
     if (historical.caseFingerprint === fingerprint)
       throw Error("Diagnostic review requires author-guided escalation for identical source evidence.");
   }
+  const pendingFormat = await readBlueprintFormatPending(job, plan,
+    "diagnostic", cycleId, rounds, writer, reviewer);
   const diagnosisSession = await sessionFor(job, snapshot, provider, model,
     "blueprint-diagnostic:" + cycleId + ":" + version,
-    "architecture-blueprint-diagnostic-sessions");
+    "architecture-blueprint-diagnostic-sessions",
+    pendingFormat ? { id: pendingFormat.sessionId, file: pendingFormat.sessionFile } : undefined);
   try {
     if ([writer.id, reviewer.id].includes(diagnosisSession.session.sessionId) ||
         [writer.file, reviewer.file].includes(diagnosisSession.file))
       throw Error("Diagnostic reviewer is not independent of the Review cycle.");
-    const start = diagnosisSession.session.messages.length;
-    await promptStorySpecialist(diagnosisSession.session,
+    const start = pendingFormat ? 0 : diagnosisSession.session.messages.length;
+    if (!pendingFormat) await promptStorySpecialist(diagnosisSession.session,
       diagnosisSession.context.contextNote +
       "INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW. " +
       "Read skill://nt-story-architecture/SKILL.md, skill://nt-catalog/SKILL.md " +
@@ -1451,7 +1510,21 @@ async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSna
     let diagnosis: BlueprintDiagnosis;
     try { diagnosis = parse(); }
     catch (error) {
-      await diagnosisSession.context.beforeTurn(diagnosisSession.file);
+      if (!pendingFormat) {
+        try { await diagnosisSession.context.beforeTurn(diagnosisSession.file); }
+        catch (pause) {
+          if (pause instanceof PiBudgetPause) {
+            // Seal the malformed original BEFORE persisting resumable context:
+            // a crash between these writes must never permit a fresh verdict.
+            await sealBlueprintFormatPending(job, plan, "diagnostic",
+              cycleId, rounds, writer, reviewer,
+              { id: diagnosisSession.session.sessionId, file: diagnosisSession.file });
+            await diagnosisSession.context.completed(diagnosisSession.file,
+              diagnosisSession.session.sessionId);
+          }
+          throw pause;
+        }
+      }
       await promptStorySpecialist(diagnosisSession.session,
         "CONTROLLER REJECTED DIAGNOSTIC RESPONSE: " +
         (error instanceof Error ? error.message : "invalid evidence") +
@@ -1495,15 +1568,18 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
     throw Error("Only an independently diagnosed reviewer replacement is permitted.");
   if (existsSync(replacementPath(job, plan.version, version)))
     throw Error("Completed replacement review must be resumed from its sealed writer boundary.");
+  const pendingFormat = await readBlueprintFormatPending(job, plan,
+    "replacement", cycleId, rounds, writer, reviewer);
   const fresh = await sessionFor(job, snapshot, provider, model,
     "blueprint-review-replacement:" + cycleId + ":" + version,
-    "architecture-blueprint-review-sessions");
+    "architecture-blueprint-review-sessions",
+    pendingFormat ? { id: pendingFormat.sessionId, file: pendingFormat.sessionFile } : undefined);
   try {
     if ([writer.id, reviewer.id, diagnosis.sessionId].includes(fresh.session.sessionId) ||
         [writer.file, reviewer.file, diagnosis.sessionFile].includes(fresh.file))
       throw Error("Replacement reviewer reused a writer, diagnostic or disputed review session.");
-    const start = fresh.session.messages.length;
-    await promptStorySpecialist(fresh.session,
+    const start = pendingFormat ? 0 : fresh.session.messages.length;
+    if (!pendingFormat) await promptStorySpecialist(fresh.session,
       fresh.context.contextNote +
       "YOU ARE A FRESH, INDEPENDENT REPLACEMENT REVIEWER. " +
       "The previous negative verdict and diagnosis are historical evidence, " +
@@ -1524,7 +1600,18 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
     let verdict: ConvergentReview;
     try { verdict = parse(); }
     catch (error) {
-      await fresh.context.beforeTurn(fresh.file);
+      if (!pendingFormat) {
+        try { await fresh.context.beforeTurn(fresh.file); }
+        catch (pause) {
+          if (pause instanceof PiBudgetPause) {
+            await sealBlueprintFormatPending(job, plan, "replacement",
+              cycleId, rounds, writer, reviewer,
+              { id: fresh.session.sessionId, file: fresh.file });
+            await fresh.context.completed(fresh.file, fresh.session.sessionId);
+          }
+          throw pause;
+        }
+      }
       await promptStorySpecialist(fresh.session,
         "CONTROLLER REJECTED REPLACEMENT REVIEW PROTOCOL: " +
         (error instanceof Error ? error.message : "invalid reviewer evidence") +
@@ -1697,13 +1784,18 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       nextVersion: number, pin: BlueprintPin, nextDraftDigest: string | null) => {
       const writerBytes = await readFile(planner.file);
       const reviewerBytes = await readFile(reviewer!.file);
-      await immutable(pausePath(job, plan.version, nextVersion, boundary), {
+      const marker: BlueprintPause = {
         schema: "noveltea-blueprint-safe-pause/v1", boundary, nextVersion, pin, nextDraftDigest,
         writerTranscriptBytes: writerBytes.length,
         writerTranscriptDigest: createHash("sha256").update(writerBytes).digest("hex"),
         reviewerTranscriptBytes: reviewerBytes.length,
         reviewerTranscriptDigest: createHash("sha256").update(reviewerBytes).digest("hex"),
-      } satisfies BlueprintPause);
+      };
+      const target = pausePath(job, plan.version, nextVersion, boundary);
+      if (existsSync(target)) {
+        if (!isDeepStrictEqual(await safeRead(target, root(job)), marker))
+          throw Error("Repeated Blueprint budget pause changed its original sealed boundary.");
+      } else await immutable(target, marker);
     };
     let lastPin: BlueprintPin | undefined = paused?.pin;
     for (let version = paused?.nextVersion ?? 0; ; version++) {

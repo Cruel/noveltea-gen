@@ -25,6 +25,7 @@ import { normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKind
 import type { TurnFulfillmentPacket, TurnFulfillmentVerdict } from "./turn-fulfillment.js";
 import { validateTurnFulfillment } from "./turn-fulfillment.js";
 import { beginProtocolInvocation, recoverWithOneFreshSession, refuseReplayedProtocolInvocation,
+  resumeExhaustedFreshProtocol, inspectResumableProtocolExhaustion, ProtocolExhaustedError,
   inspectCompletedProtocolResponse, inspectCompletedProtocolReads,
   ProtocolIntegrityBlockedError, type ResponseContractFailure } from "./response-contract-recovery.js";
 
@@ -623,20 +624,103 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
   };
   const protocolReceipt = join(job.stateDir, "review-protocol", "assignment-" + packet.sourceDigest);
   const contractName = "reviewer.assignment-verdict.v1";
+  const feedback = (failures: readonly ResponseContractFailure[]) => {
+    const exact = packet.items.map(item => ({ assignmentId: item.assignment.id,
+      commitSha: item.assurance.commitSha,
+      paths: item.assurance.changedPaths.map(path => ({ path,
+        lines: item.canonicalContext.find(c => c.path === path)?.content.split("\n").length ?? 0 })) }));
+    return "RESPONSE-CONTRACT CORRECTION ONLY (reviewer.assignment-verdict.v1). " +
+      "Return one complete unfenced JSON object in this SAME Pi conversation. " +
+      "No tools, edits, new Story work or new review assignment. Preserve ALL " +
+      "original negative findings, their message, correction, affected paths and FAIL verdict; " +
+      "a legitimate FAIL can NEVER become PASS to meet this format. " +
+      "Failed paths:\n" + failures.map(f => f.path + ": " + f.expected).join("\n") +
+      "\nsourceDigest must be " + packet.sourceDigest +
+      "\nImmutable source records (for formatting, NOT write permission): " +
+      JSON.stringify(exact);
+  };
+  const responseContract = assignmentVerdictResponseContract(packet);
+  const required = pinnedSourcePaths(snapshot, boundedPinnedSources("nt-narrative-review"));
+  let freshIdentity: { id: string; file: string } | undefined;
+  const openFresh = async () => {
+    const opened = await sessionFor(job, snapshot, provider, model, thinking,
+      "review", undefined, assignment, "assignment-fidelity", true, scope);
+    const next = opened.session;
+    const nextFile = next.sessionManager.getSessionFile();
+    if (!nextFile) { next.dispose(); throw Error("Fresh reviewer lacks transcript."); }
+    freshIdentity = { id: next.sessionId, file: nextFile };
+    return {
+      session: next,
+      // Admission precedes the one-time fallback allowance and first prompt.
+      // A budget pause here leaves the original exhausted reviewer sealed.
+      admit: () => opened.context!.beforeTurn(nextFile),
+      start: async () => {
+        await onSession(nextFile);
+        await promptStorySpecialist(next, assignmentFidelityPrompt(snapshot, packet));
+        const unread = required.filter(path =>
+          !completedReads(next, job.worktreeStoryRoot, snapshot.path).includes(path));
+        if (unread.length)
+          throw Error("Fresh reviewer omitted required pinned methodology reads.");
+      },
+      prompt: (text: string) => promptStorySpecialist(next, text),
+      beforeCorrection: () => opened.context!.beforeTurn(nextFile),
+      completed: async () => {
+        const outOfSnapshot = completedReads(next, job.worktreeStoryRoot, snapshot.path)
+          .filter(path => !reviewerPinnedSkillPath(snapshot.path, path));
+        if (outOfSnapshot.length)
+          throw Error("Fresh assignment reviewer read outside sealed skill snapshot.");
+        await opened.context!.completed(nextFile, next.sessionId);
+      },
+      dispose: () => next.dispose(),
+    };
+  };
   if ([".started.json", ".initial.json", ".fresh-allowance.json", ".fresh.json"].some(suffix =>
     existsSync(protocolReceipt + suffix))) {
-    const responseContract = assignmentVerdictResponseContract(packet);
     const sessionRoots = [join(job.stateDir, "review-sessions", "assignment-fidelity")];
-    const verdict = await inspectCompletedProtocolResponse({
-      receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
-      contract: contractName, sessionRoots,
-      validate: responseContract.validate, parse: responseContract.parse,
-    });
+    let verdict: SemanticVerdict;
+    try {
+      verdict = await inspectCompletedProtocolResponse({
+        receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+        contract: contractName, sessionRoots,
+        validate: responseContract.validate, parse: responseContract.parse,
+      });
+    } catch (error) {
+      if (!(error instanceof ProtocolExhaustedError) ||
+          existsSync(protocolReceipt + ".fresh-allowance.json") || !existingCycle)
+        throw error;
+      // The original three responses were completed and rejected before a
+      // budget pause. Verify their exact transcript, source and methods,
+      // then admit ONLY the never-started fallback session.
+      const original = await inspectResumableProtocolExhaustion({
+        receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+        contract: contractName, sessionRoots, validate: responseContract.validate,
+      });
+      const originalReads = await inspectCompletedProtocolReads({
+        receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+        contract: contractName, sessionRoots, allowExhausted: true,
+      });
+      const reads = originalReads.reads.map(path =>
+        canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
+      if (original.sessionFile !== existingCycle.reviewer.file ||
+          required.some(path => !reads.includes(path)) ||
+          reads.some(path => !reviewerPinnedSkillPath(snapshot.path, path)))
+        throw new ProtocolIntegrityBlockedError("Exhausted original reviewer lacks sealed cycle and methodology provenance");
+      const recovered = await resumeExhaustedFreshProtocol({
+        receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
+        contract: contractName, sessionRoots, validate: responseContract.validate,
+        parse: responseContract.parse, feedback, fresh: openFresh,
+      });
+      if (!freshIdentity)
+        throw new ProtocolIntegrityBlockedError("Recovered fallback has no admitted reviewer identity");
+      const successor = await replacePostcommitProtocolReviewer(job, packet,
+        existingCycle, freshIdentity);
+      await acceptPostcommitReviewRound(job, packet, recovered, successor);
+      return recovered;
+    }
     const original = await inspectCompletedProtocolReads({
       receiptFile: protocolReceipt, sourceDigest: packet.sourceDigest,
       contract: contractName, sessionRoots,
     });
-    const required = pinnedSourcePaths(snapshot, boundedPinnedSources("nt-narrative-review"));
     const reads = original.reads.map(path =>
       canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
     if (required.some(path => !reads.includes(path)) ||
@@ -671,7 +755,6 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     await promptStorySpecialist(session, assignmentFidelityPrompt(snapshot, packet));
     // Skill-method reads are mandatory even when the model receives the
     // immutable canonical packet inline. No writer tools are available.
-    const required = pinnedSourcePaths(snapshot, boundedPinnedSources("nt-narrative-review"));
     const missingPinned = () =>
       required.filter(
         (path) => !completedReads(session, job.worktreeStoryRoot, snapshot.path).includes(path),
@@ -701,23 +784,8 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     // The same shared response-contract policy serves writers, planners and
     // independent reviewers. Controller validation (including provenance) is
     // re-run for EVERY completed reply. A malformed FAIL must not be softened.
-    let reviewedSession = session;
-    const { validate: inspect, parse: parseVerdict } = assignmentVerdictResponseContract(packet);
-    const feedback = (failures: readonly ResponseContractFailure[]) => {
-      const exact = packet.items.map(item => ({ assignmentId: item.assignment.id,
-        commitSha: item.assurance.commitSha,
-        paths: item.assurance.changedPaths.map(path => ({ path,
-          lines: item.canonicalContext.find(c => c.path === path)?.content.split("\n").length ?? 0 })) }));
-      return "RESPONSE-CONTRACT CORRECTION ONLY (reviewer.assignment-verdict.v1). " +
-        "Return one complete unfenced JSON object in this SAME Pi conversation. " +
-        "No tools, edits, new Story work or new review assignment. Preserve ALL " +
-        "original negative findings, their message, correction, affected paths and FAIL verdict; " +
-        "a legitimate FAIL can NEVER become PASS to meet this format. " +
-        "Failed paths:\n" + failures.map(f => f.path + ": " + f.expected).join("\n") +
-        "\nsourceDigest must be " + packet.sourceDigest +
-        "\nImmutable source records (for formatting, NOT write permission): " +
-        JSON.stringify(exact);
-    };
+    const { validate: inspect, parse: parseVerdict } = responseContract;
+
     let verdict = await recoverWithOneFreshSession({
       receiptFile: protocolReceipt,
       sourceDigest: packet.sourceDigest,
@@ -727,41 +795,12 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
         feedback, prompt: text => promptStorySpecialist(session, text),
         beforeCorrection: () => context!.beforeTurn(file ?? undefined),
       },
-      fresh: async () => {
-        const opened = await sessionFor(job, snapshot, provider, model, thinking,
-          "review", undefined, assignment, "assignment-fidelity", true, scope);
-        const next = opened.session;
-        reviewedSession = next;
-        const nextFile = next.sessionManager.getSessionFile();
-        if (!nextFile) { next.dispose(); throw Error("Fresh reviewer lacks transcript."); }
-        return {
-          session: next,
-          start: async () => {
-            await opened.context!.beforeTurn(nextFile);
-            await onSession(nextFile);
-            await promptStorySpecialist(next, assignmentFidelityPrompt(snapshot, packet));
-            const unread = required.filter(path =>
-              !completedReads(next, job.worktreeStoryRoot, snapshot.path).includes(path));
-            if (unread.length)
-              throw Error("Fresh reviewer omitted required pinned methodology reads.");
-          },
-          prompt: text => promptStorySpecialist(next, text),
-          beforeCorrection: () => opened.context!.beforeTurn(nextFile),
-          completed: async () => {
-            const outOfSnapshot = completedReads(next, job.worktreeStoryRoot, snapshot.path)
-              .filter(path => !reviewerPinnedSkillPath(snapshot.path, path));
-            if (outOfSnapshot.length)
-              throw Error("Fresh assignment reviewer read outside sealed skill snapshot.");
-            await opened.context!.completed(nextFile, next.sessionId);
-          },
-          dispose: () => next.dispose(),
-        };
-      },
+      fresh: openFresh,
     });
     const schemaRecheck = choiceSelectionSchemaRecheck(packet, verdict);
     // A fresh reviewer is disposed by the shared protocol policy. Preserve any
     // valid negative verdict without starting another independent review here.
-    if (schemaRecheck && reviewedSession === session) {
+    if (schemaRecheck && !freshIdentity) {
       await context!.beforeTurn(file ?? undefined);
       // This is NOT an override of the failed verdict. The same independent
       // reviewer must produce a NEW fully source-linked verdict from pinned
@@ -773,20 +812,16 @@ export async function reviewSpecialistAssignments(job: JobStartResult, snapshot:
     // Re-audit after ALL correction turns. No successful worktree read,
     // orchestrator instruction read, or unpinned source may contaminate the
     // historical packet, even if the model does not cite it in the verdict.
-    const otherReads = reviewedSession === session
+    const otherReads = !freshIdentity
       ? completedReads(session, job.worktreeStoryRoot, snapshot.path)
         .filter(path => !reviewerPinnedSkillPath(snapshot.path, path))
       : []; // Fresh-session read audit already ran before Pi disposal.
     if (otherReads.length)
       throw new Error("Assignment reviewer read outside verified reviewer skill snapshot: " +
         otherReads.join(", "));
-    if (reviewedSession === session) await context!.completed(file, session.sessionId);
-    if (reviewedSession !== session && cycle) {
-      const replacement = reviewedSession.sessionManager.getSessionFile();
-      if (!replacement) throw Error("Protocol replacement reviewer has no transcript.");
-      cycle = await replacePostcommitProtocolReviewer(job, packet, cycle,
-        { id: reviewedSession.sessionId, file: replacement });
-    }
+    if (!freshIdentity) await context!.completed(file, session.sessionId);
+    if (freshIdentity && cycle)
+      cycle = await replacePostcommitProtocolReviewer(job, packet, cycle, freshIdentity);
     if (cycle) await acceptPostcommitReviewRound(job, packet, verdict, cycle);
     return verdict;
   } finally { session.dispose(); }
