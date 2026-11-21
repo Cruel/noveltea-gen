@@ -193,11 +193,22 @@ export async function trustedHead(job: JobStartResult) {
   }
   const initial = join(job.stateDir, "foundation.json");
   if (existsSync(initial)) {
-    const data = JSON.parse(await readFile(initial, "utf8")) as { stage?: string; commitSha?: string };
+    const data = JSON.parse(await readFile(initial, "utf8")) as {
+      stage?: string; commitSha?: string; jobId?: string; baseSha?: string;
+      workHead?: string; writerStarted?: boolean;
+    };
     if (data.stage !== "committed" || !data.commitSha || !SHA.test(data.commitSha)) {
-      // Only permit the unchanged baseline to be read and retried when a
-      // completed no-write Foundation handoff has an authenticated, exact
-      // job-scoped authorization. This is NOT permission to commit edits.
+      // A safe-boundary budget pause may have initialized Foundation without
+      // admitting any writer. Its unchanged baseline is a readable source for
+      // resuming that SAME work item, not a completed Foundation checkpoint.
+      if (data.stage === "writing" && data.writerStarted === false &&
+          data.jobId === job.jobId && data.baseSha === job.baseSha &&
+          data.workHead === job.baseSha &&
+          git(job, "rev-parse", "HEAD") === job.baseSha &&
+          !git(job, "status", "--porcelain=v1", "--untracked-files=all"))
+        return job.baseSha;
+      // An interrupted or ambiguous writer still needs original-source
+      // reconciliation. A clean worktree alone is not proof of nonexecution.
       const exception = await authorizedFoundationException(job);
       if (exception && exception.headSha === job.baseSha) return job.baseSha;
       throw new Error("Foundation work item is unfinished; finish or reconcile it before revision.");

@@ -689,6 +689,20 @@ async function operationFailure(s: State, job: JobStartResult, operation: Operat
     "SpecialistChoiceRequiredError", "StoryCancelledError"].includes(error.name))
     return blocked(error);
   const reason = error instanceof Error ? error.message : String(error);
+  const previous = s.operationRecovery;
+  // A completed read-only assessment must not restart the same deterministically
+  // failing operation on unchanged evidence. A new failure or verified source
+  // change gets its own assessment, but no graph invocation can spin forever.
+  if (previous?.phase === "continued" && previous.operation === operation &&
+      previous.outcome === outcome && previous.reason === reason &&
+      previous.source.jobId === job.jobId &&
+      previous.source.planVersion === (s.planVersion ?? null) &&
+      previous.source.turnDigest === (s.request.turnPlanDigest ?? null) &&
+      previous.source.headSha === await trustedHead(job).catch(() => null) &&
+      JSON.stringify(previous.evidence) === JSON.stringify(evidence))
+    return { status: "blocked", operationRecovery: { ...previous, phase: "fenced" },
+      reason: reason + " The same recovery check failed again on unchanged evidence; " +
+        "inspect the original operation before another attempt." };
   const operationRecovery = await assessGenerationOperation({ job,
     threadId: s.graphThreadId ?? graphThreadId ?? job.threadId + ":generation",
     turnDigest: s.request.turnPlanDigest, planVersion: s.planVersion, operation,
