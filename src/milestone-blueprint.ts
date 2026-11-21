@@ -154,11 +154,25 @@ function downstreamCorrectionEvidence(
   if (proof.kind === "current") return current.downstream.some(item =>
     downstreamQuote(item, claim.field, proof.quote) && proof.quote === claim.quote);
   if (proof.before !== claim.quote) return false;
+  // A field-owner correction must change the owner count, not merely rewrite
+  // the same entry's obligation. Other independently valid owner entries may
+  // remain; Composition may already be present when an owner is revised.
+  if (claim.field === "owner") {
+    const ownerCount = (design: MilestoneBlueprint, quote: string) =>
+      design.downstream.filter(item => downstreamQuote(item, "owner", quote)).length;
+    const retained = current.downstream.some(item =>
+      JSON.stringify(item) === JSON.stringify(rejected));
+    if (retained || ownerCount(current, claim.quote) >= ownerCount(original, claim.quote))
+      return false;
+    return proof.kind === "removed" ||
+      (proof.kind === "revised" &&
+        ["event", "interactive", "composition"].includes(proof.after) &&
+        ownerCount(current, proof.after) > ownerCount(original, proof.after));
+  }
   if (proof.kind === "removed")
     return !current.downstream.some(item =>
       JSON.stringify(item) === JSON.stringify(rejected) ||
-      (claim.field === "obligation" &&
-        downstreamQuote(item, "obligation", claim.quote)));
+      downstreamQuote(item, "obligation", claim.quote));
   if (proof.kind === "added" && (claim.repair !== "extend" ||
       current.downstream.some(item => JSON.stringify(item) === JSON.stringify(rejected))))
     return false; // An unchanged defective entry cannot be laundered by a duplicate extension.
@@ -488,6 +502,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
           !Number.isSafeInteger(index) || (index as number) < 0 ||
           !["owner", "obligation"].includes(String(field)) ||
           !["replace", "extend"].includes(String(evidence.repair)) ||
+          (field === "owner" && evidence.repair !== "replace") ||
           typeof evidence.quote !== "string" ||
           !draft.downstream[index as number] ||
           !downstreamQuote(draft.downstream[index as number]!,

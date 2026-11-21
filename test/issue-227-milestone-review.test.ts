@@ -191,6 +191,39 @@ test("#227 extending a rejected downstream obligation cannot keep an uncorrected
     valid, assignment, previous).status, "pass");
 });
 
+test("#227 owner-field correction must replace the rejected entry without erasing another valid owner", () => {
+  const invalid = { owner: "interactive" as const, obligation: "An optional next-Milestone puzzle" };
+  const valid = { owner: "interactive" as const, obligation: "Bind the present refusal Choice" };
+  const original: MilestoneBlueprint = { ...draft,
+    downstream: [invalid, valid, ...draft.downstream] };
+  const finding = { ...meta, evidence: { target: "downstream", index: 0,
+    field: "owner", quote: "interactive", repair: "replace" } };
+  const prior = history(original, finding);
+  const removed = { ...draft, downstream: [valid, ...draft.downstream] };
+  const removedProof = { target: "downstream", kind: "removed", index: 0,
+    field: "owner", before: "interactive" };
+  assert.equal(parseMilestoneBlueprintReview(passProof(removedProof),
+    removed, assignment, prior).status, "pass");
+
+  const merelyReworded: MilestoneBlueprint = { ...original,
+    downstream: [{ ...invalid, obligation: "Still an unrelated optional puzzle" },
+      valid, ...draft.downstream] };
+  assert.throws(() => parseMilestoneBlueprintReview(passProof(removedProof),
+    merelyReworded, assignment, prior), /correction|rejected|field/);
+
+  const changed: MilestoneBlueprint = { ...original,
+    downstream: [{ owner: "composition", obligation: invalid.obligation },
+      valid, ...draft.downstream] };
+  const revisedProof = { target: "downstream", kind: "revised", index: 0,
+    field: "owner", before: "interactive", after: "composition" };
+  assert.equal(parseMilestoneBlueprintReview(passProof(revisedProof),
+    changed, assignment, prior).status, "pass");
+
+  assert.throws(() => parseMilestoneBlueprintReview(review("revise", [{
+    ...meta, evidence: { ...finding.evidence, repair: "extend" },
+  }]), original, assignment), /owner|repair|downstream/);
+});
+
 test("#227 missing required downstream work has an exact collection citation and a verifiable addition", () => {
   const finding = {
     ...meta,
@@ -244,6 +277,45 @@ test("#227 missing required downstream work has an exact collection citation and
       ),
     /downstream|cited/,
   );
+});
+
+test("#227 sealed v4 rejection and correction replay unchanged, with no admission upgrade", () => {
+  const original: MilestoneBlueprint = { ...draft, events: [{
+    ...draft.events[0]!, knowledge: "The guard knows the unobserved exit route",
+  }] };
+  const finding = {
+    eventId: "register", anchorPath: path,
+    requirement: "Support every claimed knowledge transition",
+    reason: "The exit route has no observable source",
+    correction: "Replace the unearned route knowledge",
+    evidence: { field: "knowledge", quote: original.events[0]!.knowledge, repair: "replace" },
+  };
+  const rejected = {
+    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    findings: [finding], prior: [],
+  };
+  const first = parseMilestoneBlueprintReview(JSON.stringify(rejected),
+    original, assignment, [], "sealed-replay");
+  const oldHistory = [{ draft: original, review: first,
+    draftDigest: "historical", reviewDigest: "historical-review" }];
+  const fixed: MilestoneBlueprint = { ...original, events: [{
+    ...original.events[0]!, knowledge: "The dated gate register establishes a recorded arrival",
+  }] };
+  const corrected = {
+    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    findings: [], prior: [{ round: 0, findingIndex: 0, status: "resolved",
+      reason: "The source-bound unearned assertion was replaced",
+      evidence: { kind: "revised", eventId: "register", field: "knowledge",
+        before: original.events[0]!.knowledge, after: fixed.events[0]!.knowledge } }],
+  };
+  assert.equal(parseMilestoneBlueprintReview(JSON.stringify(corrected), fixed,
+    assignment, oldHistory, "sealed-replay").status, "pass");
+  assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify(corrected), fixed,
+    assignment, oldHistory), /v5/);
+  const forged = { ...corrected, prior: [{ ...corrected.prior[0]!,
+    evidence: { ...corrected.prior[0]!.evidence, before: "Fabricated old source" } }] };
+  assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify(forged), fixed,
+    assignment, oldHistory, "sealed-replay"), /correction|rejected|field/);
 });
 
 test("#227 prior Event-field findings remain verifiable in v5 and v4 seals remain historical", () => {
