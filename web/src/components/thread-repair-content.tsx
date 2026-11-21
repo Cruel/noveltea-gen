@@ -23,6 +23,8 @@ export function ThreadRepairContent({ repair, status, reason, queue, budgetPause
     !['queued', 'running'].includes(queue ?? '') &&
     !!repair.continuation?.pendingGuidance
   const stopped = repairBlocked && !!repair.continuation
+  const exhausted = stopped && !pendingGrant && !budgetPause &&
+    repair.continuation?.remainingGrants === 0
   const eligible = !budgetPause && (pendingGrant ||
     (stopped && !['queued', 'running'].includes(queue ?? '') &&
       (repair.continuation?.remainingGrants ?? 0) > 0))
@@ -43,6 +45,7 @@ export function ThreadRepairContent({ repair, status, reason, queue, budgetPause
       <span className="font-medium text-foreground">
         {continuing ? 'Correcting Story review' :
           pendingGrant ? 'Authorized correction ready to continue' :
+          exhausted ? 'Author correction grants exhausted' :
           stopped ? 'Review correction paused' :
           open.length ? 'Review findings retained' : 'Correction history'}
       </span>
@@ -103,7 +106,9 @@ export function ThreadRepairContent({ repair, status, reason, queue, budgetPause
     </div> : <p className="text-muted-foreground">
       {budgetPause
         ? 'Resource budget needs separate attention before this repair can continue.'
-        : 'This correction cannot continue from the current safe boundary. Preserve its reviewed checkpoint and request a separately authorized continuation.'}
+        : exhausted
+          ? 'No further author-granted corrections remain for this review. The verified checkpoint and unresolved findings are preserved; request a separately authorized continuation.'
+          : 'This correction cannot continue from the current safe boundary. Preserve its reviewed checkpoint and request a separately authorized continuation.'}
     </p>)}
     {budgetPause && <p className="text-muted-foreground">
       Resource budget paused separately: {budgetPause}

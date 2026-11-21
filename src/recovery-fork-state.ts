@@ -8,6 +8,7 @@ import type { GenerationEvidence } from "./generation-plan.js";
 import type { CompletionContract } from "./architecture.js";
 import type { TurnEvidence } from "./turn-plan-evidence.js";
 import type { ReviewedOmissionBatch } from "./recovery-review-batch.js";
+import type { InheritedMilestoneBlueprint } from "./milestone-blueprint.js";
 import { openSkillSnapshot } from "./snapshot.js";
 import { assertNativeVersion } from "./native-cli-version.js";
 import { RecoveryCompatibilityError, type RecoveryToolchain } from "./recovery-compatibility.js";
@@ -35,6 +36,8 @@ export interface RecoveryForkBundle {
   completedStages: GenerationEvidence[];
   /** Source-verified, same-Thread no-write decisions; no Git commits or author grants. */
   reviewBatch?: ReviewedOmissionBatch;
+  /** Authenticated historical Event plans only; no live reviewer sessions or grants. */
+  milestoneBlueprints?: InheritedMilestoneBlueprint[];
 }
 export const forkDigest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function regular(path: string) {

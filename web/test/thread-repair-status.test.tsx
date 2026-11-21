@@ -59,6 +59,19 @@ test('crash between author grant and queue admission retains resume without anot
   assert.doesNotMatch(queued, /Continue authorized correction/)
 })
 
+test('#213 exhausted author correction allowance is distinguished from an active repair and a resource pause', () => {
+  const exhausted = { ...repair, continuation: {
+    ...repair.continuation!, remainingGrants: 0,
+  } }
+  const html = render(exhausted, 'blocked')
+  assert.match(html, /Author correction grants exhausted/)
+  assert.doesNotMatch(html, /Continue with another correction/)
+  assert.doesNotMatch(html, /Resource budget paused/)
+  const budget = render(exhausted, 'paused', 'Pi budget exhausted', 'modelCalls')
+  assert.match(budget, /Resource budget paused separately: modelCalls/)
+  assert.doesNotMatch(budget, /Author correction grants exhausted/)
+})
+
 test('resource budgets and unrelated integrity stops never appear as an author extension approval', () => {
   const paused = render(repair, 'paused', 'Pi budget exhausted', 'Model call limit reached')
   assert.match(paused, /Resource budget paused separately: Model call limit reached/)

@@ -508,6 +508,28 @@ async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Pro
     "\n\n## Choice wording\n\n" + menu + "\n\n" +
     (variant === "missing-branch" ? reactions.split("## " + heading(choice.outcomes.at(-1)!) + " selected")[0] : reactions),
     ["revelation.ledger-secret"]);
+  // A second Choice in the same Event needs its OWN selectable menu and
+  // conditioned prose. Reusing the first menu would hide its real outcomes
+  // while still producing native-valid Choice records.
+  for (const additional of a.choicePoints.slice(1)) {
+    for (const event of additional.events) {
+      const secondMenu = additional.outcomes.map(outcome =>
+        "**" + heading(outcome) + ":** " + (outcome === "tell"
+          ? "Disclose the witness's identity to the inquiry."
+          : "Withhold the witness's name and use the independent ledgers.")).join("\n");
+      const secondReactions = additional.outcomes.map(outcome =>
+        "## " + heading(outcome) + " selected\n\n" + (outcome === "tell"
+          ? "Ada gives the inquiry the witness's name. The record is public, but the breach of "
+            + "trust may put the witness in danger, and Neri withdraws from the investigation."
+          : "Ada presents the independently checked ledgers without naming the witness. "
+            + "The inquiry can prove the transfer while the witness's refuge remains private."))
+        .join("\n\n");
+      await write("testimony-choice-scene", [event],
+        "## Shared entry\n\nAda reads the two corroborating records and considers "
+          + "what evidence the inquiry needs without assuming the witness's consent."
+          + "\n\n## Choice wording\n\n" + secondMenu + "\n\n" + secondReactions);
+    }
+  }
   if (variant !== "missing-aftermath") {
     await write("aftermath-continuation", ["event.aftermath"],
       a.choicePoints[0]!.outcomes.map(o => "## " + heading(o) + " selected\n\n" +

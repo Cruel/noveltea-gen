@@ -12,6 +12,7 @@ import { projectReviewTurn, readReviewTurnEvidence } from "./fork-review-turn.js
 import { collectReviewedOmissionBatch, verifySavedReviewBatch } from "./recovery-review-batch.js";
 import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
+import { collectInheritedMilestoneBlueprint } from "./milestone-blueprint.js";
 import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
   selectCurrentRecoveryToolchain, RecoveryCompatibilityError } from "./recovery-compatibility.js";
 import type { Plan, CompletionContract } from "./architecture.js";
@@ -209,6 +210,21 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   }
   for (const [source, receipt] of Object.entries(receipts))
     assertRecoveryReceiptCompatibility(source, receipt, completed);
+  // Preserve reviewed just-in-time Milestone plans for inherited Events.
+  // Admission authenticates the exact original reviewer/session proof before
+  // sealing only its approved design and original Git source in the bundle.
+  const milestoneBlueprints: NonNullable<RecoveryForkBundle["milestoneBlueprints"]> = [];
+  for (const [path, receipt] of Object.entries(receipts)) {
+    if (!path.startsWith("event-items/") || !receipt.blueprintPin) continue;
+    if (!receipt.assignment) throw new RecoveryCompatibilityError("invalid-evidence",
+      "Inherited Event lost the original reviewed Milestone assignment.");
+    const evidence = await collectInheritedMilestoneBlueprint(parent,
+      receipt.blueprintPin, receipt.assignment);
+    if (milestoneBlueprints.some(previous =>
+      previous.pin.milestoneId === evidence.pin.milestoneId &&
+      previous.pin.cycleId === evidence.pin.cycleId)) continue;
+    milestoneBlueprints.push(evidence);
+  }
   const completedStages: GenerationEvidence[] = [];
   for (const id of completed) {
     const item = stage(id);
@@ -227,7 +243,8 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
     storyRoot: parent.storyRoot, childId, checkpoint: checkpoint as RecoveryCheckpoint,
     reviewCoverage, contract: plan?.contract ?? contract,
     ...(reviewTurn ? { reviewTurn } : {}), receipts, commits, completedStages,
-    ...(reviewBatch ? { reviewBatch } : {}) };
+    ...(reviewBatch ? { reviewBatch } : {}),
+    ...(milestoneBlueprints.length ? { milestoneBlueprints } : {}) };
 }
 async function writeOnce(path: string, value: string) {
   if (existsSync(path)) {
@@ -240,6 +257,23 @@ async function writeOnce(path: string, value: string) {
 /** Caller owns repository Git/cache admission. Only the child's writer lock is
  * taken, so a running parent remains untouched. Retries never reset a child. */
 export async function prepareRecoveryFork(parent: JobStartResult, bundle: RecoveryForkBundle) {
+  const inheritedEvents = Object.entries(bundle.receipts).filter(([path, receipt]) =>
+    path.startsWith("event-items/") && !!receipt.blueprintPin);
+  const blueprints = bundle.milestoneBlueprints ?? [];
+  if (blueprints.length !== inheritedEvents.length || blueprints.length > 64)
+    throw new RecoveryCompatibilityError("invalid-evidence",
+      "Inherited Event and independently reviewed Milestone Blueprint counts differ.");
+  for (const [_, receipt] of inheritedEvents) {
+    const proof = blueprints.find(entry =>
+      JSON.stringify(entry.pin) === JSON.stringify(receipt.blueprintPin));
+    if (!proof || !receipt.assignment) throw new RecoveryCompatibilityError("invalid-evidence",
+      "Inherited Event lost its source-bound Milestone Blueprint proof.");
+    const original = await collectInheritedMilestoneBlueprint(parent,
+      receipt.blueprintPin, receipt.assignment);
+    if (JSON.stringify(original) !== JSON.stringify(proof))
+      throw new RecoveryCompatibilityError("invalid-evidence",
+        "Milestone Blueprint was altered between fork admission and preparation.");
+  }
   const pin = { sourceJobId: bundle.sourceJobId, sourceBaseSha: bundle.sourceBaseSha,
     commitSha: bundle.checkpoint.commitSha, bundleSha256: forkDigest(bundle) };
   const child = await startStoryJob({ story: parent.storyRoot, job: bundle.childId,

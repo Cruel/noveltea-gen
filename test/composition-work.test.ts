@@ -13,6 +13,7 @@ import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { collectRecoveryFork, prepareRecoveryFork } from "../src/recovery-fork.js";
+import { reviewedMilestoneHandoff } from "../src/milestone-obligation-handoff.js";
 import { forkSourceSummary } from "../src/recovery-fork-state.js";
 import { sealReviewedOmissionBatch } from "../src/recovery-review-batch.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
@@ -845,14 +846,33 @@ test("a reviewed no-write batch survives a same-Thread fork without a Git commit
         /Interrupted independent Event-only review must be reconciled/,
         "A half-finished independent reviewer may never be silently repeated");
       unlinkSync(startedReviewPath);
+      const reviewedPlanPath = join(parent.stateDir, "milestone-blueprints/disclosure.json");
+      const reviewedPlan = readFileSync(reviewedPlanPath, "utf8");
+      try {
+        const tamperedPlan = JSON.parse(reviewedPlan);
+        tamperedPlan.approvedDigest = "0".repeat(64);
+        writeFileSync(reviewedPlanPath, JSON.stringify(tamperedPlan));
+        await assert.rejects(collectRecoveryFork(parent,
+          "7c26d2f9-71f9-4bfd-a9a5-f8cd9d951345", checkpoint.commitSha,
+          plan.contract, source, "same-thread"),
+        /Milestone Blueprint has no approved independent source-bound review/,
+        "A fork cannot launder a tampered original Milestone review into inherited authority");
+      } finally { writeFileSync(reviewedPlanPath, reviewedPlan); }
       const childId = "116d1c99-1498-4f9b-a9f6-c800d080b7ba";
       const bundle = await collectRecoveryFork(parent, childId, checkpoint.commitSha,
         plan.contract, source, "same-thread");
       assert.deepEqual(bundle.reviewBatch?.entries.map(entry => entry.milestoneId),
         ["milestone.disclosure"]);
+      assert.deepEqual(bundle.milestoneBlueprints?.map(entry => entry.pin.milestoneId),
+        ["milestone.disclosure"]);
       assert.ok(bundle.completedStages.some(entry => entry.stage === "interactive" &&
         entry.milestone === "milestone.disclosure" &&
         entry.status === "interactive-slice-committed"));
+      const altered = structuredClone(bundle);
+      altered.milestoneBlueprints![0]!.design.events[0]!.purpose += " Unreviewed change.";
+      await assert.rejects(prepareRecoveryFork(parent, altered),
+        /Milestone Blueprint was altered between fork admission and preparation/,
+        "Changing an inherited private design before sealing the child must fail closed");
       const child = await prepareRecoveryFork(parent, bundle);
       const saved = JSON.parse(readFileSync(join(child.stateDir, "interactive-items/disclosure.json"), "utf8"));
       assert.equal(saved.units[0].phase, "not-applicable");
@@ -875,6 +895,13 @@ test("a reviewed no-write batch survives a same-Thread fork without a Git commit
         plan.contract, source, "same-thread");
       assert.deepEqual(nested.reviewBatch?.entries.map(entry => entry.milestoneId),
         ["milestone.disclosure"]);
+      const inheritedEvent = JSON.parse(readFileSync(join(child.stateDir,
+        "event-items/disclosure.json"), "utf8"));
+      const changedAssignment = structuredClone(inheritedEvent);
+      changedAssignment.assignment.characterIds = ["character.forger"];
+      await assert.rejects(reviewedMilestoneHandoff(child, changedAssignment),
+        /Missing reviewed historical Milestone Blueprint/,
+        "A child cannot silently rewrite the source assignment's Character requirements");
       const composed = await runCompositionWorkItem({
         story: child.storyRoot, job: child.jobId, action: "run",
         milestone: "milestone.disclosure", fixture: true, skillsSource: source,

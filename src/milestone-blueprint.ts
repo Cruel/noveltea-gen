@@ -7,6 +7,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join, sep } from "node:path";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
+import { readRecoveryFork } from "./recovery-fork-state.js";
 import type { Plan } from "./architecture.js";
 import type { EventAssignment } from "./event-specialist.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -224,6 +225,13 @@ interface Receipt {
 }
 export interface MilestoneBlueprintPin {
   milestoneId: string; sourceSha: string; digest: string; cycleId: string;
+}
+/** A fork's immutable, admission-verified proof of an inherited reviewed plan.
+ * This carries only the approved design, never a replayable Pi conversation. */
+export interface InheritedMilestoneBlueprint {
+  pin: MilestoneBlueprintPin;
+  design: MilestoneBlueprint;
+  sourceDigest: string;
 }
 function fileFor(job: JobStartResult, id: string) {
   if (!MILESTONE.test(id)) throw Error("Invalid Milestone Blueprint target identifier.");
@@ -644,7 +652,29 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   let record = await load(job, pin.milestoneId);
   if (record?.lineage.reviewCycleId !== pin.cycleId) {
     const archived = historicalFileFor(job, pin);
-    if (!existsSync(archived)) throw Error("Missing reviewed historical Milestone Blueprint.");
+    if (!existsSync(archived)) {
+      // A same-Thread continuation inherits an authenticated historical Event,
+      // not the parent's mutable Pi transcript or job-local plan receipt.
+      // Its immutable fork bundle carries a design that was independently
+      // verified during admission; rebind it ONLY to that Event's exact pin,
+      // assignment sources and immutable source Git commit.
+      const bundle = job.recoveryFork ? readRecoveryFork(job) : null;
+      const inherited = bundle?.milestoneBlueprints?.find(item =>
+        item.pin.milestoneId === pin.milestoneId && item.pin.cycleId === pin.cycleId);
+      const originalEvent = Object.entries(bundle?.receipts ?? {}).some(([path, source]) =>
+        path.startsWith("event-items/") &&
+        JSON.stringify(source.blueprintPin) === JSON.stringify(pin) &&
+        JSON.stringify(source.assignment) === JSON.stringify(assignment));
+      if (!inherited || !originalEvent) throw Error("Missing reviewed historical Milestone Blueprint.");
+      if (JSON.stringify(inherited.pin) !== JSON.stringify(pin) ||
+          inherited.pin.digest !== sha(inherited.design) ||
+          inherited.sourceDigest !== await sourceDigest(job, assignment.sourcePaths, pin.sourceSha))
+        throw Error("Inherited Milestone Blueprint differs from its verified Event source.");
+      // The original sealed receipt already passed independent review and
+      // historical schema replay at fork admission and again at preparation.
+      // Re-parsing it as a NEW draft could silently invalidate legacy approvals.
+      return inherited.design;
+    }
     const info = await lstat(archived);
     if (!info.isFile() || info.isSymbolicLink() || await realpath(archived) !== archived)
       throw Error("Archived Milestone Blueprint is not a safe immutable private receipt.");
@@ -673,6 +703,17 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
     await verifySeal(job, record.reviewer, "reviewer");
   }
   return record.draft!;
+}
+
+/** Transfer only the authenticated design/commit binding into a sealed fork.
+ * The original reviewer transcripts are verified before collection and are
+ * never represented as a child review or a new authoring grant. */
+export async function collectInheritedMilestoneBlueprint(job: JobStartResult,
+  pin: MilestoneBlueprintPin, assignment: Pick<EventAssignment,
+    "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
+): Promise<InheritedMilestoneBlueprint> {
+  const design = await readReviewedMilestoneBlueprint(job, pin, assignment);
+  return { pin, design, sourceDigest: await sourceDigest(job, assignment.sourcePaths, pin.sourceSha) };
 }
 
 /** After a signed upstream correction, preserve the original whole review

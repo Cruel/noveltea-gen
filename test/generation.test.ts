@@ -369,6 +369,93 @@ test("actual generation graph resumes Event-only Composition without Choice/Puzz
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
 
+test("#213 narrative-led full-Story handoff keeps omitted mechanics distinct from a completed Story", {
+  skip: !available,
+}, async () => {
+  const f = setup("cert-213-narrative");
+  for (const key of ["NT_ARCHITECTURE_FIXTURE_CASE", "NT_EVENT_FIXTURE_CASE",
+    "NT_INTERACTIVE_FIXTURE_CASE", "NT_COMPOSITION_FIXTURE_CASE"])
+    f.env[key] = "event-only";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const objective = "Resolve the missing archive witness using two dated records, "
+    + "without inventing a formal Puzzle or exposing their identity.";
+  f.start[3] = objective;
+  saveFixtureTurn(f.job, contract, objective, [
+    "Deliver player-facing prose and verifiable independent records without forced custom mechanics.",
+  ]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
+    /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status,
+    "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "event"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+  const composed = f.cli(["generate", "resume", "--pause-after", "composition"]);
+  assert.equal(composed.status, "paused", JSON.stringify(composed));
+  const item = JSON.parse(readFileSync(join(f.job.stateDir,
+    "interactive-items/disclosure.json"), "utf8"));
+  assert.deepEqual(item.units.map((unit: any) => unit.phase),
+    ["not-applicable", "not-applicable"]);
+  assert.ok(item.units.every((unit: any) => !unit.commitSha));
+  const originalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const inspect = f.cli(["generate", "inspect"]);
+    assert.equal(inspect.status, "paused");
+    assert.equal(inspect.nextStage, "review");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), originalHead);
+  }
+  const final = f.cli(["generate", "resume"]);
+  assert.notEqual(final.status, "completed",
+    "structural fixture checks cannot replace independent Story-level review");
+  assert.equal(final.report.generation.planFulfillment.status === "passed", false);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
+test("#213 Choice-heavy production fixture retains route evidence and never self-certifies", {
+  skip: !available,
+}, () => {
+  const f = setup("cert-213-choices");
+  f.env.NT_EVENT_FIXTURE_CASE = "alternative-routes";
+  f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  contract.constraints.push("Two decisions must change later trust or disclosed knowledge; "
+    + "the source evidence remains inspectable on both routes.");
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const first = f.cli([...f.start, "--pause-after", "interactive"]);
+  assert.equal(first.status, "paused", JSON.stringify(first));
+  const interactive = JSON.parse(readFileSync(join(f.job.stateDir,
+    "interactive-items/disclosure.json"), "utf8"));
+  assert.equal(interactive.units[0].phase, "committed");
+  assert.deepEqual(interactive.units[0].validation.choices.map((c: any) => c.id).sort(),
+    ["choice-point.loyalty", "choice-point.testimony"]);
+  assert.equal(interactive.units[1].phase, "committed");
+  const routes = first.inventory.audit.routeCoverage.milestones.filter(
+    (m: any) => m.milestone === "milestone.disclosure");
+  assert.ok(routes.length >= 2);
+  assert.ok(routes.every((r: any) => r.status === "reachable"),
+    "diverging routes must have native-reachable evidence");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const inspect = f.cli(["generate", "inspect"]);
+  assert.equal(inspect.status, "paused");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  const finished = f.cli(["generate", "resume"]);
+  assert.equal(finished.status, "blocked", JSON.stringify(finished));
+  assert.equal(finished.reason, "editorial-unverified");
+  assert.equal(finished.report.generation.planFulfillment.status === "passed", false);
+  const after = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(f.cli(["generate", "resume"]).status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), after);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
 test("stale original Turn after a reviewed World checkpoint fails closed instead of retrying foundations forever", { skip: !available }, async () => {
   const f = setup("stale-turn-world-checkpoint");
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
