@@ -819,6 +819,216 @@ test("production generation graph refuses another owner's recovery without advan
   assert.deepEqual(next.completedStages, []);
 });
 
+test("#225 unaccepted specialist result reaches assessment and remains fenced across inspect/resume", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-unaccepted-specialist-result");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+  assert.ok(foundation);
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    // The original worker has returned, but its result is not an admitted
+    // completed status. Verify the production checkpoint edge, not a private
+    // operation-classifier unit test.
+    await graph.updateState(config, {
+      status: "running", active: foundation,
+      result: { status: "in-progress", headSha: head }, pauseAfter: null,
+    }, "independent_assignment_review");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(result.operationRecovery?.operation, "specialist-result");
+  assert.equal(result.operationRecovery?.outcome, "returned-failure");
+  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(result.operationRecovery?.evidence.assignmentId, "foundation");
+  assert.equal(result.completedStages.length, paused.completedStages.length,
+    "an unaccepted worker result must not become a verified checkpoint");
+  const inspected = f.cli(["generate", "inspect"]);
+  assert.deepEqual(inspected.operationRecovery, result.operationRecovery);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resumed = f.cli(["generate", "resume"]);
+    assert.equal(resumed.status, "blocked");
+    assert.deepEqual(resumed.operationRecovery, result.operationRecovery);
+  }
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
+test("#225 thrown independent reviewer fails closed without another specialist or reviewer", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-independent-review-exception");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+  assert.ok(foundation);
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let reviewerCalls = 0;
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli", async () => {
+      reviewerCalls++;
+      throw Error("Injected reviewer transport failure");
+    });
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      status: "running", active: foundation,
+      result: { status: "committed", headSha: head }, pauseAfter: null,
+    }, "specialist_dispatch");
+    result = await graph.invoke(null, config);
+    assert.equal(reviewerCalls, 1, "the assessment must not retry a read-only review without an original receipt");
+    assert.equal(result.status, "blocked");
+    assert.equal(result.operationRecovery?.operation, "independent-review");
+    assert.equal(result.operationRecovery?.phase, "fenced");
+    assert.match(result.operationRecovery?.reason ?? "", /reviewer transport failure/);
+    const again = await graph.invoke(result, config);
+    assert.equal(again.status, "blocked");
+    assert.equal(reviewerCalls, 1, "repeated invocation may not start a new reviewer");
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.equal(f.cli(["generate", "resume"]).status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("#225 dirty in-flight specialist cannot be redispatched on resume", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-dirty-active-specialist");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+  assert.ok(foundation);
+  const draft = join(f.job.worktreeStoryRoot, "unreconciled-draft.md");
+  writeFileSync(draft, "Preserve this ambiguous writer effect.");
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      status: "running", active: foundation, result: null, pauseAfter: null,
+    }, "schedule");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(result.operationRecovery?.operation, "specialist-dispatch");
+  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(readFileSync(draft, "utf8"), "Preserve this ambiguous writer effect.");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  unlinkSync(draft);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("#225 untrusted completion preflight is assessed, not treated as complete or retried", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-completion-preflight");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const corrupted = join(f.job.stateDir, "architecture.json");
+  assert.ok(!existsSync(corrupted));
+  writeFileSync(corrupted, "{broken planning receipt");
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      status: "running", active: null, result: null, pauseAfter: null,
+    }, "author_update_intake");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    unlinkSync(corrupted);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(result.operationRecovery?.operation, "completion-verification");
+  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(result.completedStages.length, paused.completedStages.length);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("#225 failed dependency amendment is assessed without dispatching another writer", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-dependency-amendment");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const active = { ...paused.inventory.items.find((item: { id: string }) => item.id === "foundation"),
+    id: "focus:missing.target", stage: "focus", milestone: "missing.target" };
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      status: "running", active, result: { status: "dependency-required" }, pauseAfter: null,
+    }, "specialist_dispatch");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(result.operationRecovery?.operation, "dependency-amendment");
+  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(result.operationRecovery?.evidence.assignmentId, active.id);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
 test("single-Milestone generation checkpoints foundation then resumes all specialists in a new process", { skip: !available }, () => {
   const f = setup("complete");
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);
@@ -1042,7 +1252,7 @@ test("crash after World commit before finalization never replays writer or grant
     p.commitSha === head && p.workItem === "world-foundations" && p.eligible));
   assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD").trim(),
     String(reconciled.recoveryCheckpoints.filter((p: any) => p.eligible).length));
-  assert.equal(reconciled.status, "paused", JSON.stringify({ reason: reconciled.reason, nextStage: reconciled.nextStage }));
+  assert.equal(reconciled.status, "paused", JSON.stringify({ reason: reconciled.reason, nextStage: reconciled.nextStage, operationRecovery: reconciled.operationRecovery, active: reconciled.selectedWorkItem, pendingNodes: reconciled.pendingNodes }));
 });
 
 test("multi-Milestone generation develops every selected cluster across process restarts", { skip: !available }, () => {

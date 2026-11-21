@@ -470,6 +470,22 @@ function recoveryCommit(job: JobStartResult, state: FoundationState): string | u
   }
   return head;
 }
+/** Read-only proof for resuming an interrupted *original* Foundation that
+ * already committed its exact authored bytes before publishing its receipt.
+ * This never grants a replacement writer or accepts an unrelated Git commit. */
+export async function inspectRecoverableFoundationCommit(job: JobStartResult): Promise<boolean> {
+  const state = await existingState(job);
+  if (!state || state.stage !== "writing" || !state.writerStarted ||
+      !state.authoredSha256 || !state.target || changedPaths(job).length)
+    return false;
+  const recovered = recoveryCommit(job, state);
+  if (!recovered || await foundationDigest(job, state.target) !== state.authoredSha256)
+    return false;
+  if (state.workerMode === "pi" && !state.chatApprovalDigest)
+    await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
+  return true;
+}
+
 function assertValidation(job: JobStartResult, result: ValidationResult): "passed" | "unverified-empty-baseline" {
   const report = result.report as { diagnostics?: unknown[]; readiness?: { design?: { stages?: { foundation?: { minimum?: string } } } }; protection?: { status?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;
   if (!report || report.diagnostics?.length || report.readiness?.design?.stages?.foundation?.minimum !== "passed") {

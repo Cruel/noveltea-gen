@@ -1018,8 +1018,61 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
         },
       };
     }
-    return { status: "blocked", reason: error instanceof Error ? error.message : String(error) };
+    return operationFailure(s, job, "independent-review", error,
+      { reference: "review-checkpoints", assignmentId: s.active?.id });
   }
+}
+
+/** The *only* exception to a fenced writer is authenticated reconciliation
+ * of its already committed original work item. Foundation has its own exact
+ * Git trailer/content/session proof; World uses a finalized native checkpoint
+ * and the original Character/World receipt. This is never permission for a
+ * new session, replacement writer or unrelated specialist. */
+async function inspectOriginalSpecialistCommitForResume(
+  s: State, job: JobStartResult,
+): Promise<boolean> {
+  if (!s.active || s.result || !s.inventory) return false;
+  clean(job);
+  if (s.active.stage === "foundation") {
+    const { inspectRecoverableFoundationCommit } = await import("./foundation.js");
+    return inspectRecoverableFoundationCommit(job);
+  }
+  if (s.active.stage !== "foundations") return false;
+  const head = await trustedHead(job);
+  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.commitSha === head && p.workItem === "world-foundations");
+  if (!point) throw Error("No eligible World checkpoint at the original committed HEAD.");
+  const inspection = await runCharacterWorldJob({ ...s.request, action: "inspect" });
+  if (!("recovery" in inspection) || !inspection.recovery)
+    throw Error("World receipt has no independent recovery inspection.");
+  if (inspection.recovery.status !== "ready" &&
+      inspection.recovery.status !== "recoverable-commit")
+    throw Error("World receipt is not recoverable: " + inspection.recovery.reason);
+  return true;
+}
+
+/** A clean failed specialist may be recorded as blocked without giving the
+ * scheduler authority to replay it. Its dependent assignments are blocked in
+ * the visible inventory; independently verified work stays intact. This is
+ * bookkeeping only: the recovery assessor still fences the original operation. */
+function blockedAssignmentInventory(s: State, reason: string): GenerationInventory | null {
+  if (!s.active || !s.inventory) return s.inventory;
+  const blockedIds = new Set([s.active.id]);
+  const items = s.inventory.items.map(item => ({ ...item }));
+  for (let pass = 0; pass < items.length; pass++) {
+    let changed = false;
+    for (const item of items) {
+      if (blockedIds.has(item.id) || item.dependencies.some(id => blockedIds.has(id))) {
+        if (!blockedIds.has(item.id)) { blockedIds.add(item.id); changed = true; }
+        item.status = "blocked";
+        item.blockingReason = item.id === s.active.id ? reason :
+          "Blocked dependency: " + item.dependencies.filter(id => blockedIds.has(id)).join(", ");
+        delete item.verifiedSha;
+      }
+    }
+    if (!changed) break;
+  }
+  return { ...s.inventory, items };
 }
 
 /** Every graph edge defers to an unresolved checkpointed operation
@@ -1047,7 +1100,12 @@ export function createGenerationGraph(
         return op.safeAction === "reconcile-original-operation" &&
           (op.operation === "scheduling" || op.operation === "author-update-intake") ?
           { status: "running" as const, operationRecovery: { ...op, phase: "assessment" as const } } :
-          { status: "blocked" as const, reason: op.nextAction };
+          op.operation === "specialist-dispatch" && s.active &&
+            (s.active.stage === "foundation" || s.active.stage === "foundations") &&
+            !s.result ?
+          { status: "running" as const,
+            operationRecovery: { ...op, phase: "assessment" as const } } :
+          { status: "blocked" as const, reason: op.reason + " " + op.nextAction };
       }
       if (s.operationRecovery?.phase === "assessment") return { status: "running" as const };
       if (s.fixPickup) {
@@ -1149,6 +1207,14 @@ export function createGenerationGraph(
       }
     })
     .addNode("assess_recovery", async (s, config) => {
+      // Two pending assessments cannot decide dispatch precedence for each
+      // other. Preserve both sources and require explicit reconciliation.
+      if (s.operationRecovery?.phase === "assessment" &&
+          s.unknownRecovery?.phase === "assessment")
+        return { status: "blocked" as const,
+          reason: "Conflicting pending recovery assessments; verify the original operations before continuation.",
+          operationRecovery: { ...s.operationRecovery, phase: "fenced" as const },
+          unknownRecovery: { ...s.unknownRecovery, phase: "unsafe-evidence" as const } };
       if (s.unknownRecovery?.phase === "assessment") {
         const target = s.unknownRecovery.case;
         if (!target) return blocked(Error("Unknown recovery has no authenticated failure case."));
@@ -1222,7 +1288,7 @@ export function createGenerationGraph(
       if (op?.phase === "assessment") {
         const fence = (reason: string): Partial<State> => ({
           status: "blocked", operationRecovery: { ...op, phase: "fenced" },
-          reason: reason + " " + op.nextAction,
+          reason: op.reason + " " + reason + " " + op.nextAction,
         });
         const job = await openJob(s).catch(() => null);
         if (!job || op.version !== 1 || op.check !== operationChecks[op.operation] ||
@@ -1231,13 +1297,19 @@ export function createGenerationGraph(
             op.source.turnDigest !== (s.request.turnPlanDigest ?? null) ||
             op.source.planVersion !== (s.planVersion ?? null))
           return fence("Controller recovery source identity is missing or mismatched.");
+        // All assessment routes, including read-only reviewer failures, obey
+        // the same durable author controls before considering any continuation.
+        try {
+          const control = await readJobControl(job);
+          if (control === "cancelled" || control === "paused")
+            return { status: control, reason: "Author control takes precedence over recovery.",
+              operationRecovery: { ...op, phase: "fenced" as const } };
+        } catch (error) {
+          return fence("Author control is unavailable or untrusted: " + String(error));
+        }
         if (op.safeAction === "reconcile-original-operation" &&
             (op.operation === "scheduling" || op.operation === "author-update-intake")) {
           try {
-            const control = await readJobControl(job);
-            if (control === "cancelled" || control === "paused")
-              return { status: control, reason: "Author control takes precedence over recovery.",
-                operationRecovery: { ...op, phase: "fenced" as const } };
             await withStoryJobLock(job, "generation-read-only-reconciliation", async () => {
               clean(job);
               const head = await trustedHead(job);
@@ -1271,8 +1343,38 @@ export function createGenerationGraph(
               (error instanceof Error ? error.message : String(error)));
           }
         }
-        if (op.safeAction !== "continue-independent") return fence(op.reason);
+        if (op.operation === "specialist-dispatch" &&
+            op.safeAction === "reconcile-original-operation") {
+          try {
+            if (await inspectOriginalSpecialistCommitForResume(s, job))
+              return { status: "running" as const, reason: null,
+                operationRecovery: { ...op, phase: "continued" as const } };
+          } catch (error) {
+            return fence("Original specialist commit recovery was not authenticated: " +
+              (error instanceof Error ? error.message : String(error)));
+          }
+        }
+        if (op.safeAction !== "continue-independent") {
+          const head = await trustedHead(job).catch(() => null);
+          if (!head || op.source.headSha !== head)
+            return fence("Original Story HEAD is missing or changed; execution is not authorized.");
+          return fence(op.reason);
+        }
         try {
+          if (op.operation === "specialist-dispatch") {
+            await withStoryJobLock(job, "generation-independent-specialist-failure", async () => {
+              clean(job);
+              const head = await trustedHead(job);
+              const assignment = op.evidence.assignmentId;
+              const item = s.inventory?.items.find(i => i.id === assignment);
+              if (!assignment || !item || item.status !== "blocked" ||
+                  s.inventory?.headSha !== head || op.source.headSha !== head ||
+                  op.evidence.priorHead !== head || s.failures[assignment] !== op.reason ||
+                  s.active || s.result || item.verifiedSha || !s.inventory)
+                throw Error("Original no-write specialist failure lacks its exact blocked inventory and unchanged HEAD.");
+            });
+            return { operationRecovery: { ...op, phase: "continued" as const }, reason: null };
+          }
           await withStoryJobLock(job, "generation-operation-assessment", async () => {
             clean(job);
             const head = await trustedHead(job);
@@ -1328,15 +1430,31 @@ export function createGenerationGraph(
           const { settlePendingOtherOwnerRevalidations } =
             await import("./review-other-owner-revalidation.js");
           const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
-          await settlePendingOtherOwnerRevalidations({
-            job, inventory: s.inventory ?? undefined, contract: s.request.contract,
-            task: s.request.task, provider: s.request.provider ?? policy.profile.provider,
-            model: s.request.model ?? policy.profile.model,
-            skillsSource: s.request.skillsSource, validatorSource: s.request.validatorSource,
-          });
+          try {
+            await settlePendingOtherOwnerRevalidations({
+              job, inventory: s.inventory ?? undefined, contract: s.request.contract,
+              task: s.request.task, provider: s.request.provider ?? policy.profile.provider,
+              model: s.request.model ?? policy.profile.model,
+              skillsSource: s.request.skillsSource, validatorSource: s.request.validatorSource,
+            });
+          } catch (error) {
+            return operationFailure(s, job, "independent-review", error,
+              { reference: "review-checkpoints", assignmentId: s.active?.id });
+          }
           // Preserve an in-flight result. For interrupted external effects, only the
           // original specialist may reconcile the dirty/unpublished work boundary.
           if (s.ideaTask) return {};
+          if (s.active && !s.result &&
+              s.operationRecovery?.operation === "specialist-dispatch" &&
+              s.operationRecovery.phase === "continued") {
+            // The assessor has proven a committed original specialist can
+            // reconcile. The specialist must reauthenticate its own receipt
+            // immediately before any operation; no new writer is admitted.
+            if (await inspectOriginalSpecialistCommitForResume(s, job)) return {};
+            return operationFailure(s, job, "specialist-dispatch",
+              "Original committed specialist reconciliation proof disappeared.",
+              { reference: "specialist-receipt", assignmentId: s.active.id });
+          }
           if (s.active && (receipt?.plan?.version ?? null) === s.planVersion) {
             if (s.result) {
               // A failed correction may have reached a *reviewed*, clean
@@ -1361,7 +1479,11 @@ export function createGenerationGraph(
               }
               return s.reason === REPAIR_STEERING_BOUNDARY ? { reason: null } : {};
             }
-            try { clean(job); await trustedHead(job); } catch { return {}; }
+            try { clean(job); await trustedHead(job); }
+            catch (error) {
+              return operationFailure(s, job, "specialist-dispatch", error,
+                { reference: "specialist-receipt", assignmentId: s.active.id });
+            }
           }
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
           clean(job);
@@ -1376,8 +1498,14 @@ export function createGenerationGraph(
           // the separate node re-authenticates the entire source under lock.
           if (next.active?.stage === "composition" && next.active.milestone &&
               next.planVersion && next.request?.turnPlanDigest && !next.request.fixture) {
-            const decision = await preflightCompositionBoundary(job, next.request,
-              next.active.milestone, next.planVersion);
+            let decision: Awaited<ReturnType<typeof preflightCompositionBoundary>>;
+            try {
+              decision = await preflightCompositionBoundary(job, next.request,
+                next.active.milestone, next.planVersion);
+            } catch (error) {
+              return operationFailure(s, job, "dependency-amendment", error,
+                { reference: "dependency-plan", assignmentId: next.active.id });
+            }
             if (decision.kind === "author-required") return {
               ...next, status: "paused" as const, reason: decision.reason,
               escalation: { kind: "protected-approval" as const,
@@ -1411,7 +1539,13 @@ export function createGenerationGraph(
               .find(point => point.eligible && point.commitSha === head) ??
               (inherited?.checkpoint.commitSha === head && job.baseSha === head
                 ? inherited.checkpoint : null);
-            if (checkpoint) await sealReviewedOmissionBatch(job, checkpoint, next.inventory);
+            if (checkpoint) {
+              try { await sealReviewedOmissionBatch(job, checkpoint, next.inventory); }
+              catch (error) {
+                return operationFailure(s, job, "independent-review", error,
+                  { reference: "review-checkpoints", assignmentId: next.active.id });
+              }
+            }
           }
           // An independently approved focused revision grants only its listed
           // existing files. Do not dispatch unrelated deferred idea integrations
@@ -1557,7 +1691,12 @@ export function createGenerationGraph(
           // inventory and recheck native Milestone readiness before Composition.
           return { crossDomainCloseout: null, active: null, result: null,
             reason: null, escalation: null };
-        } catch (error) { return blocked(error); }
+        } catch (error) {
+          const stop = blocked(error);
+          if (stop.status !== "blocked") return stop;
+          return operationFailure(s, await openJob(s), "dependency-amendment", error,
+            { reference: "dependency-plan", assignmentId: s.active?.id });
+        }
       }
       // A saved dispatch result means the external stage completed before a parent
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
@@ -1616,6 +1755,15 @@ export function createGenerationGraph(
           }
           return { failures: { ...s.failures, [s.active!.id]: failure }, active: null, result: null };
         }
+        // A failed or unexpected specialist *result* is as consequential as
+        // an exception: do not silently sideline the assignment and dispatch
+        // another writer without checkpointing a recovery decision.
+        if (result.status !== "dependency-required" &&
+            !accepted[s.active!.stage].includes(result.status))
+          return operationFailure(s, await openJob(s), "specialist-result",
+            "Unexpected specialist result: " + result.status,
+            { reference: "specialist-receipt", assignmentId: s.active!.id,
+              resultStatus: result.status }, "returned-failure");
         return { result };
       } catch (error) {
         const stop = blocked(error);
@@ -1628,11 +1776,27 @@ export function createGenerationGraph(
             return { result: { status: "review-handoff", headSha } };
           });
         }
-        return withStoryJobLock(job, "generation-local-block", async () => {
-          try { clean(job); await trustedHead(job); }
-          catch { return stop; }
-          return { failures: { ...s.failures, [s.active!.id]: stop.reason! }, active: null, result: null };
-        });
+        const assessment = await operationFailure(s, job, "specialist-dispatch", error,
+          { reference: "specialist-receipt", assignmentId: s.active?.id });
+        // The failure may belong only to this cluster. Record it as blocked
+        // for inspection without claiming the active writer is replayable.
+        try {
+          return await withStoryJobLock(job, "generation-failed-specialist-inventory", async () => {
+            clean(job); await trustedHead(job);
+            const sameHead = s.inventory?.headSha === await trustedHead(job);
+            if (!sameHead && (s.active?.stage === "foundation" ||
+                              s.active?.stage === "foundations"))
+              return assessment; // Original commit can be reconciled only by its pinned specialist.
+            const safeAction = sameHead ? "continue-independent" as const : undefined;
+            const assessed = safeAction ? await operationFailure(s, job,
+              "specialist-dispatch", error,
+              { reference: "specialist-receipt", assignmentId: s.active!.id,
+                priorHead: s.inventory!.headSha }, "exception", safeAction) : assessment;
+            return { ...assessed, failures: { ...s.failures, [s.active!.id]: stop.reason! },
+              inventory: blockedAssignmentInventory(s, stop.reason!),
+              active: null, result: null };
+          });
+        } catch { return assessment; }
       }
     })
     .addNode("dependency_amendment", async s => {
@@ -1647,9 +1811,22 @@ export function createGenerationGraph(
         if (!entry || entry.phase !== "verified") throw Error("Dependency amendment lost its completion evidence.");
         return { result: null, dependencyHistory: [...(s.dependencyHistory ?? []).filter(p =>
           p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
-      } catch (error) { return blocked(error); }
+      } catch (error) {
+        const stop = blocked(error);
+        if (stop.status !== "blocked") return stop;
+        return operationFailure(s, await openJob(s), "dependency-amendment", error,
+          { reference: "dependency-plan", assignmentId: s.active?.id });
+      }
     })
-    .addNode("independent_assignment_review", reviewBoundary)
+    .addNode("independent_assignment_review", async s => {
+      try { return await reviewBoundary(s); }
+      catch (error) {
+        const job = await openJob(s).catch(() => null);
+        if (!job) return blocked(error); // Unavailable job cannot grant recovery authority.
+        return operationFailure(s, job, "independent-review", error,
+          { reference: "review-checkpoints", assignmentId: s.active?.id });
+      }
+    })
     .addNode("verify_committed_work", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-verification", async () => {
@@ -1660,8 +1837,10 @@ export function createGenerationGraph(
           const planVersion = receipt?.plan?.version ?? null;
           const stage = s.active!.stage;
           if (!s.result || !accepted[stage].includes(s.result.status))
-            return { failures: { ...s.failures, [s.active!.id]: s.result?.status ?? "Missing specialist result" },
-              active: null, result: null };
+            return operationFailure(s, job, "specialist-result",
+              "Missing or unaccepted specialist result: " + (s.result?.status ?? "absent"),
+              { reference: "specialist-receipt", assignmentId: s.active!.id,
+                resultStatus: s.result?.status ?? "absent" }, "returned-failure");
           const completedStages = [...s.completedStages, { stage, milestone: s.active?.milestone,
             headSha: s.result.headSha ?? headSha, status: s.result.status, planVersion: planVersion ?? undefined }];
           const next = await reconcile({ ...s, completedStages, active: null, result: null, planVersion }, job);
@@ -1671,7 +1850,12 @@ export function createGenerationGraph(
           // Preserve the in-flight guard there for genuinely interrupted writers.
           return { ...next, active: null, cursor: s.cursor + 1, result: null,
             ...(s.pauseAfter === stage ? { status: "paused" as const, reason: "Requested safe-boundary pause" } : {}) };
-        } catch (error) { return blocked(error); }
+        } catch (error) {
+          const stop = blocked(error);
+          if (stop.status !== "blocked") return stop;
+          return operationFailure(s, job, "commit-verification", error,
+            { reference: "review-checkpoints", assignmentId: s.active?.id });
+        }
       });
     })
     .addNode("completion_decision", async s => {
@@ -1723,6 +1907,10 @@ export function createGenerationGraph(
           await assertOtherOwnerGenerationCompletion(job);
           const report = await inspectJobReport(s.request);
           const complete = report.generation.status === "completed" && authorizedInventoryComplete(s.inventory);
+          if (report.generation.status === "completed" && !authorizedInventoryComplete(s.inventory))
+            return operationFailure(s, job, "completion-verification",
+              "The completion report claims success without a complete authenticated assignment inventory.",
+              { reference: "completion-report", resultStatus: report.generation.status }, "returned-failure");
           const escalation = complete ? null : reviewEscalation(report, s.inventory);
           // A trusted but unexplained final failure has ONE advisory diagnosis
           // opportunity. Known incomplete assignments, required author decisions,
@@ -1776,7 +1964,12 @@ export function createGenerationGraph(
               ...(escalation ? [escalation.action] : [])].join("; "),
           };
         });
-      } catch (error) { return blocked(error); }
+      } catch (error) {
+        const stop = blocked(error);
+        if (stop.status !== "blocked") return stop;
+        return operationFailure(s, job, "completion-verification", error,
+          { reference: "completion-report" });
+      }
     })
     .addEdge(START, "schedule")
     .addConditionalEdges("schedule", s => routeAfterOperationAssessment(s,
@@ -1856,17 +2049,49 @@ export async function runStoryGeneration(options: GenerationOptions) {
       if (options.action === "start" && cancelled) {
         throw new Error("Cannot start generation for a terminally cancelled Story job.");
       }
-      if (options.action === "resume" && !cancelled) {
+      let preflightStopped = false;
+      if (options.action === "resume" && !cancelled && state.orchestratorSnapshotId) {
+        // This check must precede graph.invoke, not merely decorate its final
+        // report: a swapped but otherwise valid snapshot cannot dispatch a
+        // writer while inspection subsequently reports the mismatch.
+        try {
+          const pinned = await loadSelectedStoryOrchestrator(job,
+            config.configurable.thread_id, {
+              task: state.request.task, kind: state.request.contract.scope.kind,
+              turnPlanDigest: state.request.turnPlanDigest,
+            });
+          if (pinned.receipt.skillSnapshot.id !== state.orchestratorSnapshotId)
+            throw Error("Pinned orchestrator snapshot changed since the generation checkpoint.");
+        } catch (error) {
+          state = { ...state, ...blocked(error) };
+          preflightStopped = true;
+        }
+      }
+      if (options.action === "resume" && !cancelled && !preflightStopped &&
+          (state.operationRecovery?.phase !== "fenced" ||
+           state.operationRecovery.operation === "specialist-dispatch")) {
         // Reconcile independently committed work items without ever replaying
-        // their external Pi writer. The parent graph may still be mid-node.
-        await withStoryJobLock(job, "generation-checkpoint-reconciliation", () =>
-          reconcileRecoveryCheckpoints(job));
+        // their external Pi writer. An unsuccessful pre-graph reconciliation
+        // must be checkpointed as an assessment before the graph can dispatch.
+        try {
+          await withStoryJobLock(job, "generation-checkpoint-reconciliation", () =>
+            reconcileRecoveryCheckpoints(job));
+        } catch (error) {
+          const stop = blocked(error);
+          if (stop.status !== "blocked") {
+            state = { ...state, ...stop };
+            preflightStopped = true;
+          } else state = { ...state, status: "running",
+            ...await operationFailure(state, job, "resume-reconciliation", error,
+              { reference: "generation-checkpoints" }, "exception", undefined,
+              config.configurable.thread_id) };
+        }
       }
       if (options.action !== "inspect") {
         // A terminal cancellation never re-enters a checkpointed dispatch:
         // an unfinished writer's original session and dirty worktree must
         // remain available for explicit, non-destructive reconciliation.
-        state = cancelled ? { ...state, ...cancellation } :
+        state = cancelled ? { ...state, ...cancellation } : preflightStopped ? state :
           await graph.invoke({ ...state, pauseAfter: options.pauseAfter ?? null }, config);
       }
       // A broken intake receipt can also make the composite job report fail.
@@ -1917,7 +2142,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
       if (options.action === "inspect") {
         current = selectionFailure ? blocked(selectionFailure) : cancelled ? cancellation :
           state.operationRecovery?.phase === "fenced" || state.operationRecovery?.phase === "assessment"
-            ? { status: "blocked", reason: state.operationRecovery.nextAction } :
+            ? { status: "blocked", reason: state.operationRecovery.reason + " " + state.operationRecovery.nextAction } :
           await withStoryJobLock(job, "generation-inspect", async () => {
             try {
               clean(job);
