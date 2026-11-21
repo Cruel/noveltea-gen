@@ -1488,6 +1488,42 @@ export async function runStoryGeneration(options: GenerationOptions) {
         current = blocked(selectionFailure);
       }
       const visible = { ...state, ...current };
+      const recoveryCheckpoints = await inspectRecoveryCheckpoints(job);
+      // Inspection is strictly read-only. Report the last source-bound
+      // corrective assignment (including an unsafe/missing proof) without
+      // advancing its writer, Git publication, attempt ledger or reviewer.
+      const rejected = [...recoveryCheckpoints].reverse().find(point =>
+        point.eligible && point.semanticReview === "failed" &&
+        (point.commitSha === visible.result?.headSha ||
+          existsSync(join(job.stateDir, "review-repairs", point.commitSha + ".json"))));
+      let correctiveAssignment: {
+        sourceCommitSha: string; phase: string; attempts?: number;
+        repairedCommitSha?: string; evidence?: string;
+      } | null = null;
+      if (rejected) {
+        const sourceCommitSha = rejected.commitSha;
+        const receipt = join(job.stateDir, "review-repairs", sourceCommitSha + ".json");
+        if (!existsSync(receipt)) {
+          correctiveAssignment = { sourceCommitSha, phase: "not-admitted" };
+        } else {
+          try {
+            const { inspectRejectedRepair, inspectPreparedRepairDispatch } =
+              await import("./rejected-review-repair.js");
+            const repair = await inspectRejectedRepair(job, sourceCommitSha);
+            if (repair.phase === "prepared")
+              await inspectPreparedRepairDispatch(job, sourceCommitSha);
+            correctiveAssignment = { sourceCommitSha, phase: repair.phase,
+              attempts: repair.attempts, repairedCommitSha: repair.repairedCommitSha,
+              evidence: repair.phase === "prepared" ? "unstarted-verified" :
+                repair.phase === "repairing" ? "writer-effects-uncertain" :
+                repair.phase === "awaiting-checkpoint" ? "commit-reconciliation-required" :
+                "receipt-verified" };
+          } catch (error) {
+            correctiveAssignment = { sourceCommitSha, phase: "integrity-blocked",
+              evidence: error instanceof Error ? error.message : String(error) };
+          }
+        }
+      }
       return { schema: "noveltea-generation/v1", status: current.status ?? state.status,
         reason: current.reason ?? state.reason, checkpointStatus: state.status,
         jobId: job.jobId, threadId: config.configurable.thread_id, checkpointPath: path,
@@ -1496,10 +1532,10 @@ export async function runStoryGeneration(options: GenerationOptions) {
           visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
             visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
-        recovery: visible.recovery ?? null,
+        recovery: visible.recovery ?? null, correctiveAssignment,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
-        recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),
+        recoveryCheckpoints,
         orchestrationSelection, orchestrationPlanning,
         dependencyPlan: await inspectDependencyPlan(job),
         causalAmendment: visible.causalAmendment ?? null,

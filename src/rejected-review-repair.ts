@@ -126,7 +126,7 @@ interface RepairCommitIntent {
   /** Exact validated canonical bytes staged for the original commit. */
   fileHashes: Record<string, string>;
 }
-export type RepairPhase = "ready" | "repairing" | "awaiting-author" | "needs-plan" | "disputing" | "adjudicating" | "validating" |
+export type RepairPhase = "ready" | "prepared" | "repairing" | "awaiting-author" | "needs-plan" | "disputing" | "adjudicating" | "validating" |
   "awaiting-checkpoint" | "reviewing" | "passed" | "failed" | "blocked";
 export interface RepairReceipt {
   version: 1;
@@ -380,7 +380,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
       (state.origin?.workItem === "foundation" &&
         (state.allowedPaths.length !== 1 || !state.allowedPaths[0]?.startsWith("creative-direction/"))) ||
       !Number.isSafeInteger(state.attempts) || state.attempts < 0 ||
-      !["ready", "repairing", "awaiting-author", "needs-plan", "disputing",
+      !["ready", "prepared", "repairing", "awaiting-author", "needs-plan", "disputing",
         "adjudicating", "validating", "awaiting-checkpoint", "reviewing", "passed", "failed", "blocked"].includes(state.phase) ||
       (state.outOfAuthority && (state.phase !== "needs-plan" ||
         !originalSafePath(state.outOfAuthority.path) ||
@@ -551,8 +551,50 @@ export async function claimRejectedRepair(job: JobStartResult, sha: string) {
   if (hash(originalTranscript) !== state.sessionSha256)
     throw Error("Original Pi transcript changed; do not silently start a new session.");
   state.sessionBytesBeforeRepair = originalTranscript.length;
+  // Preparing has no model or writing side effects. A second, durable
+  // dispatch marker is mandatory before the first external Pi prompt.
+  state.phase = "prepared";
+  await save(job, state);
+  return state;
+}
+
+/** A prepared claim is proven unstarted only by the durable pre-dispatch
+ * phase AND the unchanged pinned session, Git source and attempt ledger.
+ * Clean Git by itself is never evidence that a writer did not run. */
+export async function inspectPreparedRepairDispatch(job: JobStartResult, sha: string) {
+  const state = await inspectRejectedRepair(job, sha);
+  if (state.phase !== "prepared") throw Error("Repair has no unstarted dispatch to reconcile.");
+  if (state.sessionBytesBeforeRepair === undefined ||
+      state.sessionBytesBeforeRepair < 1 ||
+      await trustedHead(job) !== state.baselineHead ||
+      git(job, "status", "--porcelain=v1", "--untracked-files=all"))
+    throw new ProtocolIntegrityBlockedError("Prepared repair lost its unchanged source or writer fence");
+  let transcript: Buffer;
+  try {
+    const stat = await lstat(state.origin.sessionFile);
+    if (!stat.isFile() || stat.isSymbolicLink() ||
+        await realpath(state.origin.sessionFile) !== state.origin.sessionFile ||
+        stat.size !== state.sessionBytesBeforeRepair)
+      throw Error("Untrusted original session");
+    transcript = await readFile(state.origin.sessionFile);
+  } catch {
+    throw new ProtocolIntegrityBlockedError("Prepared repair transcript is missing or changed");
+  }
+  if (hash(transcript) !== state.sessionSha256)
+    throw new ProtocolIntegrityBlockedError("Prepared repair transcript is missing or changed");
+  const ledger = await inspectRepairLedger(job, state.originalSource.turnDigest);
+  if (ledger.corrections.some(c => c.rootFailureSha === state.rootFailureSha &&
+      c.sourceSha === sha))
+    throw new ProtocolIntegrityBlockedError("Prepared repair already has a submitted correction");
+  return state;
+}
+
+/** Persist 'started' BEFORE any Pi prompt. A crash after this marker is
+ * uncertain even if the transcript and Git happen to be clean; never replay. */
+export async function markRejectedRepairStarted(job: JobStartResult, sha: string) {
+  const state = await inspectPreparedRepairDispatch(job, sha);
   state.phase = "repairing";
-  await save(job, state); // One-way crash fence before any external model call.
+  await save(job, state);
   return state;
 }
 /** A crash after Pi finished but before draft submission has an append-only
@@ -1265,8 +1307,12 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
   // one-way Pi turn. A failed preflight must not strand a repair as an
   // interrupted writer call that never actually began.
   const state = await inspectRejectedRepair(job, sha);
-  if (state.phase !== "ready")
+  if (state.phase !== "ready" && state.phase !== "prepared")
     throw Error("No safe original-session repair attempt is ready.");
+  // An uncertain saved claim must be refused BEFORE budget admission, sandbox
+  // provisioning, or a new session. Only the exact pre-dispatch fence permits
+  // continuing an interrupted prepared assignment.
+  if (state.phase === "prepared") await inspectPreparedRepairDispatch(job, sha);
   const focus = state.origin.workItem.startsWith("focus:")
     ? state.origin.workItem.slice(6).split(".")[0] : null;
   const skill = state.origin.workItem === "foundation" ? "nt-story-discovery" :
@@ -1315,7 +1361,9 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       },
     });
   const feedback = await prepareRejectedRepairFeedback(job, state);
-  const claimed = await claimRejectedRepair(job, sha);
+  const claimed = state.phase === "ready"
+    ? await claimRejectedRepair(job, sha)
+    : await inspectPreparedRepairDispatch(job, sha);
   if (claimed.attempts !== state.attempts)
     throw Error("Repair attempt counter changed before the original Pi session.");
   const { session } = await createAgentSession({
@@ -1333,6 +1381,7 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
         session.thinkingLevel !== resolved.resolution.thinking)
       throw Error("Original specialist thinking effort changed.");
     await reportControllerReviewPhase("correcting");
+    await markRejectedRepairStarted(job, sha);
     await promptStorySpecialist(session,
       "Continue your ORIGINAL specialist Pi session to correct a rejected draft. " +
       "This is not an argument with the independent reviewer. The prior verdict " +

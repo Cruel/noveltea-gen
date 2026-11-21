@@ -58,6 +58,9 @@ export async function driveRejectedRepairCycle<S extends RepairCycleState>(
     seen.add(transition);
     switch (state.phase) {
       case "ready":
+      case "prepared":
+        // 'prepared' is only replayable after the production adapter proves
+        // its durable pre-dispatch marker and unmodified Git/Pi/ledger state.
         state = await ops.correct(state.sourceCommitSha);
         continue;
       case "repairing":

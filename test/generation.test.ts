@@ -617,6 +617,73 @@ async function runFixtureRecoveryGraph(
   }
 }
 
+test("generation start and read-only inspect preserve invalid corrective evidence without replay", {
+  skip: !available,
+}, async () => {
+  const f = setup("correction-inspect-unsafe");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Retain the original archive witness obligation during independent review."]);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  let sourceSha: string;
+  try {
+    const job = await startStoryJob({ story: f.story, job: "single" }, false);
+    const checkpoints = await inspectRecoveryCheckpoints(job);
+    const point = checkpoints.find(item => item.eligible && item.workItem === "foundation");
+    assert.ok(point?.assurance, JSON.stringify({
+      checkpoints: checkpoints.map(item => ({
+        workItem: item.workItem, eligible: item.eligible, reason: item.reason,
+        review: item.semanticReview,
+      })), completed: paused.completedStages, status: paused.status,
+    }));
+    sourceSha = point.commitSha;
+    await reviewBoundedAssignments(job, [point], async packet => {
+      const item = packet.items[0]!;
+      const path = item.assurance.changedPaths[0]!;
+      return { sourceDigest: packet.sourceDigest, verdict: "fail" as const,
+        findings: [{
+          commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+          path, line: 1, kind: "missing-requirement" as const,
+          message: "The original premise lacks a causal witness.",
+          requiredCorrection: "Establish a specific witness in the existing Foundation.",
+          affectedPaths: [path],
+        }], evidence: [] };
+    }, "deterministic-negative-review-fixture", true);
+    assert.equal((await inspectRecoveryCheckpoints(job)).find(item =>
+      item.commitSha === sourceSha)?.semanticReview, "failed");
+    const receiptDir = join(job.stateDir, "review-repairs");
+    mkdirSync(receiptDir, { recursive: true });
+    // A plausible phase is not evidence. A missing/invalid sealed source must
+    // surface an integrity blocker; inspection must never invoke the writer.
+    writeFileSync(join(receiptDir, sourceSha + ".json"), JSON.stringify({
+      version: 1, jobId: job.jobId, threadId: job.threadId,
+      sourceCommitSha: sourceSha, phase: "prepared", attempts: 0,
+    }));
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const first = f.cli(["generate", "inspect"]);
+  assert.equal(first.correctiveAssignment?.sourceCommitSha, sourceSha!);
+  assert.equal(first.correctiveAssignment?.phase, "integrity-blocked");
+  const second = f.cli(["generate", "inspect"]);
+  assert.deepEqual(second.correctiveAssignment, first.correctiveAssignment);
+  for (let restart = 0; restart < 2; restart++) {
+    const resumed = f.cli(["generate", "resume", "--pause-after", "foundation"]);
+    assert.notEqual(resumed.status, "completed", "Invalid correction evidence cannot complete the Turn");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
+      "A restart must not create a replacement correction commit");
+  }
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
 test("production generation graph routes bounded correction, independent review and next specialist without replay", {
   skip: !available,
 }, async () => {

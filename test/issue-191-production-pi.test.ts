@@ -26,7 +26,8 @@ import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { runPinnedObjectivePlanner } from "../src/orchestrator-planner.js";
 import { runPiAssignmentReview, prepareSemanticReview } from "../src/semantic-assignment-review.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
-import { beginRejectedRepair, claimRejectedRepair, reconcileCompletedRepairWriter,
+import { beginRejectedRepair, claimRejectedRepair, inspectPreparedRepairDispatch,
+  markRejectedRepairStarted, reconcileCompletedRepairWriter,
   validateRejectedRepairDraft, commitRejectedRepairDraft, reconcileUnpublishedRepairCommit,
   inspectRejectedRepair } from "../src/rejected-review-repair.js";
 import { inspectRepairLedger } from "../src/repair-ledger.js";
@@ -320,8 +321,34 @@ test("production planner and independent reviewer recover in original Pi session
     const originalNegativeSha = point.commitSha;
     const repair = await beginRejectedRepair(job, point);
     assert.equal(repair.phase, "ready");
-    await withStoryJobLock(job, "rejected-review-writer", () =>
+    const prepared = await withStoryJobLock(job, "rejected-review-writer", () =>
       claimRejectedRepair(job, originalNegativeSha));
+    assert.equal(prepared.phase, "prepared");
+    for (let restart = 0; restart < 2; restart++) {
+      const safe = await withStoryJobLock(job, "rejected-review-writer", () =>
+        inspectPreparedRepairDispatch(job, originalNegativeSha));
+      assert.equal(safe.phase, "prepared", "durable pre-dispatch marker proves writer unstarted");
+      assert.equal((await inspectRepairLedger(job, plan.digest)).corrections.length, 0);
+    }
+    const originalBytes = readFileSync(originalSessionFile);
+    writeFileSync(originalSessionFile, Buffer.concat([originalBytes, Buffer.from("unexpected")]));
+    await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
+      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked/);
+    writeFileSync(originalSessionFile, originalBytes);
+    unlinkSync(originalSessionFile);
+    await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
+      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked/);
+    writeFileSync(originalSessionFile, originalBytes);
+    const strayPath = join(job.worktreeStoryRoot, "stray.txt");
+    writeFileSync(strayPath, "Unresolved writer effects must be preserved.");
+    await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
+      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked/);
+    unlinkSync(strayPath);
+    await withStoryJobLock(job, "rejected-review-writer", () =>
+      markRejectedRepairStarted(job, originalNegativeSha));
+    assert.equal((await inspectRejectedRepair(job, originalNegativeSha)).phase, "repairing");
+    assert.equal((await reconcileCompletedRepairWriter(job, originalNegativeSha)).phase,
+      "repairing", "a marked started call cannot be replayed merely because Git is clean");
     const correctedPath = item.assurance.changedPaths[0]!;
     const correctedFile = join(job.worktreeStoryRoot, correctedPath);
     const rejectedBytes = readFileSync(correctedFile, "utf8");

@@ -74,6 +74,43 @@ test("rejection -> same writer -> actual correction -> native validation -> dist
   assert.equal(done.state.repairedCommitSha, corrected);
 });
 
+test("postcommit parent-checkpoint replay finishes only missing independent review", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "reviewing", sourceCommitSha: original,
+    repairedCommitSha: corrected, attempts: 1 }, log);
+  let review = "required-pending" as "required-pending" | "passed";
+  flow.ops.correct = async () => { throw Error("Committed correction cannot rerun writer"); };
+  flow.ops.commit = async () => { throw Error("Committed correction cannot republish Git"); };
+  flow.ops.reviewStatus = async () => review;
+  flow.ops.rereview = async () => { log.push("independent-read-only-review"); review = "passed"; };
+  const done = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(done.next, "completed");
+  assert.deepEqual(log, ["independent-read-only-review", "seal-independent-verdict"]);
+  const again = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(again.next, "completed");
+  assert.deepEqual(log, ["independent-read-only-review", "seal-independent-verdict"],
+    "Repeated resume must not spend writer, commit or reviewer attempts");
+});
+
+test("durably prepared but proven unstarted correction dispatches once on restart", async () => {
+  const log: string[] = [];
+  const flow = defaultOps({ phase: "prepared", sourceCommitSha: original }, log);
+  flow.ops.correct = async () => {
+    log.push("resume-proven-unstarted");
+    const next: State = { ...flow.get(), phase: "validating", attempts: 1 };
+    flow.set(next);
+    return next;
+  };
+  const resumed = await driveRejectedRepairCycle(flow.ops);
+  assert.equal(resumed.next, "completed");
+  assert.deepEqual(log, [
+    "resume-proven-unstarted", "native-validate", "new-signed-checkpoint",
+    "independent-read-only-review", "seal-independent-verdict",
+  ]);
+  assert.equal((await driveRejectedRepairCycle(flow.ops)).next, "completed");
+  assert.equal(log.filter(entry => entry === "resume-proven-unstarted").length, 1);
+});
+
 test("pending author steering yields after sealed failed rereview, never in the middle of a writer", async () => {
   const log: string[] = [];
   const flow = defaultOps({ phase: "ready", sourceCommitSha: original, attempts: 0 }, log);
