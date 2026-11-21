@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { assertCompletedSelectiveRevalidation } from "../src/selective-revalidation-work.js";
+import { assertCompletedSelectiveRevalidation, assertCompletedOtherOwnerRevalidation } from "../src/selective-revalidation-work.js";
 import { planSelectiveRevalidation, originalInventorySnapshotDigest } from "../src/selective-revalidation.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { admitCausalRevalidationFinding } from "../src/repair-ledger.js";
@@ -127,6 +127,31 @@ test("completed read-only dependent review proves later Composition may resume",
     f.job, f.successorSha, f.turnDigest, f.reviewDigest);
   assert.equal(checked.digest, f.plan.digest);
 });
+test("#221: other-owner completed revalidation uses the same source-bound proof, not an Event closeout", async t => {
+  const f = await fixture(t);
+  const source = { baseSha: sha("1"), successorSha: f.successorSha,
+    turnDigest: f.turnDigest, path: "milestones/alpha.md" };
+  const checked = await assertCompletedOtherOwnerRevalidation(f.job, source);
+  assert.equal(checked.digest, f.plan.digest);
+  await assert.rejects(() => assertCompletedOtherOwnerRevalidation(f.job,
+    { ...source, path: "characters/wrong.md" }), /source-bound/);
+  await assert.rejects(() => assertCompletedOtherOwnerRevalidation(f.job,
+    { ...source, baseSha: sha("f") }), /source-bound/);
+  for (const update of [
+    (s: any) => { s.results = []; },
+    (s: any) => { s.state = "reviewing"; },
+    (s: any) => { s.results[0].reviewerDigest = sum("f"); },
+  ]) {
+    const tampered = structuredClone(f.state);
+    update(tampered);
+    f.save(tampered);
+    await assert.rejects(() => assertCompletedOtherOwnerRevalidation(f.job, source));
+  }
+  f.save(f.state);
+  writeFileSync(f.reviewerFile, f.transcript.replace("Accepted revised source", "Forged reviewer text"));
+  await assert.rejects(() => assertCompletedOtherOwnerRevalidation(f.job, source), /transcript/i);
+});
+
 test("an incomplete, forged, stale, missing or interrupted reviewer never carries forward", async t => {
   const f = await fixture(t);
   for (const mutation of [

@@ -1428,6 +1428,11 @@ export function createGenerationGraph(
           clean(job); await trustedHead(job); await checkPlan(job, s.request, s.planVersion);
           const stopped = await authorBoundary(job);
           if (stopped) return stopped;
+          // A positive other-owner prerequisite rereview alone does not
+          // certify its already-authored dependents. This final gate reopens
+          // the immutable completed selective-review receipt after restart.
+          const { assertOtherOwnerGenerationCompletion } = await import("./review-other-owner-revalidation.js");
+          await assertOtherOwnerGenerationCompletion(job);
           const report = await inspectJobReport(s.request);
           const complete = report.generation.status === "completed" && authorizedInventoryComplete(s.inventory);
           const escalation = complete ? null : reviewEscalation(report, s.inventory);

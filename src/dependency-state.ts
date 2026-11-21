@@ -255,6 +255,11 @@ export async function recordReviewDependency(job: JobStartResult, request: Revie
       const entry = plan.entries.find(e => e.reviewSourceSha === request.sourceSha);
       if (entry?.phase === "verified" && entry.eventRepair?.commitSha === head)
         return request; // inspectDependencyPlan already attested the final Event repair.
+      if (request.classification === "other-owner" && entry?.phase === "verified" && entry.commitSha) {
+        const { verifiedNarrativeChain } = await import("./job-successor.js");
+        await verifiedNarrativeChain(job, entry.commitSha, head);
+        return request; // Independently reviewed later commits are not a replay of the prerequisite.
+      }
       const proofPath = entry?.amendment && join(job.stateDir, "dependency-items",
         entry.amendment.assignment.id + ".json");
       if (!entry || !entry.amendment || !proofPath || !existsSync(proofPath) ||
@@ -306,6 +311,11 @@ export async function registerReviewDependency(
   if (prior) {
     if (prior.phase === "verified" && prior.eventRepair?.commitSha === head)
       return { plan: saved, entry: prior };
+    if (existingOwner && prior.phase === "verified" && prior.commitSha && head !== request.sourceSha) {
+      const { verifiedNarrativeChain } = await import("./job-successor.js");
+      await verifiedNarrativeChain(job, prior.commitSha, head);
+      return { plan: saved, entry: prior };
+    }
     if (head !== request.sourceSha) {
       const path = prior.amendment && join(job.stateDir, "dependency-items",
         prior.amendment.assignment.id + ".json");

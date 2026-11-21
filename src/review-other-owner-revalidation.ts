@@ -7,7 +7,27 @@ import type { GenerationInventory } from "./generation-plan.js";
 import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { dependencyDigest, dependencyGit, inspectDependencyPlan, dependencyTurn } from "./dependency-state.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
-import { revalidateAfterReviewedCorrection } from "./selective-revalidation-work.js";
+import { assertCompletedOtherOwnerRevalidation, revalidateAfterReviewedCorrection } from "./selective-revalidation-work.js";
+
+/** The final Turn verdict must never use an other-owner positive rereview
+ * without the separately sealed dependent revalidation. An interrupted
+ * reviewer can be resumed through its persisted workflow, not marked done. */
+export async function assertOtherOwnerGenerationCompletion(job: JobStartResult) {
+  const plan = await inspectDependencyPlan(job);
+  for (const request of plan?.reviewRequests ?? []) {
+    if (request.classification !== "other-owner") continue;
+    const entries = plan!.entries.filter(entry => entry.reviewSourceSha === request.sourceSha);
+    const entry = entries[0];
+    if (entries.length !== 1 || entry?.phase !== "verified" || !entry.commitSha ||
+        !request.otherOwnerPath || entry.originalReview?.verdict !== "pass" ||
+        entry.review?.verdict !== "pass")
+      throw Error("Turn completion has an unresolved cross-specialist prerequisite.");
+    await assertCompletedOtherOwnerRevalidation(job, {
+      baseSha: request.sourceSha, successorSha: entry.commitSha,
+      turnDigest: request.turnDigest, path: request.otherOwnerPath,
+    });
+  }
+}
 
 export async function revalidateOtherOwnerPrerequisite(input: {
   job: JobStartResult;
@@ -70,5 +90,9 @@ export async function revalidateOtherOwnerPrerequisite(input: {
     },
     contract: input.contract, task: input.task, provider: input.provider, model: input.model,
     skillsSource: input.skillsSource, validatorSource: input.validatorSource,
+  });
+  await assertCompletedOtherOwnerRevalidation(job, {
+    baseSha: request.sourceSha, successorSha: entry.commitSha,
+    turnDigest: request.turnDigest, path,
   });
 }

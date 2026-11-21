@@ -213,6 +213,45 @@ export async function assertCompletedSelectiveRevalidation(
     throw Error("An unresolved causally linked downstream Repair finding blocks Composition.");
   return state.proposal;
 }
+/** #221: a separately authorized existing-record correction is not the
+ * Milestone closeout adapter. Authenticate its completed downstream verdicts
+ * without pretending it authored a prerequisite-* Event correction. The
+ * supporting grant itself is verified by inspectDependencyPlan at the caller.
+ */
+export async function assertCompletedOtherOwnerRevalidation(job: JobStartResult, source: {
+  baseSha: string; successorSha: string; turnDigest: string; path: string;
+}) {
+  const state = await read(fileOf(job, source.successorSha));
+  if (state) assertSelectiveRevalidationPlan(state.proposal);
+  if (!state || state.version !== 1 || state.jobId !== job.jobId ||
+      state.threadId !== job.threadId || state.turnDigest !== source.turnDigest ||
+      state.proposal.sourceSha !== source.baseSha ||
+      state.proposal.successorSha !== source.successorSha ||
+      state.proposal.turnDigest !== source.turnDigest ||
+      JSON.stringify(state.proposal.changedPaths) !== JSON.stringify([source.path]) ||
+      state.state !== "completed" || state.reviewing || state.correctiveAssignment ||
+      await openSkillSnapshot(state.snapshot.id) !== state.snapshot.path ||
+      !state.finalHead)
+    throw Error("Other-owner revalidation lacks a completed source-bound dependent review.");
+  await verifiedNarrativeChain(job, state.finalHead, await trustedHead(job));
+  const heads = await authenticatedCorrectionHeads(job, state);
+  const expected = [...state.proposal.affected, ...state.proposal.unknown];
+  if (state.results.length !== expected.length ||
+      new Set(state.results.map(r => r.itemId)).size !== expected.length ||
+      state.results.some(r => !expected.includes(r.itemId) || r.status !== "passed"))
+    throw Error("Other-owner revalidation cannot carry unreviewed or failed dependent work.");
+  for (const result of state.results) {
+    checkReview(job, state.proposal, result, heads);
+    if (result.sessionDigest !== await transcript(job, result.sessionFile))
+      throw Error("Other-owner revalidation lost a source-bound reviewer transcript.");
+  }
+  const ledger = await inspectRepairLedger(job, source.turnDigest);
+  if (ledger.findings.some(f => [source.successorSha, ...heads].includes(f.causedBy ?? "") &&
+      f.status !== "resolved"))
+    throw Error("Unresolved downstream correction cannot be carried forward.");
+  return state.proposal;
+}
+
 export interface RevalidateAfterCorrectionOptions {
   job: JobStartResult;
   inventory: GenerationInventory;
