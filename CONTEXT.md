@@ -16,6 +16,9 @@ One author request and the agent's resulting work within an existing Thread. A T
 **Thread fork**:
 A new Thread descended from an exact verified checkpoint in another Thread. Its ancestry remains visible while subsequent Story changes are independent.
 
+**Original-Thread resumption**:
+Continuation of an interrupted Turn in its existing Thread, preserving its original objective, execution lineage, and verified work. It does not create a new Thread or reinterpret unfinished operations as complete.
+
 **Collection**:
 An optional organizational grouping of Threads within a Story. Collection membership is independent of Thread ancestry and can change without changing the Story revisions.
 
@@ -78,6 +81,18 @@ A provisional, Story-wide causal design establishing the central narrative resol
 
 **Milestone Blueprint**:
 A provisional design for one Milestone's causal Events, evidence, decisions, and downstream obligations, developed when its verified prerequisites are available.
+
+**Milestone Blueprint approval**:
+An independent judgment that a specific version of the provisional Milestone design meets its planning contract at the cited source. It does not certify that downstream assignments have been completed, nor make the plan unchangeable.
+
+**Post-approval revision**:
+A source-bound correction or amendment of previously approved provisional Story work that preserves the prior approval as historical evidence. Its consequences for dependent work must be assessed against the new approved version.
+
+**Approval escape**:
+A defect that was already present in the evidence accepted by an earlier independent approval but was recognized only afterward. It is distinct from a revision justified by later Story information or an author's changed direction.
+
+**Downstream obligation**:
+A requirement for additional Story work that remains after the current stage and has a responsible specialist. A determination that no Choice or Puzzle is needed is not an Interactive downstream obligation.
 
 **Specialist assignment**:
 A bounded task derived from a Thread request or work plan, describing the specific outcome a specialist is responsible for producing. It is the reference for reviewing that specialist's proposed Story changes, rather than the original broad Story brief.
