@@ -89,12 +89,22 @@ test("#227 valid Event-only and genuinely interactive Milestones have a v5 path 
   assert.equal(parseMilestoneBlueprintReview(review("pass"), draft, assignment).status, "pass");
   const interactive: MilestoneBlueprint = {
     ...draft,
+    events: [{
+      ...draft.events[0]!,
+      routes: [
+        { condition: "The player provides informed consent",
+          consequence: "The witness shares a verifiable dated account" },
+        { condition: "The player refuses disclosure",
+          consequence: "The witness stays anonymous; the public ledger remains accessible" },
+      ],
+    }],
     downstream: [
       { owner: "interactive", obligation: "Bind the player's refusal to a real Choice and its consequences" },
       ...draft.downstream,
     ],
   };
   assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(interactive), assignment), interactive);
+  assert.equal(interactive.events[0]?.routes.length, 2);
   assert.equal(parseMilestoneBlueprintReview(review("pass"), interactive, assignment).status, "pass");
 });
 
