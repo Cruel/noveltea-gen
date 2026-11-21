@@ -16,6 +16,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { guardPiBudget, preparePiContext } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { openSkillSnapshot } from "./snapshot.js";
@@ -747,6 +748,7 @@ export async function createArchitectureDraftReviewCycle(
               history.at(-1)!.sources, requirements, history);
           };
           await guardPiBudget(job, stepId, diagnostic.file);
+          await reportControllerReviewPhase("diagnosing");
           await promptStorySpecialist(opened, diagnosticContext.contextNote + prompt);
           let diagnosis: ReturnType<typeof parseArchitectureDraftDiagnosis>;
           try { diagnosis = parse(); }

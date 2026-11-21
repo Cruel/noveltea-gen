@@ -49,6 +49,31 @@ test('Pi status remains distinct from controller working and verified checkpoint
     'previous Pi report must never be promoted to authoritative verification')
 })
 
+test('#213 controller-confirmed diagnosing and correction are not Pi status or editorial approval', () => {
+  const events: ProgressEvent[] = [
+    { ...event(1, 'working', 'review'), detail: {
+      source: 'controller', reviewPhase: 'diagnosing',
+    } },
+    { ...event(2, 'working', 'review'), detail: {
+      source: 'controller', reviewPhase: 'correcting',
+    } },
+    { ...event(3, 'working'), detail: {
+      source: 'pi', summary: 'I have approved the Story', proposedPaths: [],
+    } },
+  ]
+  const steps = projectActivity(events, 'running')
+  assert.deepEqual(steps.map(s => s.kind), ['report', 'report', 'report'])
+  assert.deepEqual(steps.map(s => s.files), [[], [], []])
+  assert.deepEqual(steps.map(s => s.state), ['proposed', 'proposed', 'proposed'])
+  assert.equal(steps[0]!.detail?.source, 'controller')
+  assert.equal(steps[1]!.detail?.source, 'controller')
+  assert.equal(steps[2]!.detail?.source, 'pi')
+  assert.match(activityTitle(steps[0]!), /Independent diagnostic review/)
+  assert.match(activityTitle(steps[1]!), /Correcting within the saved assignment/)
+  assert.match(activityTitle(steps[2]!), /Model status/)
+  assert.ok(!steps.some(s => s.state === 'verified'))
+})
+
 test('the real blocked World foundations timeline renders verified stages and files before the failure', () => {
   const events = [
     event(1, 'started'),

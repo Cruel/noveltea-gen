@@ -15,6 +15,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { preparePiContext, PiBudgetPause } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { assertReviewCycleSession, reviewCycleId } from "./review-cycle.js";
 import { evaluateReviewConvergence, type ConvergentReview, type ReviewRound } from "./review-convergence.js";
@@ -1465,6 +1466,7 @@ async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSna
         [writer.file, reviewer.file].includes(diagnosisSession.file))
       throw Error("Diagnostic reviewer is not independent of the Review cycle.");
     const start = pendingFormat ? 0 : diagnosisSession.session.messages.length;
+    if (!pendingFormat) await reportControllerReviewPhase("diagnosing");
     if (!pendingFormat) await promptStorySpecialist(diagnosisSession.session,
       diagnosisSession.context.contextNote +
       "INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW. " +

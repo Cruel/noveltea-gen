@@ -41,6 +41,12 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
       steps.push({ id: event.id, kind: 'started', stage: null, milestone: null,
         state: 'started', files: [], outcome: null, at: event.createdAt,
         detail: event.detail })
+    } else if (event.kind === 'working' && event.detail?.reviewPhase) {
+      // Controller phase transitions are neither model prose nor a review
+      // verdict. Surface them without manufacturing a verified Story stage.
+      steps.push({ id: event.id, kind: 'report', stage: 'review', milestone: null,
+        state: 'proposed', files: [], outcome: null, at: event.createdAt,
+        detail: event.detail })
     } else if (event.kind === 'working' && event.detail?.source === 'pi') {
       steps.push({ id: event.id, kind: 'report', stage: null, milestone: null,
         state: 'proposed', files: [], outcome: null, at: event.createdAt,
@@ -90,7 +96,13 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
 
 export function activityTitle(step: ActivityStep): string {
   if (step.kind === 'started') return 'Started generation'
-  if (step.kind === 'report') return 'Model status · ' + (step.detail?.summary ?? 'Working; unverified')
+  if (step.kind === 'report') {
+    if (step.detail?.reviewPhase === 'diagnosing')
+      return 'Independent diagnostic review in progress'
+    if (step.detail?.reviewPhase === 'correcting')
+      return 'Correcting within the saved assignment'
+    return 'Model status · ' + (step.detail?.summary ?? 'Working; unverified')
+  }
   if (step.kind === 'finished') {
     switch (step.outcome) {
       case 'completed': return 'Generation finished'

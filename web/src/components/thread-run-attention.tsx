@@ -5,10 +5,10 @@ import { AlertCircle, CheckCircle2, Clock3, LoaderCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { authorInteractionsQuery } from '@/lib/author.queries'
 import { isAuthorState } from '@/lib/author-state'
-import { runAttentionText } from '@/lib/thread-attention'
+import { runAttentionText, runAttentionHeading } from '@/lib/thread-attention'
 import { publicRuntimeText } from '@/lib/public-runtime-text'
 import { updateJobControl } from '@/lib/jobs.functions'
-import { jobQuery } from '@/lib/jobs.queries'
+import { jobQuery, jobControlsQuery } from '@/lib/jobs.queries'
 import { CheckpointContinueAction } from './checkpoint-timeline'
 import { startConfiguredGeneration } from '@/lib/generation.functions'
 import { AuthorInteractions } from '../routes/_protected/jobs/-AuthorInteractions'
@@ -24,6 +24,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
   const queryClient = useQueryClient()
   const inspectable = ['prepared', 'blocked', 'interrupted', 'paused', 'completed', 'cancelled'].includes(run.status)
   const { data: job, error } = useQuery({ ...jobQuery(run.jobId), enabled: inspectable })
+  const { data: controls } = useQuery({ ...jobControlsQuery(run.jobId), enabled: inspectable })
   const sourceJobId = job?.forkSource?.jobId ?? ''
   const { data: sourceJob, isPending: sourcePending } = useQuery({
     ...jobQuery(sourceJobId), enabled: inspectable && !!sourceJobId &&
@@ -102,12 +103,11 @@ export function ThreadRunAttention({ run }: { run: Run }) {
       {blocked ? <AlertCircle className="size-4 shrink-0 text-amber-500" /> :
         job.status === 'completed' ? <CheckCircle2 className="size-4 shrink-0 text-emerald-500" /> :
           <Clock3 className="size-4 shrink-0 text-muted-foreground" />}
-      <strong>{retryableContinuation ? 'Generation could not start' :
-        blocked ? 'Generation stopped' :
-        job.status === 'completed' ? 'Generation finished' :
-          job.status === 'paused' ? 'Generation paused' :
-            job.status === 'prepared' ? 'Ready to generate' :
-              job.status === 'cancelled' ? 'Run cancelled' : 'Generation status'}</strong>
+      <strong>{runAttentionHeading(job.status, {
+        authorPending: !!pendingDecision,
+        budgetPaused: !!controls?.budget.pause,
+        retryableContinuation,
+      })}</strong>
     </div>
     <p className="whitespace-pre-wrap break-words text-sm">
       {retryableContinuation

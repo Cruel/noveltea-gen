@@ -278,9 +278,21 @@ function causalDispatchPriority(receipt: {
  * Git HEAD is independently branchable and the next specialist has never
  * started. This does not repair, discard, or repeat an interrupted writer.
  */
-async function reconciledFailures(job: JobStartResult, failures: Record<string, string>) {
+async function reconciledFailures(job: JobStartResult, failures: Record<string, string>,
+  previousInventoryHead?: string | null) {
   if (!Object.keys(failures).length) return failures;
   const currentHead = await trustedHead(job);
+  // Clearing a failed assignment at the SAME observed HEAD creates an
+  // unbounded dispatch/failure/reconcile loop. Only a NEW externally settled
+  // commit since the previous controller inventory may remove this failure;
+  // the exact checkpoint below still must prove the specialist identity.
+  const finalizedFixtureWorldCrash = failures.foundations ===
+    "Injected recovery crash after Git commit and before checkpoint finalization.";
+  // A fixture World crash is the one supported exception: the same HEAD
+  // changes from ineligible to eligible when the original native receipt is
+  // finalized by checkpoint reconciliation. It cannot authorize a new writer.
+  if ((!previousInventoryHead || previousInventoryHead === currentHead) &&
+      !finalizedFixtureWorldCrash) return failures;
   const point = (await inspectRecoveryCheckpoints(job))
     .find(record => record.eligible && record.commitSha === currentHead);
   if (!point) return failures;
@@ -394,7 +406,8 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   // independent clusters do not permit replay against a changed HEAD.
   // A new authorized plan is the boundary for reconsidering local failures.
   const failures = await reconciledFailures(job,
-    s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {});
+    s.inventory?.planVersion === (plan?.version ?? null) ? s.failures ?? {} : {},
+    s.inventory?.headSha);
   const inherited = readRecoveryFork(job)?.completedStages ?? [];
   const evidence = [...inherited.filter(old => !s.completedStages.some(current =>
     current.stage === old.stage && current.milestone === old.milestone)), ...s.completedStages];

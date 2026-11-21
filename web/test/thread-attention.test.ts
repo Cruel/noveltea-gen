@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { runAttentionText, canSendThreadFollowUp } from '../src/lib/thread-attention'
+import { runAttentionText, runAttentionHeading, canSendThreadFollowUp } from '../src/lib/thread-attention'
 
 test('blocked specialist failure remains legible without hiding preserved work', () => {
   const detail = 'foundations: Foundation specialist did not edit canonical Markdown.; event:a: Blocked dependency: foundations; composition:a: Blocked dependency'
@@ -12,6 +12,20 @@ test('blocked specialist failure remains legible without hiding preserved work',
   assert.equal(runAttentionText('interrupted', 'Writer needs manual reconciliation; downstream blocked'),
     'Writer needs manual reconciliation')
   assert.equal(runAttentionText('prepared', null), 'This Thread has not started generating yet.')
+})
+
+test('#213 trusted Studio headings distinguish author input, budget pauses and completion', () => {
+  assert.equal(runAttentionHeading('paused', { authorPending: true }), 'Author input required')
+  assert.equal(runAttentionHeading('blocked', { authorPending: true }), 'Author input required')
+  assert.equal(runAttentionHeading('paused', { budgetPaused: true }), 'Resource budget paused')
+  assert.equal(runAttentionHeading('paused'), 'Generation paused')
+  assert.equal(runAttentionHeading('blocked'), 'Generation stopped')
+  assert.equal(runAttentionHeading('completed', { budgetPaused: true }),
+    'Generation finished', 'historical budgets must not overwrite terminal success')
+  assert.equal(runAttentionHeading('blocked', { retryableContinuation: true }),
+    'Generation could not start')
+  assert.equal(runAttentionHeading('running', { authorPending: true, budgetPaused: true }),
+    'Generation status', 'stale controls must not claim a current pause')
 })
 
 test('paused, blocked, interrupted and cancelled Threads never invite undeliverable follow-ups', () => {

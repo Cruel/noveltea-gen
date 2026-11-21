@@ -13,6 +13,25 @@ export function runAttentionText(status: string, reason: string | null): string 
   return reason || 'Inspect the saved run for details.'
 }
 
+/** These headings reflect trusted controller state, never a model progress
+ * report. Only a verified pending Author Choice can claim author input, and
+ * only the actual resource ledger can claim a budget pause. */
+export function runAttentionHeading(status: string, options: {
+  authorPending?: boolean; budgetPaused?: boolean; retryableContinuation?: boolean
+} = {}): string {
+  if (options.authorPending && ['paused', 'blocked'].includes(status))
+    return 'Author input required'
+  if (options.budgetPaused && status === 'paused')
+    return 'Resource budget paused'
+  if (options.retryableContinuation) return 'Generation could not start'
+  if (['blocked', 'interrupted', 'failed'].includes(status)) return 'Generation stopped'
+  if (status === 'completed') return 'Generation finished'
+  if (status === 'paused') return 'Generation paused'
+  if (status === 'prepared') return 'Ready to generate'
+  if (status === 'cancelled') return 'Run cancelled'
+  return 'Generation status'
+}
+
 /** A stopped run has no independently verified continuation source. */
 export function canSendThreadFollowUp(status: string | undefined, archived: boolean): boolean {
   return !archived && (status === 'running' || status === 'queued' || status === 'completed')

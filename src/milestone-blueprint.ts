@@ -17,6 +17,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { preparePiContext, PiBudgetPause } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { assertReviewCycleSession, reviewCycleId } from "./review-cycle.js";
 
@@ -513,7 +514,12 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "Design 1–5 causally ordered provisional Events ONLY for " + assignment.milestoneId + ". " +
     "For each Event state concrete inspectable evidence, source, access/custody, " +
     "what it actually establishes and its uncertainty; Character knowledge/state, local branch " +
-    "conditions and lasting consequences. Evidence anchorPath MUST be an existing sourcePaths " +
+    "conditions and lasting consequences. The Event knowledge field MUST be ONE " +
+    "nonempty STRING summarizing who learns what and why, NEVER an array, object, " +
+    "list of structured state transitions or nested fact mappings. Participants " +
+    "MUST use ONLY the exact CHARACTER IDS below (or [] if empty). dependsOn " +
+    "MUST use only earlier provisional Event slugs. " +
+    "Evidence anchorPath MUST be an existing sourcePaths " +
     "canonical record, not a proposed Event path. Name downstream owners for Choice/interactive " +
     "and Composition obligations. Unknown future Events remain provisional, not verified canon. " +
     "No unrelated Milestone or protected-canon changes. Return ONLY one JSON object " +
@@ -808,10 +814,37 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       }
       try {
         const start = writer.session.messages.length;
+        if (previousPhase === "revision") await reportControllerReviewPhase("correcting");
         await promptStorySpecialist(writer.session, writer.context.contextNote +
           plannerPrompt(assignment, task, receipt.rounds.at(-1)));
         verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment);
-        const draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
+        let draft: MilestoneBlueprint;
+        try {
+          draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
+        } catch (error) {
+          // This is a strict response-contract correction, not a fresh
+          // planner or authority to edit the Story. The original invalid
+          // reply stays in the SAME read-only Pi conversation; a crash before
+          // a sealed draft remains ambiguous and is never replayed.
+          await writer.context.beforeTurn(writer.session.sessionManager.getSessionFile());
+          await reportControllerReviewPhase("correcting");
+          await promptStorySpecialist(writer.session,
+            "READ-ONLY MILESTONE BLUEPRINT PROTOCOL CORRECTION. The previous " +
+            "plan was rejected by the canonical schema verifier: " +
+            (error instanceof Error ? error.message : String(error)) +
+            ". Keep the same source Milestone, approved causal obligations and " +
+            "protected Character IDs. Re-read any missing pinned sources. " +
+            "Return ONE complete valid noveltea-milestone-blueprint/v1 JSON " +
+            "object with existing sourcePaths, ordered existing event dependencies, " +
+            "participants ONLY from " + JSON.stringify(assignment.characterIds) +
+            " (or [] if empty), evidence, routes and a Composition owner. " +
+            "Each Event's knowledge MUST be ONE nonempty STRING, NOT an array " +
+            "of fact transitions, an object or nested JSON. Summarize concrete " +
+            "Character knowledge and its limits in this single prose string. " +
+            "Do not write any Story file or start a new plan.");
+          verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment);
+          draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
+        }
         await writer.context.completed(writer.session.sessionManager.getSessionFile()!, writer.session.sessionId);
         receipt.writer = await seal(writer.session);
         receipt.draft = draft;
@@ -845,10 +878,30 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
         reviewerPrompt(assignment, receipt.draft, receipt.rounds));
       verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
-      const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft,
-        assignment, receipt.rounds);
-      if (verdict.schema !== "noveltea-milestone-blueprint-review/v4")
-        throw Error("New Milestone reviews require an original, field-bound repair classification.");
+      const parseVerdict = () => {
+        const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft!,
+          assignment, receipt.rounds);
+        if (verdict.schema !== "noveltea-milestone-blueprint-review/v4")
+          throw Error("New Milestone reviews require an original, field-bound repair classification.");
+        return verdict;
+      };
+      let verdict: MilestoneBlueprintReview;
+      try {
+        verdict = parseVerdict();
+      } catch (error) {
+        await reviewer.context.beforeTurn(reviewer.session.sessionManager.getSessionFile());
+        await reportControllerReviewPhase("correcting");
+        await promptStorySpecialist(reviewer.session,
+          "INDEPENDENT READ-ONLY MILESTONE REVIEW FORMAT CORRECTION. The " +
+          "previous verdict failed the strict schema/provenance verifier: " +
+          (error instanceof Error ? error.message : String(error)) +
+          ". Keep all substantive findings and previous-round assessments; " +
+          "do not manufacture a pass. Re-read pinned sources if missing. Return " +
+          "ONE complete v4 review JSON object with source-linked findings and " +
+          "a prior assessment for each sealed historical blocker.");
+        verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
+        verdict = parseVerdict();
+      }
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
       receipt.reviewer = await seal(reviewer.session);
       const previousRound = receipt.rounds.at(-1);

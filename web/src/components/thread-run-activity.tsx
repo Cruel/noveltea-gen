@@ -50,12 +50,14 @@ export function ActivityRow({ step, onHover, onPin, pinned = false }: {
     onFocus: () => onHover(step), onBlur: () => onHover(null), tabIndex: 0,
   } : {}
   if (isStart || step.kind === 'report') return <TraceLine status={status} title={step.at}
-    {...interaction} data-activity-source={step.kind === 'report' ? 'pi' : 'controller'}>
+    {...interaction} data-activity-source={step.detail?.source === 'pi' ? 'pi' : 'controller'}>
     <TraceIcon><StepIcon step={step} /></TraceIcon>
     <div className="min-w-0"><TraceTitle>{activityTitle(step)}</TraceTitle>
       {step.kind === 'report' && <TraceDescription>
-        Studio-proposed, unverified{step.detail?.proposedPaths?.length
-          ? ' · ' + step.detail.proposedPaths.join(', ') : ''}
+        {step.detail?.reviewPhase
+          ? 'Controller-confirmed review phase; no new verdict or verified Story files claimed'
+          : 'Studio-proposed, unverified' + (step.detail?.proposedPaths?.length
+              ? ' · ' + step.detail.proposedPaths.join(', ') : '')}
       </TraceDescription>}
       {pinButton}
     </div>

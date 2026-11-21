@@ -5,6 +5,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath, requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
@@ -688,6 +689,7 @@ async function diagnoseComposition(
       "composition:" + assignment.workItemId + ":diagnostic:" + cycleId + ":" + history.length,
       diagnostic.file,
     );
+    await reportControllerReviewPhase("diagnosing");
     await promptStorySpecialist(
       session,
       context.contextNote +

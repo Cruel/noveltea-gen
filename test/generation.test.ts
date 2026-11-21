@@ -205,7 +205,7 @@ test("rejected placement remains dormant, blocks binding completion, and is not 
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
-test("amended Event objective reaches the real production dispatcher and resume reuses its verified commit", { skip: !available }, async () => {
+test("amended Event objective reaches production but an unamended parent fails closed without replay", { skip: !available }, async () => {
   const f = setup("adaptive-dispatch");
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
@@ -274,13 +274,20 @@ test("amended Event objective reaches the real production dispatcher and resume 
     "one Event assignment can deliver two native-verified causal Events when justified");
   const commit = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
-  assert.equal(resumed.status, "paused", JSON.stringify(resumed));
+  assert.equal(resumed.status, "blocked",
+    "the parent never signed the externally refined Event task; it cannot inherit that authority");
+  assert.match(resumed.reason, /Event author objective changed after its source-bound Milestone planning admission/);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), commit,
-    "the graph must reconcile the original specialist receipt instead of creating a second Event");
+    "a mismatched parent cannot replay or overwrite the independently verified Event commit");
   assert.equal(resumed.inventory.items.find((i: any) =>
-    i.id === "event:milestone.disclosure")?.status, "verified");
+    i.id === "event:milestone.disclosure")?.status, "blocked");
   assert.ok(resumed.recoveryCheckpoints.some((point: any) =>
     point.workItem === "event-disclosure" && point.commitSha === commit && point.eligible));
+  const replayed = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(replayed.status, "blocked", "a restart must not reset a mismatched objective failure");
+  assert.match(replayed.reason, /Event author objective changed/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), commit,
+    "repeated resume cannot reinterpret an external signed task as this parent's own");
 });
 
 async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, workItem: string) {
@@ -593,7 +600,7 @@ async function runFixtureRecoveryGraph(
     });
     const config = { configurable: { thread_id: paused.threadId } };
     await graph.updateState(config, {
-      active: foundation, result: { status: "foundation-committed", headSha: before },
+      active: foundation, result: { status: "committed", headSha: before },
       status: "running", reason: null, completedStages: [], pauseAfter: "architecture",
     }, "specialist_dispatch");
     const next = await graph.invoke(null, config);
@@ -1352,7 +1359,7 @@ test("rerouted Event task and original receipt remain immutable across recovery"
   const tampered = JSON.parse(original);
   tampered.conflicts = ["Different report"];
   writeFileSync(history, JSON.stringify(tampered));
-  assert.match(f.cli(eventArgs, false), /predecessor receipt is tampered/);
+  assert.match(f.cli(eventArgs, false), /Event no-write report changed or does not match its sealed source/);
   writeFileSync(history, original);
   const recovered = f.cli(eventArgs);
   assert.equal(recovered.status, "event-cluster-committed");

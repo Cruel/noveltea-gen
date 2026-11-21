@@ -5,6 +5,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { dirname, join, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { completedContextReads } from "./story-context.js";
@@ -703,6 +704,7 @@ async function reviewPostcommitDiagnosis(job: JobStartResult, snapshot: SkillSna
       await beginProtocolInvocation({
         receiptFile, sourceDigest: admission.sourceDigest, contract, session,
       });
+      await reportControllerReviewPhase("diagnosing");
       await promptStorySpecialist(session,
         "INDEPENDENT POSTCOMMIT DIAGNOSTIC. You are not the writer or the continuing " +
         "reviewer. No writes, approvals, waived obligations or expanded work grants. " +

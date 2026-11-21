@@ -9,6 +9,7 @@ import { eventConsequenceProofDigest,
   type EventConsequenceProof } from "./event-consequence-proof.js";
 import { rejectedRepairContext } from "./review-repair-context.js";
 import { createPiStatusTool } from "./pi-work-status.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
@@ -1331,6 +1332,7 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     if (resolved.resolution.thinking &&
         session.thinkingLevel !== resolved.resolution.thinking)
       throw Error("Original specialist thinking effort changed.");
+    await reportControllerReviewPhase("correcting");
     await promptStorySpecialist(session,
       "Continue your ORIGINAL specialist Pi session to correct a rejected draft. " +
       "This is not an argument with the independent reviewer. The prior verdict " +

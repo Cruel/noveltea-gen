@@ -8,6 +8,7 @@ import type { JobStartResult } from '../../../src/job'
 import { generationStages } from '../../../src/generation'
 import type { GenerationStage } from '../../../src/generation-plan'
 import type { PiWorkStatus } from '../../../src/pi-work-status'
+import type { ControllerReviewPhase } from '../../../src/controller-review-phase'
 
 export type ProgressKind = 'started' | 'working' | 'verified' | 'finished' | 'interrupted'
 export type ProgressStatus = 'paused' | 'blocked' | 'completed' | 'cancelled'
@@ -25,6 +26,7 @@ export type ProgressDetail = {
   review?: 'complete-in-scope' | 'incomplete' | 'blocked'
   summary?: string
   proposedPaths?: string[]
+  reviewPhase?: ControllerReviewPhase
 }
 export type ProgressEvent = {
   id: number; kind: ProgressKind; stage: GenerationStage | null; milestone: string | null
@@ -37,6 +39,7 @@ type EventInput = {
   headSha?: string; outcome?: string; specialist?: string; turnId?: string
   changedRecordIds?: string[]; validation?: ProgressDetail['validation']; diagnostics?: number
   piStatus?: PiWorkStatus
+  reviewPhase?: ControllerReviewPhase
 }
 
 const stageSet = new Set<string>(generationStages)
@@ -52,8 +55,11 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
   if (input.milestone && !canonicalMilestone(input.milestone)) throw new Error('Invalid progress milestone')
   if (input.piStatus && (input.kind !== 'working' || input.files?.length || input.headSha ||
       input.outcome || input.specialist || input.status || input.changedRecordIds?.length ||
-      input.validation || input.diagnostics !== undefined))
+      input.validation || input.diagnostics !== undefined || input.reviewPhase))
     throw new Error('Model status cannot claim controller evidence')
+  if (input.reviewPhase && (input.kind !== 'working' || input.stage !== 'review' ||
+      !['diagnosing', 'correcting'].includes(input.reviewPhase)))
+    throw new Error('Invalid trusted review phase')
   if (input.headSha && !/^[a-f0-9]{40}$/i.test(input.headSha))
     throw new Error('Invalid verified progress SHA')
   if (input.diagnostics !== undefined && (!Number.isSafeInteger(input.diagnostics) ||
@@ -75,6 +81,7 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
     ...(input.specialist ? { specialist: input.specialist.slice(0, 160) } : {}),
     ...(input.headSha ? { headSha: input.headSha } : {}),
     ...(input.outcome ? { outcome: input.outcome.slice(0, 160) } : {}),
+    ...(input.reviewPhase ? { reviewPhase: input.reviewPhase } : {}),
     ...(input.kind === 'verified' && input.stage === 'review' &&
       (input.outcome === 'complete-in-scope' || input.outcome === 'incomplete' ||
         input.outcome === 'blocked') ? { review: input.outcome } : {}),

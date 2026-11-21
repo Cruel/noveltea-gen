@@ -1,5 +1,6 @@
 import { assertNativeVersion } from '../../src/native-cli-version';
 import { withPiStatusReporter } from '../../src/pi-work-status'
+import { withControllerReviewPhase } from '../../src/controller-review-phase'
 import { withSteeringBoundary } from '../../src/steering-boundary'
 import { validateStoryJob } from '../../src/validator'
 import { trustedHead } from '../../src/revision'
@@ -193,7 +194,10 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   }
   try {
     await withActiveExecutionTime(job, async () => {
-      const executeWithStatus = () => withSteeringBoundary({
+      const executeWithStatus = () => withControllerReviewPhase(
+        phase => appendGenerationEvent(store, item.ownerId, row.id, {
+          kind: 'working', stage: 'review', reviewPhase: phase, turnId }),
+        () => withSteeringBoundary({
         receipts: async source => {
           if (!ownerThreadId || source.jobId !== row.id)
             throw new Error('Steering amendment receipts require the exact authenticated Thread.')
@@ -213,7 +217,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       }, () => withPiStatusReporter(
         status => appendGenerationEvent(store, item.ownerId, row.id, {
           kind: 'working', piStatus: status, turnId }),
-        execute))
+        execute)))
       if (runtime) await withJobModelRuntime(runtime, executeWithStatus)
       else await executeWithStatus()
     })

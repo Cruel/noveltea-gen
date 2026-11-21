@@ -74,41 +74,82 @@ function scriptProvider(
       name,
       arguments: args,
     });
+    // Production Event admission now requires an independently reviewed,
+    // pinned Milestone Blueprint before the canonical Event writer can start.
+    // Script both read-only Pi conversations through their REAL sandbox read
+    // tools; do not replace the review with a fabricated fixture approval.
+    const milestoneReads = [
+      ...boundedPinnedSources("nt-event-design").map((path, i) =>
+        call("plan-skill-" + i, "read", { path: "skill://" + path })),
+      call("plan-catalog", "read", { path: "skill://nt-catalog/SKILL.md" }),
+      call("plan-milestone", "read", { path: "milestones/disclosure.md" }),
+    ];
+    const plan = {
+      schema: "noveltea-milestone-blueprint/v1",
+      milestoneId: "milestone.disclosure",
+      events: [{
+        id: "disclosure",
+        purpose: "Reveal the physical ledger through an inspectable archive discovery",
+        dependsOn: [],
+        evidence: [{
+          anchorPath: "milestones/disclosure.md",
+          source: "The current archive Milestone and its recorded ledger",
+          observation: "Ada finds the ledger where the archive clue points",
+          access: "The player can inspect the archive in the current scene",
+          establishes: "A source-linked disclosure without inventing previous testimony",
+          limits: "An observed ledger alone does not prove the witness's intent",
+        }],
+        participants: [],
+        knowledge: "The witness is not presumed to know the ledger's contents",
+        routes: [],
+      }],
+      downstream: [{
+        owner: "composition",
+        obligation: "Deliver source-linked prose revealing the ledger to the player",
+      }],
+    };
     const content: AssistantMessage["content"] =
-      at === 0
-        ? [
-            ...boundedPinnedSources("nt-event-design").map((path, i) =>
-              call("skill-" + i, "read", { path: "skill://" + path }),
-            ),
-            call("write-event", "write", { path: "events/disclose-ledger.md", content: eventRecord }),
-            call("bind-milestone", "edit", {
-              path: "milestones/disclosure.md",
-              edits: [
-                { oldText: "completeness: partial\n", newText: "" },
-                {
-                  oldText: "fulfillment: {any_of: []}",
-                  newText: "fulfillment: {any_of: [[event.disclose-ledger]]}",
-                },
-              ],
-            }),
-          ]
+      at === 0 || at === 3
+        ? milestoneReads
         : at === 1
-          ? [{ type: "text", text: '{"modifiedRecords": [' }]
+          ? [{ type: "text", text: JSON.stringify({
+              ...plan, events: [{ ...plan.events[0]!, participants: ["character.unknown"] }],
+            }) }]
           : at === 2
-            ? [
-                {
-                  type: "text",
-                  text: JSON.stringify({
-                    modifiedRecords: ["events/disclose-ledger.md", "milestones/disclosure.md"],
-                    architecturalConflicts: [],
-                    laterObligations: [
-                      "Player-facing prose and alternate branch details require composition and editorial review.",
+            ? [{ type: "text", text: JSON.stringify(plan) }]
+            : at === 4
+              ? [{ type: "text", text: JSON.stringify({
+                  schema: "noveltea-milestone-blueprint-review/v4",
+                  status: "pass", findings: [], prior: [],
+                }) }]
+            : at === 5
+              ? [
+                  ...boundedPinnedSources("nt-event-design").map((path, i) =>
+                    call("skill-" + i, "read", { path: "skill://" + path })),
+                  call("write-event", "write", { path: "events/disclose-ledger.md", content: eventRecord }),
+                  call("bind-milestone", "edit", {
+                    path: "milestones/disclosure.md",
+                    edits: [
+                      { oldText: "completeness: partial\n", newText: "" },
+                      {
+                        oldText: "fulfillment: {any_of: []}",
+                        newText: "fulfillment: {any_of: [[event.disclose-ledger]]}",
+                      },
                     ],
                   }),
-                },
-              ]
-            : [{ type: "text", text: "Unexpected extra model invocation" }];
-    const reason = at === 0 ? "toolUse" : "stop";
+                ]
+              : at === 6
+                ? [{ type: "text", text: '{"modifiedRecords": [' }]
+                : at === 7
+                  ? [{ type: "text", text: JSON.stringify({
+                      modifiedRecords: ["events/disclose-ledger.md", "milestones/disclosure.md"],
+                      architecturalConflicts: [],
+                      laterObligations: [
+                        "Player-facing prose and alternate branch details require composition and editorial review.",
+                      ],
+                    }) }]
+                  : [{ type: "text", text: "Unexpected extra model invocation" }];
+    const reason = [0, 3, 5].includes(at) ? "toolUse" : "stop";
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
@@ -373,11 +414,17 @@ Ada and Neri disagree about whether a concealed ledger should be revealed.
       );
       assert.equal(outcome.status, "event-cluster-committed");
       assert.equal(outcome.validation.status, "passed");
-      assert.equal(observed.length, 3, "one tool-use reply, one malformed response, one correction");
-      assert.ok(observed[0]!.toolNames.includes("write"));
-      assert.ok(observed[0]!.toolNames.includes("edit"));
-      assert.deepEqual(observed[2]!.toolNames, [], "correction must expose no tools in actual Pi");
-      const correctionContext = JSON.stringify(observed[2]!.messages);
+      assert.equal(observed.length, 8,
+        "Milestone planner corrects invalid schema in its own session before independent review and Event authoring");
+      assert.ok(observed[0]!.toolNames.includes("read"));
+      assert.ok(!observed[0]!.toolNames.includes("write"),
+        "Milestone planner must not receive a canonical authoring grant");
+      assert.ok(!observed[3]!.toolNames.includes("write"),
+        "independent Milestone reviewer must remain read-only");
+      assert.ok(observed[5]!.toolNames.includes("write"));
+      assert.ok(observed[5]!.toolNames.includes("edit"));
+      assert.deepEqual(observed[7]!.toolNames, [], "correction must expose no tools in actual Pi");
+      const correctionContext = JSON.stringify(observed[7]!.messages);
       assert.match(correctionContext, /RESPONSE-CONTRACT CORRECTION ONLY/);
       assert.match(correctionContext, /modifiedRecords/);
       assert.match(
@@ -386,7 +433,7 @@ Ada and Neri disagree about whether a concealed ledger should be revealed.
         "the invalid original response must remain in the same Pi conversation",
       );
       const authorCalls = (
-        observed[2]!.messages as Array<{
+        observed[7]!.messages as Array<{
           role: string;
           content?: Array<{ type: string; name?: string }>;
         }>
@@ -440,7 +487,7 @@ Ada and Neri disagree about whether a concealed ledger should be revealed.
         }),
       );
       assert.equal(replay.headSha, outcome.headSha);
-      assert.equal(observed.length, 3, "replayed graph must not invoke Pi again");
+      assert.equal(observed.length, 8, "replayed graph must not invoke Pi again");
     } finally {
       if (controller && liveJobId) controller.dispose(liveJobId);
       if (server) await new Promise<void>((done) => server!.close(() => done()));
