@@ -58,7 +58,7 @@ test('read-only review binds each exact claim, source and submitted author text'
       source: artwork },
   ]
   const interprets = [
-    { path: 'first_playthrough', value: JSON.stringify(planning.first_playthrough),
+    { path: 'planning.first_playthrough', value: JSON.stringify(planning.first_playthrough),
       source: { kind: 'turn' as const, index: 0 }, sourceDecisionId: 'author-brief',
       basis: 'inferred' as const, rationale: 'Exact author-selected minutes.' },
   ]
@@ -98,7 +98,7 @@ test('read-only review binds each exact claim, source and submitted author text'
 
 test('a planning citation has exact provenance but cannot self-certify semantic relevance', () => {
   const packet = discoverySemanticPacket('Make a short mystery', [],
-    [{ path: 'production.illustrated_backgrounds', source: ending, sourceDecisionId: 'author-ending',
+    [{ path: 'planning.production.illustrated_backgrounds', source: ending, sourceDecisionId: 'author-ending',
       basis: 'delegated', value: JSON.stringify(planning.production?.illustrated_backgrounds),
       rationale: 'Soft background limit.' }], evidence, context)
   assert.equal(packet.claims[0]?.sourceDecisionId, 'author-ending')

@@ -1,28 +1,28 @@
 import type { PlanningInterpretation } from '../../../src/planning-interpretation'
 
 const descriptions: Record<string, string> = {
-  choice_frequency: 'Choice frequency',
-  choice_impact: 'Choice impact',
-  'branching.depth': 'Branching depth',
-  'branching.route_exclusivity': 'Route-exclusive content',
-  puzzle_emphasis: 'Puzzle emphasis',
-  puzzle_count: 'Puzzle count',
-  choice_points: 'Choice points',
-  pacing: 'Pacing',
-  first_playthrough: 'Single-route playthrough (minutes)',
-  'production.illustrated_backgrounds': 'Illustrated background budget',
-  'production.background_variants': 'Background variant budget',
-  'production.character_artwork.main': 'Main Character artwork budget',
-  'production.character_artwork.supporting': 'Supporting Character artwork budget',
-  'production.character_artwork.extra': 'Extra Character artwork budget',
-  illustration_concepts: 'Illustration concepts',
+  'planning.choice_frequency': 'Choice frequency',
+  'planning.choice_impact': 'Choice impact',
+  'planning.branching.depth': 'Branching depth',
+  'planning.branching.route_exclusivity': 'Route-exclusive content',
+  'planning.puzzle_emphasis': 'Puzzle emphasis',
+  'planning.puzzle_count': 'Puzzle count',
+  'planning.choice_points': 'Choice points',
+  'planning.pacing': 'Pacing',
+  'planning.first_playthrough': 'Single-route playthrough (minutes)',
+  'planning.production.illustrated_backgrounds': 'Illustrated background budget',
+  'planning.production.background_variants': 'Background variant budget',
+  'planning.production.character_artwork.main': 'Main Character artwork budget',
+  'planning.production.character_artwork.supporting': 'Supporting Character artwork budget',
+  'planning.production.character_artwork.extra': 'Extra Character artwork budget',
+  'planning.illustration_concepts': 'Illustration concepts',
 }
 function displayValue(entry: PlanningInterpretation): string {
   let value: unknown
   try { value = JSON.parse(entry.value) }
   catch { return entry.value }
   if (typeof value === 'string') return value.replace(/-/g, ' ')
-  if (entry.path === 'first_playthrough' && value && typeof value === 'object' &&
+  if (entry.path === 'planning.first_playthrough' && value && typeof value === 'object' &&
       'min_minutes' in value && 'max_minutes' in value)
     return String(value.min_minutes) + '–' + String(value.max_minutes) + ' minutes per route'
   if (value && typeof value === 'object' && 'count' in value &&
@@ -34,7 +34,7 @@ function displayValue(entry: PlanningInterpretation): string {
   }
   if (value && typeof value === 'object' && 'max' in value)
     return 'up to ' + String(value.max)
-  if (entry.path === 'illustration_concepts' && Array.isArray(value))
+  if (entry.path === 'planning.illustration_concepts' && Array.isArray(value))
     return value.length + ' illustration concepts'
   return entry.value
 }

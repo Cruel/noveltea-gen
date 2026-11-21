@@ -7,12 +7,12 @@ import type { PlanningInterpretation } from '../../src/planning-interpretation'
 
 const source = { kind: 'answer' as const, setId: 'a'.repeat(64), questionId: 'linearity' }
 const entries: PlanningInterpretation[] = [
-  { path: 'branching.depth', value: '"shallow"', source, sourceDecisionId: 'author-answer-2',
+  { path: 'planning.branching.depth', value: '"shallow"', source, sourceDecisionId: 'author-answer-2',
     basis: 'inferred', rationale: 'Modest branching preserves choice without many distinct routes.' },
-  { path: 'branching.route_exclusivity', value: '"limited"', source,
+  { path: 'planning.branching.route_exclusivity', value: '"limited"', source,
     sourceDecisionId: 'author-answer-2', basis: 'inferred',
     rationale: 'Most content remains shared between routes.' },
-  { path: 'puzzle_emphasis', value: '"none"', source,
+  { path: 'planning.puzzle_emphasis', value: '"none"', source,
     sourceDecisionId: 'author-answer-3', basis: 'delegated',
     rationale: 'The author delegated Puzzle direction.' },
 ]

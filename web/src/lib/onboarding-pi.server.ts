@@ -12,8 +12,8 @@ import { candidate, validateNewStory } from './story-foundation.server'
 import { validStoryTitle } from './story-initialization-contract'
 import { parseGenerationContract } from '../../../src/generation'
 import { parseStoryPlanning, type StoryPlanning } from '../../../src/story-planning'
-import { parsePlanningInterpretations, renderPlanningInterpretations,
-  PlanningClarificationRequired, resolveDelegatedDecision,
+import { parsePlanningInterpretations, renderPlanningInterpretations, planningDimensionPaths,
+  PlanningClarificationRequired, PlanningInterpretationContractError, resolveDelegatedDecision,
   type PlanningEvidence, type PlanningInterpretation } from '../../../src/planning-interpretation'
 import { authorQuestionDirection, authorQuestionOptions } from '../../../src/author-question'
 import { parseProposedQuestionSet, parseQuestionDrafts, parseQuestionResponses,
@@ -172,6 +172,7 @@ function parseResponse(text: string, evidence: PlanningEvidence[], newStoryChat:
  * include arbitrary provider errors, private session text or exception stacks. */
 function discoveryCorrectionFeedback(error: unknown): string {
   if (error instanceof DiscoverySemanticRejection) return error.correction
+  if (error instanceof PlanningInterpretationContractError) return error.message
   const reason = error instanceof Error ? error.message : ''
   if (reason === 'Invalid author-question recommendation.' ||
       reason === 'A free-text question cannot force suggested alternatives.') {
@@ -291,7 +292,7 @@ When decisions are ready, return a proposed foundation and task for explicit
 human review, not an approval. Never assume user approval in your output.
 Respond ONLY as valid JSON, either:
 {"phase":"questions","questions":{"questions":[{"id":"story-tone","kind":"alternatives","question":"Which tone should shape the story?","options":[{"id":"uneasy","title":"Uneasy"},{"id":"hopeful","title":"Hopeful"}],"recommendedId":"uneasy","recommendationReason":"Supports the mystery","allowStudioDecision":true},{"id":"duration","kind":"free-text","question":"How long should one playthrough take?","placeholder":"For example, 90–120 minutes","allowStudioDecision":true}]}}
-or {"phase":"proposal","task":"brief generation objective","interpretations":[{"path":"branching.depth","source":{"kind":"answer","setId":"the trusted set id from planningSources","questionId":"branching"},"basis":"inferred","rationale":"A modest branch structure reflects the stated preference"}],"foundation":{
+or {"phase":"proposal","task":"brief generation objective","interpretations":[{"path":"planning.branching.depth","source":{"kind":"answer","setId":"the trusted set id from planningSources","questionId":"branching"},"basis":"inferred","rationale":"A modest branch structure reflects the stated preference"}],"foundation":{
 "id":"lowercase-slug","title":"...","premise":"...","central_conflict":"...",
 "genre":"...","tone":"...","player_experience":"...","scope":"...",
 "planning":{"choice_frequency":"occasional","choice_impact":"lasting",
@@ -303,12 +304,16 @@ or {"phase":"proposal","task":"brief generation objective","interpretations":[{"
 "character_artwork":{"main":{"count":{"max":3},"firmness":"soft"}}}},
 "body":"meaningful coherent narrative and production prose",
 "decisions":[{"statement":"significant creative choice","authority":"delegated","source":{"kind":"answer","setId":"exact trusted set id","questionId":"exact delegated question id"}}]}}
-The interpretations array above is also ILLUSTRATIVE: include EXACTLY ONE entry for EVERY
-populated planning dimension (choice_frequency, choice_impact, branching.depth,
-branching.route_exclusivity, puzzle_emphasis, pacing, first_playthrough, each
-production budget, and any optional counts/concepts). A dimension's numeric/range
-value comes exclusively from foundation.planning, not an extra value field in
-interpretations. Each entry has ONLY path, source, basis ('explicit' only for a selected option with the literal
+interpretations[].path MUST use the fully qualified canonical Story planning path,
+including the "planning." prefix. Relative paths such as "branching.depth" are INVALID.
+The complete supported path list, shared with the controller validator, is:
+${planningDimensionPaths.join(', ')}.
+Include EXACTLY ONE interpretation for EVERY populated planning dimension from
+foundation.planning, and NONE for omitted dimensions. The controller derives the
+exact expected paths from your proposed planning object and reports them if invalid.
+Numeric/range values come exclusively from foundation.planning, not an extra
+value field in interpretations. Each entry has ONLY path, source, basis
+('explicit' only for a selected option with the literal
 category value, 'inferred' for a normalized author preference, 'delegated' for an
 explicitly delegated question), and a short concrete rationale. Source must be an
 EXACT kind/index or kind/setId/questionId from the trusted planningSources input.

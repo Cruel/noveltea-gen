@@ -36,10 +36,10 @@ function render(phase: 'questions' | 'proposed' | 'approved', legacyQuestions = 
     ] } : null,
     proposal: phase === 'questions' ? null : { foundation, task: 'Make me a mystery game',
       interpretations: [
-        { path: 'branching.depth', value: '"shallow"',
+        { path: 'planning.branching.depth', value: '"shallow"',
           source: { kind: 'turn', index: 0 }, sourceDecisionId: 'author-brief',
           basis: 'inferred', rationale: 'The wording suggests limited branches.' },
-        { path: 'first_playthrough', value: '{"min_minutes":60,"max_minutes":90}',
+        { path: 'planning.first_playthrough', value: '{"min_minutes":60,"max_minutes":90}',
           source: { kind: 'turn', index: 0 }, sourceDecisionId: 'author-brief',
           basis: 'delegated', rationale: 'Studio selected a bounded route duration.' },
       ] },

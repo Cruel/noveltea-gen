@@ -57,27 +57,45 @@ export function resolveDelegatedDecision(raw: unknown, evidence: PlanningEvidenc
   // semantic reviewer; no keywords can grant or deny authorization here.
   return bound
 }
-const required = ['choice_frequency', 'choice_impact', 'branching.depth',
-  'branching.route_exclusivity', 'puzzle_emphasis', 'pacing', 'first_playthrough'] as const
+const required = ['planning.choice_frequency', 'planning.choice_impact',
+  'planning.branching.depth', 'planning.branching.route_exclusivity',
+  'planning.puzzle_emphasis', 'planning.pacing', 'planning.first_playthrough'] as const
 
-/** Enumerate meaningful planning fields, not arbitrary JSON leaves. Production
- * limits and duration stay grouped with their explicit units and firmness. */
+/** Full canonical Story paths are the only interpretation contract. Keep the
+ * published path list and controller value extraction in one definition. */
+const planningFields: ReadonlyArray<readonly [string, (p: StoryPlanning) => unknown]> = [
+  ['planning.choice_frequency', p => p.choice_frequency],
+  ['planning.choice_impact', p => p.choice_impact],
+  ['planning.choice_points', p => p.choice_points],
+  ['planning.branching.depth', p => p.branching?.depth],
+  ['planning.branching.route_exclusivity', p => p.branching?.route_exclusivity],
+  ['planning.puzzle_emphasis', p => p.puzzle_emphasis],
+  ['planning.puzzle_count', p => p.puzzle_count],
+  ['planning.pacing', p => p.pacing],
+  ['planning.first_playthrough', p => p.first_playthrough],
+  ['planning.production.illustrated_backgrounds', p => p.production?.illustrated_backgrounds],
+  ['planning.production.background_variants', p => p.production?.background_variants],
+  ['planning.production.character_artwork.main', p => p.production?.character_artwork?.main],
+  ['planning.production.character_artwork.supporting', p => p.production?.character_artwork?.supporting],
+  ['planning.production.character_artwork.extra', p => p.production?.character_artwork?.extra],
+  ['planning.illustration_concepts', p => p.illustration_concepts],
+]
+export const planningDimensionPaths: readonly string[] = planningFields.map(([path]) => path)
+
+/** Enumerate only populated planning fields, retaining grouped values for
+ * duration, production limits and illustration concepts. */
 export function planningDimensions(p: StoryPlanning): Array<{ path: string; value: unknown }> {
-  const values: Array<{ path: string; value: unknown }> = []
-  const add = (path: string, value: unknown) => {
-    if (value !== undefined) values.push({ path, value })
+  return planningFields.flatMap(([path, read]) => {
+    const value = read(p)
+    return value === undefined ? [] : [{ path, value }]
+  })
+}
+
+export class PlanningInterpretationContractError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PlanningInterpretationContractError'
   }
-  for (const key of ['choice_frequency', 'choice_impact', 'choice_points'] as const) add(key, p[key])
-  add('branching.depth', p.branching?.depth)
-  add('branching.route_exclusivity', p.branching?.route_exclusivity)
-  for (const key of ['puzzle_emphasis', 'puzzle_count', 'pacing', 'first_playthrough'] as const)
-    add(key, p[key])
-  add('production.illustrated_backgrounds', p.production?.illustrated_backgrounds)
-  add('production.background_variants', p.production?.background_variants)
-  for (const key of ['main', 'supporting', 'extra'] as const)
-    add('production.character_artwork.' + key, p.production?.character_artwork?.[key])
-  add('illustration_concepts', p.illustration_concepts)
-  return values
 }
 const clarification = (evidence: PlanningEvidence[], dimension: 'branch' | 'puzzle') =>
   [...evidence].reverse().find(item => !item.delegated && item.source.kind === 'answer' &&
@@ -136,13 +154,26 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
   const dimensions = planningDimensions(planning)
   if (fullBaseline && required.some(path => !dimensions.some(item => item.path === path)))
     throw Error('The initial Story planning baseline is incomplete.')
+  const expectedPaths = dimensions.map(item => item.path)
   if (raw.length !== dimensions.length)
-    throw Error('Every proposed planning dimension needs one source-bound interpretation.')
+    throw new PlanningInterpretationContractError(
+      'Every populated planning dimension requires exactly one interpretation. Expected paths: ' +
+      expectedPaths.join(', ') + '.')
   const values = new Map(dimensions.map(item => [item.path, item.value]))
   const seen = new Set<string>()
   return raw.map(item => {
-    if (!own(item) || Object.keys(item).sort().join(',') !== 'basis,path,rationale,source' ||
-        typeof item.path !== 'string' || seen.has(item.path) || !values.has(item.path) ||
+    if (!own(item)) throw Error('Invalid planning interpretation entry.')
+    if (typeof item.path !== 'string' || !values.has(item.path) || seen.has(item.path)) {
+      // Model-controlled strings are never echoed into correction prompts unless
+      // bounded to a harmless path identifier; no arbitrary text or credentials.
+      const received = typeof item.path === 'string' &&
+        /^[a-zA-Z][a-zA-Z0-9_.]{0,95}$/.test(item.path) ? item.path : '<invalid>'
+      throw new PlanningInterpretationContractError(
+        (seen.has(String(item.path)) ? 'Duplicate' : 'Invalid') +
+        ' planning interpretation path "' + received + '". Expected exactly: ' +
+        expectedPaths.join(', ') + '.')
+    }
+    if (Object.keys(item).sort().join(',') !== 'basis,path,rationale,source' ||
         !['explicit', 'inferred', 'delegated'].includes(String(item.basis)) ||
         typeof item.rationale !== 'string' || !item.rationale.trim() ||
         item.rationale.length > 320 || /[\r\n\0]/.test(item.rationale) ||
@@ -152,8 +183,8 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
     const bound = resolvePlanningEvidence(item.source, evidence)
     if ((item.basis === 'delegated') !== bound.delegated)
       throw Error('Planning interpretation has no matching submitted author evidence or delegation.')
-    const relevantClarification = item.path.startsWith('branching.')
-      ? clarification(evidence, 'branch') : item.path.startsWith('puzzle_')
+    const relevantClarification = item.path.startsWith('planning.branching.')
+      ? clarification(evidence, 'branch') : item.path.startsWith('planning.puzzle_')
         ? clarification(evidence, 'puzzle') : undefined
     if (relevantClarification && planningSourceKey(bound.source) !== planningSourceKey(relevantClarification.source))
       throw Error('A resolved planning conflict must cite its later author clarification.')
@@ -176,7 +207,7 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
       const numeric = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|dozen|couple|few|several|hour|minute)\b/i.test(bound.authorText)
       if (!numerals.length && !numeric)
         throw Error('Numeric planning estimates need an explicit quantitative source or delegation.')
-      if (item.path.startsWith('production.') && (value as { firmness?: string }).firmness === 'hard') {
+      if (item.path.startsWith('planning.production.') && (value as { firmness?: string }).firmness === 'hard') {
         if (!/\b(?:hard|strict|maximum|max|at most|no more than|limit|cap|cannot exceed|must not exceed)\b/i.test(bound.authorText))
           throw Error('A model cannot fabricate a hard author production limit.')
         const exactCap = /(?:at most|max(?:imum)?|limit(?:ed)? to|no more than|cap(?:ped)? at)\s+(\d+)\b/i.exec(bound.authorText)
@@ -185,7 +216,7 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
             (value as { count: { max: number } }).count.max !== statedCap)
           throw new PlanningClarificationRequired('The proposed hard production cap differs from the author quantity; ask rather than changing a protected limit.')
       }
-      if (item.path === 'first_playthrough') {
+      if (item.path === 'planning.first_playthrough') {
         const range = /(\d+)\s*(?:-|–|to)\s*(\d+)\s*(minutes?|mins?|hours?|hrs?)\b/i.exec(bound.authorText)
         if (range) {
           const factor = /^(?:hour|hr)/i.test(range[3]!) ? 60 : 1

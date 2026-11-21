@@ -39,26 +39,92 @@ const interpretation = (path: string, source: PlanningEvidence['source'],
   basis: 'explicit' | 'inferred' | 'delegated' = 'inferred') =>
   ({ path, source, basis, rationale: 'Grounded in the author source and bounded direction.' })
 const claims = [
-  interpretation('choice_frequency', at('frequency'), 'explicit'),
-  interpretation('choice_impact', at('studio'), 'delegated'),
-  interpretation('branching.depth', at('linearity')),
-  interpretation('branching.route_exclusivity', at('linearity')),
-  interpretation('puzzle_emphasis', at('studio'), 'delegated'),
-  interpretation('pacing', at('studio'), 'delegated'),
-  interpretation('first_playthrough', { kind: 'turn', index: 0 }),
-  interpretation('production.illustrated_backgrounds', { kind: 'turn', index: 0 }),
+  interpretation('planning.choice_frequency', at('frequency'), 'explicit'),
+  interpretation('planning.choice_impact', at('studio'), 'delegated'),
+  interpretation('planning.branching.depth', at('linearity')),
+  interpretation('planning.branching.route_exclusivity', at('linearity')),
+  interpretation('planning.puzzle_emphasis', at('studio'), 'delegated'),
+  interpretation('planning.pacing', at('studio'), 'delegated'),
+  interpretation('planning.first_playthrough', { kind: 'turn', index: 0 }),
+  interpretation('planning.production.illustrated_backgrounds', { kind: 'turn', index: 0 }),
 ]
+
+test('the exact canonical planning paths are accepted, and relative interpretation paths are rejected', () => {
+  const entries = parsePlanningInterpretations(claims, p, sources, true)
+  assert.deepEqual(entries.map(entry => entry.path), claims.map(claim => claim.path))
+  const relative = claims.map(claim => ({ ...claim, path: claim.path.slice('planning.'.length) }))
+  assert.throws(() => parsePlanningInterpretations(relative, p, sources, true),
+    /Invalid planning interpretation path "choice_frequency". Expected exactly: planning.choice_frequency/)
+  assert.throws(() => parsePlanningInterpretations(claims.slice(1), p, sources, true),
+    /Expected paths: planning.choice_frequency, planning.choice_impact/)
+  const malformed = claims.map((claim, index) => index === 0
+    ? { ...claim, path: 'planning.choice_frequency\nsecret=DO-NOT-ECHO' } : claim)
+  assert.throws(() => parsePlanningInterpretations(malformed, p, sources, true), error => {
+    assert.match((error as Error).message, /Invalid planning interpretation path "<invalid>"/)
+    assert.doesNotMatch((error as Error).message, /DO-NOT-ECHO/)
+    return true
+  })
+})
+
+test('Luna-shaped ten-dimension proposal validates exact canonical paths without aliases', () => {
+  const planning: StoryPlanning = {
+    choice_frequency: 'occasional', choice_impact: 'lasting',
+    branching: { depth: 'shallow', route_exclusivity: 'limited' },
+    puzzle_emphasis: 'adventure', pacing: 'narrative-led',
+    first_playthrough: { min_minutes: 30, max_minutes: 45 },
+    production: {
+      illustrated_backgrounds: { count: { max: 4 }, firmness: 'soft' },
+      background_variants: { count: { max: 2 }, firmness: 'soft' },
+      character_artwork: { main: { count: { max: 3 }, firmness: 'soft' } },
+    },
+  }
+  const questionIds = new Map([
+    ['planning.choice_frequency', 'choice-frequency'],
+    ['planning.choice_impact', 'choice-impact'],
+    ['planning.branching.depth', 'branching'],
+    ['planning.branching.route_exclusivity', 'branching'],
+    ['planning.puzzle_emphasis', 'puzzles'],
+    ['planning.pacing', 'pacing'],
+    ['planning.production.illustrated_backgrounds', 'background-budget'],
+    ['planning.production.background_variants', 'variant-budget'],
+    ['planning.production.character_artwork.main', 'character-art-budget'],
+  ])
+  const evidence: PlanningEvidence[] = [
+    { source: { kind: 'turn', index: 0 }, decisionId: 'author-brief',
+      statement: 'Make a compact 30–45-minute mystery.',
+      authorText: 'Make a compact 30–45-minute mystery.', delegated: false,
+      selectedOption: false },
+    ...[...new Set(questionIds.values())].map((id, index) => ({
+      source: at(id), decisionId: 'author-answer-' + (index + 1),
+      statement: 'Studio may decide ' + id, authorText: '',
+      delegated: true, selectedOption: false,
+    })),
+  ]
+  const interpretations = planningDimensions(planning).map(({ path }) => ({
+    path,
+    source: path === 'planning.first_playthrough' ? { kind: 'turn' as const, index: 0 } :
+      at(questionIds.get(path)!),
+    basis: (path === 'planning.first_playthrough' ? 'inferred' : 'delegated') as
+      'inferred' | 'delegated',
+    rationale: 'Grounded in the submitted author requirements.',
+  }))
+  assert.equal(interpretations.length, 10)
+  assert.equal(parsePlanningInterpretations(interpretations, planning, evidence, true).length, 10)
+  assert.throws(() => parsePlanningInterpretations(interpretations.map(item =>
+    ({ ...item, path: item.path.slice('planning.'.length) })), planning, evidence, true),
+  /Invalid planning interpretation path "choice_frequency"/)
+})
 
 test('natural author wording remains original while the controller binds normalized categorical paths', () => {
   const entries = parsePlanningInterpretations(claims, p, sources, true)
   assert.equal(entries.length, planningDimensions(p).length)
-  const depth = entries.find(e => e.path === 'branching.depth')!
+  const depth = entries.find(e => e.path === 'planning.branching.depth')!
   assert.equal(depth.value, '"shallow"')
   assert.equal(depth.basis, 'inferred')
   assert.equal(depth.sourceDecisionId, 'author-answer-1')
-  assert.equal(entries.find(e => e.path === 'branching.route_exclusivity')?.value, '"limited"')
-  assert.equal(entries.find(e => e.path === 'choice_frequency')?.basis, 'explicit')
-  assert.equal(entries.find(e => e.path === 'puzzle_emphasis')?.basis, 'delegated')
+  assert.equal(entries.find(e => e.path === 'planning.branching.route_exclusivity')?.value, '"limited"')
+  assert.equal(entries.find(e => e.path === 'planning.choice_frequency')?.basis, 'explicit')
+  assert.equal(entries.find(e => e.path === 'planning.puzzle_emphasis')?.basis, 'delegated')
   const appendix = renderPlanningInterpretations(entries, sources)
   assert.match(appendix, /source: Creative Decision `author-answer-1`/)
   assert.match(appendix, /chosen by NovelTea Studio under author delegation/)
@@ -118,11 +184,11 @@ test('forged or incomplete source references and fabricated consent fail closed'
   for (const tampered of [
     claims.slice(1),
     [...claims.slice(0, -1), claims[0]],
-    claims.map(c => c.path === 'branching.depth' ? { ...c, source: at('fake') } : c),
-    claims.map(c => c.path === 'branching.depth' ? { ...c, basis: 'explicit' } : c),
-    claims.map(c => c.path === 'puzzle_emphasis' ? { ...c, basis: 'inferred' } : c),
-    claims.map(c => c.path === 'choice_frequency' ? { ...c, source: at('studio') } : c),
-    claims.map(c => c.path === 'branching.depth' ? { ...c, basis: 'explicit' } : c),
+    claims.map(c => c.path === 'planning.branching.depth' ? { ...c, source: at('fake') } : c),
+    claims.map(c => c.path === 'planning.branching.depth' ? { ...c, basis: 'explicit' } : c),
+    claims.map(c => c.path === 'planning.puzzle_emphasis' ? { ...c, basis: 'inferred' } : c),
+    claims.map(c => c.path === 'planning.choice_frequency' ? { ...c, source: at('studio') } : c),
+    claims.map(c => c.path === 'planning.branching.depth' ? { ...c, basis: 'explicit' } : c),
   ]) assert.throws(() => parsePlanningInterpretations(tampered, p, sources, true))
   assert.throws(() => parsePlanningInterpretations([...claims, { ...claims[0], extra: 'forged' }],
     p, sources, true))
@@ -136,15 +202,15 @@ test('negated category words in an option cannot masquerade as an explicit autho
     : source)
   const deepPlan: StoryPlanning = { ...p, branching: { ...p.branching!, depth: 'deep' } }
   assert.throws(() => parsePlanningInterpretations(
-    claims.map(claim => claim.path === 'branching.depth' ? { ...claim, basis: 'explicit' } : claim),
+    claims.map(claim => claim.path === 'planning.branching.depth' ? { ...claim, basis: 'explicit' } : claim),
     deepPlan, negative, true), PlanningClarificationRequired)
   const falselyAffirmed = negative.map(source => source.decisionId === 'author-answer-1'
     ? { ...source, authorText: 'Deep branching? Absolutely not.' } : source)
   assert.throws(() => parsePlanningInterpretations(
-    claims.map(claim => claim.path === 'branching.depth' ? { ...claim, basis: 'explicit' } : claim),
+    claims.map(claim => claim.path === 'planning.branching.depth' ? { ...claim, basis: 'explicit' } : claim),
     deepPlan, falselyAffirmed, true), /impersonate an explicit author choice/)
   assert.equal(parsePlanningInterpretations(claims, p, negative, true).find(entry =>
-    entry.path === 'branching.depth')?.basis, 'inferred')
+    entry.path === 'planning.branching.depth')?.basis, 'inferred')
 })
 
 test('negation in one answer must not suppress an affirmative choice from another answer', () => {
@@ -166,10 +232,10 @@ test('an exact hyphenated categorical label remains an explicit author choice', 
     statement: 'Preferred pacing? — Author selected/wrote: narrative-led',
     authorText: 'narrative-led', selectedOption: true, delegated: false,
   }]
-  const result = parsePlanningInterpretations(claims.map(item => item.path === 'pacing'
+  const result = parsePlanningInterpretations(claims.map(item => item.path === 'planning.pacing'
     ? { ...item, source: at('pacing'), basis: 'explicit' } : item),
   { ...p, pacing: 'narrative-led' }, pacedSources, true)
-  assert.equal(result.find(item => item.path === 'pacing')?.basis, 'explicit')
+  assert.equal(result.find(item => item.path === 'planning.pacing')?.basis, 'explicit')
 })
 
 test('materially conflicting explicit author preferences demand a new question', () => {
@@ -197,10 +263,10 @@ test('explicit clarification supersedes earlier contradictory answers without re
       statement: 'Clarify conflicting Puzzle direction — Author selected/wrote: Must include custom puzzles.',
       authorText: 'Must include custom puzzles.', selectedOption: true, delegated: false }]
   const changed: StoryPlanning = { ...p, puzzle_emphasis: 'custom' }
-  const updated = claims.map(c => c.path === 'puzzle_emphasis'
+  const updated = claims.map(c => c.path === 'planning.puzzle_emphasis'
     ? { ...c, source: at('puzzles-new'), basis: 'inferred' as const } : c)
   const parsed = parsePlanningInterpretations(updated, changed, conflicting, true)
-  assert.equal(parsed.find(c => c.path === 'puzzle_emphasis')?.sourceDecisionId, 'author-answer-5')
+  assert.equal(parsed.find(c => c.path === 'planning.puzzle_emphasis')?.sourceDecisionId, 'author-answer-5')
   assert.throws(() => parsePlanningInterpretations(claims, changed, conflicting, true),
     /later author clarification/)
   const conflictWithoutClarification = conflicting.map(e => e.decisionId === 'author-answer-5'
@@ -274,18 +340,18 @@ test('a delegated planning dimension can cite the exact answered topic ID despit
       statement: 'Where should players spend most of their time? — Author explicitly delegated this question',
       authorText: '', selectedOption: false, delegated: true },
   ]
-  const adapted = claims.map(c => c.path === 'branching.depth'
+  const adapted = claims.map(c => c.path === 'planning.branching.depth'
     ? { ...c, source: at('branch-depth'), basis: 'delegated' as const }
-    : c.path === 'pacing' ? { ...c, source: at('pacing'), basis: 'delegated' as const } : c)
+    : c.path === 'planning.pacing' ? { ...c, source: at('pacing'), basis: 'delegated' as const } : c)
   const accepted = parsePlanningInterpretations(adapted, p, evidence, true)
-  assert.equal(accepted.find(item => item.path === 'branching.depth')?.sourceDecisionId,
+  assert.equal(accepted.find(item => item.path === 'planning.branching.depth')?.sourceDecisionId,
     'author-answer-branch-depth')
-  assert.equal(accepted.find(item => item.path === 'pacing')?.sourceDecisionId,
+  assert.equal(accepted.find(item => item.path === 'planning.pacing')?.sourceDecisionId,
     'author-answer-pacing')
-  const mismatched = adapted.map(c => c.path === 'pacing'
+  const mismatched = adapted.map(c => c.path === 'planning.pacing'
     ? { ...c, source: at('branch-depth') } : c)
   assert.equal(parsePlanningInterpretations(mismatched, p, evidence, true)
-    .find(item => item.path === 'pacing')?.sourceDecisionId, 'author-answer-branch-depth',
+    .find(item => item.path === 'planning.pacing')?.sourceDecisionId, 'author-answer-branch-depth',
   'The independent reviewer must reject mismatched meaning after exact provenance is established')
 })
 

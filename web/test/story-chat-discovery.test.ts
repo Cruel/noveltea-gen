@@ -13,7 +13,7 @@ import { openStudioDatabase, migrateStudio } from './support/studio-database'
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { listStoryThreads } from '../src/lib/story-threads.server'
 import type { DiscoveryInference } from '../src/lib/onboarding-pi.server'
-import { planningDimensions } from '../../src/planning-interpretation'
+import { planningDimensions, planningDimensionPaths } from '../../src/planning-interpretation'
 import { withFixtureSemanticReview } from './support/discovery-semantic-fixture'
 
 const url = 'http://localhost:3000'
@@ -53,8 +53,8 @@ const proposalFor = (session: { brief: string; accepted?: Array<{
     ? { kind: 'turn', index: 0 }
     : { kind: 'answer', setId: baseline!.setId, questionId: 'baseline' }
   value.interpretations = planningDimensions(value.foundation.planning).map(({ path }) => {
-    const fromBranching = path.startsWith('branching.') && branching
-    const fromClarification = path === 'puzzle_emphasis' && puzzleClarification
+    const fromBranching = path.startsWith('planning.branching.') && branching
+    const fromClarification = path === 'planning.puzzle_emphasis' && puzzleClarification
     const source = fromClarification
       ? { kind: 'answer', setId: puzzleClarification.setId, questionId: 'puzzle-clarification' }
       : fromBranching
@@ -123,7 +123,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     const selected = (await availableUserPiModels(store, alice))[0]!
     const model = { provider: selected.provider, id: selected.id }
     await store.persistence.settings.putDefaultModel(alice, model, 'now')
-    const storyIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()]
+    const storyIds = Array.from({ length: 6 }, () => randomUUID())
     const sourceSha = 'b'.repeat(40)
     for (const [i, storyId] of storyIds.entries()) {
       await store.persistence.onboarding.importStory({
@@ -251,9 +251,9 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(proposed.proposal.foundation.decisions[0].authority, 'user-protected')
     assert.equal(proposed.proposal.foundation.decisions[5].authority, 'delegated')
     assert.equal(proposed.proposal.interpretations.find((i: any) =>
-      i.path === 'branching.depth').value, '"shallow"')
+      i.path === 'planning.branching.depth').value, '"shallow"')
     assert.equal(proposed.proposal.interpretations.find((i: any) =>
-      i.path === 'branching.depth').basis, 'inferred')
+      i.path === 'planning.branching.depth').basis, 'inferred')
     assert.match(proposed.proposal.foundation.body, /source: Creative Decision `author-answer-2`/)
     assert.equal(proposed.proposal.foundation.planning.production.illustrated_backgrounds.firmness, 'hard')
     assert.deepEqual(proposed.proposal.foundation.planning.first_playthrough,
@@ -535,8 +535,54 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(resolvedProposal.phase, 'proposed')
     assert.equal(resolvedProposal.proposal.foundation.planning.puzzle_emphasis, 'none')
     assert.equal(resolvedProposal.proposal.interpretations.find((i: any) =>
-      i.path === 'puzzle_emphasis').source.questionId, 'puzzle-clarification')
+      i.path === 'planning.puzzle_emphasis').source.questionId, 'puzzle-clarification')
     assert.match(resolvedProposal.proposal.foundation.body, /Planning interpretations/)
+
+    // Reproduce Luna's failure at the production discovery boundary: an
+    // otherwise valid Creative Direction carries unqualified interpretation
+    // paths, so the controller must give exact bounded feedback and accept the
+    // corrected canonical paths on its one allowed response correction.
+    const pathTurnId = randomUUID()
+    const pathStarted = await submitFirstStoryTurn(auth, store, headers, url, {
+      storyId: storyIds[5]!, jobId: pathTurnId, prompt: initial, creativeMode: 'autonomous',
+    }, async (_state, instructions) => {
+      assert.match(instructions, /interpretations\[\]\.path MUST use the fully qualified canonical Story planning path/)
+      for (const path of planningDimensionPaths) assert.ok(instructions.includes(path),
+        'Model instructions must publish the validator path ' + path)
+      assert.doesNotMatch(instructions, /"path":"branching\.depth"/)
+      return questionsReply([{ id: 'baseline', kind: 'free-text',
+        question: 'May Studio decide the complete planning baseline?',
+        allowStudioDecision: true }])
+    })
+    assert.equal(pathStarted.state, 'discovery')
+    const pathQuestions = (await req(storyIds[5]!, pathTurnId, 'GET')).body.session
+    let pathResponses = 0
+    const repaired = await storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url },
+        body: JSON.stringify({ action: 'answer', revision: pathQuestions.revision,
+          setId: pathQuestions.questions.id, setRevision: pathQuestions.questions.revision,
+          responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
+        }),
+      }), url, storyIds[5]!, pathTurnId, withFixtureSemanticReview(async (state, instructions) => {
+        pathResponses++
+        const next = JSON.parse(proposalFor(state))
+        if (pathResponses === 1) {
+          next.interpretations = next.interpretations.map((item: { path: string }) =>
+            ({ ...item, path: item.path.slice('planning.'.length) }))
+        } else {
+          assert.match(instructions, /Invalid planning interpretation path "choice_frequency"/)
+          assert.match(instructions, /Expected exactly: planning.choice_frequency, planning.choice_impact/)
+          assert.match(instructions, /planning.production.illustrated_backgrounds/)
+        }
+        return JSON.stringify(next)
+      }))
+    assert.equal(repaired.status, 200)
+    assert.equal(pathResponses, 2, 'Discovery repairs an exact schema error within its bounded correction')
+    const repairedSession = (await repaired.json() as any).session
+    assert.equal(repairedSession.phase, 'proposed')
+    assert.ok(repairedSession.proposal.interpretations.every((item: { path: string }) =>
+      item.path.startsWith('planning.')))
     assert.deepEqual(await store.testing.foreignKeyViolations(), [])
   } finally {
     store.close()
