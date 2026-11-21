@@ -21,9 +21,22 @@ export interface AdaptiveSessionEvidence {
    * the exact ancillary tracked root README.txt. */
   skillReads: string[]; proposalDigest: string;
 }
+/** A controller-owned, write-ahead boundary for the ORIGINAL adaptive
+ * operation. "prepared" proves no adaptive Pi invocation was begun by this
+ * implementation; "invoking" is deliberately ambiguous until the exact
+ * transcript proves a completed response. Old attempts have no such proof. */
+export interface AdaptiveEffect {
+  version: 1;
+  phase: "prepared" | "invoking" | "responded";
+  snapshotId: string; provider: string; model: string;
+  contextDigest?: string;
+  invocation?: { file: string; id: string; prefixBytes: number; prefixSha256: string;
+    promptSha256: string; responseSha256?: string };
+}
 export interface AdaptiveAttempt {
   signature: string; sourceSha: string;
   phase: "planning" | "rejected" | "unchanged" | "admitted";
+  effect?: AdaptiveEffect;
   session?: AdaptiveSessionEvidence;
   malformedResponse?: AdaptiveResponseProof;
   recoveryContext?: string;
@@ -135,6 +148,23 @@ export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
       throw Error("Adaptive orchestration attempt history is corrupt.");
     signatures.add(attempt.signature);
     dependencyGit(job, "merge-base", "--is-ancestor", attempt.sourceSha, "HEAD");
+    const effect = attempt.effect;
+    if (effect) {
+      if (effect.version !== 1 || !["prepared", "invoking", "responded"].includes(effect.phase) ||
+          !HASH.test(effect.snapshotId) || !effect.provider || !effect.model ||
+          effect.contextDigest !== undefined && !HASH.test(effect.contextDigest) ||
+          (effect.phase === "prepared") !== !effect.invocation)
+        throw Error("Adaptive operation effect phase or original model/snapshot proof is invalid.");
+      if (effect.invocation) {
+        const ref = effect.invocation;
+        if (!ref.file.startsWith(join(job.stateDir, "adaptive-planning-sessions") + sep) ||
+            !ref.file.endsWith(".jsonl") || !ref.id || !Number.isSafeInteger(ref.prefixBytes) ||
+            ref.prefixBytes < 0 || !HASH.test(ref.prefixSha256) || !HASH.test(ref.promptSha256) ||
+            effect.phase === "responded" !== Boolean(ref.responseSha256) ||
+            ref.responseSha256 !== undefined && !HASH.test(ref.responseSha256))
+          throw Error("Adaptive original Pi invocation proof is invalid.");
+      }
+    }
     if (attempt.phase === "admitted" && !attempt.session)
       throw Error("An admitted adaptive proposal has no original read-only Pi transcript.");
     if (attempt.session)
@@ -163,17 +193,96 @@ export function assertAdaptiveSettled(state: AdaptiveState) {
     throw Error("Rejected adaptive orchestrator proposal: preserve its evidence and reconcile before dispatching remaining work.");
 }
 export async function beginAdaptiveAttempt(job: JobStartResult, state: AdaptiveState,
-  sourceSha: string, signature: string): Promise<boolean> {
+  sourceSha: string, signature: string, effect?: Pick<AdaptiveEffect, "snapshotId" | "provider" | "model">): Promise<boolean> {
   assertAdaptiveSettled(state);
   if (!SHA.test(sourceSha) || !HASH.test(signature))
     throw Error("Adaptive planning attempt has invalid source identity.");
   if (state.attempts.some(a => a.signature === signature)) return false;
   if (state.attempts.length >= 24 || state.entries.length >= 4)
     throw Error("Bounded adaptive plan history exhausted; author review required.");
-  state.attempts.push({ signature, sourceSha, phase: "planning" });
+  if (effect && (!HASH.test(effect.snapshotId) || !effect.provider || !effect.model))
+    throw Error("Adaptive original operation lacks pinned model and snapshot identity.");
+  state.attempts.push({ signature, sourceSha, phase: "planning",
+    ...(effect ? { effect: { version: 1 as const, phase: "prepared" as const, ...effect } } : {}) });
   await saveAdaptiveState(job, state);
   return true;
 }
+
+/** Called only under the original Story writer lease, after the independent
+ * omission work has completed. Never weaken the write-ahead invocation fence. */
+export async function bindAdaptiveContext(job: JobStartResult, state: AdaptiveState,
+  signature: string, contextDigest: string) {
+  const attempt = state.attempts.find(a => a.signature === signature);
+  if (!attempt || attempt.phase !== "planning" || !attempt.effect ||
+      !HASH.test(contextDigest) || attempt.effect.phase !== "prepared" ||
+      attempt.effect.contextDigest && attempt.effect.contextDigest !== contextDigest)
+    throw Error("Adaptive original operation context or effect phase differs.");
+  attempt.effect.contextDigest = contextDigest;
+  await saveAdaptiveState(job, state);
+}
+
+export async function beginAdaptiveInvocation(job: JobStartResult, state: AdaptiveState,
+  signature: string, file: string, id: string, prompt: string) {
+  const attempt = state.attempts.find(a => a.signature === signature);
+  if (!attempt || attempt.phase !== "planning" || attempt.effect?.phase !== "prepared" ||
+      !attempt.effect.contextDigest || !id || !prompt ||
+      !file.startsWith(join(job.stateDir, "adaptive-planning-sessions") + sep) ||
+      !file.endsWith(".jsonl"))
+    throw Error("Adaptive Pi invocation has no prepared, source-bound original operation.");
+  // Pi creates the JSONL on its first user message, not at SessionManager
+  // construction. Missing *before* this marker is legitimate; missing after
+  // it is ambiguous and never proves that the call did not begin.
+  let bytes = Buffer.alloc(0);
+  try {
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024 * 1024 ||
+        await realpath(file) !== file)
+      throw Error("Adaptive original Pi session is unsafe.");
+    bytes = await readFile(file);
+    let header: { type?: string; id?: string };
+    try { header = JSON.parse(bytes.toString("utf8").split("\n")[0] ?? "{}"); }
+    catch { throw Error("Adaptive original Pi session header is invalid."); }
+    if (header.type !== "session" || header.id !== id)
+      throw Error("Adaptive original Pi session identity changed before dispatch.");
+    // The adaptive group is unique per operation. Existing conversation
+    // messages at a supposedly pre-call boundary imply another effect.
+    try {
+      if (bytes.toString("utf8").trimEnd().split("\n").slice(1)
+        .some(line => JSON.parse(line).type === "message"))
+        throw Error("Adaptive original Pi session already contains model activity.");
+    } catch (error) {
+      if (error instanceof SyntaxError) throw Error("Adaptive original Pi prefix is malformed.");
+      throw error;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  attempt.effect = { ...attempt.effect, phase: "invoking",
+    invocation: { file, id, prefixBytes: bytes.length,
+      prefixSha256: createHash("sha256").update(bytes).digest("hex"),
+      promptSha256: createHash("sha256").update(prompt).digest("hex") } };
+  // This durable commit MUST complete before session.prompt() can reach Pi.
+  // A crash between this write and the actual call is ambiguous, not "prepared".
+  await saveAdaptiveState(job, state);
+}
+
+export async function completeAdaptiveInvocation(job: JobStartResult, state: AdaptiveState,
+  signature: string, file: string, id: string) {
+  const attempt = state.attempts.find(a => a.signature === signature);
+  if (attempt?.phase !== "planning" || attempt.effect?.phase !== "invoking" ||
+      attempt.effect.invocation?.file !== file || attempt.effect.invocation.id !== id)
+    throw Error("Completed adaptive response lacks its original invocation fence.");
+  const bytes = await readFile(file);
+  const original = attempt.effect.invocation;
+  if (bytes.length < original.prefixBytes ||
+      createHash("sha256").update(bytes.subarray(0, original.prefixBytes)).digest("hex") !== original.prefixSha256)
+    throw Error("Completed adaptive Pi response no longer contains its invocation prefix.");
+  attempt.effect = { ...attempt.effect, phase: "responded",
+    invocation: { ...original,
+      responseSha256: createHash("sha256").update(bytes).digest("hex") } };
+  await saveAdaptiveState(job, state);
+}
+
 export async function settleAdaptiveAttempt(job: JobStartResult, state: AdaptiveState,
   signature: string, phase: "rejected" | "unchanged" | "admitted",
   entry?: AdaptiveAmendment, session?: AdaptiveSessionEvidence): Promise<void> {

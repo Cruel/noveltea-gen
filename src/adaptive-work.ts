@@ -22,9 +22,12 @@ import { evaluateAdaptiveProposal, applyAdaptiveAssignments, revalidateAdaptiveA
   removeAdaptiveOverlays, assertReviewedOmissionDisposition,
   type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment } from "./adaptive-assignments.js";
 import { emptyAdaptiveState, readAdaptiveState,
-  assertAdaptiveSettled, beginAdaptiveAttempt, settleAdaptiveAttempt, saveAdaptiveState } from "./adaptive-state.js";
+  assertAdaptiveSettled, beginAdaptiveAttempt, settleAdaptiveAttempt, saveAdaptiveState,
+  bindAdaptiveContext, beginAdaptiveInvocation, completeAdaptiveInvocation } from "./adaptive-state.js";
 import { AdaptiveRecoveryRequired, MalformedAdaptiveResponse, recheckAdaptiveResponse, type AdaptiveRecovery, type AdaptiveResponseProof } from "./adaptive-protocol.js";
-import { proposeAdaptiveWork, InvalidAdaptiveProposalError } from "./adaptive-planner.js";
+import { proposeAdaptiveWork, recoverCompletedAdaptiveProposal, InvalidAdaptiveProposalError } from "./adaptive-planner.js";
+import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
+import { registerPendingPiSession } from "./job-pi-policy.js";
 import { readEventOnlyOmission } from "./interactive-event-only.js";
 import { readPuzzleNoWrite } from "./puzzle-obligation.js";
 import { reviewedAdaptiveOmissions } from "./adaptive-omission.js";
@@ -300,10 +303,19 @@ export async function reconcileAdaptiveWork(input: {
       throw Error("Checkpointed adaptive correction lost its original response; do not replay the planner");
   }
   state ??= emptyAdaptiveState(job, turn.digest, plan.version);
-  const interrupted = state.attempts.find(a => a.phase === "planning" && a.malformedResponse);
-  // Exempt only this sealed format failure, never a rejected admission or an
-  // ambiguous interrupted invocation. Inspection cannot grant a continuation.
-  assertAdaptiveSettled(interrupted ? { ...state, attempts: state.attempts.filter(a => a !== interrupted) } : state);
+  const interrupted = state.attempts.find(a => a.phase === "planning");
+  const originalAttempt = interrupted?.effect && !interrupted.malformedResponse ? interrupted : null;
+  const format = interrupted?.malformedResponse ? interrupted : null;
+  // Legacy receipts without a write-ahead effect phase remain ambiguous. A
+  // prepared original is never replayed in inspection; only the controller
+  // execution boundary can verify and continue the SAME operation.
+  const recoverable = input.allowAmend !== false && !!originalAttempt;
+  assertAdaptiveSettled(interrupted && (format || recoverable)
+    ? { ...state, attempts: state.attempts.filter(a => a !== interrupted) } : state);
+  if (originalAttempt && (originalAttempt.effect!.snapshotId !== selected.receipt.skillSnapshot.id ||
+      originalAttempt.effect!.provider !== (request.provider ?? "openai") ||
+      originalAttempt.effect!.model !== (request.model ?? "gpt-6-luna")))
+    throw Error("Interrupted adaptive planner changed its original model or snapshot.");
   const expectedSignature = pendingDigest({ source: original.headSha, planVersion: plan.version,
     turn: turn.digest, metricSources: budget.sourceRevisionsDigest });
   const decision = (proof: AdaptiveResponseProof): AdaptiveRecovery => ({
@@ -313,11 +325,14 @@ export async function reconcileAdaptiveWork(input: {
   });
   if (interrupted) {
     if (interrupted.signature !== expectedSignature || interrupted.sourceSha !== original.headSha)
-      throw Error("Unsettled adaptive correction no longer matches the verified source");
-    const required = decision(interrupted.malformedResponse!);
-    const phase = input.fixRecheck ? "protocol-exhausted" : "authorized";
-    if (input.allowAmend === false || !isDeepStrictEqual(input.recovery, { ...required, phase }))
-      throw new AdaptiveRecoveryRequired(required);
+      throw Error("Unsettled adaptive operation no longer matches the verified source");
+    if (format) {
+      const required = decision(format.malformedResponse!);
+      const phase = input.fixRecheck ? "protocol-exhausted" : "authorized";
+      if (input.allowAmend === false || !isDeepStrictEqual(input.recovery, { ...required, phase }))
+        throw new AdaptiveRecoveryRequired(required);
+    } else if (input.recovery && input.recovery.phase !== "completed")
+      throw Error("Unrelated adaptive protocol recovery cannot authorize the original Pi operation.");
   }
   const protectedPaths = report.records.filter(r =>
     r.metadata.type === "creative-direction" || (r.metadata.decisions?.length ?? 0) > 0).map(r => r.path);
@@ -354,7 +369,10 @@ export async function reconcileAdaptiveWork(input: {
   if (interrupted && !eligible) throw Error("Unsettled adaptive correction lost its pending assignment scope");
   if (input.allowAmend !== false && eligible) {
     const signature = expectedSignature;
-    if (interrupted || await beginAdaptiveAttempt(job, state, original.headSha, signature)) {
+    if (interrupted || await beginAdaptiveAttempt(job, state, original.headSha, signature, {
+      snapshotId: selected.receipt.skillSnapshot.id, provider: request.provider ?? "openai",
+      model: request.model ?? "gpt-6-luna",
+    })) {
       // Only a new, persisted controller attempt may make another independent
       // review request. Pure restarts or unchanged source HEADs never consume
       // an extra model turn; interrupted review retains its original fence.
@@ -369,16 +387,29 @@ export async function reconcileAdaptiveWork(input: {
       // session is never replaced by another potentially costly/inconsistent
       // proposal on automatic resume.
       const contextDigest = pendingDigest({ inventory: effective, omissionProofs, sourceHashes });
-      if (interrupted && interrupted.recoveryContext !== contextDigest)
-        throw Error("Adaptive protocol correction lost its original source or omission evidence");
+      if (interrupted && (format?.recoveryContext && format.recoveryContext !== contextDigest ||
+          originalAttempt?.effect?.contextDigest && originalAttempt.effect.contextDigest !== contextDigest))
+        throw Error("Interrupted adaptive operation lost its original source or omission evidence");
+      if (!format && (!interrupted || originalAttempt?.effect?.phase === "prepared"))
+        await bindAdaptiveContext(job, state, signature, contextDigest);
       let proposed: Awaited<ReturnType<typeof proposeAdaptiveWork>>;
       try {
-        proposed = input.fixRecheck && interrupted && input.recovery
+        proposed = input.fixRecheck && format && input.recovery
           ? await recheckAdaptiveResponse(job, input.recovery, selected.receipt.skillSnapshot.path)
+          : originalAttempt && originalAttempt.effect?.phase !== "prepared"
+          ? await recoverCompletedAdaptiveProposal({
+              job, selected, effect: originalAttempt.effect!, signature,
+              required: [...requiredOrchestratorSkillReads(turn.creativePolicy?.mode ?? "autonomous")],
+            })
           : await proposeAdaptiveWork({
           job, selected, turn, inventory: effective, planning, metrics,
           provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
-          version: state.version, signature, recovery: interrupted ? input.recovery! : undefined,
+          version: state.version, signature, recovery: format ? input.recovery! : undefined,
+          onInvocation: async (file, id, prompt) => {
+            await beginAdaptiveInvocation(job, state, signature, file, id, prompt);
+            await registerPendingPiSession(job, file);
+          },
+          onCompleted: (file, id) => completeAdaptiveInvocation(job, state, signature, file, id),
           typedEdges: architectureCausalEdges(plan),
           omissionCandidates: omissionProofs.filter(proof => effective.items.some(item =>
             item.id === proof.assignmentId && item.status === "pending"))
@@ -391,7 +422,7 @@ export async function reconcileAdaptiveWork(input: {
               sha256: milestoneSourceHashes[r.path]! })),
         });
       } catch (error) {
-        if (error instanceof MalformedAdaptiveResponse && !interrupted) {
+        if (error instanceof MalformedAdaptiveResponse && !format) {
           const attempt = state.attempts.find(a => a.signature === signature)!;
           attempt.malformedResponse = error.proof;
           attempt.recoveryContext = contextDigest;
@@ -401,6 +432,12 @@ export async function reconcileAdaptiveWork(input: {
         if (error instanceof InvalidAdaptiveProposalError)
           await settleAdaptiveAttempt(job, state, signature, "rejected");
         throw error;
+      }
+      if (originalAttempt?.effect?.phase === "invoking") {
+        // Crash after a terminal Pi reply but before the effect checkpoint:
+        // authenticate its original session, then seal the response hash.
+        await completeAdaptiveInvocation(job, state, signature, proposed.sessionFile,
+          originalAttempt.effect.invocation!.id);
       }
       const p = proposed.proposal;
       const session = {

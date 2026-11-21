@@ -126,7 +126,7 @@ test("production planner and independent reviewer recover in original Pi session
   ].map(k => [k, process.env[k]]));
   let controller: SandboxController | undefined;
   let secondLiveId: string | undefined;
-  const adaptiveIds = [randomUUID(), randomUUID()];
+  const adaptiveIds = [randomUUID(), randomUUID(), randomUUID()];
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -625,6 +625,7 @@ test("production planner and independent reviewer recover in original Pi session
       const calls: Array<{ tools: string[]; messages: readonly unknown[] }> = [];
       await exerciseAdaptiveRecoveryGraph({ story, id: adaptiveId, source, task, contract, scoped,
         provider: model.provider, model: model.id, calls, exhaust: index === 1,
+        preCallStop: index === 2,
         runtime: script => runtimeFor(i => {
           const next = script(i);
           return Array.isArray(next) ? { content: readCalls(next), reason: "toolUse" } :

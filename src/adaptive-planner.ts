@@ -1,8 +1,10 @@
 /** Read-only, pinned adaptive Story planning. The model proposes; the
  * controller separately authorizes each pending action against native sources.
  * This session never owns Story write tools or review approval. */
-import { join, sep } from "node:path";
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { join, sep, dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { GenerationInventory } from "./generation-plan.js";
 import type { TurnEvidence } from "./turn-plan-evidence.js";
@@ -12,23 +14,96 @@ import type { StoryArchitectureMetrics } from "./story-metrics.js";
 import { openStoryProject } from "./project.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, restoreCompletedAdaptivePiContext, recordPiSession, inspectPiPolicy } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { missingAdaptiveMethodReads, adaptiveMethodCorrectionPrompt } from "./adaptive-method-correction.js";
 import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { AdaptiveProposal } from "./adaptive-assignments.js";
+import type { AdaptiveEffect } from "./adaptive-state.js";
 
 import { correctAdaptiveResponse, initialAdaptiveResponse, type AdaptiveRecovery } from "./adaptive-protocol.js";
 
 export class InvalidAdaptiveProposalError extends Error {}
+
+/** Reconcile an invoked ORIGINAL Pi operation using its on-disk transcript.
+ * This is deliberately read-only until all session, prefix, terminal response,
+ * methodology and source identities agree. No new prompt is ever issued. */
+export async function recoverCompletedAdaptiveProposal(input: {
+  job: JobStartResult; selected: StoryOrchestratorSelection; effect: AdaptiveEffect;
+  signature: string; required: string[];
+}): Promise<{ proposal: AdaptiveProposal; sessionFile: string; skillReads: string[] }> {
+  const { job, selected, effect, signature } = input;
+  const ref = effect.invocation;
+  if (!ref || !effect.contextDigest ||
+      effect.snapshotId !== selected.receipt.skillSnapshot.id ||
+      (effect.phase !== "invoking" && effect.phase !== "responded"))
+    throw Error("Original adaptive Pi operation has no trusted invocation or snapshot identity.");
+  const root = join(job.stateDir, "adaptive-planning-sessions");
+  if (dirname(ref.file) !== root || !ref.file.endsWith(".jsonl") ||
+      await realpath(ref.file).catch(() => null) !== ref.file)
+    throw Error("Original adaptive Pi transcript is missing or escaped its session root.");
+  const stat = await lstat(ref.file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024)
+    throw Error("Original adaptive Pi transcript is unsafe.");
+  const bytes = await readFile(ref.file);
+  const hash = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+  if (bytes.length < ref.prefixBytes || hash(bytes.subarray(0, ref.prefixBytes)) !== ref.prefixSha256 ||
+      ref.responseSha256 && hash(bytes) !== ref.responseSha256 ||
+      !bytes.toString("utf8").endsWith("\n"))
+    throw Error("Original adaptive Pi transcript changed or was truncated.");
+  let records: Array<{ type?: string; id?: string }>;
+  try { records = bytes.toString("utf8").trimEnd().split("\n").map(line => JSON.parse(line)); }
+  catch { throw Error("Original adaptive Pi transcript has malformed records."); }
+  if (records[0]?.type !== "session" || records[0].id !== ref.id)
+    throw Error("Original adaptive Pi session identity differs.");
+  const project = await openStoryProject(job.worktreeStoryRoot);
+  const manager = SessionManager.open(ref.file, root, project.root);
+  if (manager.getSessionId() !== ref.id || manager.getHeader()?.cwd !== project.root)
+    throw Error("Original adaptive Pi manager or Story root identity differs.");
+  const messages = manager.buildSessionContext().messages;
+  const assistant = [...messages].reverse().find(m => m.role === "assistant");
+  if (!assistant || assistant.role !== "assistant" || assistant.stopReason !== "stop" ||
+      !Array.isArray(assistant.content))
+    throw Error("Original adaptive Pi effects are ambiguous or interrupted; never dispatch a second call.");
+  const last = messages.at(-1);
+  if (last !== assistant)
+    throw Error("Original adaptive Pi turn has unaccounted trailing activity.");
+  const firstUser = messages.find(m => m.role === "user");
+  const originalPrompt = firstUser?.role === "user" && typeof firstUser.content === "string"
+    ? firstUser.content : firstUser?.role === "user" && Array.isArray(firstUser.content)
+      ? firstUser.content.filter(c => c.type === "text").map(c =>
+        c.type === "text" ? c.text : "").join("\n") : null;
+  if (!originalPrompt || hash(Buffer.from(originalPrompt)) !== ref.promptSha256)
+    throw Error("Original adaptive Pi prompt changed or is absent from its invocation.");
+  const { resolved } = await inspectPiPolicy(job);
+  if (!resolved || assistant.provider !== resolved.selected.provider ||
+      assistant.model !== resolved.selected.model)
+    throw Error("Original adaptive Pi response model provenance differs from the job pin.");
+  const text = assistant.content.filter(c => c.type === "text").map(c =>
+    c.type === "text" ? c.text : "").join("\n");
+  const skillReads = completedPinnedSkillReads(messages, project.root, selected.receipt.skillSnapshot.path);
+  if (missingAdaptiveMethodReads(messages, project.root, selected.receipt.skillSnapshot.path, input.required).length)
+    throw Error("Original adaptive Pi response lacks required verified methodology reads.");
+  // The original completed session remains the only basis for admission;
+  // malformed responses still go through the existing protocol correction.
+  await restoreCompletedAdaptivePiContext(job, project, {
+    signature, snapshot: effect.snapshotId,
+    session: { id: ref.id, file: ref.file }, provider: effect.provider, model: effect.model,
+  });
+  const proposal = await initialAdaptiveResponse(job, text, ref.file, ref.id);
+  return { proposal, sessionFile: ref.file, skillReads };
+}
 
 export async function proposeAdaptiveWork(input: {
   job: JobStartResult; selected: StoryOrchestratorSelection;
   turn: TurnEvidence; inventory: GenerationInventory; planning: StoryPlanning;
   metrics: StoryArchitectureMetrics;
   recovery?: AdaptiveRecovery;
+  /** Write-ahead controller phase transitions; never called by model output. */
+  onInvocation?: (file: string, id: string, prompt: string) => Promise<void>;
+  onCompleted?: (file: string, id: string) => Promise<void>;
   provider: string; model: string; version: number; signature: string;
   typedEdges: Array<{ item: string; needs: string }>;
   omissionCandidates: Array<{ assignmentId: string; sourcePath: string; evidence: string }>;
@@ -159,6 +234,10 @@ export async function proposeAdaptiveWork(input: {
       "Use strict JSON DOUBLE QUOTES. order MUST contain EVERY resulting pending ID " +
       "exactly once in dependency-safe order after all actions. " +
       "No omitted tasks, no extra keys, no invented milestones or quota assumptions.";
+    // The persisted invocation marker MUST precede the first external Pi
+    // effect. A crash after this marker is ambiguous until the original
+    // transcript proves a completed response; it is never replayed.
+    await input.onInvocation?.(sessionFile, session.sessionId, prompt);
     await promptStorySpecialist(session, prompt);
     const reads = () => completedPinnedSkillReads(session.messages, project.root, snapshot.path);
     const missing = () => missingAdaptiveMethodReads(session.messages, project.root, snapshot.path, required);
@@ -168,6 +247,10 @@ export async function proposeAdaptiveWork(input: {
     const first = [...session.messages].reverse().find(m => m.role === "assistant");
     if (!first || first.role !== "assistant" || ["aborted", "error"].includes(first.stopReason))
       throw Error("Adaptive orchestrator model turn is interrupted; preserve the exact session without replay.");
+    // Register the now-existing transcript before a same-session method repair
+    // can pass the next resource gate. The initial pending reservation already
+    // protected the window before Pi wrote its first message.
+    await recordPiSession(job, sessionFile);
     if (missing().length) {
       await context.beforeTurn(sessionFile);
       await promptStorySpecialist(session, adaptiveMethodCorrectionPrompt(missing()));
@@ -179,7 +262,10 @@ export async function proposeAdaptiveWork(input: {
     if (!last || last.role !== "assistant" || last.stopReason !== "stop")
       throw Error("Adaptive orchestrator model turn is interrupted; preserve the exact session without replay.");
     await context.completed(sessionFile, session.sessionId);
-    return { proposal: await initialAdaptiveResponse(job, session.getLastAssistantText() ?? "", sessionFile, session.sessionId), sessionFile, skillReads };
+    const proposal = await initialAdaptiveResponse(job, session.getLastAssistantText() ?? "",
+      sessionFile, session.sessionId);
+    await input.onCompleted?.(sessionFile, session.sessionId);
+    return { proposal, sessionFile, skillReads };
   } finally {
     session.dispose();
   }

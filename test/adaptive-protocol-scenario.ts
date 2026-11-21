@@ -1,13 +1,14 @@
 /** A production graph run from a fixture-authored Architecture checkpoint.
  * Only the model transport is scripted during planning and protocol recovery. */
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
 import { createGenerationGraph, runStoryGeneration } from "../src/generation.js";
 import { configurePiPolicy, inspectPiPolicy } from "../src/job-pi-policy.js";
+import { readAdaptiveState } from "../src/adaptive-state.js";
 import { startStoryJob } from "../src/job.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
@@ -16,7 +17,7 @@ import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
 
 export async function exerciseAdaptiveRecoveryGraph(input: {
-  exhaust: boolean; story: string; id: string; task: string; source: string; scoped: string; contract: CompletionContract;
+  exhaust: boolean; preCallStop?: boolean; story: string; id: string; task: string; source: string; scoped: string; contract: CompletionContract;
   provider: string; model: string; calls: Array<{ tools: string[]; messages: readonly unknown[] }>;
   runtime(script: (index: number) => string | string[]): Promise<ModelRuntime>;
 }) {
@@ -39,6 +40,15 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
     if (i === 0 || i === 2) return reads;
     if (i === 1) return JSON.stringify({ sourceSha: job.baseSha, turnDigest: turn.digest,
       assignments: turn.assignments.map(a => ({ id: a.id, reason: "Verified scoped assignment" })) });
+    if (input.preCallStop && i === 3) {
+      const messages = calls[i]!.messages as Array<{ role: string; content?: Array<{ text?: string }> }>;
+      const content = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text).join("\n");
+      const match = content.match(/Only currently pending IDs: (\[[^\n]*\])/);
+      assert.ok(match, "the resumed operation retains original pending source");
+      return JSON.stringify({ sourceSha: point.commitSha, turnDigest: turn.digest, beforeVersion: 1,
+        reason: "Preserve the original verified plan without a second operation", actions: [],
+        order: JSON.parse(match[1]!) });
+    }
     if (i === 3) return '{"sourceSha":';
     assert.ok(i === 4 || (input.exhaust && i === 5), "no planner replacement or writer replay");
     assert.deepEqual(calls[i]!.tools, []);
@@ -65,6 +75,56 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       { stage: "foundation", status: "committed", headSha: job.baseSha },
       { stage: "architecture", status: "architecture-committed", headSha: point.commitSha, planVersion: 1 },
     ], planVersion: 1 }, "schedule");
+    if (input.preCallStop) {
+      const before = await inspectPiPolicy(job);
+      // Admission is durable, but the first adaptive Pi preflight is stopped
+      // BEFORE any external planner session. The same Thread must resume it.
+      await configurePiPolicy(job, { ...before.policy, limits: {
+        ...before.policy.limits, modelCalls: before.budget.modelCalls,
+      } });
+      const stopped = await withJobModelRuntime(rt, () =>
+        graph.invoke(null, { ...config, interruptAfter: ["author_update_intake"] }));
+      assert.equal(stopped.status, "paused", stopped.reason ?? undefined);
+      assert.equal(calls.length, 2, "budget pause must precede the first adaptive Pi call");
+      const receipt = (await readAdaptiveState(job, turn.digest, 1))!;
+      assert.equal(receipt.attempts.length, 1);
+      assert.equal(receipt.attempts[0]?.effect?.phase, "prepared");
+      for (let restart = 0; restart < 3; restart++) {
+        const report = await runStoryGeneration({ action: "inspect", story, job: id });
+        assert.notEqual(report.status, "completed");
+        assert.equal(calls.length, 2, "read-only inspection must never dispatch");
+        assert.equal((await readAdaptiveState(job, turn.digest, 1))?.attempts[0]?.effect?.phase, "prepared");
+      }
+      const foreign = join(job.worktreeStoryRoot, "unpublished-adaptive.txt");
+      writeFileSync(foreign, "An unrelated writer left uncommitted work.\n");
+      try {
+        const dirty = await runStoryGeneration({ action: "inspect", story, job: id });
+        assert.equal(dirty.status, "blocked", "a dirty worktree must never authorize adaptive recovery");
+        assert.equal(calls.length, 2);
+      } finally { unlinkSync(foreign); }
+      await configurePiPolicy(job, before.policy);
+      saver.db.close(); saver = SqliteSaver.fromConnString(file);
+      graph = createGenerationGraph(saver, "cli");
+      const resumed = await withJobModelRuntime(rt, () =>
+        graph.invoke({ request }, { ...config, interruptAfter: ["author_update_intake"] }));
+      assert.equal(resumed.status, "running", resumed.reason ?? undefined);
+      assert.equal(calls.length, 4, "same operation invokes exactly one adaptive Pi session");
+      const restored = (await readAdaptiveState(job, turn.digest, 1))!;
+      assert.equal(restored.attempts.length, 1);
+      assert.equal(restored.attempts[0]?.phase, "unchanged");
+      assert.equal(restored.attempts[0]?.effect?.phase, "responded");
+      assert.ok(resumed.active, "original pending assignment order is still schedulable");
+      const recorded = (await inspectPiPolicy(job)).budget.modelCalls;
+      assert.equal(recorded, before.budget.modelCalls + 2,
+        "one original adaptive call with its verified skill reads consumes exactly two model responses");
+      for (let restart = 0; restart < 2; restart++) {
+        await runStoryGeneration({ action: "inspect", story, job: id });
+        assert.equal(calls.length, 4, "completed original planner cannot restart");
+        assert.equal((await inspectPiPolicy(job)).budget.modelCalls, recorded,
+          "repeated inspections cannot re-charge Pi usage");
+      }
+      return;
+    }
     const assessed = await withJobModelRuntime(rt, () => graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
     assert.equal(assessed.recovery?.phase, "authorized", assessed.reason ?? undefined);
     assert.equal(assessed.recovery.sourceSha, point.commitSha);

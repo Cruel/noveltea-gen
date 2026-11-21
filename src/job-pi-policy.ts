@@ -41,6 +41,10 @@ interface BudgetState {
   version: 1;
   steps: string[];
   sessions: string[];
+  /** Write-ahead external invocation references. Pi creates its transcript
+   * with the first user message; until reconciled, absent files are unknown
+   * external effects, not permission to dispatch another model call. */
+  pendingSessions?: string[];
   pause?: { reason: string; at: string };
 }
 /** Observed Pi transcript usage, not an estimate of uninstrumented direct-model calls.
@@ -255,9 +259,14 @@ async function sessionUsage(job: JobStartResult, state: BudgetState): Promise<Pi
     modelCalls: 0, costUsd: 0, unpricedCalls: 0, activeSeconds: 0, tokens: emptyTokens(),
     unknownTokenCalls: 0, ...(state.pause ? { pause: state.pause } : {}) };
   const seen = new Set<string>();
-  for (const file of new Set(state.sessions)) {
-    if (!file.startsWith(stateDir(job) + sep) || !existsSync(file) ||
-        await realpath(file) !== file) throw new Error("Unsafe Pi budget session path.");
+  for (const file of new Set([...state.sessions, ...(state.pendingSessions ?? [])])) {
+    if (!file.startsWith(stateDir(job) + sep) || !file.endsWith(".jsonl"))
+      throw new Error("Unsafe Pi budget session path.");
+    if (!existsSync(file)) {
+      if (state.pendingSessions?.includes(file) && !state.sessions.includes(file)) continue;
+      throw new Error("Missing registered Pi budget transcript.");
+    }
+    if (await realpath(file) !== file) throw new Error("Unsafe Pi budget session path.");
     await usageFromSession(file, seen, summary);
   }
   return summary;
@@ -284,6 +293,11 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
   const observed = await sessionUsage(job, state);
   const { modelCalls, costUsd, unpricedCalls } = observed;
   const activeSeconds = await observedActiveSeconds(job);
+  // An interrupted external Pi call may have unreported usage. The original
+  // operation must reconcile its exact session first; never spend another
+  // invocation from an unsettled budget registration.
+  if (state.pendingSessions?.length)
+    throw Error("Unsettled original Pi invocation usage; reconcile its transcript before another model call.");
   const freshStep = !state.steps.includes(step);
   const reason = freshStep && policy.limits.steps !== undefined && state.steps.length >= policy.limits.steps
     ? "steps" : policy.limits.modelCalls !== undefined && modelCalls >= policy.limits.modelCalls
@@ -313,6 +327,20 @@ export async function preflightPiAssignment(job: JobStartResult, step: string,
   }
 }
 
+/** A durable reservation for a Pi transcript that may not exist until its
+ * first user message. Called AFTER the original invocation fence is persisted,
+ * but BEFORE the first external model prompt. */
+export async function registerPendingPiSession(job: JobStartResult, file: string) {
+  if (!file.startsWith(stateDir(job) + sep) || !file.endsWith(".jsonl"))
+    throw Error("Unsafe pending Pi session registration.");
+  const state: BudgetState = (await json<BudgetState>(budgetPath(job))) ??
+    { version: 1, steps: [], sessions: [] };
+  if (!state.sessions.includes(file) && !state.pendingSessions?.includes(file)) {
+    state.pendingSessions = [...(state.pendingSessions ?? []), file];
+    await persist(budgetPath(job), state);
+  }
+}
+
 /** Record the just-completed session without imposing a new budget gate after
  * edits. The next safe boundary will inspect its actual usage and pause. */
 export async function recordPiSession(job: JobStartResult, sessionFile: string): Promise<void> {
@@ -322,8 +350,11 @@ export async function recordPiSession(job: JobStartResult, sessionFile: string):
   }
   const state: BudgetState = (await json<BudgetState>(budgetPath(job))) ??
     { version: 1, steps: [], sessions: [] };
-  if (!state.sessions.includes(sessionFile)) {
-    state.sessions.push(sessionFile);
+  const pending = state.pendingSessions?.filter(file => file !== sessionFile) ?? [];
+  if (!state.sessions.includes(sessionFile) || pending.length !== (state.pendingSessions?.length ?? 0)) {
+    if (!state.sessions.includes(sessionFile)) state.sessions.push(sessionFile);
+    if (pending.length) state.pendingSessions = pending;
+    else delete state.pendingSessions;
     await persist(budgetPath(job), state);
   }
 }
@@ -380,6 +411,53 @@ export async function restoreAcceptedPiReviewContext(
   await recordPiSession(job, file);
   await persist(path, { version: 1, group, file, sessionId: id,
     snapshot: args.snapshot, model, sources, nativeRevisions: {} } satisfies ContextReceipt);
+}
+
+/** Reconstruct only the completed original adaptive context after a crash
+ * between Pi's terminal transcript and completed(). No new session, turn,
+ * budget step or model selection may be created by reconciliation. */
+export async function restoreCompletedAdaptivePiContext(
+  job: JobStartResult, project: StoryProject, args: {
+    signature: string; snapshot: string; session: { id: string; file: string };
+    provider: string; model: string;
+  }): Promise<void> {
+  const group = "orchestrator:adaptive:" + args.signature;
+  const directory = join(job.stateDir, "adaptive-planning-sessions");
+  const { file, id } = args.session;
+  if (!/^[a-f0-9]{64}$/.test(args.signature) ||
+      !/^[a-f0-9]{64}$/.test(args.snapshot) || !id ||
+      !within(directory, file) || dirname(file) !== directory ||
+      !existsSync(file) || await realpath(file) !== file || !(await stat(file)).isFile())
+    throw Error("Original adaptive Pi context has an unsafe transcript reference.");
+  const resolution = await json<Resolution>(resolutionPath(job));
+  const configured = await json<PiPolicy>(policyPath(job));
+  if (configured) checkPolicy(configured);
+  // CLI's historical default is an alias for an explicitly configured job
+  // profile, just as resolvePiModel() treats it on the original dispatch.
+  const implicitDefault = !!configured && args.provider === defaultProfile.provider &&
+    args.model === defaultProfile.model;
+  const requested = implicitDefault ? configured!.profile :
+    { provider: args.provider, model: args.model };
+  if (!resolution || resolution.version !== 1 ||
+      resolution.requested.provider !== requested.provider ||
+      resolution.requested.model !== requested.model)
+    throw Error("Original adaptive Pi model resolution differs; no replay.");
+  const model = resolution.selected.provider + "/" + resolution.selected.model +
+    ":" + (resolution.thinking ?? "pi-default");
+  const path = contextPath(job, group);
+  const previous = await json<ContextReceipt>(path);
+  if (previous) {
+    if (previous.version !== 1 || previous.group !== group ||
+        previous.file !== file || previous.sessionId !== id ||
+        previous.snapshot !== args.snapshot || previous.model !== model)
+      throw Error("Original adaptive Pi context receipt differs.");
+    return;
+  }
+  await recordPiSession(job, file);
+  await persist(path, { version: 1, group, file, sessionId: id,
+    snapshot: args.snapshot, model,
+    sources: await sourceVersions(project.root, await loadedStoryPaths(file, project.root)),
+    nativeRevisions: {} } satisfies ContextReceipt);
 }
 
 /** Each completed, clean specialist turn may be reused within its scoped narrative group. */
