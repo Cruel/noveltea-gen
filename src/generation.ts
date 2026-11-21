@@ -12,7 +12,8 @@ import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, unknownComplet
   unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import { assessGenerationOperation, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
-import { ProtocolExhaustedError } from "./response-contract-recovery.js";
+import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
+import { ProtocolExhaustedError, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
@@ -182,12 +183,15 @@ export const GenerationInputSchema = z.object({
     orchestrationPolicy: z.enum(["explicit", "fixture-legacy"]).optional(),
   }),
   pauseAfter: z.enum(generationStages).nullable().optional(),
+  fixPickup: z.object({ id: z.string(), check: z.string(), failedVersion: z.number().int(),
+    signature: z.string() }).nullable().optional(),
 });
 
 const Channels = Annotation.Root({
   recovery: Annotation<AdaptiveRecovery | null>({ reducer: (_, next) => next, default: () => null }),
   unknownRecovery: Annotation<UnknownRecoveryStatus | null>({ reducer: (_, next) => next, default: () => null }),
   operationRecovery: Annotation<GenerationOperationRecovery | null>({ reducer: (_, next) => next, default: () => null }),
+  fixPickup: Annotation<KnownFixRequest | null>({ reducer: (_, next) => next, default: () => null }),
   request: Annotation<GenerationRequest>(),
   cursor: Annotation<number>({ reducer: (_, next) => next, default: () => 0 }),
   completedStages: Annotation<GenerationEvidence[]>({ reducer: (_, next) => next, default: () => [] }),
@@ -500,13 +504,17 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const pending = await reconcilePendingWork(job, request, inventory, canonicalPrevious, validation, allowAmend);
   let adaptive: Awaited<ReturnType<typeof reconcileAdaptiveWork>> | null = null;
   try {
+    if (s.fixPickup && (!s.recovery || !authorizedKnownFixDispatch(s.fixPickup,
+      job.jobId, job.threadId)))
+      throw Error("Known-fix recheck lacks a verified Studio agent dispatch");
     if (plan && validation && receipt.phase === "committed") adaptive = await reconcileAdaptiveWork({
       job, request, plan, validation, inventory: pending.inventory, completed: completedStages,
-      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion, allowAmend, recovery: s.recovery });
+      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion, allowAmend, recovery: s.recovery,
+      fixRecheck: allowAmend && !!s.fixPickup });
   } catch (error) {
     if (error instanceof AdaptiveRecoveryRequired) {
       const same = s.recovery?.signature === error.decision.signature;
-      if (same && s.recovery?.phase === "protocol-exhausted") return {
+      if (same && s.recovery?.phase === "protocol-exhausted" && !s.fixPickup) return {
         status: "blocked", active: null, reason: "protocol-exhausted: the original adaptive response allowance is spent.",
       };
       const recovery = same && !allowAmend ? s.recovery : error.decision;
@@ -516,6 +524,12 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     if (error instanceof ProtocolExhaustedError && s.recovery?.phase === "authorized" && error.contract === s.recovery.check)
       return { request, completedStages, planVersion: plan!.version, active: null,
         status: "blocked", reason: error.message, recovery: { ...s.recovery, phase: "protocol-exhausted" } };
+    if (s.fixPickup && error instanceof ProtocolIntegrityBlockedError &&
+        error.message.includes("Original response still fails the fixed verifier"))
+      return { request, active: null, status: "blocked", fixPickup: null,
+        reason: "protocol-exhausted: original response still fails this deployed verifier fix; no writer was started." };
+    if (s.fixPickup) return { request, active: null, status: "blocked", fixPickup: null,
+      reason: error instanceof Error ? error.message : String(error) };
     throw error;
   }
   if (s.recovery && s.recovery.phase !== "completed" && !adaptive?.recovered)
@@ -524,8 +538,9 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const pendingOrder = adaptive?.order ?? pending.order ?? s.pendingOrder ?? null;
   return { request, planVersion: plan?.version ?? null, completedStages, failures,
     ...(plan?.version !== s.causalAmendment?.source.planVersion ? { causalAmendment: null } : {}),
-    ...(adaptive?.recovered && s.recovery?.phase === "authorized" ?
-      { recovery: { ...s.recovery, phase: "completed" as const }, reason: null } : {}),
+    ...(adaptive?.recovered && (s.recovery?.phase === "authorized" ||
+        s.recovery?.phase === "protocol-exhausted" && s.fixPickup) ?
+      { recovery: { ...s.recovery, phase: "completed" as const }, fixPickup: null, reason: null } : {}),
     inventory: effective, pendingOrder, pendingVersion: pending.stateVersion,
     adaptiveVersion: adaptive?.version ?? s.adaptiveVersion ?? null,
     active: nextExecutionItem(effective,
@@ -1012,6 +1027,18 @@ export function createGenerationGraph(
       if (s.operationRecovery?.phase === "fenced") return {
         status: "blocked" as const, reason: s.operationRecovery.nextAction };
       if (s.operationRecovery?.phase === "assessment") return { status: "running" as const };
+      if (s.fixPickup) {
+        const r = s.recovery, f = s.fixPickup;
+        if (!r || !authorizedKnownFixDispatch(f, s.request?.job ?? "", r.threadId) ||
+            executionOwner !== "server" || s.status !== "blocked" || !s.orchestratorOrder ||
+            !s.orchestratorPlanningDigest || !s.orchestratorSnapshotId ||
+            !s.graphThreadId || r.planVersion !== s.planVersion ||
+            r.sourceSha !== s.inventory?.headSha || r.phase !== "protocol-exhausted" ||
+            r.check !== f.check || r.checkVersion !== f.failedVersion ||
+            r.signature !== f.signature || r.jobId !== s.request?.job ||
+            r.turnDigest !== s.request?.turnPlanDigest || !/^[a-z0-9][a-z0-9.-]{0,100}$/.test(f.id))
+          return blocked(Error("Known-fix pickup has no exact blocked verifier and Turn proof"));
+      }
       const input = GenerationInputSchema.shape.request.safeParse(s.request);
       if (!input.success) return blocked(new Error("Invalid generation request: " +
         input.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ")));
@@ -1730,7 +1757,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model,
           orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-legacy" : "explicit" };
-        state = { request, recovery: null, unknownRecovery: null, operationRecovery: null,
+        state = { request, recovery: null, unknownRecovery: null, operationRecovery: null, fixPickup: null,
           cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,

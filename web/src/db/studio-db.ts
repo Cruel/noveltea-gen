@@ -39,6 +39,7 @@ export interface GenerationEvents {
 
 export interface GenerationRunQueue {
   createdAt: string
+  fixId: string | null
   intent: string
   jobId: string
   ownerUserId: string
@@ -46,6 +47,18 @@ export interface GenerationRunQueue {
   sequence: Generated<number>
   updatedAt: string
   workerId: string | null
+}
+
+export interface GenerationVerifierStops {
+  attemptedFixesJson: string
+  checkId: string
+  checkVersion: number
+  failureSignature: string
+  jobId: string
+  ownerUserId: string
+  sourceSha: string
+  threadId: string
+  turnDigest: string
 }
 
 export interface GitConnectionFlows {
@@ -398,6 +411,7 @@ export interface StudioDb {
   checkpointForks: CheckpointForks
   generationEvents: GenerationEvents
   generationRunQueue: GenerationRunQueue
+  generationVerifierStops: GenerationVerifierStops
   gitConnectionFlows: GitConnectionFlows
   gitConnections: GitConnections
   githubInstallFlows: GithubInstallFlows

@@ -6,6 +6,7 @@ import { authorizedStoryJob } from './lib/fixture-jobs.server'
 import { appendGenerationEvent } from './lib/generation-progress.server'
 import { claimNext, finishAttempt, fenceAbandonedRuns, queueRecord } from './lib/generation-queue.server'
 import { runPersistedGeneration } from './agent-runner'
+import { pickupKnownVerifierFixes } from './lib/known-fix-pickup.server'
 import { cleanFinalizedTranscripts, transcriptRetentionDays } from './lib/transcript-retention.server'
 import { recoverSettledThreadRuns, settleThreadRun } from './lib/thread-chat.server'
 import { executeAuthorCommand } from './lib/agent-author-command.server'
@@ -41,6 +42,8 @@ export function pumpAgentQueue(store: StudioDatabase): Promise<void> {
       // Never re-enter an unfinished writer from a previous server lifetime.
       await fenceAbandonedRuns(store)
       await recoverOrphanedPiTurns(store)
+      // Exact failed check/version pickup only; never replay interrupted writers.
+      await pickupKnownVerifierFixes(store)
       initialized.add(store)
       // Crash-safe chat catch-up only; this never replays the writer.
       void recoverSettledThreadRuns(store).catch(() => {

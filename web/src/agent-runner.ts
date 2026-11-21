@@ -25,6 +25,10 @@ import { queueRecord, type QueueRecord } from './lib/generation-queue.server'
 import { selectedJob, restoreJob, pinnedRequest, verifyTrustedRevision, verifyWebExecution } from './lib/fixture-jobs.server'
 import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint } from './lib/thread-steering-replan.server'
 import { retryReadOnlyPreflight } from './lib/read-only-preflight-retry'
+import { deployedVerifierFixes, withKnownFixDispatch } from '../../src/known-verifier-fix'
+import { verifyKnownFixProof } from './lib/known-fix-pickup.server'
+import { sameGenerationRequest } from '../../src/generation-owner'
+import type { AdaptiveRecovery } from '../../src/adaptive-protocol'
 
 /** Verify the queued identity and resume the pinned graph, never browser inputs. */
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
@@ -32,6 +36,14 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   const job = await restoreJob(row, item.ownerId)
   assertNativeVersion(job.validatorVersion)
   const pinned = pinnedRequest(row, job)
+  const fix = item.fixId
+    ? deployedVerifierFixes().find(candidate => candidate.id === item.fixId) : null
+  const indexedStop = fix
+    ? await store.persistence.generation.queue.verifierStop(item.ownerId, item.jobId) : null
+  if (item.fixId && (!fix || !indexedStop ||
+      fix.check !== indexedStop.check || fix.failedVersion !== indexedStop.checkVersion ||
+      item.fixId !== fix.id))
+    throw Error('Queued known-verifier-fix recheck lost its exact deployed fix or failure')
   if (!pinned || row.status !== 'paused' || (await queueRecord(store, row.id))?.phase !== 'running')
     throw new Error('Queued generation state changed before execution.')
   const config = row.configJson ? JSON.parse(row.configJson) as {
@@ -83,8 +95,10 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   const claim = () => withStoryJobLock(job, 'studio-generation-admission', async () => {
     const current = await store.persistence.generation.jobs.state(item.ownerId, row.id)
     if (current?.status !== 'paused' || current.requestJson !== JSON.stringify(pinned) ||
-        current.threadId !== threadId || (await queueRecord(store, row.id))?.phase !== 'running')
+        current.threadId !== threadId || (await queueRecord(store, row.id))?.phase !== 'running' ||
+        await readJobControl(job) !== 'running')
       throw new Error('Conflicting generation admission.')
+    if (fix && indexedStop) await verifyKnownFixProof(job, pinned, indexedStop)
     let sandbox: SandboxClient | null = null
     if (selected) {
       sandbox = new SandboxClient()
@@ -123,6 +137,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       let working = '', verified = stages.length
       let previousHead = stages.at(-1)?.headSha ?? job.headSha
       for await (const patch of await graph.stream({ request: pinned,
+        fixPickup: fix && indexedStop ? { id: fix.id, check: fix.check,
+          failedVersion: fix.failedVersion, signature: indexedStop.signature } : null,
         pauseAfter: item.intent === 'start' && (pinned.fixture || config?.pauseAfter === 'foundation')
           ? 'foundation' : null },
         { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
@@ -183,7 +199,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       }
       const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
       const outcome = snapshot.values as { status?: string; reason?: string | null;
-        unknownRecovery?: { phase?: string } | null }
+        unknownRecovery?: { phase?: string } | null;
+        recovery?: AdaptiveRecovery | null; request?: typeof pinned }
       const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
@@ -194,7 +211,15 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         /author (decision|choice|approval|question|input)|waiting for (your|an author)|approval required|author review/i.test(outcome.reason)
       if (!await store.persistence.generation.jobs.finish(
         item.ownerId, row.id, threadId, state as 'paused' | 'blocked' | 'completed' | 'cancelled',
-        needsAuthor, item.workerId!, new Date().toISOString())) {
+        needsAuthor, item.workerId!, new Date().toISOString(),
+        state === 'blocked' && !needsAuthor && outcome.reason?.startsWith('protocol-exhausted:') &&
+          outcome.recovery?.phase === 'protocol-exhausted' &&
+          outcome.recovery.check === 'adaptive-plan.v1' &&
+          outcome.request && sameGenerationRequest(outcome.request, pinned) &&
+          await trustedHead(job) === outcome.recovery.sourceSha
+          ? { check: outcome.recovery.check, checkVersion: outcome.recovery.checkVersion,
+              signature: outcome.recovery.signature, sourceSha: outcome.recovery.sourceSha,
+              turnDigest: outcome.recovery.turnDigest } : null)) {
         throw new Error('Generation finished against a changed worker or job state.')
       }
       const diagnosticStatus = outcome.unknownRecovery?.phase
@@ -232,8 +257,13 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         status => appendGenerationEvent(store, item.ownerId, row.id, {
           kind: 'working', piStatus: status, turnId }),
         execute)))
-      if (runtime) await withJobModelRuntime(runtime, executeWithStatus)
-      else await executeWithStatus()
+      const authorized = () => fix && indexedStop
+        ? withKnownFixDispatch({ id: fix.id, check: fix.check,
+            failedVersion: fix.failedVersion, signature: indexedStop.signature,
+            jobId: job.jobId, threadId: job.threadId }, executeWithStatus)
+        : executeWithStatus()
+      if (runtime) await withJobModelRuntime(runtime, authorized)
+      else await authorized()
     })
   } finally {
     if (selected) await new SandboxClient().dispose(job.jobId).catch(() => {})

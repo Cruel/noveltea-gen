@@ -23,7 +23,7 @@ import { evaluateAdaptiveProposal, applyAdaptiveAssignments, revalidateAdaptiveA
   type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment } from "./adaptive-assignments.js";
 import { emptyAdaptiveState, readAdaptiveState,
   assertAdaptiveSettled, beginAdaptiveAttempt, settleAdaptiveAttempt, saveAdaptiveState } from "./adaptive-state.js";
-import { AdaptiveRecoveryRequired, MalformedAdaptiveResponse, type AdaptiveRecovery, type AdaptiveResponseProof } from "./adaptive-protocol.js";
+import { AdaptiveRecoveryRequired, MalformedAdaptiveResponse, recheckAdaptiveResponse, type AdaptiveRecovery, type AdaptiveResponseProof } from "./adaptive-protocol.js";
 import { proposeAdaptiveWork, InvalidAdaptiveProposalError } from "./adaptive-planner.js";
 import { readEventOnlyOmission } from "./interactive-event-only.js";
 import { readPuzzleNoWrite } from "./puzzle-obligation.js";
@@ -249,6 +249,8 @@ export async function reconcileAdaptiveWork(input: {
   /** Inspection restores authenticated history but must never start a Pi turn. */
   allowAmend?: boolean;
   recovery?: AdaptiveRecovery | null;
+  /** A deployed verifier fix authorizes rechecking the exhausted original response only. */
+  fixRecheck?: boolean;
 }): Promise<{ inventory: GenerationInventory; order: string[] | null; version: number | null; recovered?: boolean }> {
   const { job, request, plan, validation, completed } = input;
   const original = input.inventory;
@@ -313,7 +315,8 @@ export async function reconcileAdaptiveWork(input: {
     if (interrupted.signature !== expectedSignature || interrupted.sourceSha !== original.headSha)
       throw Error("Unsettled adaptive correction no longer matches the verified source");
     const required = decision(interrupted.malformedResponse!);
-    if (input.allowAmend === false || !isDeepStrictEqual(input.recovery, { ...required, phase: "authorized" }))
+    const phase = input.fixRecheck ? "protocol-exhausted" : "authorized";
+    if (input.allowAmend === false || !isDeepStrictEqual(input.recovery, { ...required, phase }))
       throw new AdaptiveRecoveryRequired(required);
   }
   const protectedPaths = report.records.filter(r =>
@@ -370,7 +373,9 @@ export async function reconcileAdaptiveWork(input: {
         throw Error("Adaptive protocol correction lost its original source or omission evidence");
       let proposed: Awaited<ReturnType<typeof proposeAdaptiveWork>>;
       try {
-        proposed = await proposeAdaptiveWork({
+        proposed = input.fixRecheck && interrupted && input.recovery
+          ? await recheckAdaptiveResponse(job, input.recovery)
+          : await proposeAdaptiveWork({
           job, selected, turn, inventory: effective, planning, metrics,
           provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
           version: state.version, signature, recovery: interrupted ? input.recovery! : undefined,

@@ -326,6 +326,58 @@ export async function inspectCompletedProtocolResponse<T>(options: {
   return result;
 }
 
+/** A known verifier fix may RECHECK the already sealed unsuccessful result,
+ * never send a new model prompt. Revalidate the exact response and the
+ * original invocation's append-only transcript under the current contract.
+ * No rejected response is accepted merely because a fix was advertised. */
+export async function recheckExhaustedProtocolResponse<T>(options: {
+  receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
+  expectedSession: { id: string; file: string };
+  validate: (text: string) => ResponseContractFailure[];
+  parse: (text: string) => T;
+}): Promise<T> {
+  const { receiptFile, sourceDigest, contract, expectedSession } = options;
+  if (!hex64.test(sourceDigest) || !/^[a-z][a-z0-9.-]{0,100}$/.test(contract))
+    throw new ProtocolIntegrityBlockedError("Invalid verifier recheck source");
+  const started = await regularJson<StartedInvocation>(receiptFile + ".started.json");
+  const initial = await regularJson<ContractReceipt>(receiptFile + ".initial.json");
+  const fresh = await regularJson<ContractReceipt>(receiptFile + ".fresh.json");
+  const allowance = await regularJson<FreshAuthorization>(receiptFile + ".fresh-allowance.json");
+  if (!started || !initial || fresh || allowance ||
+      started.version !== 1 || started.contract !== contract ||
+      started.sourceDigest !== sourceDigest || initial.status !== "protocol-exhausted" ||
+      initial.attempts !== 3 || !initial.responseOrdinal || !initial.failedPaths.length ||
+      started.sessionId !== expectedSession.id || started.sessionFile !== expectedSession.file ||
+      initial.sessionId !== expectedSession.id || initial.sessionFile !== expectedSession.file)
+    throw new ProtocolIntegrityBlockedError("Verifier fix lacks an exact exhausted original invocation");
+  checkedReceipt(initial, sourceDigest, contract, started, null);
+  const proof = await transcriptResponses(initial.sessionFile, options.sessionRoots, initial.sessionId);
+  if (!hex64.test(started.transcriptSha256BeforePrompt ?? "") ||
+      started.transcriptBytesBeforePrompt === undefined ||
+      proof.bytes.length < started.transcriptBytesBeforePrompt ||
+      createHash("sha256").update(proof.bytes.subarray(0, started.transcriptBytesBeforePrompt)).digest("hex") !==
+        started.transcriptSha256BeforePrompt ||
+      proof.complete.length !== initial.responseOrdinal ||
+      createHash("sha256").update(proof.complete.at(-1) ?? "").digest("hex") !== initial.responseHash)
+    throw new ProtocolIntegrityBlockedError("Original exhausted response or transcript changed");
+  // The two correction attempts were format-only; no tool or extra prompt may
+  // have been introduced after the initial rejected assistant completion.
+  let completed = 0;
+  for (const message of proof.messages) {
+    if (completed >= initial.responseOrdinal - 2 &&
+        (message?.role === "toolResult" ||
+          message?.role === "assistant" && Array.isArray(message.content) &&
+            message.content.some(c => c.type === "toolCall")))
+      throw new ProtocolIntegrityBlockedError("Exhausted format correction executed a tool");
+    if (message?.role === "assistant" && message.stopReason === "stop") completed++;
+  }
+  const answer = proof.complete.at(-1)!;
+  if (options.validate(answer).length)
+    throw new ProtocolIntegrityBlockedError("Original response still fails the fixed verifier");
+  try { return options.parse(answer); }
+  catch { throw new ProtocolIntegrityBlockedError("Original response cannot be parsed by the fixed verifier"); }
+}
+
 /** Return BOTH Pi identities only when the original protocol exhausted
  * its three turns and the one authorized fresh session has an accepted,
  * transcript-verified response. It never starts or reopens a model session. */

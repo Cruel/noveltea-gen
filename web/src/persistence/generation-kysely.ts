@@ -5,7 +5,7 @@ import type { StudioDb } from '../db/studio-db'
 import { seedThreadMessagesKysely } from './thread-message-kysely'
 import type {
   GenerationPersistence, QueueRecord, QueueIntent, JobState, ProgressRow,
-  FinalizedTranscriptCandidate,
+  FinalizedTranscriptCandidate, KnownVerifierFix, IndexedVerifierStop, VerifierStop,
 } from './generation-contracts'
 
 type Read = QueryExecutor<StudioDb>
@@ -18,11 +18,11 @@ const ownerRequired = (owner: string) => {
 }
 
 const queueColumns = ['jobId', 'ownerUserId as ownerId', 'intent', 'phase',
-  'workerId', 'sequence'] as const
+  'workerId', 'sequence', 'fixId'] as const
 
 function queueValue(row: {
   jobId: string; ownerId: string; intent: string; phase: string
-  workerId: string | null; sequence: number | string | bigint
+  workerId: string | null; sequence: number | string | bigint; fixId: string | null
 }): QueueRecord {
   if (!['start', 'resume'].includes(row.intent) ||
       !['queued', 'running', 'finished', 'interrupted'].includes(row.phase))
@@ -94,6 +94,23 @@ export async function enqueueGenerationKysely(
   if (membership) await seedThreadMessagesKysely(tx, owner, membership.threadId)
 }
 
+const checkName = /^[a-z][a-z0-9.-]{1,100}$/
+const digest = /^[a-f0-9]{64}$/
+const sha = /^[a-f0-9]{40}$/
+function validStop(stop: VerifierStop): boolean {
+  return checkName.test(stop.check) && Number.isSafeInteger(stop.checkVersion) &&
+    stop.checkVersion >= 1 && stop.checkVersion <= 10000 &&
+    digest.test(stop.signature) && digest.test(stop.turnDigest) && sha.test(stop.sourceSha)
+}
+function indexedStop(row: {
+  jobId: string; ownerUserId: string; threadId: string; checkId: string;
+  checkVersion: number; failureSignature: string; sourceSha: string; turnDigest: string
+}): IndexedVerifierStop {
+  return { jobId: row.jobId, ownerId: row.ownerUserId, threadId: row.threadId,
+    check: row.checkId, checkVersion: row.checkVersion, signature: row.failureSignature,
+    sourceSha: row.sourceSha, turnDigest: row.turnDigest }
+}
+
 async function finalizedCandidates(
   db: Read, limit: number, offset: number, owner?: string, jobId?: string,
 ): Promise<FinalizedTranscriptCandidate[]> {
@@ -150,6 +167,86 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
   return {
     queue: {
       record: jobId => queueRecord(db.read, jobId),
+      async matchingVerifierStops(fix) {
+        if (!checkName.test(fix.check) || !fix.id || !Number.isSafeInteger(fix.failedVersion))
+          throw Error('Invalid deployed verifier fix')
+        const rows = await db.read.selectFrom('generationVerifierStops as v')
+          .innerJoin('studioSessions as s', join => join
+            .onRef('s.id', '=', 'v.jobId').onRef('s.ownerUserId', '=', 'v.ownerUserId'))
+          .innerJoin('generationRunQueue as q', join => join
+            .onRef('q.jobId', '=', 'v.jobId').onRef('q.ownerUserId', '=', 'v.ownerUserId'))
+          .innerJoin('storyThreadRuns as r', join => join
+            .onRef('r.jobId', '=', 'v.jobId').onRef('r.ownerUserId', '=', 'v.ownerUserId'))
+          .innerJoin('storyThreads as t', join => join
+            .onRef('t.id', '=', 'r.threadId').onRef('t.ownerUserId', '=', 'v.ownerUserId'))
+          .select(['v.jobId', 'v.ownerUserId', 'v.threadId', 'v.checkId',
+            'v.checkVersion', 'v.failureSignature', 'v.sourceSha', 'v.turnDigest',
+            'v.attemptedFixesJson'])
+          .where('v.checkId', '=', fix.check).where('v.checkVersion', '=', fix.failedVersion)
+          .where('s.status', '=', 'blocked').where('q.phase', '=', 'finished')
+          .where('r.needsAuthor', '=', 0).where('t.deletedAt', 'is', null)
+          .whereRef('r.threadId', '=', 'v.threadId').execute()
+        return rows.filter(row => {
+          try {
+            const attempted: unknown = JSON.parse(row.attemptedFixesJson)
+            return Array.isArray(attempted) && attempted.every(v => typeof v === 'string') &&
+              !attempted.includes(fix.id)
+          } catch { return false }
+        }).map(indexedStop)
+      },
+      async verifierStop(owner, jobId) {
+        ownerRequired(owner)
+        const row = await db.read.selectFrom('generationVerifierStops')
+          .selectAll().where('ownerUserId', '=', owner).where('jobId', '=', jobId).executeTakeFirst()
+        return row ? indexedStop(row) : null
+      },
+      async enqueueFix(owner, jobId, expected, fix, now) {
+        ownerRequired(owner)
+        if (!validStop(expected) || fix.check !== expected.check ||
+            fix.failedVersion !== expected.checkVersion || !/^[a-z0-9][a-z0-9.-]{0,100}$/.test(fix.id))
+          throw Error('Invalid source-bound verifier fix pairing')
+        return db.withWriteTransaction([job(jobId)], async tx => {
+          await assertNotDeleted(tx, owner, jobId)
+          const row = await tx.selectFrom('generationVerifierStops').selectAll()
+            .where('jobId', '=', jobId).where('ownerUserId', '=', owner).executeTakeFirst()
+          const live = await jobState(tx, owner, jobId)
+          const queue = await queueRecord(tx, jobId)
+          const membership = await tx.selectFrom('storyThreadRuns as r')
+            .innerJoin('storyThreads as t', join => join
+              .onRef('t.id', '=', 'r.threadId').onRef('t.ownerUserId', '=', 'r.ownerUserId'))
+            .select('r.threadId')
+            .where('r.jobId', '=', jobId).where('r.ownerUserId', '=', owner)
+            .where('r.needsAuthor', '=', 0).where('t.deletedAt', 'is', null)
+            .executeTakeFirst()
+          if (!membership || membership.threadId !== row?.threadId ||
+              !row || !live || live.status !== 'blocked' || !live.requestJson ||
+              live.threadId !== row.threadId || queue?.phase !== 'finished' ||
+              queue.ownerId !== owner || queue.fixId === fix.id ||
+              row.checkId !== expected.check || row.checkVersion !== expected.checkVersion ||
+              row.failureSignature !== expected.signature || row.sourceSha !== expected.sourceSha ||
+              row.turnDigest !== expected.turnDigest)
+            return false
+          const attempted: unknown = JSON.parse(row.attemptedFixesJson)
+          if (!Array.isArray(attempted) || attempted.some(v => typeof v !== 'string') ||
+              attempted.includes(fix.id)) return false
+          const updated = await tx.updateTable('studioSessions').set({ status: 'paused', updatedAt: now })
+            .where('id', '=', jobId).where('ownerUserId', '=', owner)
+            .where('status', '=', 'blocked').where('generationThreadId', '=', row.threadId)
+            .where('generationRequestJson', '=', live.requestJson).executeTakeFirst()
+          if (!changed(updated)) return false
+          await tx.updateTable('generationVerifierStops')
+            .set({ attemptedFixesJson: JSON.stringify([...attempted, fix.id]) })
+            .where('jobId', '=', jobId).where('ownerUserId', '=', owner).execute()
+          await tx.deleteFrom('generationRunQueue')
+            .where('jobId', '=', jobId).where('ownerUserId', '=', owner).where('phase', '=', 'finished')
+            .execute()
+          await tx.insertInto('generationRunQueue').values({
+            jobId, ownerUserId: owner, intent: 'resume', fixId: fix.id,
+            phase: 'queued', createdAt: now, updatedAt: now,
+          }).execute()
+          return true
+        })
+      },
       async enqueue(owner, jobId, intent, expected, now, requestJson, threadId) {
         ownerRequired(owner)
         await db.withWriteTransaction([job(jobId)], tx =>
@@ -376,7 +473,7 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
               .where('q.phase', '=', 'running').where('q.workerId', '=', workerId)))
             .executeTakeFirst()))
       },
-      async finish(owner, jobId, threadId, status, needsAuthor, workerId, now) {
+      async finish(owner, jobId, threadId, status, needsAuthor, workerId, now, stop) {
         ownerRequired(owner)
         return db.withWriteTransaction([job(jobId)], async tx => {
           const active = await tx.selectFrom('generationRunQueue').select('jobId')
@@ -393,6 +490,29 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
           await tx.updateTable('storyThreadRuns')
             .set({ needsAuthor: storedStudioBoolean(needsAuthor) })
             .where('jobId', '=', jobId).where('ownerUserId', '=', owner).execute()
+          if (status === 'blocked' && !needsAuthor && stop) {
+            if (!validStop(stop)) throw Error('Invalid verifier failure identity')
+            const previous = await tx.selectFrom('generationVerifierStops').selectAll()
+              .where('jobId', '=', jobId).where('ownerUserId', '=', owner).executeTakeFirst()
+            const same = previous && previous.threadId === threadId &&
+              previous.checkId === stop.check && previous.checkVersion === stop.checkVersion &&
+              previous.failureSignature === stop.signature && previous.sourceSha === stop.sourceSha &&
+              previous.turnDigest === stop.turnDigest
+            await tx.insertInto('generationVerifierStops').values({
+              jobId, ownerUserId: owner, threadId, checkId: stop.check,
+              checkVersion: stop.checkVersion, failureSignature: stop.signature,
+              sourceSha: stop.sourceSha, turnDigest: stop.turnDigest,
+              attemptedFixesJson: same ? previous.attemptedFixesJson : '[]',
+            }).onConflict(oc => oc.column('jobId').doUpdateSet({
+              threadId, checkId: stop.check, checkVersion: stop.checkVersion,
+              failureSignature: stop.signature, sourceSha: stop.sourceSha,
+              turnDigest: stop.turnDigest,
+              attemptedFixesJson: same ? previous!.attemptedFixesJson : '[]',
+            })).execute()
+          } else {
+            await tx.deleteFrom('generationVerifierStops')
+              .where('jobId', '=', jobId).where('ownerUserId', '=', owner).execute()
+          }
           return true
         })
       },

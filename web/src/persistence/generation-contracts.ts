@@ -6,7 +6,7 @@ export type QueueIntent = 'start' | 'resume'
 export type QueuePhase = 'queued' | 'running' | 'finished' | 'interrupted'
 export type QueueRecord = {
   jobId: string; ownerId: string; intent: QueueIntent; phase: QueuePhase
-  workerId: string | null; sequence: number
+  workerId: string | null; sequence: number; fixId: string | null
 }
 export type JobState = {
   status: 'running' | 'paused' | 'blocked' | 'completed' | 'cancelled'
@@ -26,7 +26,19 @@ export type ProgressRow = {
   stage: string | null; milestone: string | null; filesJson: string
   status: string | null; createdAt: string
 }
+/** A verifier stop is indexed only when produced by a new-format graph.
+ * A fix is code-shipped, exact, and never a Story write grant. */
+export type KnownVerifierFix = { id: string; check: string; failedVersion: number }
+export type VerifierStop = {
+  check: string; checkVersion: number; signature: string; sourceSha: string; turnDigest: string
+}
+export type IndexedVerifierStop = VerifierStop & { jobId: string; ownerId: string; threadId: string }
 export interface GenerationQueueStore {
+  matchingVerifierStops(fix: KnownVerifierFix): Promise<IndexedVerifierStop[]>
+  verifierStop(owner: string, jobId: string): Promise<IndexedVerifierStop | null>
+  /** The paired fix is recorded atomically with the only enqueue permission. */
+  enqueueFix(owner: string, jobId: string, expected: VerifierStop,
+    fix: KnownVerifierFix, now: string): Promise<boolean>
   /** Capacity count and FIFO claim share the same serialized write transaction. */
   claim(workerId: string, limit: number, now: string): Promise<QueueRecord | null>
   record(jobId: string): Promise<QueueRecord | null>
@@ -64,7 +76,8 @@ export interface GenerationJobs {
   start(owner: string, jobId: string, threadId: string, expectedRequest: string,
     workerId: string, now: string): Promise<boolean>
   finish(owner: string, jobId: string, threadId: string,
-    status: JobState['status'], needsAuthor: boolean, workerId: string, now: string): Promise<boolean>
+    status: JobState['status'], needsAuthor: boolean, workerId: string, now: string,
+    stop?: VerifierStop | null): Promise<boolean>
 }
 export interface GenerationProgress {
   append(owner: string, jobId: string, row: Omit<ProgressRow, 'id'>): Promise<void>

@@ -6,8 +6,8 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AdaptiveProposal } from "./adaptive-assignments.js";
 import type { JobStartResult } from "./job.js";
-import { beginProtocolInvocation, recoverResponseContract,
-  type ResponseContractSession } from "./response-contract-recovery.js";
+import { beginProtocolInvocation, recoverResponseContract, recheckExhaustedProtocolResponse,
+  inspectCompletedProtocolReads, type ResponseContractSession } from "./response-contract-recovery.js";
 
 const contract = "adaptive-plan.v1";
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -52,19 +52,49 @@ export async function initialAdaptiveResponse(job: JobStartResult, text: string,
   const bytes = await transcript(job, file);
   throw new MalformedAdaptiveResponse({ file, id, bytes: bytes.length, sha256: hash(bytes) });
 }
+export async function verifyAdaptiveRecoveryProof(job: JobStartResult, decision: AdaptiveRecovery) {
+  const { proof, signature } = decision;
+  if (!/^[a-f0-9]{64}$/.test(signature) || !/^[a-f0-9]{64}$/.test(decision.turnDigest) ||
+      !/^[a-f0-9]{40}$/.test(decision.sourceSha) ||
+      decision.operation !== "adaptive-planner" || decision.failedPhase !== "completed-response" ||
+      decision.check !== contract || decision.checkVersion !== 1 ||
+      decision.jobId !== job.jobId || decision.threadId !== job.threadId ||
+      !proof.id || !/^[a-f0-9]{64}$/.test(proof.sha256))
+    throw Error("Adaptive recovery has no matched source and check identity");
+  const bytes = await transcript(job, proof.file);
+  if (!Number.isSafeInteger(proof.bytes) || proof.bytes <= 0 || bytes.length < proof.bytes ||
+      hash(bytes.subarray(0, proof.bytes)) !== proof.sha256)
+    throw Error("Original adaptive response changed");
+}
+
+export async function recheckAdaptiveResponse(job: JobStartResult, decision: AdaptiveRecovery) {
+  if (decision.phase !== "protocol-exhausted")
+    throw Error("Only an exact exhausted original response can be rechecked");
+  await verifyAdaptiveRecoveryProof(job, decision);
+  const receiptFile = join(job.stateDir, "adaptive-protocol", decision.signature);
+  const options = { receiptFile, sourceDigest: decision.signature,
+    contract, sessionRoots: [dirname(decision.proof.file)] };
+  const proposal = await recheckExhaustedProtocolResponse({
+    ...options, expectedSession: { id: decision.proof.id, file: decision.proof.file },
+    validate, parse,
+  });
+  const provenance = await inspectCompletedProtocolReads({ ...options, allowExhausted: true });
+  if (provenance.sessionFile !== decision.proof.file)
+    throw Error("Rechecked adaptive session no longer matches the original");
+  return { proposal, sessionFile: provenance.sessionFile, skillReads: provenance.reads };
+}
+
 export async function correctAdaptiveResponse(job: JobStartResult, decision: AdaptiveRecovery,
   session: ResponseContractSession, beforeCorrection: () => Promise<void>, prompt: (feedback: string) => Promise<void>) {
   const { proof, signature } = decision;
-  if (!/^[a-f0-9]{64}$/.test(signature) || decision.phase !== "authorized" ||
-      decision.jobId !== job.jobId || decision.threadId !== job.threadId ||
+  if (decision.phase !== "authorized" ||
       session.sessionManager.getSessionFile() !== proof.file || session.sessionId !== proof.id)
     throw Error("Adaptive format correction lost its source or original session");
-  const bytes = await transcript(job, proof.file);
-  if (!Number.isSafeInteger(proof.bytes) || proof.bytes <= 0 || bytes.length < proof.bytes ||
-      hash(bytes.subarray(0, proof.bytes)) !== proof.sha256) throw Error("Original adaptive response changed");
+  await verifyAdaptiveRecoveryProof(job, decision);
   const receiptFile = join(job.stateDir, "adaptive-protocol", signature);
   const options = { receiptFile, sourceDigest: signature, contract, validate, parse };
-  if (!existsSync(receiptFile + ".initial.json") && bytes.length !== proof.bytes) throw Error("Unattributed adaptive planner activity; do not repeat the correction");
+  if (!existsSync(receiptFile + ".initial.json") &&
+      (await transcript(job, proof.file)).length !== proof.bytes) throw Error("Unattributed adaptive planner activity; do not repeat the correction");
   // The original malformed response is already sealed. This marker pins the
   // unchanged prefix before any format-only prompt; the shared helper seals
   // each individual attempt before dispatch and removes *all* active tools.
