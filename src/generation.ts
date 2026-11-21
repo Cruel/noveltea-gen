@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
+import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
+import { ProtocolExhaustedError } from "./response-contract-recovery.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
@@ -179,6 +181,7 @@ export const GenerationInputSchema = z.object({
 });
 
 const Channels = Annotation.Root({
+  recovery: Annotation<AdaptiveRecovery | null>({ reducer: (_, next) => next, default: () => null }),
   request: Annotation<GenerationRequest>(),
   cursor: Annotation<number>({ reducer: (_, next) => next, default: () => 0 }),
   completedStages: Annotation<GenerationEvidence[]>({ reducer: (_, next) => next, default: () => [] }),
@@ -489,14 +492,34 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   const inventory = await reviewGatedInventory(job,
     reconcileInventory(plan, validation, head, completedStages, failures, canonicalPrevious));
   const pending = await reconcilePendingWork(job, request, inventory, canonicalPrevious, validation, allowAmend);
-  const adaptive = plan && validation && receipt.phase === "committed"
-    ? await reconcileAdaptiveWork({ job, request, plan, validation,
-      inventory: pending.inventory, completed: completedStages,
-      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion, allowAmend }) : null;
+  let adaptive: Awaited<ReturnType<typeof reconcileAdaptiveWork>> | null = null;
+  try {
+    if (plan && validation && receipt.phase === "committed") adaptive = await reconcileAdaptiveWork({
+      job, request, plan, validation, inventory: pending.inventory, completed: completedStages,
+      graphThreadId: s.graphThreadId, pinnedVersion: s.adaptiveVersion, allowAmend, recovery: s.recovery });
+  } catch (error) {
+    if (error instanceof AdaptiveRecoveryRequired) {
+      const same = s.recovery?.signature === error.decision.signature;
+      if (same && s.recovery?.phase === "protocol-exhausted") return {
+        status: "blocked", active: null, reason: "protocol-exhausted: the original adaptive response allowance is spent.",
+      };
+      const recovery = same && !allowAmend ? s.recovery : error.decision;
+      return { request, planVersion: plan!.version, completedStages, failures, active: null, recovery,
+        reason: !allowAmend && s.reason ? s.reason : "Adaptive planner response requires original-session protocol correction." };
+    }
+    if (error instanceof ProtocolExhaustedError && s.recovery?.phase === "authorized" && error.contract === s.recovery.check)
+      return { request, completedStages, planVersion: plan!.version, active: null,
+        status: "blocked", reason: error.message, recovery: { ...s.recovery, phase: "protocol-exhausted" } };
+    throw error;
+  }
+  if (s.recovery && s.recovery.phase !== "completed" && !adaptive?.recovered)
+    throw Error("Unsettled adaptive correction lost its recovery evidence; scheduling refused");
   const effective = adaptive?.inventory ?? pending.inventory;
   const pendingOrder = adaptive?.order ?? pending.order ?? s.pendingOrder ?? null;
   return { request, planVersion: plan?.version ?? null, completedStages, failures,
     ...(plan?.version !== s.causalAmendment?.source.planVersion ? { causalAmendment: null } : {}),
+    ...(adaptive?.recovered && s.recovery?.phase === "authorized" ?
+      { recovery: { ...s.recovery, phase: "completed" as const }, reason: null } : {}),
     inventory: effective, pendingOrder, pendingVersion: pending.stateVersion,
     adaptiveVersion: adaptive?.version ?? s.adaptiveVersion ?? null,
     active: nextExecutionItem(effective,
@@ -938,6 +961,17 @@ export function createGenerationGraph(
           status: "running" as const, reason: null, failures: s.failures ?? {} };
       } catch (error) { return blocked(error); }
     })
+    .addNode("assess_recovery", async s => {
+      const r = s.recovery;
+      if (!r || r.phase !== "assessment" || r.operation !== "adaptive-planner" ||
+          r.failedPhase !== "completed-response" || r.planVersion !== s.planVersion ||
+          r.check !== "adaptive-plan.v1" || r.checkVersion !== 1 || r.jobId !== s.request.job ||
+          r.turnDigest !== s.request.turnPlanDigest)
+        return blocked(Error("Unrecognized or unbound adaptive recovery decision"));
+      // This checkpoint records intent, not authority to reuse a session. Intake
+      // rechecks author controls and the adapter authenticates source and proof.
+      return { recovery: { ...r, phase: "authorized" as const }, reason: "Correcting the original adaptive planner response." };
+    })
     .addNode("author_update_intake", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-boundary", async () => {
@@ -977,7 +1011,7 @@ export function createGenerationGraph(
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
           clean(job);
           const next = await reconcile(s, job);
-          if (next.status === "paused") return next;
+          if (next.status === "paused" || next.status === "blocked" || next.recovery?.phase === "assessment") return next;
           const boundary = await applyLiveSteeringAtBoundary(job, s.request, next.inventory ?? null);
           if (boundary) return { ...next, ...boundary, ideaTask: null, escalation: null };
           const head = await trustedHead(job);
@@ -1322,11 +1356,14 @@ export function createGenerationGraph(
     })
     .addEdge(START, "schedule")
     .addConditionalEdges("schedule", s => s.status !== "running" ? END : "author_update_intake")
+    .addConditionalEdges("assess_recovery", s => s.status !== "running" ? END : "author_update_intake", [END, "author_update_intake"])
     .addConditionalEdges("author_update_intake", s => s.status !== "running" ? END :
+      s.recovery?.phase === "assessment" ? "assess_recovery" :
       s.ideaTask ? "idea_integration" : s.active && s.result ? "independent_assignment_review" :
-      s.active ? "specialist_dispatch" : "completion_decision")
+      s.active ? "specialist_dispatch" : "completion_decision", [END, "assess_recovery", "idea_integration", "independent_assignment_review", "specialist_dispatch", "completion_decision"])
     .addConditionalEdges("idea_integration", s => s.status !== "running" ? END : "verify_idea_integration")
-    .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END : "author_update_intake")
+    .addConditionalEdges("verify_idea_integration", s => s.status !== "running" ? END :
+      s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake")
     .addConditionalEdges("specialist_dispatch", s => s.status !== "running" ? END :
       s.result?.status === "dependency-required" ? "dependency_amendment" :
       s.active ? "independent_assignment_review" : "author_update_intake")
@@ -1334,7 +1371,8 @@ export function createGenerationGraph(
     .addConditionalEdges("independent_assignment_review", s => s.status !== "running" ? END :
       s.reason === REPAIR_STEERING_BOUNDARY ? "author_update_intake" :
       s.result ? "verify_committed_work" : "specialist_dispatch")
-    .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END : "author_update_intake")
+    .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END :
+      s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake")
     .addEdge("completion_decision", END)
     .compile({ checkpointer });
 }
@@ -1360,7 +1398,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model,
           orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-legacy" : "explicit" };
-        state = { request, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
+        state = { request, recovery: null, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
@@ -1458,6 +1496,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
             visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
+        recovery: visible.recovery ?? null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints: await inspectRecoveryCheckpoints(await startStoryJob({ story: job.storyRoot, job: job.jobId }, false)),

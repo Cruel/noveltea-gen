@@ -88,7 +88,7 @@ async function authenticate(job: JobStartResult, milestone: string, planVersion:
 export async function reviewedAdaptiveOmissions(input: {
   job: JobStartResult; request: GenerationRequest; inventory: GenerationInventory;
   records: RecordItem[]; sourceHashes: Record<string, string>;
-  saved: AdaptiveOmissionProof[]; allowReview: boolean; authorTargets: string[];
+  saved: AdaptiveOmissionProof[]; allowReview: boolean | "restore-candidates"; authorTargets: string[];
   planning: StoryPlanning; protectedPaths: string[]; planDigest: string;
 }): Promise<AdaptiveOmissionProof[]> {
   const { job, request, inventory, records, sourceHashes, saved } = input;
@@ -134,6 +134,7 @@ export async function reviewedAdaptiveOmissions(input: {
           input.planDigest, records, sourceHashes));
       continue;
     }
+    if (input.allowReview === "restore-candidates") continue;
     const reviewed = await runInteractiveWorkItem({
       story: job.storyRoot, job: job.jobId, action: "review-omission",
       milestone: item.milestone, fixture: false,

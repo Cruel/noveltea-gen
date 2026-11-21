@@ -20,17 +20,15 @@ import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { AdaptiveProposal } from "./adaptive-assignments.js";
 
+import { correctAdaptiveResponse, initialAdaptiveResponse, type AdaptiveRecovery } from "./adaptive-protocol.js";
+
 export class InvalidAdaptiveProposalError extends Error {}
-function parseReply(message: string): AdaptiveProposal {
-  const raw = message.trim().replace(/^```(?:json)?\s*\n/i, "").replace(/\n```\s*$/, "");
-  try { return JSON.parse(raw) as AdaptiveProposal; }
-  catch { throw new InvalidAdaptiveProposalError("Adaptive orchestrator did not return a bounded JSON plan proposal."); }
-}
 
 export async function proposeAdaptiveWork(input: {
   job: JobStartResult; selected: StoryOrchestratorSelection;
   turn: TurnEvidence; inventory: GenerationInventory; planning: StoryPlanning;
   metrics: StoryArchitectureMetrics;
+  recovery?: AdaptiveRecovery;
   provider: string; model: string; version: number; signature: string;
   typedEdges: Array<{ item: string; needs: string }>;
   omissionCandidates: Array<{ assignmentId: string; sourcePath: string; evidence: string }>;
@@ -60,7 +58,10 @@ export async function proposeAdaptiveWork(input: {
     throw Error("Pinned adaptive Story orchestrator methodology is unavailable.");
   const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
-    group: "orchestrator:adaptive", step: "orchestrator:adaptive:" + signature,
+    // Each admitted plan pins its transcript digest: a later assignment must
+    // not append to it. Only its own format repair reopens this conversation.
+    group: "orchestrator:adaptive:" + signature,
+    resumeSession: input.recovery ? { ...input.recovery.proof, formatOnly: true } : undefined, step: "orchestrator:adaptive:" + signature,
     paths: [], snapshot: snapshot.id, provider, model,
     directory: join(job.stateDir, "adaptive-planning-sessions"),
   }, runtime);
@@ -77,6 +78,12 @@ export async function proposeAdaptiveWork(input: {
       throw Error("Adaptive orchestrator violated the pinned model thinking policy.");
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw Error("Adaptive planning cannot preserve its original Pi session.");
+    if (input.recovery) {
+      const proposal = await correctAdaptiveResponse(job, input.recovery, session,
+        () => context.beforeTurn(sessionFile), feedback => promptStorySpecialist(session, feedback));
+      await context.completed(sessionFile, session.sessionId);
+      return { proposal, sessionFile, skillReads: completedPinnedSkillReads(session.messages, project.root, snapshot.path) };
+    }
     await context.beforeTurn(sessionFile);
     const pending = inventory.items.filter(i => i.status === "pending");
     const prompt = context.contextNote +
@@ -160,16 +167,17 @@ export async function proposeAdaptiveWork(input: {
     if (!first || first.role !== "assistant" || ["aborted", "error"].includes(first.stopReason))
       throw Error("Adaptive orchestrator model turn is interrupted; preserve the exact session without replay.");
     if (missing().length) {
+      await context.beforeTurn(sessionFile);
       await promptStorySpecialist(session, adaptiveMethodCorrectionPrompt(missing()));
     }
     const skillReads = reads();
     if (missing().length)
       throw new InvalidAdaptiveProposalError("Adaptive orchestrator skipped required pinned methodology reads after same-session correction.");
     const last = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!last || last.role !== "assistant" || ["aborted", "error"].includes(last.stopReason))
+    if (!last || last.role !== "assistant" || last.stopReason !== "stop")
       throw Error("Adaptive orchestrator model turn is interrupted; preserve the exact session without replay.");
     await context.completed(sessionFile, session.sessionId);
-    return { proposal: parseReply(session.getLastAssistantText() ?? ""), sessionFile, skillReads };
+    return { proposal: await initialAdaptiveResponse(job, session.getLastAssistantText() ?? "", sessionFile, session.sessionId), sessionFile, skillReads };
   } finally {
     session.dispose();
   }

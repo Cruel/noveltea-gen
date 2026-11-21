@@ -11,6 +11,8 @@ import { dependencyGit } from "./dependency-state.js";
 import { pendingDigest } from "./pending-work-amendments.js";
 import type { AdaptiveAmendment } from "./adaptive-assignments.js";
 
+import type { AdaptiveResponseProof } from "./adaptive-protocol.js";
+
 export interface AdaptiveSessionEvidence {
   sessionFile: string; sessionSha256: string; snapshotId: string;
   /** Successful read-tool paths: pinned skills and source-Git canonical Story files. */
@@ -20,6 +22,8 @@ export interface AdaptiveAttempt {
   signature: string; sourceSha: string;
   phase: "planning" | "rejected" | "unchanged" | "admitted";
   session?: AdaptiveSessionEvidence;
+  malformedResponse?: AdaptiveResponseProof;
+  recoveryContext?: string;
 }
 export interface AdaptiveState {
   schema: "noveltea-adaptive-plan/v1";

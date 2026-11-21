@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createControllerServer, SandboxController, type ControllerConfig } from "../web/src/sandbox-controller.js";
 import { startStoryJob } from "../src/job.js";
+import { exerciseAdaptiveRecoveryGraph } from "./adaptive-protocol-scenario.js";
 import { runFoundationJob } from "../src/foundation.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
 import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
@@ -124,6 +125,7 @@ test("production planner and independent reviewer recover in original Pi session
   ].map(k => [k, process.env[k]]));
   let controller: SandboxController | undefined;
   let secondLiveId: string | undefined;
+  const adaptiveIds = [randomUUID(), randomUUID()];
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -578,7 +580,29 @@ test("production planner and independent reviewer recover in original Pi session
     assert.equal((await inspectRecoveryCheckpoints(secondJob)).find(p =>
       p.commitSha === secondCheckpoint.commitSha)?.semanticReview, "failed");
     assert.equal(git(secondJob.worktreeRoot, "status", "--porcelain"), "");
+    // A separate verified Story and graph thread, sharing only the registered
+    // sandbox transport. No completed Stage or model verdict is inherited.
+    mkdirSync(join(story, "creative-direction"), { recursive: true });
+    const direction = readFileSync(join(secondJob.worktreeStoryRoot, secondPath), "utf8")
+      .replace(/^status: .*$/m, 'status: approved\nplanning: {choice_frequency: occasional, puzzle_emphasis: none}');
+    writeFileSync(join(story, "creative-direction", "foundation.md"), direction);
+    git(repo, "add", "."); git(repo, "commit", "-qm", "Test approved Creative Direction");
+    for (const [index, adaptiveId] of adaptiveIds.entries()) {
+      const db218 = new DatabaseSync(join(app, "studio.sqlite"));
+      try { db218.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)").run(
+        adaptiveId, owner, "story", git(repo, "rev-parse", "HEAD"), null); } finally { db218.close(); }
+      const calls: Array<{ tools: string[]; messages: readonly unknown[] }> = [];
+      await exerciseAdaptiveRecoveryGraph({ story, id: adaptiveId, source, task, contract, scoped,
+        provider: model.provider, model: model.id, calls, exhaust: index === 1,
+        runtime: script => runtimeFor(i => {
+          const next = script(i);
+          return Array.isArray(next) ? { content: readCalls(next), reason: "toolUse" } :
+            { content: text(next), reason: "stop" };
+        }, calls),
+      });
+    }
   } finally {
+    for (const adaptiveId of adaptiveIds) controller?.dispose(adaptiveId);
     if (controller && secondLiveId) controller.dispose(secondLiveId);
     if (controller) controller.dispose(id);
     if (server) await new Promise<void>(done => server!.close(() => done()));

@@ -389,7 +389,7 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   directory: string;
   /** Sealed safe-boundary resume: reopen this exact original Pi session, even
    * beyond the normal opportunistic 1.5 MB context-fork threshold. */
-  resumeSession?: { file: string; id: string };
+  resumeSession?: { file: string; id: string; formatOnly?: boolean };
   /** Public native task-scoped Context Manifest query. Omit for discovery-only work. */
   task?: StoryContextRequest;
   /** An independent review nested inside an active writer must not pause mid-edit. */
@@ -413,7 +413,11 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   const oldSources = previous?.sources ?? {};
   const changed = Object.keys(versions).filter(p => versions[p] !== oldSources[p]);
   const superseded = Object.keys(oldSources).filter(p => !options.paths.includes(p));
-  const redesigned = changed.some(p => /^(creative-direction|arcs|milestones)\//.test(p)) ||
+  // A format-only continuation deliberately requests no source tools. Its
+  // historical reads are not superseded assignments. Require *all* original
+  // source versions unchanged instead of applying the new-assignment heuristic.
+  const redesigned = options.resumeSession?.formatOnly ? changed.length !== 0 :
+    changed.some(p => /^(creative-direction|arcs|milestones)\//.test(p)) ||
     changed.length + superseded.length > 12;
   const clean = !execFileSync("git", ["status", "--porcelain", "--untracked-files=all"],
     { cwd: job.worktreeRoot, encoding: "utf8" }).trim();

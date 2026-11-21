@@ -268,7 +268,15 @@ history and original transcript evidence. Interrupted **or rejected** proposals
 fence further dispatch, including after restart or disabling the feature flag;
 inspect and reconcile the preserved evidence rather than deleting receipts or
 replaying the planner. Inspection restores existing history but never starts a
-new adaptive planning session.
+new adaptive planning session. A completed malformed planner **response** is
+not a rejected plan. In this case the production graph checkpoints an
+`assess_recovery` decision, rechecks the original source and attempt, and
+continues the same Pi conversation with format feedback and zero tools. At
+most two further responses are allowed; each still requires job budget. A
+valid response goes through ordinary proposal admission. `generate inspect`
+exposes the `recovery` phase and source identity without prompting Pi;
+`protocol-exhausted` is an execution stop, not a negative Story review.
+An ambiguous prompt or changed proof is not permission to replace a planner.
 
 Adaptive admission now consumes separately reviewed, source-bound omission
 proofs rather than treating a no-write model suggestion as completion (#180).

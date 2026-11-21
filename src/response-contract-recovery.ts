@@ -447,13 +447,43 @@ export async function recoverResponseContract<T>(options: {
   /** Static, controller-authored contract text for a non-manifest response. */
   schema?: string;
   sourceDigest?: string;
+  /** Reopen only the original, source-pinned invocation. The base marker
+   * precedes correction; no new allowance is granted on graph restart. */
+  resumeOriginal?: { base: string; sessionRoots: string[] };
 }): Promise<T> {
   const { session, contract, validate, parse, prompt, receiptFile } = options;
   const sessionFile = session.sessionManager.getSessionFile();
   if (!sessionFile) throw new Error("Protocol recovery requires a durable Pi session transcript.");
   if (!/^[a-z][a-z0-9.-]{0,100}$/.test(contract))
     throw new Error("Invalid response contract identity.");
-  if (receiptFile) {
+  let firstIndex = 0;
+  if (options.resumeOriginal) {
+    const { base, sessionRoots } = options.resumeOriginal;
+    const sourceDigest = options.sourceDigest;
+    const started = await regularJson<StartedInvocation>(base + ".started.json");
+    if (!sourceDigest || !hex64.test(sourceDigest) || receiptFile !== base + ".initial.json" || !started ||
+        started.version !== 1 || started.contract !== contract || started.sourceDigest !== sourceDigest ||
+        started.sessionFile !== sessionFile || started.sessionId !== session.sessionId ||
+        started.invocationId !== invocationId(contract, session.sessionId, sessionFile) ||
+        await regularJson(base + ".fresh-allowance.json") || await regularJson(base + ".fresh.json"))
+      throw new ProtocolIntegrityBlockedError("Original correction invocation identity changed");
+    const prior = await regularJson<ContractReceipt>(receiptFile);
+    if (prior) {
+      checkedReceipt(prior, sourceDigest, contract, started, null);
+      if (prior.status !== "invalid-response") return inspectCompletedProtocolResponse({
+        receiptFile: base, sessionRoots, sourceDigest, contract, validate, parse });
+      // Budget admission may pause AFTER an invalid reply was sealed but
+      // BEFORE correction-pending. Only that exact, unchanged reply may use
+      // the remaining allowance. An uncertain dispatched prompt is never retried.
+      const evidence = await transcriptResponses(sessionFile, sessionRoots, session.sessionId);
+      const text = response(session);
+      if (prior.attempts >= 3 || prior.responseOrdinal !== evidence.complete.length ||
+          evidence.messages.at(-1)?.role !== "assistant" || evidence.complete.at(-1) !== text ||
+          prior.responseHash !== createHash("sha256").update(text).digest("hex") ||
+          !validate(text).length) throw new ProtocolIntegrityBlockedError("Original invalid response changed");
+      firstIndex = prior.attempts - 1;
+    }
+  } else if (receiptFile) {
     try {
       await readFile(receiptFile, "utf8");
       throw new Error("Existing protocol-recovery receipt requires reconciliation; do not replay a Pi response.");
@@ -462,7 +492,7 @@ export async function recoverResponseContract<T>(options: {
     }
   }
   const originalTools = session.getActiveToolNames();
-  for (let index = 0; index < 3; index++) {
+  for (let index = firstIndex; index < 3; index++) {
     const text = response(session);
     const failures = validate(text);
     const current: ContractReceipt = {
