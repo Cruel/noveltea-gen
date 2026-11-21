@@ -264,16 +264,20 @@ Even an unchanged proposal must pass source, objective, schema and carry-forward
 checks. HEAD, clean worktree and source hashes are rechecked after planning.
 
 Private `adaptive-plan.json` and `adaptive-planning-sessions/` retain the plan
-history and original transcript evidence. Interrupted **or rejected** proposals
-fence further dispatch, including after restart or disabling the feature flag;
-inspect and reconcile the preserved evidence rather than deleting receipts or
-replaying the planner. Inspection restores existing history but never starts a
-new adaptive planning session. A completed malformed planner **response** is
-not a rejected plan. In this case the production graph checkpoints an
-`assess_recovery` decision, rechecks the original source and attempt, and
-continues the same Pi conversation with format feedback and zero tools. At
-most two further responses are allowed; each still requires job budget. A
-valid response goes through ordinary proposal admission. `generate inspect`
+history and original transcript evidence. Adaptive planning reads are limited to
+pinned, regular Git-tracked canonical Story Markdown and the exact tracked
+Story-root `README.txt` (ancillary context only, never canonical or methodology
+evidence). The same source policy applies when the sandbox exposes a read,
+when a proposal is admitted, and when its receipt is restored. Interrupted
+**or rejected** proposals fence further dispatch, including after restart or
+disabling the feature flag; inspect and reconcile the preserved evidence rather
+than deleting receipts or replaying the planner. Inspection restores existing
+history but never starts a new adaptive planning session. A completed malformed
+planner **response** is not a rejected plan. In this case the production graph
+checkpoints an `assess_recovery` decision, rechecks the original source and
+attempt, and continues the same Pi conversation with format feedback and zero
+tools. At most two further responses are allowed; each still requires job budget.
+A valid response goes through ordinary proposal admission. `generate inspect`
 exposes the `recovery` phase and source identity without prompting Pi;
 `protocol-exhausted` is an execution stop, not a negative Story review.
 An ambiguous prompt or changed proof is not permission to replace a planner.

@@ -9,14 +9,17 @@ import type { JobStartResult } from "./job.js";
 import { persist } from "./ideas.js";
 import { dependencyGit } from "./dependency-state.js";
 import { pendingDigest } from "./pending-work-amendments.js";
+import { assertAdaptiveTrackedRead } from "./adaptive-source-reads.js";
 import type { AdaptiveAmendment } from "./adaptive-assignments.js";
 
 import type { AdaptiveResponseProof } from "./adaptive-protocol.js";
 
 export interface AdaptiveSessionEvidence {
   sessionFile: string; sessionSha256: string; snapshotId: string;
-  /** Successful read-tool paths: pinned skills and source-Git canonical Story files. */
-  provider: string; model: string; skillReads: string[]; proposalDigest: string;
+  provider: string; model: string;
+  /** Successful read-tool paths: pinned methods, canonical Story files and
+   * the exact ancillary tracked root README.txt. */
+  skillReads: string[]; proposalDigest: string;
 }
 export interface AdaptiveAttempt {
   signature: string; sourceSha: string;
@@ -46,6 +49,52 @@ export async function saveAdaptiveState(job: JobStartResult, state: AdaptiveStat
   const { digest: _digest, ...body } = state;
   state.digest = pendingDigest(body);
   await persist(pathFor(job), state);
+}
+
+/** Exactly the same source-read policy is enforced before saving a proposal
+ * and on every restoration, including on process restart. */
+async function verifyAdaptiveSessionEvidence(job: JobStartResult, sourceSha: string,
+  proof: AdaptiveSessionEvidence): Promise<void> {
+  const dir = join(job.stateDir, "adaptive-planning-sessions") + sep;
+  const snapshotRoot = await openSkillSnapshot(proof.snapshotId);
+  if (!proof.sessionFile.startsWith(dir) || !proof.sessionFile.endsWith(".jsonl") ||
+      !HASH.test(proof.sessionSha256) || !HASH.test(proof.snapshotId) ||
+      !HASH.test(proof.proposalDigest) || !proof.provider || !proof.model ||
+      !Array.isArray(proof.skillReads) || !proof.skillReads.length ||
+      proof.skillReads.length > 1024 || !snapshotRoot)
+    throw Error("Adaptive Pi transcript or pinned skill evidence was altered.");
+  const skillsDir = join(snapshotRoot, "skills") + sep;
+  const storyDir = job.worktreeStoryRoot ? job.worktreeStoryRoot + sep : "";
+  if (!proof.skillReads.some(path => typeof path === "string" && path.startsWith(skillsDir)))
+    throw Error("Adaptive Pi transcript lacks pinned methodology reads.");
+  for (const path of proof.skillReads) {
+    if (typeof path !== "string" || path.length > 4096)
+      throw Error("Adaptive Pi transcript contains an invalid source read.");
+    if (path.startsWith(skillsDir)) {
+      const skillRelative = relative(skillsDir, path);
+      if (!skillRelative || skillRelative === ".." ||
+          skillRelative.startsWith(".." + sep) || !skillRelative.endsWith(".md"))
+        throw Error("Adaptive Pi transcript references an unsafe pinned skill path.");
+      try {
+        const pinned = await lstat(path);
+        if (!pinned.isFile() || pinned.isSymbolicLink() || await realpath(path) !== path)
+          throw Error("unsafe");
+      } catch {
+        throw Error("Adaptive Pi transcript references a missing or unsafe pinned skill file.");
+      }
+      continue;
+    }
+    if (!storyDir || !path.startsWith(storyDir))
+      throw Error("Adaptive Pi transcript read outside its pinned skill and Story roots.");
+    // An exact root README.txt is ancillary Story context, not methodology or
+    // canonical evidence. A tracked symlink is never a valid source read.
+    assertAdaptiveTrackedRead(job, sourceSha, path);
+  }
+  const stat = await lstat(proof.sessionFile);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024 ||
+      await realpath(proof.sessionFile) !== proof.sessionFile ||
+      createHash("sha256").update(await readFile(proof.sessionFile)).digest("hex") !== proof.sessionSha256)
+    throw Error("Adaptive Pi transcript changed after controller admission.");
 }
 
 export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
@@ -88,57 +137,8 @@ export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
     dependencyGit(job, "merge-base", "--is-ancestor", attempt.sourceSha, "HEAD");
     if (attempt.phase === "admitted" && !attempt.session)
       throw Error("An admitted adaptive proposal has no original read-only Pi transcript.");
-    if (attempt.session) {
-      const proof = attempt.session;
-      const dir = join(job.stateDir, "adaptive-planning-sessions") + sep;
-      const snapshotRoot = await openSkillSnapshot(proof.snapshotId);
-      if (!proof.sessionFile.startsWith(dir) || !proof.sessionFile.endsWith(".jsonl") ||
-          !HASH.test(proof.sessionSha256) || !HASH.test(proof.snapshotId) ||
-          !HASH.test(proof.proposalDigest) || !proof.provider || !proof.model ||
-          !Array.isArray(proof.skillReads) || !proof.skillReads.length ||
-          proof.skillReads.length > 1024 || !snapshotRoot)
-        throw Error("Adaptive Pi transcript or pinned skill evidence was altered.");
-      // Real read-only Pi transcripts include BOTH pinned skill instructions
-      // and canonical Story reads. Requiring every path to contain /skills/
-      // incorrectly blocks a valid settled planner on restart. Authenticate
-      // each source at its original Git SHA instead of accepting a substring
-      // match against an unrelated filesystem path.
-      const skillsDir = join(snapshotRoot, "skills") + sep;
-      const storyDir = job.worktreeStoryRoot ? job.worktreeStoryRoot + sep : "";
-      if (!proof.skillReads.some(path => typeof path === "string" && path.startsWith(skillsDir)))
-        throw Error("Adaptive Pi transcript lacks pinned methodology reads.");
-      for (const path of proof.skillReads) {
-        if (typeof path !== "string" || path.length > 4096)
-          throw Error("Adaptive Pi transcript contains an invalid source read.");
-        if (path.startsWith(skillsDir)) {
-          const skillRelative = relative(skillsDir, path);
-          if (!skillRelative || skillRelative === ".." ||
-              skillRelative.startsWith(".." + sep) || !skillRelative.endsWith(".md"))
-            throw Error("Adaptive Pi transcript references an unsafe pinned skill path.");
-          try {
-            const pinned = await lstat(path);
-            if (!pinned.isFile() || pinned.isSymbolicLink() || await realpath(path) !== path)
-              throw Error("unsafe");
-          } catch {
-            throw Error("Adaptive Pi transcript references a missing or unsafe pinned skill file.");
-          }
-          continue;
-        }
-        if (!storyDir || !path.startsWith(storyDir))
-          throw Error("Adaptive Pi transcript read outside its pinned skill and canonical Story roots.");
-        const rel = relative(job.worktreeStoryRoot, path);
-        if (!/^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(rel))
-          throw Error("Adaptive Pi transcript read an unsupported canonical Story path.");
-        const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
-        try { dependencyGit(job, "cat-file", "-e", attempt.sourceSha + ":" + prefix + rel); }
-        catch { throw Error("Adaptive Pi transcript references a Story file absent from its original verified Git commit."); }
-      }
-      const stat = await lstat(proof.sessionFile);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024 ||
-          await realpath(proof.sessionFile) !== proof.sessionFile ||
-          createHash("sha256").update(await readFile(proof.sessionFile)).digest("hex") !== proof.sessionSha256)
-        throw Error("Adaptive Pi transcript changed after controller admission.");
-    }
+    if (attempt.session)
+      await verifyAdaptiveSessionEvidence(job, attempt.sourceSha, attempt.session);
   }
   const admitted = state.attempts.filter(a => a.phase === "admitted");
   if (admitted.length !== state.entries.length ||
@@ -182,6 +182,7 @@ export async function settleAdaptiveAttempt(job: JobStartResult, state: Adaptive
       phase === "admitted" !== Boolean(entry) ||
       phase === "admitted" && !session)
     throw Error("Adaptive planning attempt is not an unsettled exact source.");
+  if (session) await verifyAdaptiveSessionEvidence(job, attempt.sourceSha, session);
   if (entry) {
     if (entry.beforeVersion !== state.version || entry.afterVersion !== state.version + 1 ||
         entry.sourceSha !== attempt.sourceSha || entry.turnDigest !== state.turnDigest ||

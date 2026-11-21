@@ -14,12 +14,14 @@ import type { Skill } from "@earendil-works/pi-coding-agent";
 import { SandboxClient } from "./sandbox-client.js";
 import { createSkillReadTool, roleVisibleSkills, type SkillReadRole } from "./skills.js";
 import { verifiedSkillFiles, type SkillSnapshot } from "./snapshot.js";
+import { adaptiveTrackedReadPaths, assertAdaptiveExposedRead } from "./adaptive-source-reads.js";
 import type { JobStartResult } from "./job.js";
 
 export const SANDBOX_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
 export const SANDBOX_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export type SandboxToolAccess = "writer" | "read-only";
-export type SandboxReadScope = "story-and-skills" | "pinned-skills-only";
+export type SandboxReadScope = "story-and-skills" | "pinned-skills-only" |
+  { kind: "adaptive"; sourceSha: string };
 const MAX_WRITE = 128 * 1024;
 const MAX_READ_LINES = 500;
 const MAX_OUTPUT = 48 * 1024;
@@ -140,6 +142,18 @@ export async function createSandboxPiTools(
     s.baseDir === join(verified.root, "skills", s.name) &&
     s.filePath === join(verified.root, "skills", s.name, "SKILL.md"));
   const pinnedRead = createSkillReadTool(pinnedSkills, verified);
+  const adaptiveSource = typeof readScope === "object" && readScope.kind === "adaptive"
+    ? readScope.sourceSha : null;
+  const adaptiveFiles = adaptiveSource === null ? null :
+    adaptiveTrackedReadPaths(job, adaptiveSource);
+  const adaptiveScopedFiles = (requested: unknown): string[] => {
+    const path = mappedStoryPath(job, requested, true);
+    const dir = path === "/story" ? "" : path.slice("/story/".length);
+    return (adaptiveFiles ?? []).filter(file => !dir || file === dir || file.startsWith(dir + "/"));
+  };
+  const wildcard = (pattern: string): RegExp => new RegExp("^" +
+    [...pattern].map(char => char === "*" ? ".*" : char === "?" ? "." :
+      char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("") + "$");
 
   const mapped = (requested: unknown, allowStoryRoot = false): string =>
     mappedStoryPath(job, requested, allowStoryRoot);
@@ -196,6 +210,8 @@ export async function createSandboxPiTools(
           throw new Error("Assignment fidelity reads only immutable pinned skills; Story evidence is in the sealed review packet.");
         const offset = number(input.offset, 1, 1_000_000);
         const limit = number(input.limit, 300, MAX_READ_LINES);
+        if (adaptiveSource !== null)
+          await assertAdaptiveExposedRead(job, adaptiveSource, path);
         return text(await read(mapped(path), offset, limit));
       },
     },
@@ -261,9 +277,27 @@ export async function createSandboxPiTools(
         const opts = ["-RIn", "--binary-files=without-match", "--exclude-dir=.*", ...(input.ignoreCase ? ["-i"] : []),
           ...(input.literal ? ["-F"] : ["-E"]), ...(context ? ["-C", String(context)] : []),
           ...(typeof input.glob === "string" ? ["--include=" + input.glob] : []),
-          "-m", String(limit), "--", input.pattern, path];
+          "-m", String(limit), "--", input.pattern];
+        // In an adaptive turn, even search cannot expose an untracked or
+        // foreign file. Enumerate permitted pinned paths, then read only those
+        // exact worktree objects after checking their content against Git.
+        if (adaptiveSource !== null) {
+          const matches = adaptiveScopedFiles(input.path ?? ".").filter(file =>
+            typeof input.glob !== "string" || wildcard(input.glob).test(file.split("/").at(-1)!));
+          for (const file of matches) await assertAdaptiveExposedRead(job, adaptiveSource, file);
+          let output = "";
+          for (let i = 0; i < matches.length; i += 30) {
+            const files = matches.slice(i, i + 30).map(file => "/story/" + file);
+            const result = await run(["sh", "-c", 'grep "$@" | head -c 48000', "nt-grep",
+              ...opts, ...files]);
+            if (result.code !== 0) throw Error("Sandbox grep failed.");
+            output += result.stdout;
+            if (output.length >= MAX_OUTPUT) break;
+          }
+          return text(output.slice(0, MAX_OUTPUT) || "(no matches)");
+        }
         // Cap output before the controller limit; grep runs only inside Docker.
-        const result = await run(["sh", "-c", 'grep "$@" | head -c 48000', "nt-grep", ...opts]);
+        const result = await run(["sh", "-c", 'grep "$@" | head -c 48000', "nt-grep", ...opts, path]);
         if (result.code !== 0) throw new Error("Sandbox grep failed.");
         return text(result.stdout || "(no matches)");
       },
@@ -276,6 +310,13 @@ export async function createSandboxPiTools(
         const path = mapped(input.path ?? ".", true);
         const limit = number(input.limit, 300, 1000);
         // Fixed script, with pattern and search path only as positional data.
+        if (adaptiveSource !== null) {
+          const match = wildcard("*/" + input.pattern);
+          const files = adaptiveScopedFiles(input.path ?? ".")
+            .filter(file => match.test("/story/" + file)).slice(0, limit);
+          // Return Story-relative paths, which the same read tool accepts.
+          return text(files.join("\n") || "(no files)");
+        }
         const script = 'find "$1" -type d -name ".*" -prune -o -type f -path "*/$2" -print | head -n "$3" | head -c 48000';
         const output = await checked(["sh", "-c", script, "nt-find", path, input.pattern, String(limit)]);
         return text(output || "(no files)");
@@ -287,6 +328,14 @@ export async function createSandboxPiTools(
       async execute(_id, input: Input) {
         const path = mapped(input.path ?? ".", true);
         const limit = number(input.limit, 300, 1000);
+        if (adaptiveSource !== null) {
+          const dir = path === "/story" ? "" : path.slice("/story/".length);
+          const names = adaptiveScopedFiles(input.path ?? ".").map(file => {
+            const remaining = dir ? file.slice(dir.length + 1) : file;
+            return remaining.split("/")[0]!;
+          });
+          return text([...new Set(names)].slice(0, limit).join("\n") || "(no files)");
+        }
         const script = 'ls -1 -- "$1" | head -n "$2" | head -c 48000';
         return text(await checked(["sh", "-c", script, "nt-ls", path, String(limit)]));
       },

@@ -66,7 +66,7 @@ export async function proposeAdaptiveWork(input: {
     directory: join(job.stateDir, "adaptive-planning-sessions"),
   }, runtime);
   const tools = await selectSandboxPiTools(job, snapshot, skills, undefined,
-    "read-only", "orchestrator");
+    "read-only", "orchestrator", { kind: "adaptive", sourceSha: inventory.headSha });
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
     thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
@@ -91,7 +91,9 @@ export async function proposeAdaptiveWork(input: {
       "You are READ-ONLY, not a writer, author approval authority or reviewer. " +
       "Read these exact pinned skills/references with the read tool BEFORE proposing: " +
       required.map(r => "skill://" + r).join(", ") + ". " +
-      "Inspect actual canonical Story sources with safe read/find/grep. Do not access private .story-inbox. " +
+      "Inspect pinned canonical Story sources with safe read/find/grep. The exact tracked " +
+      "Story-root README.txt is ancillary context only, NOT a canonical Story record or " +
+      "a replacement for required pinned methodology reads. Do not access private .story-inbox. " +
       "Compare the author's ORIGINAL goal and approved whole-Story Creative Direction to current causal " +
       "Event, Choice, Puzzle, Composition and playable-route evidence. " +
       "An observational/short VN can have zero formal Puzzles, or no Choices when approved. " +
