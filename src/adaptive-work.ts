@@ -386,9 +386,19 @@ export async function reconcileAdaptiveWork(input: {
       // The persisted 'planning' fence is deliberate. An interrupted Pi
       // session is never replaced by another potentially costly/inconsistent
       // proposal on automatic resume.
-      const contextDigest = pendingDigest({ inventory: effective, omissionProofs, sourceHashes });
-      if (interrupted && (format?.recoveryContext && format.recoveryContext !== contextDigest ||
-          originalAttempt?.effect?.contextDigest && originalAttempt.effect.contextDigest !== contextDigest))
+      // Reconciliation can change its human-readable inventory rationale
+      // without changing a single assignment. Bind the original Pi operation
+      // to the evidence and actual writer authorization, not scheduler prose.
+      const { rationale: _rationale, ...authorization } = effective;
+      const contextDigest = pendingDigest({ inventory: authorization, omissionProofs, sourceHashes });
+      // Historical format corrections pinned the full inventory, including
+      // its rationale. Accept that old proof only when it still matches
+      // exactly; never rewrite the original receipt during recheck.
+      const legacyContextDigest = pendingDigest({ inventory: effective, omissionProofs, sourceHashes });
+      const matchesContext = (digest: string | undefined) =>
+        !digest || digest === contextDigest || digest === legacyContextDigest;
+      if (interrupted && (!matchesContext(format?.recoveryContext) ||
+          !matchesContext(originalAttempt?.effect?.contextDigest)))
         throw Error("Interrupted adaptive operation lost its original source or omission evidence");
       if (!format && (!interrupted || originalAttempt?.effect?.phase === "prepared"))
         await bindAdaptiveContext(job, state, signature, contextDigest);

@@ -76,7 +76,9 @@ export async function assessGenerationOperation(input: {
         ? "Keep the deferred idea outstanding. Continue only dependency-independent work from the same verified Story HEAD; reconsider placement when eligible source evidence changes."
         : "Keep the failed operation blocked. Continue only verified dependency-independent work at the same Story HEAD; never replay the original specialist or infer a successful review."
       : input.operation === "adaptive-admission"
-        ? "The original response passed its fixed format verifier but failed a distinct controller admission check. Inspect that new failure with the original fix proof; do not replay the planner."
+        ? input.evidence.previousCheck
+          ? "The original response passed its fixed format verifier but failed a distinct controller admission check. Inspect that new failure with the original fix proof; do not replay the planner."
+          : "Inspect the original adaptive operation, Pi transcript, resource ledger and pinned Story source. Ambiguous or altered evidence must remain fenced; never replay the planner or dispatch a writer."
       : input.operation === "author-update-intake"
         ? "Inspect the original author message and acknowledgement receipts. Reconcile that intake before any writer or scheduler replay."
         : input.operation === "idea-integration" || input.operation === "idea-verification"

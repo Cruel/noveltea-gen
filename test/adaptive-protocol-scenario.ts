@@ -1,14 +1,16 @@
 /** A production graph run from a fixture-authored Architecture checkpoint.
  * Only the model transport is scripted during planning and protocol recovery. */
 import assert from "node:assert/strict";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
 import { createGenerationGraph, runStoryGeneration } from "../src/generation.js";
 import { configurePiPolicy, inspectPiPolicy } from "../src/job-pi-policy.js";
-import { readAdaptiveState } from "../src/adaptive-state.js";
+import { readAdaptiveState, saveAdaptiveState } from "../src/adaptive-state.js";
+import { setJobControl } from "../src/job-control.js";
 import { startStoryJob } from "../src/job.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
@@ -17,7 +19,9 @@ import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
 
 export async function exerciseAdaptiveRecoveryGraph(input: {
-  exhaust: boolean; preCallStop?: boolean; story: string; id: string; task: string; source: string; scoped: string; contract: CompletionContract;
+  exhaust: boolean; preCallStop?: boolean; completedStop?: boolean; tamperCompleted?: boolean;
+  preCallRefusal?: "head" | "model" | "pause" | "cancel";
+  story: string; id: string; task: string; source: string; scoped: string; contract: CompletionContract;
   provider: string; model: string; calls: Array<{ tools: string[]; messages: readonly unknown[] }>;
   runtime(script: (index: number) => string | string[]): Promise<ModelRuntime>;
 }) {
@@ -40,7 +44,7 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
     if (i === 0 || i === 2) return reads;
     if (i === 1) return JSON.stringify({ sourceSha: job.baseSha, turnDigest: turn.digest,
       assignments: turn.assignments.map(a => ({ id: a.id, reason: "Verified scoped assignment" })) });
-    if (input.preCallStop && i === 3) {
+    if ((input.preCallStop || input.completedStop) && i === 3) {
       const messages = calls[i]!.messages as Array<{ role: string; content?: Array<{ text?: string }> }>;
       const content = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text).join("\n");
       const match = content.match(/Only currently pending IDs: (\[[^\n]*\])/);
@@ -75,6 +79,71 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       { stage: "foundation", status: "committed", headSha: job.baseSha },
       { stage: "architecture", status: "architecture-committed", headSha: point.commitSha, planVersion: 1 },
     ], planVersion: 1 }, "schedule");
+    if (input.completedStop) {
+      // The parent graph checkpoint has not yet published this operation's
+      // reconciliation. Preserve and restore the exact PRE-node state rather
+      // than retaining an inventory from an already completed node.
+      const originalGraphState = structuredClone((await graph.getState(config)).values);
+      const first = await withJobModelRuntime(rt, () =>
+        graph.invoke(null, { ...config, interruptAfter: ["author_update_intake"] }));
+      assert.equal(first.status, "running", first.reason ?? undefined);
+      assert.equal(calls.length, 4);
+      const before = (await readAdaptiveState(job, turn.digest, 1))!;
+      assert.equal(before.attempts.length, 1);
+      assert.equal(before.attempts[0]?.phase, "unchanged");
+      assert.equal(before.attempts[0]?.effect?.phase, "responded");
+      const usage = (await inspectPiPolicy(job)).budget.modelCalls;
+      // Deterministically simulate a crash AFTER the original Pi response
+      // was checkpointed but BEFORE the parent admitted its disposition.
+      // Reopen exactly that persisted attempt, never a new operation.
+      before.attempts[0]!.phase = "planning";
+      delete before.attempts[0]!.session;
+      if (input.tamperCompleted) {
+        const session = before.attempts[0]!.effect!.invocation!.file;
+        writeFileSync(session, readFileSync(session, "utf8")
+          .replace("Preserve the original verified plan without a second operation",
+            "A substituted response must not become an authorized plan"));
+      } else {
+        // Exercise the earlier crash window: terminal response exists, but
+        // the effect's completion hash was not checkpointed yet.
+        before.attempts[0]!.effect!.phase = "invoking";
+        delete before.attempts[0]!.effect!.invocation!.responseSha256;
+      }
+      await saveAdaptiveState(job, before);
+      await graph.updateState(config, originalGraphState, "schedule");
+      saver.db.close(); saver = SqliteSaver.fromConnString(file);
+      graph = createGenerationGraph(saver, "cli");
+      for (let restart = 0; restart < 2; restart++) {
+        const inspected = await runStoryGeneration({ action: "inspect", story, job: id });
+        assert.notEqual(inspected.status, "completed");
+        assert.equal(calls.length, 4, "inspection cannot perform original or replacement model calls");
+        assert.equal((await inspectPiPolicy(job)).budget.modelCalls, usage);
+      }
+      const resumed = await withJobModelRuntime(rt, () =>
+        graph.invoke({ request }, { ...config, interruptAfter: ["author_update_intake"] }));
+      assert.equal(calls.length, 4, "the resumed graph cannot invoke Pi again");
+      assert.equal((await inspectPiPolicy(job)).budget.modelCalls, usage);
+      const after = (await readAdaptiveState(job, turn.digest, 1))!;
+      assert.equal(after.attempts.length, 1);
+      if (input.tamperCompleted) {
+        assert.equal(resumed.operationRecovery?.operation, "adaptive-admission");
+        assert.equal(resumed.operationRecovery?.phase, "assessment",
+          "tampered original evidence must reach the existing operation assessor first");
+        assert.equal(after.attempts[0]?.phase, "planning");
+        const assessed = await withJobModelRuntime(rt, () =>
+          graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
+        assert.equal(assessed.status, "blocked", "tampered original Pi evidence must be fenced");
+        assert.equal(assessed.operationRecovery?.phase, "fenced");
+        assert.equal(calls.length, 4, "assessing tampered evidence cannot create another Pi call");
+      } else {
+        assert.equal(resumed.status, "running", resumed.reason ?? undefined);
+        assert.equal(after.attempts[0]?.phase, "unchanged",
+          "an authenticated original terminal response must settle without a replacement call");
+        assert.equal(after.attempts[0]?.effect?.phase, "responded");
+        assert.ok(resumed.active, "the original verified assignments are schedulable");
+      }
+      return;
+    }
     if (input.preCallStop) {
       const before = await inspectPiPolicy(job);
       // Admission is durable, but the first adaptive Pi preflight is stopped
@@ -103,6 +172,28 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
         assert.equal(calls.length, 2);
       } finally { unlinkSync(foreign); }
       await configurePiPolicy(job, before.policy);
+      if (input.preCallRefusal) {
+        if (input.preCallRefusal === "head") {
+          // A new commit can leave all canonical file bytes unchanged while
+          // invalidating the signed source revision for the original attempt.
+          execFileSync("git", ["commit", "--allow-empty", "-qm", "Unrelated head movement"],
+            { cwd: job.worktreeRoot });
+        } else if (input.preCallRefusal === "model") {
+          const changed = (await readAdaptiveState(job, turn.digest, 1))!;
+          changed.attempts[0]!.effect!.model = "substituted-model";
+          await saveAdaptiveState(job, changed);
+        } else await setJobControl(job, input.preCallRefusal === "cancel" ? "cancelled" : "paused");
+        saver.db.close(); saver = SqliteSaver.fromConnString(file);
+        graph = createGenerationGraph(saver, "cli");
+        const refused = await withJobModelRuntime(rt, () =>
+          runStoryGeneration({ action: "resume", story, job: id }));
+        assert.ok(refused.status === "blocked" || refused.status === "paused" ||
+          refused.status === "cancelled", "unsafe pre-call source/control must not dispatch");
+        assert.equal(calls.length, 2, "source and author control refusal must precede Pi");
+        assert.equal((await readAdaptiveState(job, turn.digest, 1))?.attempts[0]?.phase, "planning",
+          "a refused operation retains its original fence");
+        return;
+      }
       saver.db.close(); saver = SqliteSaver.fromConnString(file);
       graph = createGenerationGraph(saver, "cli");
       const resumed = await withJobModelRuntime(rt, () =>

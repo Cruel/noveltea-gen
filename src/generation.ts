@@ -539,7 +539,11 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
       });
       return { ...assessed, request, active: null, fixPickup: null };
     }
-    throw error;
+    // An interrupted or corrupt adaptive planner is not a generic scheduler
+    // failure. Assess/fence its ORIGINAL session before any other dispatch;
+    // a resource pause remains resumable through operationFailure().
+    return { ...await operationFailure(s, job, "adaptive-admission", error,
+      { reference: "generation-checkpoint" }), request, active: null };
   }
   if (s.recovery && s.recovery.phase !== "completed" && !adaptive?.recovered)
     throw Error("Unsettled adaptive correction lost its recovery evidence; scheduling refused");
@@ -1502,7 +1506,9 @@ export function createGenerationGraph(
           if (s.result) throw new Error("Plan changed with an unverified dispatch result; reconcile the original assignment first.");
           clean(job);
           const next = await reconcile(s, job);
-          if (next.status === "paused" || next.status === "blocked" || next.recovery?.phase === "assessment") return next;
+          if (next.status === "paused" || next.status === "blocked" ||
+              next.recovery?.phase === "assessment" ||
+              next.operationRecovery?.phase === "assessment") return next;
           const boundary = await applyLiveSteeringAtBoundary(job, s.request, next.inventory ?? null);
           if (boundary) return { ...next, ...boundary, ideaTask: null, escalation: null };
           const head = await trustedHead(job);
