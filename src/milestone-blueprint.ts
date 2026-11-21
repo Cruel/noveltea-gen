@@ -20,6 +20,9 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { assertReviewCycleSession, reviewCycleId } from "./review-cycle.js";
+import { milestoneDiagnosticDecision, milestoneDiagnosticEvidence, milestoneDiagnosticFingerprint,
+  milestoneDiagnosticTrigger, parseMilestoneDiagnosis,
+  type MilestoneDiagnosis, type MilestoneDiagnosticTrigger } from "./milestone-review-diagnostic.js";
 
 const sha = (value: unknown) => createHash("sha256").update(
   typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -166,7 +169,8 @@ interface Lineage {
   contractDigest: string; sourceDigest: string; snapshotId: string;
   provider: string; model: string; taskDigest: string; reviewCycleId: string;
 }
-type Phase = "admitted" | "planning" | "draft" | "reviewing" | "revision" | "approved";
+type Phase = "admitted" | "planning" | "draft" | "reviewing" | "revision" |
+  "diagnosing" | "stopped" | "approved";
 interface SessionSeal {
   id: string; file: string; bytes: number; digest: string;
 }
@@ -218,11 +222,25 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
   }
   return stalled;
 }
+interface DiagnosticReceipt {
+  schema: "noveltea-milestone-diagnostic-receipt/v1";
+  round: number; trigger: MilestoneDiagnosticTrigger;
+  evidenceDigest: string; caseFingerprint: string;
+  sources: { task: string; contract: unknown };
+  diagnosis: MilestoneDiagnosis; session: SessionSeal;
+}
 interface Receipt {
   schema: "noveltea-milestone-plan-receipt/v1";
   lineage: Lineage; phase: Phase; rounds: Round[];
   draft?: MilestoneBlueprint; writer?: SessionSeal; reviewer?: SessionSeal;
   approvedDigest?: string;
+  diagnostics?: DiagnosticReceipt[];
+  reviewerRole?: "reviewer" | "replacement";
+  reviewerHistory?: Array<{ role: "reviewer" | "replacement"; session: SessionSeal }>;
+  /** Each replacement starts a fresh independently adjudicated verdict lineage. */
+  reviewStart?: number;
+  reviewStarts?: number[];
+  stopReason?: string;
 }
 export interface MilestoneBlueprintPin {
   milestoneId: string; sourceSha: string; digest: string; cycleId: string;
@@ -237,6 +255,33 @@ export interface InheritedMilestoneBlueprint {
 function fileFor(job: JobStartResult, id: string) {
   if (!MILESTONE.test(id)) throw Error("Invalid Milestone Blueprint target identifier.");
   return join(job.stateDir, "milestone-blueprints", id.slice("milestone.".length) + ".json");
+}
+function diagnosticFileFor(job: JobStartResult, id: string, cycleId: string,
+  round: number) {
+  if (!MILESTONE.test(id) || !HASH.test(cycleId) ||
+      !Number.isSafeInteger(round) || round < 0)
+    throw Error("Invalid Milestone diagnostic lineage.");
+  return join(job.stateDir, "milestone-blueprint-diagnostics",
+    id.slice("milestone.".length) + "-" + cycleId + "-" + round + ".json");
+}
+async function readSealedDiagnosis(job: JobStartResult, receipt: Receipt,
+  round: number): Promise<DiagnosticReceipt | null> {
+  const path = diagnosticFileFor(job, receipt.lineage.milestoneId,
+    receipt.lineage.reviewCycleId, round);
+  if (!existsSync(path)) return null;
+  if (await realpath(path) !== path || !(await lstat(path)).isFile())
+    throw Error("Milestone diagnosis is not an immutable private file.");
+  return JSON.parse(await readFile(path, "utf8")) as DiagnosticReceipt;
+}
+async function sealDiagnosis(job: JobStartResult, receipt: Receipt,
+  diagnosis: DiagnosticReceipt): Promise<void> {
+  const path = diagnosticFileFor(job, receipt.lineage.milestoneId,
+    receipt.lineage.reviewCycleId, diagnosis.round);
+  await mkdir(dirname(path), { recursive: true });
+  // An already-present diagnosis is evidence to reconcile, NEVER an invitation
+  // to replace its assessment with another model response.
+  await writeFile(path, JSON.stringify(diagnosis, null, 2) + "\n",
+    { flag: "wx", mode: 0o600 });
 }
 function historicalFileFor(job: JobStartResult, pin: MilestoneBlueprintPin) {
   if (!MILESTONE.test(pin.milestoneId) || !HASH.test(pin.cycleId))
@@ -434,7 +479,8 @@ async function seal(session: { sessionId: string; sessionManager: { getSessionFi
   const bytes = await readFile(file);
   return { id: session.sessionId, file, bytes: bytes.length, digest: sha(bytes.toString("utf8")) };
 }
-async function verifySeal(job: JobStartResult, sealValue: SessionSeal, role: "writer" | "reviewer") {
+async function verifySeal(job: JobStartResult, sealValue: SessionSeal,
+  role: "writer" | "reviewer" | "diagnostic" | "replacement") {
   const dir = join(job.stateDir, "milestone-blueprint-sessions", role);
   if (!sealValue || !string(sealValue.id) ||
       typeof sealValue.file !== "string" || !sealValue.file.startsWith(dir + sep) ||
@@ -450,8 +496,24 @@ async function verifySeal(job: JobStartResult, sealValue: SessionSeal, role: "wr
 function validateReceiptShape(value: Receipt, id: string) {
   if (value?.schema !== "noveltea-milestone-plan-receipt/v1" ||
       !MILESTONE.test(id) || value.lineage?.milestoneId !== id ||
-      !["admitted", "planning", "draft", "reviewing", "revision", "approved"].includes(value.phase) ||
-      !Array.isArray(value.rounds) || value.rounds.length > 60)
+      !["admitted", "planning", "draft", "reviewing", "revision", "diagnosing", "stopped", "approved"].includes(value.phase) ||
+      !Array.isArray(value.rounds) ||
+      (value.reviewStart !== undefined &&
+        (!Number.isSafeInteger(value.reviewStart) || value.reviewStart < 1 || value.reviewStart > value.rounds.length)) ||
+      (value.reviewStarts !== undefined &&
+        (!Array.isArray(value.reviewStarts) ||
+          value.reviewStarts.at(-1) !== value.reviewStart ||
+          value.reviewStarts.some((start, index) =>
+            !Number.isSafeInteger(start) || start < 1 ||
+            start > value.rounds.length ||
+            (index > 0 && start <= value.reviewStarts![index - 1]!) ||
+            !value.diagnostics?.some(d => d.diagnosis.action === "replace" &&
+              d.round === start - 1)))) ||
+      (value.reviewerRole === "replacement" &&
+        (value.reviewStart === undefined || !value.reviewerHistory?.length ||
+          !value.diagnostics?.some(d => d.diagnosis.action === "replace" &&
+            d.round === value.reviewStart! - 1))) ||
+      (value.phase === "stopped" && !string(value.stopReason)))
     throw Error("Invalid private Milestone Blueprint receipt.");
 }
 function pinOf(value: Receipt): MilestoneBlueprintPin {
@@ -467,14 +529,168 @@ function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
   "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">) {
   for (const [index, round] of value.rounds.entries()) {
     const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment);
+    const boundaries = value.reviewStarts ?? (value.reviewStart === undefined
+      ? [] : [value.reviewStart]);
+    const start = boundaries.filter(boundary => boundary <= index).at(-1) ?? 0;
     const review = parseMilestoneBlueprintReview(JSON.stringify(round.review), draft,
-      assignment, value.rounds.slice(0, index), "sealed-replay");
+      assignment, value.rounds.slice(start, index), "sealed-replay");
     if (round.draftDigest !== sha(draft) || round.reviewDigest !== sha(review))
       throw Error("Milestone review evidence changed after its sealed verdict.");
   }
   if (value.draft && sha(parseMilestoneBlueprint(JSON.stringify(value.draft), assignment)) !==
       sha(value.draft)) throw Error("Milestone planning draft changed.");
 }
+/** Verify durable independent advice against the sealed negative review and
+ * original job/Thread/plan/contract lineage before applying any routing. */
+async function assertDiagnostics(job: JobStartResult, receipt: Receipt) {
+  let previousRound = -1;
+  for (const record of receipt.diagnostics ?? []) {
+    const round = receipt.rounds[record.round];
+    const sources = record.sources;
+    if (!sources || sha(sources.task) !== receipt.lineage.taskDigest ||
+        sha(sources.contract) !== receipt.lineage.contractDigest ||
+        record.schema !== "noveltea-milestone-diagnostic-receipt/v1" ||
+        !round || round.review.status !== "revise" ||
+        record.round <= previousRound || record.round >= receipt.rounds.length ||
+        !["stagnation", "review-depth"].includes(record.trigger) ||
+        record.evidenceDigest !== milestoneDiagnosticEvidence(receipt.lineage.reviewCycleId,
+          receipt.rounds.slice(0, record.round + 1), sources) ||
+        record.caseFingerprint !== milestoneDiagnosticFingerprint(receipt.lineage.reviewCycleId,
+          round.draft, round.review.findings, sources))
+      throw Error("Milestone diagnosis changed its sealed review or source evidence.");
+    const sealed = await readSealedDiagnosis(job, receipt, record.round);
+    if (!sealed || JSON.stringify(sealed) !== JSON.stringify(record))
+      throw Error("Milestone diagnostic disposition differs from immutable source evidence.");
+    const parsed = parseMilestoneDiagnosis(JSON.stringify(record.diagnosis), round.draft, sources);
+    if (JSON.stringify(parsed) !== JSON.stringify(record.diagnosis))
+      throw Error("Milestone diagnosis changed its independent disposition.");
+    await verifySeal(job, record.session, "diagnostic");
+    if ([receipt.writer?.id, receipt.reviewer?.id,
+        ...(receipt.reviewerHistory ?? []).map(h => h.session.id),
+        ...(receipt.diagnostics ?? []).filter(d => d !== record).map(d => d.session.id)]
+      .includes(record.session.id))
+      throw Error("Milestone diagnosis reused a writer or reviewer session.");
+    previousRound = record.round;
+  }
+  for (const history of receipt.reviewerHistory ?? [])
+    await verifySeal(job, history.session, history.role);
+}
+
+async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapshot,
+  assignment: EventAssignment, provider: string, model: string, task: string,
+  receipt: Receipt, contract: unknown, trigger: MilestoneDiagnosticTrigger,
+): Promise<DiagnosticReceipt> {
+  const last = receipt.rounds.at(-1)!;
+  const index = receipt.rounds.length - 1;
+  let session: Awaited<ReturnType<typeof sessionFor>>;
+  try {
+    session = await sessionFor(job, snapshot, assignment, provider, model,
+      "diagnostic", receipt.lineage.reviewCycleId + ":" + index);
+  } catch (error) {
+    if (error instanceof PiBudgetPause) {
+      // Only admission failed: no diagnostic prompt has been dispatched.
+      receipt.phase = "revision";
+      await persist(fileFor(job, assignment.milestoneId), receipt);
+    }
+    throw error;
+  }
+  try {
+    if ([receipt.writer?.id, receipt.reviewer?.id,
+        ...(receipt.reviewerHistory ?? []).map(h => h.session.id),
+        ...(receipt.diagnostics ?? []).map(d => d.session.id)].includes(session.session.sessionId))
+      throw Error("Milestone diagnostician reused an original Pi session.");
+    const start = session.session.messages.length;
+    await reportControllerReviewPhase("diagnosing");
+    await promptStorySpecialist(session.session, session.context.contextNote +
+      "FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC. " +
+      "Read the pinned nt-event-design and nt-catalog skills and the exact selected " +
+      "Milestone and supporting canonical sources. You are NOT the original " +
+      "reviewer; do not presume the previous verdict right or wrong. Judge " +
+      "whether the current-stage defect is material, deferred to downstream work, " +
+      "cosmetic, reviewer drift or outside the authorized scope. " +
+      "Your diagnosis NEVER approves a draft, erases a review verdict, changes " +
+      "protected decisions, grants writing authority or overrides budgets. " +
+      "Recommend continue (writer/reviewer keep distinct original conversations), " +
+      "replace (new read-only independent reviewer must actually review), " +
+      "split (requires separately authorized replanning), or escalate (safe stop). " +
+      "\nTRIGGER: " + trigger +
+      "\nSOURCE MILESTONE: " + assignment.milestoneId +
+      "\nTASK: " + JSON.stringify(task) +
+      "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
+      "\nHISTORICAL SEALED REVIEWS: " + JSON.stringify(receipt.rounds.map((r, i) =>
+        ({ round: i, draftDigest: r.draftDigest, review: r.review }))) +
+      "\nCURRENT EXACT DRAFT: " + JSON.stringify(last.draft) +
+      "\\nReturn ONLY strict JSON {schema:'noveltea-milestone-diagnosis/v1'," +
+      "action:'continue|replace|split|escalate',explanation:string," +
+      "assessments:[{kind:'material|deferred|cosmetic|scope',reason:string," +
+      "requirement:{source:'task|contract',quote:exact accepted 8+ character substring}," +
+      "evidence:{eventId:current provisional Event id,field:'purpose|dependsOn|" +
+      "evidence|participants|knowledge|routes',quote:exact current field text}}]}. " +
+      "Every assessment must cite the exact CURRENT Event field and existing " +
+      "accepted task or contract; never introduce requirements or return a PASS.");
+    const parse = () => {
+      verifyReads(session.session.messages.slice(start), session.project.root, snapshot, assignment);
+      return parseMilestoneDiagnosis(lastText(session.session), last.draft, { task, contract });
+    };
+    let diagnosis: MilestoneDiagnosis;
+    try { diagnosis = parse(); }
+    catch (error) {
+      await session.context.beforeTurn(session.session.sessionManager.getSessionFile());
+      await reportControllerReviewPhase("correcting");
+      await promptStorySpecialist(session.session,
+        "READ-ONLY DIAGNOSTIC FORMAT CORRECTION. The previous response failed " +
+        "source/protocol validation: " + (error instanceof Error ? error.message : String(error)) +
+        ". Retain independent substantive analysis, re-read missing pinned sources, " +
+        "and return ONE complete valid strict diagnosis JSON with real citations. " +
+        "No approval, Story writes or new scope.");
+      diagnosis = parse();
+    }
+    await session.context.completed(session.session.sessionManager.getSessionFile()!,
+      session.session.sessionId);
+    const result: DiagnosticReceipt = {
+      schema: "noveltea-milestone-diagnostic-receipt/v1", round: index, trigger,
+      evidenceDigest: milestoneDiagnosticEvidence(receipt.lineage.reviewCycleId,
+        receipt.rounds, { task, contract }),
+      caseFingerprint: milestoneDiagnosticFingerprint(receipt.lineage.reviewCycleId,
+        last.draft, last.review.findings, { task, contract }),
+      sources: { task, contract }, diagnosis, session: await seal(session.session),
+    };
+    await sealDiagnosis(job, receipt, result);
+    return result;
+  } finally { session.session.dispose(); }
+}
+
+/** Reconcile one immutable diagnosis before taking any trusted action.
+ * A restart that finds the sealed result uses this exact path without another
+ * Pi prompt, reviewer verdict, writer attempt, or budget debit. */
+async function applyMilestoneDiagnosis(job: JobStartResult, receipt: Receipt,
+  diagnostic: DiagnosticReceipt): Promise<void> {
+  if (receipt.diagnostics?.some(d => d.round === diagnostic.round))
+    throw Error("Milestone diagnostic result was already dispatched.");
+  const next = { ...receipt,
+    diagnostics: [...(receipt.diagnostics ?? []), diagnostic] };
+  await assertDiagnostics(job, next);
+  const decision = milestoneDiagnosticDecision(diagnostic.diagnosis.action, false);
+  receipt.diagnostics = next.diagnostics;
+  if (decision.kind === "replace") {
+    if (!receipt.reviewer)
+      throw Error("Milestone reviewer replacement lacks sealed original provenance.");
+    receipt.reviewerHistory = [...(receipt.reviewerHistory ?? []),
+      { role: receipt.reviewerRole ?? "reviewer", session: receipt.reviewer }];
+    receipt.reviewer = undefined;
+    receipt.reviewerRole = "replacement";
+    receipt.reviewStart = receipt.rounds.length;
+    receipt.reviewStarts = [...(receipt.reviewStarts ?? []), receipt.reviewStart];
+    receipt.phase = "draft";
+  } else if (decision.kind === "stop") {
+    receipt.phase = "stopped";
+    receipt.stopReason = decision.reason;
+  } else {
+    receipt.phase = "revision";
+  }
+  await persist(fileFor(job, receipt.lineage.milestoneId), receipt);
+}
+
 async function lineage(job: JobStartResult, plan: Plan, assignment: EventAssignment,
   snapshot: SkillSnapshot, provider: string, model: string, task: string, head: string): Promise<Lineage> {
   const sources = await sourceDigest(job, assignment.sourcePaths, head);
@@ -581,7 +797,8 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
       review: r.review }))) + "\nCURRENT PLAN: " + JSON.stringify(draft);
 }
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
-  provider: string, model: string, role: "writer" | "reviewer", cycleId: string,
+  provider: string, model: string,
+  role: "writer" | "reviewer" | "diagnostic" | "replacement", cycleId: string,
   resume?: SessionSeal) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
@@ -597,7 +814,8 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, assignme
   const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
     group: "milestone-blueprint:" + role + ":" + cycleId,
-    step: "milestone-blueprint:" + role + ":" + assignment.milestoneId,
+    step: "milestone-blueprint:" + role + ":" + assignment.milestoneId +
+      (role === "diagnostic" || role === "replacement" ? ":" + cycleId : ""),
     paths: assignment.sourcePaths, snapshot: snapshot.id,
     provider, model, directory: join(job.stateDir, "milestone-blueprint-sessions", role),
     ...(resume ? { resumeSession: { file: resume.file, id: resume.id } } : {}),
@@ -640,13 +858,21 @@ export async function inspectMilestoneBlueprint(job: JobStartResult, milestoneId
   const receipt = await load(job, milestoneId);
   if (!receipt) return null;
   validateReceiptShape(receipt, milestoneId);
+  await assertDiagnostics(job, receipt);
   if (receipt.lineage.jobId !== job.jobId || receipt.lineage.threadId !== job.threadId ||
       receipt.lineage.baseSha !== job.baseSha)
     throw Error("Milestone Blueprint inspection found an unrelated job or Thread.");
   return { phase: receipt.phase, milestoneId, sourceSha: receipt.lineage.executionHead,
     cycleId: receipt.lineage.reviewCycleId, rounds: receipt.rounds.length,
     digest: receipt.phase === "approved" ? pinOf(receipt).digest : undefined,
-    lastVerdict: receipt.rounds.at(-1)?.review.status ?? null };
+    lastVerdict: receipt.rounds.at(-1)?.review.status ?? null,
+    diagnostic: receipt.diagnostics?.at(-1) ? {
+      round: receipt.diagnostics.at(-1)!.round,
+      trigger: receipt.diagnostics.at(-1)!.trigger,
+      action: receipt.diagnostics.at(-1)!.diagnosis.action,
+      explanation: receipt.diagnostics.at(-1)!.diagnosis.explanation,
+    } : null,
+    stopReason: receipt.stopReason ?? null };
 }
 
 /** Inspect a sealed plan (including at a later committed Event head) without
@@ -696,6 +922,7 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   if (record.lineage.sourceDigest !== await sourceDigest(job, assignment.sourcePaths, pin.sourceSha))
     throw Error("Milestone Blueprint source record digest changed.");
   assertRounds(record, assignment);
+  await assertDiagnostics(job, record);
   const actual = pinOf(record);
   if (JSON.stringify(actual) !== JSON.stringify(pin))
     throw Error("Event consumed a stale or altered Milestone Blueprint approval.");
@@ -706,7 +933,7 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
     assertReviewCycleSession({ id: record.writer.id, file: record.writer.file },
       { id: record.reviewer.id, file: record.reviewer.file });
     await verifySeal(job, record.writer, "writer");
-    await verifySeal(job, record.reviewer, "reviewer");
+    await verifySeal(job, record.reviewer, record.reviewerRole ?? "reviewer");
   }
   return record.draft!;
 }
@@ -764,14 +991,23 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     validateReceiptShape(receipt, assignment.milestoneId);
     assertLineage(receipt.lineage, binding);
     assertRounds(receipt, assignment);
+    await assertDiagnostics(job, receipt);
     if (receipt.phase === "approved") {
       const pin = pinOf(receipt);
       return { blueprint: await readReviewedMilestoneBlueprint(job, pin, assignment), pin };
     }
     if (receipt.phase === "planning" || receipt.phase === "reviewing")
       throw Error("Interrupted Milestone Blueprint Pi session; inspect original transcripts before recovery.");
+    if (receipt.phase === "diagnosing") {
+      const recovered = await readSealedDiagnosis(job, receipt, receipt.rounds.length - 1);
+      if (!recovered)
+        throw Error("Interrupted Milestone diagnostic has no sealed answer; preserve original transcript for reconciliation.");
+      await applyMilestoneDiagnosis(job, receipt, recovered);
+    }
+    if (receipt.phase === "stopped")
+      throw Error(receipt.stopReason ?? "Milestone diagnostic review safely stopped execution.");
     if (receipt.writer) await verifySeal(job, receipt.writer, "writer");
-    if (receipt.reviewer) await verifySeal(job, receipt.reviewer, "reviewer");
+    if (receipt.reviewer) await verifySeal(job, receipt.reviewer, receipt.reviewerRole ?? "reviewer");
   } else {
     receipt = { schema: "noveltea-milestone-plan-receipt/v1",
       lineage: binding, phase: "admitted", rounds: [] };
@@ -792,8 +1028,39 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   // The writer and reviewer remain independent read-only Pi sessions across
   // substantive corrections. A partial prompt is never automatically replayed.
   for (;;) {
-    if (receipt.phase === "revision" && milestoneReviewStagnation(receipt.rounds) >= 2)
-      throw Error("Milestone Blueprint has two sealed nonproductive corrections; independent diagnostic reassessment required.");
+    if (receipt.phase === "revision") {
+      const reviewStart = receipt.reviewStart ?? 0;
+      const active = receipt.rounds.slice(reviewStart);
+      const diagnosedAt = (receipt.diagnostics ?? []).filter(d => d.round >= reviewStart)
+        .map(d => d.round + 1 - reviewStart);
+      const stalled = milestoneReviewStagnation(active);
+      const trigger = milestoneDiagnosticTrigger(active, diagnosedAt, stalled);
+      if ((trigger || stalled >= 2) && (receipt.diagnostics?.length ?? 0) >= 2) {
+        receipt.phase = "stopped";
+        receipt.stopReason = "Independent Milestone diagnostic allowance exhausted; unresolved negative review requires author-guided escalation.";
+        await persist(file, receipt);
+        throw Error(receipt.stopReason);
+      }
+      if (trigger) {
+        const last = receipt.rounds.at(-1)!;
+        const fingerprint = milestoneDiagnosticFingerprint(binding.reviewCycleId,
+          last.draft, last.review.findings, { task, contract: plan.contract });
+        const repeated = (receipt.diagnostics ?? []).some(d => d.caseFingerprint === fingerprint);
+        if (repeated) {
+          receipt.phase = "stopped";
+          receipt.stopReason = milestoneDiagnosticDecision("continue", true).reason;
+          await persist(file, receipt);
+          throw Error(receipt.stopReason);
+        }
+        receipt.phase = "diagnosing";
+        await persist(file, receipt);
+        const diagnostic = await runMilestoneDiagnosis(job, snapshot, assignment,
+          provider, model, task, receipt, plan.contract, trigger);
+        await applyMilestoneDiagnosis(job, receipt, diagnostic);
+        if (receipt.stopReason) throw Error(receipt.stopReason);
+        continue;
+      }
+    }
     if (receipt.phase === "admitted" || receipt.phase === "revision") {
       const previousPhase = receipt.phase;
       // Seal ambiguity BEFORE the SDK may create a Pi transcript. A crash in
@@ -861,7 +1128,9 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     let reviewer: Awaited<ReturnType<typeof sessionFor>>;
     try {
       reviewer = await sessionFor(job, snapshot, assignment, provider, model,
-        "reviewer", binding.reviewCycleId, receipt.reviewer);
+        receipt.reviewerRole ?? "reviewer",
+        binding.reviewCycleId + (receipt.reviewerRole === "replacement"
+          ? ":" + receipt.reviewStart : ""), receipt.reviewer);
     } catch (error) {
       if (error instanceof PiBudgetPause) {
         receipt.phase = "draft";
@@ -875,12 +1144,18 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
           file: reviewer.session.sessionManager.getSessionFile() ?? "" },
         receipt.reviewer ? { id: receipt.reviewer.id, file: receipt.reviewer.file } : undefined);
       const start = reviewer.session.messages.length;
+      const reviewHistory = receipt.rounds.slice(receipt.reviewStart ?? 0);
       await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
-        reviewerPrompt(assignment, receipt.draft, receipt.rounds));
+        (receipt.reviewerRole === "replacement" && !reviewHistory.length
+          ? "FRESH INDEPENDENT REPLACEMENT REVIEWER. Previous negative verdicts and " +
+            "diagnostic advice are history, not approval or authority. Independently " +
+            "evaluate the current exact draft and original accepted source scope. " +
+            "Your verdict must meet the full original v4 review contract. " : "") +
+        reviewerPrompt(assignment, receipt.draft, reviewHistory));
       verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
       const parseVerdict = () => {
         const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft!,
-          assignment, receipt.rounds);
+          assignment, reviewHistory);
         if (verdict.schema !== "noveltea-milestone-blueprint-review/v4")
           throw Error("New Milestone reviews require an original, field-bound repair classification.");
         return verdict;
@@ -904,10 +1179,10 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       }
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
       receipt.reviewer = await seal(reviewer.session);
-      const previousRound = receipt.rounds.at(-1);
+      const previousRound = reviewHistory.at(-1);
       if (verdict.status === "pass" && previousRound?.review.status === "revise" &&
           (previousRound.draftDigest === sha(receipt.draft) ||
-            !milestonePassCorrections(receipt.draft, receipt.rounds, verdict)))
+            !milestonePassCorrections(receipt.draft, reviewHistory, verdict)))
         throw Error("Milestone reviewer cannot approve without repairing the exact rejected Event field.");
       receipt.rounds.push({ draft: receipt.draft, review: verdict,
         draftDigest: sha(receipt.draft), reviewDigest: sha(verdict) });
@@ -916,11 +1191,6 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         receipt.phase = "approved";
         await persist(file, receipt);
         return { blueprint: receipt.draft, pin: pinOf(receipt) };
-      }
-      if (milestoneReviewStagnation(receipt.rounds) >= 2) {
-        receipt.phase = "revision";
-        await persist(file, receipt);
-        throw Error("Milestone Blueprint review is not converging; inspect sealed findings for a diagnostic review.");
       }
       receipt.phase = "revision";
       await persist(file, receipt);
