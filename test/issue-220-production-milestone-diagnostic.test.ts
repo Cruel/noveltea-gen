@@ -18,7 +18,7 @@ import {
 import { createControllerServer, SandboxController,
   type ControllerConfig } from "../web/src/sandbox-controller.js";
 import { ensureMilestoneBlueprint, inspectMilestoneBlueprint,
-  type MilestoneBlueprint } from "../src/milestone-blueprint.js";
+  readReviewedMilestoneBlueprint, type MilestoneBlueprint } from "../src/milestone-blueprint.js";
 import { startStoryJob } from "../src/job.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { configurePiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
@@ -320,6 +320,9 @@ The guard finds a dated register, but no evidence of a prior visit.
     await assert.rejects(run(), /escalation/);
     assert.equal(calls.length, count, "stopped review never dispatches more Pi work");
     assert.equal(git("status", "--porcelain"), "", "canonical source repo stays unchanged");
+    assert.equal(execFileSync("git", ["status", "--porcelain"],
+      { cwd: job.worktreeRoot, encoding: "utf8" }).trim(), "",
+    "Milestone diagnostic and reviews must never mutate the job Story");
 
     // A fresh replacement reviewer can independently PASS the existing source,
     // but the diagnostic itself remains advice; all old negatives stay sealed.
@@ -348,6 +351,8 @@ The guard finds a dated register, but no evidence of a prior visit.
           model.provider, model.id, task, head, false)));
     const result = await replace();
     assert.equal(result.blueprint.milestoneId, milestoneId);
+    assert.equal((await readReviewedMilestoneBlueprint(replacementJob,
+      result.pin, assignment)).milestoneId, milestoneId);
     const replaced = await inspectMilestoneBlueprint(replacementJob, milestoneId);
     assert.equal(replaced?.phase, "approved");
     assert.equal(replaced?.lastVerdict, "pass");
@@ -372,7 +377,8 @@ The guard finds a dated register, but no evidence of a prior visit.
     assert.equal(replacementCalls.filter(call =>
       call.prompt.includes("FRESH INDEPENDENT REPLACEMENT REVIEWER") &&
       call.lastRole === "toolResult").length, 1);
-    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(execFileSync("git", ["status", "--porcelain"],
+      { cwd: replacementJob.worktreeRoot, encoding: "utf8" }).trim(), "");
 
     // A CONTINUE diagnosis must retain the exact original reviewer and writer
     // identities. One real field-specific correction then receives a v4 PASS
@@ -400,7 +406,9 @@ The guard finds a dated register, but no evidence of a prior visit.
       withStoryJobLock(continuingJob, "event-sample", () =>
         ensureMilestoneBlueprint(continuingJob, plan, assignment, snapshot,
           model.provider, model.id, task, head, false)));
-    await continueRun();
+    const continuedResult = await continueRun();
+    assert.equal((await readReviewedMilestoneBlueprint(continuingJob,
+      continuedResult.pin, assignment)).milestoneId, milestoneId);
     const continued = await inspectMilestoneBlueprint(continuingJob, milestoneId);
     assert.equal(continued?.phase, "approved");
     assert.equal(continued?.rounds, 4);
@@ -425,7 +433,8 @@ The guard finds a dated register, but no evidence of a prior visit.
     assert.equal(continuingCalls.filter(call =>
       call.prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC") &&
       call.lastRole === "toolResult").length, 1);
-    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(execFileSync("git", ["status", "--porcelain"],
+      { cwd: continuingJob.worktreeRoot, encoding: "utf8" }).trim(), "");
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
