@@ -196,6 +196,15 @@ test("rejected placement remains dormant, blocks binding completion, and is not 
   assert.equal(result.status, "blocked", JSON.stringify(result));
   assert.ok(result.ideaHistory.some((h: any) => h.id === "rejected-concept" &&
     h.status === "deferred"));
+  assert.equal(result.operationRecovery?.operation, "idea-integration");
+  assert.equal(result.operationRecovery?.phase, "continued");
+  assert.equal(result.operationRecovery?.outcome, "returned-failure");
+  assert.equal(result.operationRecovery?.check, "idea-dispatch.v1");
+  assert.equal(result.operationRecovery?.checkVersion, 1);
+  assert.equal(result.operationRecovery?.safeAction, "continue-independent");
+  assert.equal(result.operationRecovery?.source?.jobId, "single");
+  assert.equal(result.operationRecovery?.evidence?.ideaId, "rejected-concept");
+  assert.equal(result.operationRecovery?.evidence?.resultStatus, "deferred");
   const inbox = JSON.parse(readFileSync(join(f.job.worktreeRoot, ".story-inbox/ideas/rejected-concept.yaml"), "utf8"));
   assert.equal(inbox.lifecycle.status, "dormant");
   assert.deepEqual(inbox.lifecycle.placements, []);
@@ -203,6 +212,89 @@ test("rejected placement remains dormant, blocks binding completion, and is not 
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   assert.deepEqual(f.cli(["generate", "resume"]).ideaHistory, result.ideaHistory);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+function captureRecoveryIdea(f: ReturnType<typeof setup>, id: string) {
+  const file = join(root, id + "-recovery-idea.json");
+  writeFileSync(file, JSON.stringify({
+    id, kind: "event-concept",
+    source: { kind: "author-onboarding", reference: "source-notes" },
+    original: "The bell establishes the archive visitor's arrival.",
+    requirements: { meaning: [{ text: "The bell establishes the chronology", binding: true }],
+      wording: [], participants: [] },
+    identities: { known: [], unresolved: [] },
+    prerequisites: ["milestone.disclosure"],
+    placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
+    upstreamConstraints: [],
+  }));
+  f.cli(["ideas", "capture", "--file", file]);
+}
+
+test("production start assesses thrown author-update intake and restart cannot replay it", { skip: !available }, () => {
+  const f = setup("recovery-author-intake");
+  const folder = join(f.job.stateDir, "author-updates", "messages");
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, "broken.json"), "not valid JSON");
+  const initial = f.cli(f.start);
+  assert.equal(initial.status, "blocked");
+  assert.equal(initial.operationRecovery?.operation, "author-update-intake");
+  assert.equal(initial.operationRecovery?.phase, "fenced");
+  assert.equal(initial.operationRecovery?.outcome, "exception");
+  assert.equal(initial.operationRecovery?.source.jobId, "single");
+  assert.equal(initial.operationRecovery?.evidence.reference, "author-updates");
+  assert.equal(initial.operationRecovery?.check, "author-update-intake.v1");
+  assert.equal(initial.operationRecovery?.checkVersion, 1);
+  assert.match(initial.operationRecovery?.nextAction ?? "", /reconcile.*intake/i);
+  const inspected = f.cli(["generate", "inspect"]);
+  assert.deepEqual(inspected.operationRecovery, initial.operationRecovery);
+  const resumed = f.cli(["generate", "resume"]);
+  assert.deepEqual(resumed.operationRecovery, initial.operationRecovery);
+  assert.equal(resumed.status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+});
+
+test("production resume assesses failed scheduling without repeating completed work", { skip: !available }, () => {
+  const f = setup("recovery-schedule");
+  captureRecoveryIdea(f, "schedule-bell");
+  const paused = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  writeFileSync(join(f.job.stateDir, "idea-placement-tasks.json"),
+    JSON.stringify({ version: 999, jobId: "single", history: [] }));
+  const result = f.cli(["generate", "resume"]);
+  assert.equal(result.status, "blocked");
+  assert.equal(result.operationRecovery?.operation, "scheduling");
+  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(result.operationRecovery?.source.headSha, head);
+  assert.equal(result.operationRecovery?.evidence.reference, "generation-checkpoint");
+  assert.match(result.operationRecovery?.reason ?? "", /schedule receipt|provenance/i);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("unknown original idea dispatch is fenced on resume without restarting a writer", { skip: !available }, () => {
+  const f = setup("recovery-idea-dispatch");
+  captureRecoveryIdea(f, "dispatch-bell");
+  const paused = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const file = join(f.job.stateDir, "generation-idea-dispatch.json");
+  const receipt = { jobId: "different-job", task: { id: "dispatch-bell" }, phase: "running" };
+  writeFileSync(file, JSON.stringify(receipt));
+  const result = f.cli(["generate", "resume"]);
+  assert.equal(result.status, "blocked");
+  assert.equal(result.operationRecovery?.operation, "idea-integration");
+  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(result.operationRecovery?.evidence.ideaId, "dispatch-bell");
+  assert.equal(result.operationRecovery?.evidence.reference, "generation-idea-dispatch");
+  assert.match(result.operationRecovery?.nextAction ?? "", /never dispatch it again/i);
+  const settledHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(git(f.job.worktreeRoot, "merge-base", "--is-ancestor", head, settledHead), "");
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), receipt);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), settledHead);
 });
 
 test("amended Event objective reaches production but an unamended parent fails closed without replay", { skip: !available }, async () => {
@@ -1546,7 +1638,9 @@ test("approved scope expansion activates an early deferred idea without replayin
 test("generation honors author pause, questions, cancellation and cumulative budgets without dispatching", { skip: !available }, () => {
   const f = setup("controls");
   f.cli(["author", "control", "--state", "paused"]);
-  assert.equal(f.cli(f.start).status, "paused");
+  const authorPause = f.cli(f.start);
+  assert.equal(authorPause.status, "paused");
+  assert.equal(authorPause.operationRecovery, null, "normal author pause is not an operational failure");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
   f.cli(["author", "control", "--state", "running"]);
   f.cli(["pi", "configure", "--max-steps", "0"]);
@@ -1559,6 +1653,7 @@ test("generation honors author pause, questions, cancellation and cumulative bud
   f.cli(["author", "send", "--file", message]);
   const question = f.cli(["generate", "resume"]);
   assert.equal(question.status, "blocked");
+  assert.equal(question.operationRecovery, null, "a waiting Author Question is not an operational failure");
   assert.match(question.reason, /awaiting-author/);
   const response = join(root, "answer.json");
   writeFileSync(response, JSON.stringify({ type: "answer", messageId: "ask", answer: "Yes" }));
@@ -1566,7 +1661,9 @@ test("generation honors author pause, questions, cancellation and cumulative bud
   assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).nextStage, "foundations");
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   f.cli(["author", "control", "--state", "cancelled"]);
-  assert.equal(f.cli(["generate", "resume"]).status, "cancelled");
+  const cancelled = f.cli(["generate", "resume"]);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.operationRecovery, null, "explicit cancellation is not a failure");
   // A cancelled Pi writer can leave these bytes after its checkpoint. Neither
   // inspect nor resume may reopen dispatch or mistake dirty recovery for a
   // generic scheduling failure on the terminal job.

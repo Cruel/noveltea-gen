@@ -538,7 +538,8 @@ export async function processAuthorUpdatesAfterWork(job: JobStartResult) {
     // A successful specialist commit must not be reported as uncommitted merely
     // because a newly received author update needs repair or manual review.
     return { status: "blocked", processed: [], blockers: ["author-update-processing-error"],
-      error: error instanceof Error ? error.message : String(error) };
+      error: error instanceof Error ? error.message : String(error),
+      errorName: error instanceof Error ? error.name : null };
   }
 }
 /** Safe-boundary hook; CALL ONLY while already holding withStoryJobLock. */
