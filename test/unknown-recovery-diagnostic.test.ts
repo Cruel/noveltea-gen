@@ -10,7 +10,8 @@ import { configurePiPolicy } from '../src/job-pi-policy.js';
 import { withStoryJobLock } from '../src/job-lock.js';
 import type { JobStartResult } from '../src/job.js';
 import {
-  unknownCompletionCase, parseUnknownDiagnosis, unknownDiagnosisDisposition, diagnoseUnknownCompletion,
+  unknownCompletionCase, parseUnknownDiagnosis, unknownDiagnosisDisposition,
+  diagnoseUnknownCompletion, inspectUnknownRecoveryStatus,
 } from '../src/unknown-recovery-diagnostic.js';
 
 const evidence = {
@@ -25,6 +26,9 @@ test('unknown completion fingerprint identifies failed operation and evidence, n
   assert.equal(first.check, 'generation-fulfillment');
   assert.equal(first.checkVersion, 1);
   assert.equal(first.signature, unknownCompletionCase({ ...evidence }).signature);
+  assert.equal(first.signature, unknownCompletionCase(Object.fromEntries(
+    Object.entries(evidence).reverse()) as typeof evidence).signature,
+  'reordered structured fields do not consume a second diagnosis');
   assert.notEqual(first.signature, unknownCompletionCase({ ...evidence, sourceSha: 'c'.repeat(40) }).signature);
   assert.notEqual(first.signature, unknownCompletionCase({ ...evidence, planStatus: 'incomplete' }).signature);
   assert.throws(() => unknownCompletionCase({ ...evidence, sourceSha: 'untrusted' }), /source/i);
@@ -127,6 +131,18 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
     const second = await run();
     assert.deepEqual(second, first);
     assert.equal(calls, 1, 'same material evidence never creates a second model call');
+    const savedStatus = { case: caseFile, phase: 'operator-intervention' as const,
+      recommendation: first.action, advisoryCategory: first.category };
+    assert.deepEqual(await inspectUnknownRecoveryStatus(job, savedStatus), savedStatus);
+    assert.equal(calls, 1, 'read-only inspection cannot issue model requests');
+    const receipt = join(stateDir, 'unknown-diagnostics', caseFile.signature + '.initial.json');
+    const sealed = readFileSync(receipt, 'utf8');
+    writeFileSync(receipt, sealed.replace('"responseHash":"', '"responseHash":"bad-'));
+    const unsafe = await inspectUnknownRecoveryStatus(job, savedStatus);
+    assert.equal(unsafe?.phase, 'unsafe-evidence');
+    assert.equal(unsafe?.recommendation, undefined, 'tampered transcript proof loses all advisory claims');
+    writeFileSync(receipt, sealed);
+    assert.deepEqual(await inspectUnknownRecoveryStatus(job, savedStatus), savedStatus);
     const file = join(stateDir, 'unknown-diagnostics', caseFile.signature + '.admission.json');
     writeFileSync(file, readFileSync(file, 'utf8').replace('"sourceSha":"b', '"sourceSha":"c'));
     await assert.rejects(run(), /untrustworthy|missing/i);

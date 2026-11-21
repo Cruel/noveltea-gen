@@ -14,6 +14,7 @@ import { readReusedFoundation } from '../../../src/chat-reused-foundation'
 import { reusableExistingFoundation } from '../../../src/foundation-readiness'
 import { validateStoryJob } from '../../../src/validator'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
+import { inspectUnknownRecoveryStatus, type UnknownRecoveryStatus } from '../../../src/unknown-recovery-diagnostic'
 import { forkSourceSummary, verifyReadyRecoveryFork } from '../../../src/recovery-fork-state'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
@@ -336,14 +337,16 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
         guidance: 'An unfinished work item has unverified files or receipts. Inspect its saved session and Git changes, reconcile the original specialist, then verify the parent generation checkpoint before resuming. Automatic retry is disabled.',
       }
     }
+    const inspectedUnknownRecovery = await inspectUnknownRecoveryStatus(job,
+      (state.unknownRecovery ?? null) as UnknownRecoveryStatus | null)
     return { ...initial, status: interrupted ? 'interrupted' : authorReady ? 'paused' :
         (state.status ?? 'interrupted'),
       revisionVerified, recovery,
-      unknownRecovery: state.unknownRecovery ? {
-        phase: state.unknownRecovery.phase ?? 'unsafe-evidence',
-        signature: state.unknownRecovery.case?.signature ?? null,
-        advisoryCategory: state.unknownRecovery.advisoryCategory ?? null,
-        recommendation: state.unknownRecovery.recommendation ?? null,
+      unknownRecovery: inspectedUnknownRecovery ? {
+        phase: inspectedUnknownRecovery.phase,
+        signature: inspectedUnknownRecovery.case?.signature ?? null,
+        advisoryCategory: inspectedUnknownRecovery.advisoryCategory ?? null,
+        recommendation: inspectedUnknownRecovery.recommendation ?? null,
       } : null,
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
         : waitingForChoice ? 'The specialist is waiting for your answer in Chat or Author questions and approvals. After saving the answer, use Resume.'

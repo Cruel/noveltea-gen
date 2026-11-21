@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, lstat, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -51,9 +52,15 @@ export function unknownCompletionCase(evidence: UnknownCompletionEvidence): Unkn
       !safeCode(evidence.checkpoint) ||
       ![evidence.reportStatus, evidence.scopeStatus, evidence.planStatus].every(safeCode))
     throw Error("Unknown recovery lacks a trustworthy source, identity or failed-check state.");
+  // Canonical field order makes identity independent of object construction
+  // order and error-message wording, even after a graph process restart.
   const source = { schema: "noveltea-unknown-recovery-case/v1" as const,
     operation: "completion-verification" as const, phase: "post-verification" as const,
-    check: "generation-fulfillment" as const, checkVersion: 1 as const, ...evidence };
+    check: "generation-fulfillment" as const, checkVersion: 1 as const,
+    jobId: evidence.jobId, threadId: evidence.threadId, turnDigest: evidence.turnDigest,
+    planVersion: evidence.planVersion, sourceSha: evidence.sourceSha,
+    checkpoint: evidence.checkpoint, reportStatus: evidence.reportStatus,
+    scopeStatus: evidence.scopeStatus, planStatus: evidence.planStatus };
   return { ...source, signature: sha(source) };
 }
 
@@ -91,19 +98,55 @@ const validation = (caseFile: UnknownRecoveryCase) => (response: string): Respon
   catch { return [{ path: "$.diagnosis", expected: "strict advisory-only JSON bound to the original signature" }]; }
 };
 
-/** A same-case graph restart may READ an accepted prior response but can
- * NEVER call Pi again. The shared protocol gate authenticates original session
- * transcript, attempt count and exact accepted bytes before returning it. */
-export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: UnknownRecoveryCase,
-  provider: string, modelId: string): Promise<UnknownDiagnosis> {
+function assertCaseBoundToJob(job: JobStartResult, evidence: UnknownRecoveryCase): UnknownRecoveryCase {
   const bound = unknownCompletionCase({
     jobId: job.jobId, threadId: job.threadId, turnDigest: evidence.turnDigest,
     planVersion: evidence.planVersion, sourceSha: evidence.sourceSha,
     checkpoint: evidence.checkpoint, reportStatus: evidence.reportStatus,
     scopeStatus: evidence.scopeStatus, planStatus: evidence.planStatus,
   });
-  if (bound.signature !== evidence.signature || JSON.stringify(bound) !== JSON.stringify(evidence))
+  if (bound.signature !== evidence.signature || !isDeepStrictEqual(bound, evidence))
     throw Error("Unknown recovery lost its original verified failure identity.");
+  return bound;
+}
+
+/** Read-only inspection never trusts a checkpointed model recommendation on
+ * its own: the accepted Pi transcript and original case admission must still
+ * agree. A tampered or missing receipt becomes unsafe evidence, not advice. */
+export async function inspectUnknownRecoveryStatus(job: JobStartResult,
+  status: UnknownRecoveryStatus | null): Promise<UnknownRecoveryStatus | null> {
+  if (!status) return null;
+  if (status.phase !== "operator-intervention" || !status.recommendation) return status;
+  try {
+    const evidence = status.case;
+    if (!evidence) throw Error("Missing original case.");
+    const bound = assertCaseBoundToJob(job, evidence);
+    const root = protocolRoot(job, evidence.signature);
+    const admission = root + ".admission.json";
+    const stat = await lstat(admission);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000 ||
+        await readFile(admission, "utf8") !== JSON.stringify(bound) + "\n")
+      throw Error("Missing or altered original admission.");
+    const diagnosis = await inspectCompletedProtocolResponse({
+      receiptFile: root, sourceDigest: evidence.signature, contract,
+      sessionRoots: [sessionsRoot(job)], validate: validation(evidence),
+      parse: text => parseUnknownDiagnosis(text, evidence),
+    });
+    if (diagnosis.action !== status.recommendation ||
+        diagnosis.category !== status.advisoryCategory)
+      throw Error("Checkpointed recommendation differs from authenticated transcript.");
+    return status;
+  } catch {
+    return { case: status.case ?? null, phase: "unsafe-evidence" };
+  }
+}
+
+/** A same-case graph restart may READ an accepted prior response but can
+ * NEVER call Pi again. The shared protocol gate authenticates original session
+ * transcript, attempt count and exact accepted bytes before returning it. */
+export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: UnknownRecoveryCase,
+  provider: string, modelId: string): Promise<UnknownDiagnosis> {
+  const bound = assertCaseBoundToJob(job, evidence);
   const root = dirFor(job), receipt = protocolRoot(job, evidence.signature);
   const admission = receipt + ".admission.json";
   const parse = (text: string) => parseUnknownDiagnosis(text, evidence);
@@ -122,7 +165,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: U
   if (existsSync(admission)) {
     const stat = await lstat(admission);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000 ||
-        await readFile(admission, "utf8") !== JSON.stringify(evidence) + "\n")
+        await readFile(admission, "utf8") !== JSON.stringify(bound) + "\n")
       throw Error("Unknown diagnostic admission is missing or untrustworthy.");
     // A completed answer is only READ from its authenticated transcript.
     // An invalid original response paused by a resource limit may consume
@@ -186,7 +229,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: U
     await mkdir(root, { recursive: true, mode: 0o700 });
     // Claim the sole possible diagnosis for this material evidence state
     // BEFORE the SDK is allowed to issue a model request.
-    await writeFile(admission, JSON.stringify(evidence) + "\n", { flag: "wx", mode: 0o600 });
+    await writeFile(admission, JSON.stringify(bound) + "\n", { flag: "wx", mode: 0o600 });
     await beginProtocolInvocation({ receiptFile: receipt,
       sourceDigest: evidence.signature, contract, session });
     await promptStorySpecialist(session,

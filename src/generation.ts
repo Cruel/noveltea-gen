@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
-import { diagnoseUnknownCompletion, unknownCompletionCase,
+import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, unknownCompletionCase,
   unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import { ProtocolExhaustedError } from "./response-contract-recovery.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -1741,7 +1741,9 @@ export async function runStoryGeneration(options: GenerationOptions) {
           visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
             visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
-        recovery: visible.recovery ?? null, unknownRecovery: visible.unknownRecovery ?? null, correctiveAssignment,
+        recovery: visible.recovery ?? null,
+        unknownRecovery: await inspectUnknownRecoveryStatus(job, visible.unknownRecovery ?? null),
+        correctiveAssignment,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints,
