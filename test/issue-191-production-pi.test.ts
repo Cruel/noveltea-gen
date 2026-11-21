@@ -319,7 +319,11 @@ test("production planner and independent reviewer recover in original Pi session
       piSessionFile: originalSessionFile, piSessionId: originalSessionId });
     writeFileSync(foundationFile, JSON.stringify(foundationReceipt));
     const originalNegativeSha = point.commitSha;
-    const repair = await beginRejectedRepair(job, point);
+    // Exercise the actual repair-admission implementation under the same
+    // graph lease used for a second failed independent rereview. Admission
+    // must reuse this owner without acquiring a competing Story lock.
+    const repair = await withStoryJobLock(job, "rejected-review-next-attempt", () =>
+      beginRejectedRepair(job, point));
     assert.equal(repair.phase, "ready");
     const prepared = await withStoryJobLock(job, "rejected-review-writer", () =>
       claimRejectedRepair(job, originalNegativeSha));

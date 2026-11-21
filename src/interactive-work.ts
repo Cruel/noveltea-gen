@@ -12,7 +12,7 @@ import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { verifiedNarrativeSuccessor, verifiedCompositionSuccessor } from "./job-successor.js";
-import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
+import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
 import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
@@ -1387,9 +1387,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     await scheduleIdeasAtBoundary(job, "interactive-work");
     return { ...output(job, result.receipt, input.unit), authorUpdates };
   };
-  const owner = activeStoryWriter();
-  if (input.action === "review-omission" && owner?.active &&
-      owner.workItem === "generation-boundary" && owner.job.stateDir === job.stateDir)
-    return execute();
+  if (input.action === "review-omission")
+    return withStoryJobLockOrReuse(job, "interactive-" + input.milestone.slice(10),
+      ["generation-boundary", "generation-verification", "generation-idea-verification"],
+      execute);
   return withStoryJobLock(job, "interactive-" + input.milestone.slice(10), execute);
 }

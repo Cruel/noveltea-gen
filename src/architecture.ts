@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { startStoryJob, type JobStartResult } from "./job.js";
-import { withStoryJobLock } from "./job-lock.js";
+import { requireStoryJobLease, withStoryJobLock } from "./job-lock.js";
 import { parseCarryForward, verifyCarryForwardCandidates } from "./plan-continuity.js";
 import { readCheckpointedCausalAmendment } from "./causal-amendment-controller.js";
 import type { CausalAmendment } from "./causal-amendment.js";
@@ -976,5 +976,9 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
     await scheduleIdeasAtBoundary(job, "architecture");
     return { ...output(job, result.receipt), authorUpdates };
   };
-  return alreadyLocked ? execute() : withStoryJobLock(job, "global-architecture", execute);
+  if (alreadyLocked) {
+    requireStoryJobLease(job);
+    return execute();
+  }
+  return withStoryJobLock(job, "global-architecture", execute);
 }

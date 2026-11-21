@@ -5,7 +5,7 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { startStoryJob, type JobStartResult } from "./job.js";
-import { withStoryJobLock } from "./job-lock.js";
+import { requireStoryJobLease, withStoryJobLock } from "./job-lock.js";
 import { authorizedFoundationException } from "./foundation-conflict.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -628,5 +628,9 @@ export async function runRevisionAction(input: RevisionOptions, alreadyLocked = 
     if (input.action !== "commit") throw new Error("Unknown revision operation.");
     return publicStatus(await commitRevisionGraph(job, receipt, head), unrelated);
   };
-  return alreadyLocked ? execute() : withStoryJobLock(job, input.workItem, execute);
+  if (alreadyLocked) {
+    requireStoryJobLease(job);
+    return execute();
+  }
+  return withStoryJobLock(job, input.workItem, execute);
 }

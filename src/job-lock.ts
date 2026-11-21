@@ -39,6 +39,48 @@ export function activeStoryWriter(): StoryWriterContext | undefined {
   return storyWriter.getStore();
 }
 
+/** Prove that this async operation still owns the exact per-Story lease.
+ * An ambient context alone is not authority: the lease can have expired, or
+ * a different job/branch can share the same human-facing Story identifier.
+ */
+export function requireStoryJobLease(job: JobStartResult,
+  allowedWorkItems?: readonly string[]): StoryWriterContext {
+  const owner = activeStoryWriter();
+  if (!owner?.active)
+    throw Error("Operation requires an active Story job writer lease.");
+  if (owner.job.jobId !== job.jobId || owner.job.stateDir !== job.stateDir ||
+      owner.job.worktreeRoot !== job.worktreeRoot ||
+      owner.job.worktreeStoryRoot !== job.worktreeStoryRoot ||
+      owner.job.threadId !== job.threadId)
+    throw Error("Active Story job writer lease belongs to a different Story or worktree.");
+  if (allowedWorkItems && !allowedWorkItems.includes(owner.workItem))
+    throw Error("Story job writer lease from " + owner.workItem +
+      " does not authorize this nested operation.");
+  return owner;
+}
+
+/** Explicitly permitted nested operation. Ordinary withStoryJobLock remains
+ * non-reentrant; only named parent workflows may reuse their exact live lease.
+ * Never infer authority from a matching PID or a stale AsyncLocalStorage frame.
+ */
+export async function withStoryJobLockOrReuse<T>(
+  job: JobStartResult, workItem: string, allowedParents: readonly string[],
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!allowedParents.length)
+    throw Error("Story job lease reuse must enumerate authorized parent work items.");
+  const owner = activeStoryWriter();
+  if (!owner) return withStoryJobLock(job, workItem, run);
+  if (!owner.active) throw Error("Story job writer lease expired before nested operation.");
+  // The private state directory is the lease's lock location. Separate Story
+  // jobs may legitimately share a display job ID, but never inherit each
+  // other's lock; an identity mismatch inside one state directory is rejected.
+  if (owner.job.stateDir !== job.stateDir)
+    return withStoryJobLock(job, workItem, run);
+  requireStoryJobLease(job, allowedParents);
+  return run();
+}
+
 interface Owner {
   version: 1;
   jobId: string;
@@ -81,6 +123,13 @@ function isAlive(pid: number): boolean {
 export async function withStoryJobLock<T>(
   job: JobStartResult, workItem: string, run: () => Promise<T>,
 ): Promise<T> {
+  const owner = activeStoryWriter();
+  if (owner && owner.job.stateDir === job.stateDir) {
+    if (!owner.active) throw Error("Story job writer lease expired before nested acquisition.");
+    requireStoryJobLease(job);
+    throw Error("Nested Story job writer lock acquisition by " + workItem +
+      " while " + owner.workItem + " owns it; explicit authorized lease reuse is required.");
+  }
   return withJobLease(job, workItem, ".story-job", run);
 }
 

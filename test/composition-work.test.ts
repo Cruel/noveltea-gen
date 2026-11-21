@@ -20,6 +20,7 @@ import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { compositionOptionalDialoguePolicy, parseSpecialistJson } from "../src/composition-specialist.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
 import { runInteractiveWorkItem } from "../src/interactive-work.js";
+import { withStoryJobLock } from "../src/job-lock.js";
 import { reviewedAdaptiveOmissions } from "../src/adaptive-omission.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments,
   revalidateAdaptiveAmendment } from "../src/adaptive-assignments.js";
@@ -182,7 +183,25 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     assert.equal(JSON.parse(result.stdout).completionEvidence.puzzleDisposition, "not-applicable");
     return JSON.parse(result.stdout).headSha as string;
   };
-  const prepareEventOnly = async (reviewer: "fixture" | "pi" = "fixture", probeOnly = false) => {
+  const reviewUnderLease = async (owner: string) => {
+    const old = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    process.env.NT_INTERACTIVE_FIXTURE_CASE = "event-only";
+    try {
+      const current = await startStoryJob({ story, job: jobId }, false);
+      return await withStoryJobLock(current, owner, () => runInteractiveWorkItem({
+        story, job: jobId, milestone: "milestone.disclosure",
+        action: "review-omission", fixture: true, skillsSource: source,
+      }));
+    } finally {
+      for (const [key, value] of Object.entries(old)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  };
+  const prepareEventOnly = async (reviewer: "fixture" | "pi" = "fixture",
+    probeOnly = false, inheritedLease?: string) => {
     const original = JSON.parse(readFileSync(contract, "utf8"));
     const full = { ...original, scope: { kind: "full-story", depth: "composition", targets: [], branches: [] } };
     writeFileSync(contract, JSON.stringify(full));
@@ -212,9 +231,10 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
       Object.assign(process.env, env);
       process.env.NT_INTERACTIVE_FIXTURE_CASE = "event-only";
       try {
-        disposition = await runInteractiveWorkItem({ story, job: jobId,
-          milestone: "milestone.disclosure", action: "review-omission",
-          fixture: true, skillsSource: source });
+        disposition = inheritedLease ? await reviewUnderLease(inheritedLease) :
+          await runInteractiveWorkItem({ story, job: jobId,
+            milestone: "milestone.disclosure", action: "review-omission",
+            fixture: true, skillsSource: source });
       } finally {
         for (const [key, value] of Object.entries(old)) {
           if (value === undefined) delete process.env[key];
@@ -256,7 +276,7 @@ Ada questions Neri about the missing witness and a disputed custody ledger.
     }
   };
   return { repo, original, job, cli, cliAsync, prepare, prepareWithOptionalPuzzle,
-    prepareEventOnly, run, inspect, seal, recovery };
+    prepareEventOnly, reviewUnderLease, run, inspect, seal, recovery };
 }
 
 test("Event-only Composition defers optional testimony instead of fabricating Mara's response", () => {
@@ -718,6 +738,22 @@ test("omission-only production preflight seals both interactive dispositions wit
   const composition = x.run("event-only");
   assert.equal(composition.status, 0, composition.stderr);
   assert.equal(JSON.parse(composition.stdout).status, "composition-committed");
+});
+
+test("production graph lease owners safely execute the real Event-only omission boundary", { skip: !available }, async () => {
+  const x = setup("adaptive-omission-under-graph-lock");
+  const { before, disposition } = await x.prepareEventOnly("fixture", true, "generation-verification");
+  assert.equal(disposition.completionEvidence.eventOnlyDisposition, "sealed-no-write");
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), before);
+  for (const owner of ["generation-idea-verification", "generation-boundary"]) {
+    const result = await x.reviewUnderLease(owner);
+    assert.equal(result.status, "interactive-slice-committed");
+    assert.equal(result.headSha, before);
+  }
+  await assert.rejects(x.reviewUnderLease("generation-completion"),
+    /does not authorize this nested operation/,
+    "An unrelated parent stage must not borrow a specialist lease.");
+  assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
 test("Event-only omission rejects modified sealed proof and cannot replay an interrupted reviewer", { skip: !available }, async () => {

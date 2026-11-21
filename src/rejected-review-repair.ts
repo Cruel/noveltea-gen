@@ -42,7 +42,7 @@ import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { postcommitDiagnosticReason, readPostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
 import { assertReviewCycleSession } from "./review-cycle.js";
-import { activeStoryWriter, withStoryJobLock } from "./job-lock.js";
+import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { steeringForAssignment } from "./steering-amendments.js";
@@ -296,8 +296,8 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
       turn: plan!, planVersion: point.planVersion ?? plan!.version,
       originWorkItem, eventMilestone,
     });
-    await withStoryJobLock(job, "review-dependency-request", () =>
-      recordReviewDependency(job, request));
+    await withStoryJobLockOrReuse(job, "review-dependency-request",
+      ["rejected-review-next-attempt"], () => recordReviewDependency(job, request));
     throw new ReviewDependencyRequiredError(request);
   }
   const origin = await readRejectedRepairOrigin(job, point);
@@ -343,10 +343,8 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
     await save(job, state);
     return state;
   };
-  const owner = activeStoryWriter();
-  if (owner?.active && owner.job.jobId === job.jobId &&
-      owner.job.stateDir === job.stateDir) return admit();
-  return withStoryJobLock(job, "rejected-review-admission", admit);
+  return withStoryJobLockOrReuse(job, "rejected-review-admission",
+    ["rejected-review-next-attempt"], admit);
 }
 export async function inspectRejectedRepair(job: JobStartResult, sha: string): Promise<RepairReceipt> {
   if (!SHA.test(sha)) throw Error("Invalid repair source SHA.");
