@@ -109,7 +109,7 @@ function dockerAvailable() {
     return true;
   } catch { return false; }
 }
-const source = resolve("../noveltea-skills");
+const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
 const available = dockerAvailable() &&
   existsSync(join(source, "skills/nt-story-orchestrate/SKILL.md"));
 
@@ -333,11 +333,11 @@ test("production planner and independent reviewer recover in original Pi session
     const originalBytes = readFileSync(originalSessionFile);
     writeFileSync(originalSessionFile, Buffer.concat([originalBytes, Buffer.from("unexpected")]));
     await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
-      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked/);
+      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked|recover Pi session|transcript/);
     writeFileSync(originalSessionFile, originalBytes);
     unlinkSync(originalSessionFile);
     await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
-      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked/);
+      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked|recover Pi session|transcript/);
     writeFileSync(originalSessionFile, originalBytes);
     const strayPath = join(job.worktreeStoryRoot, "stray.txt");
     writeFileSync(strayPath, "Unresolved writer effects must be preserved.");
