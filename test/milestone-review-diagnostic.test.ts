@@ -75,3 +75,53 @@ test("#220 repeated unchanged cases stop, and diagnostic advice cannot confer ap
   assert.match(milestoneDiagnosticDecision("escalate", false).reason ?? "", /escalat/i);
   assert.equal(milestoneDiagnosticDecision("continue", true).kind, "stop");
 });
+
+test("#227 diagnostic of stalled downstream review cites the exact current entry or missing obligation", () => {
+  const negative = {
+    ...diagnosis,
+    assessments: [
+      {
+        ...diagnosis.assessments[0],
+        evidence: {
+          target: "downstream",
+          index: 0,
+          field: "obligation",
+          quote: draft.downstream[0]!.obligation,
+        },
+      },
+    ],
+  };
+  assert.deepEqual(parseMilestoneDiagnosis(JSON.stringify(negative), draft, sources), negative);
+  const missing = {
+    ...diagnosis,
+    assessments: [
+      {
+        ...diagnosis.assessments[0],
+        evidence: {
+          target: "missing-downstream",
+          owner: "interactive",
+          quote: JSON.stringify(draft.downstream),
+        },
+      },
+    ],
+  };
+  assert.deepEqual(parseMilestoneDiagnosis(JSON.stringify(missing), draft, sources), missing);
+  for (const evidence of [
+    { target: "downstream", index: 3, field: "obligation", quote: draft.downstream[0]!.obligation },
+    { target: "downstream", index: 0, field: "owner", quote: "interactive" },
+    { target: "missing-downstream", owner: "interactive", quote: "[]" },
+    { target: "missing-downstream", owner: "unknown", quote: JSON.stringify(draft.downstream) },
+  ])
+    assert.throws(
+      () =>
+        parseMilestoneDiagnosis(
+          JSON.stringify({
+            ...diagnosis,
+            assessments: [{ ...diagnosis.assessments[0], evidence }],
+          }),
+          draft,
+          sources,
+        ),
+      /source-bound/,
+    );
+});

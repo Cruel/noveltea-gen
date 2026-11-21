@@ -88,13 +88,13 @@ test("#207 PASS requires a correction to the rejected Event field, not an unrela
     evidence: { field: "knowledge", quote: rejectedClaim, repair: "replace" },
   };
   const negative = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [finding], prior: [],
   }), initial, assignment);
   const history = [{ draft: initial, review: negative,
     draftDigest: "initial", reviewDigest: "negative" }];
   const verdict = (proof: unknown) => JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "pass",
     findings: [], prior: [{ round: 0, findingIndex: 0, status: "resolved",
       reason: "Knowledge gap resolved", evidence: proof }],
   });
@@ -161,7 +161,7 @@ test("#207 omitted route/dependency/participant accepts only an exact empty-arra
     evidence: { field, quote, repair: "extend" },
   });
   const review = (finding: unknown) => JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [finding], prior: [],
   });
   for (const field of ["routes", "dependsOn", "participants", "evidence"]) {
@@ -182,7 +182,7 @@ test("#207 omitted route/dependency/participant accepts only an exact empty-arra
   const history = [{ draft: initial, review: negative,
     draftDigest: "a", reviewDigest: "b" }];
   const fixed = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "pass",
     findings: [], prior: [{ round: 0, findingIndex: 0,
       status: "resolved", reason: "Refusal branch now has lasting consequence",
       evidence: { kind: "revised", eventId: "gate", field: "routes",
@@ -207,7 +207,7 @@ test("#207 additive correction retains valid text but cannot use unrelated edits
   });
   const initial = draft(beforeQuote);
   const review = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [{ eventId: "ledger", anchorPath: "milestones/ledger.md",
       requirement: "State uncertainty about the ledger's signing time",
       reason: "The current knowledge says nothing about its temporal limit",
@@ -216,7 +216,7 @@ test("#207 additive correction retains valid text but cannot use unrelated edits
   }), initial, assignment);
   const history = [{ draft: initial, review, draftDigest: "a", reviewDigest: "b" }];
   const result = (status = "resolved", field = "knowledge", after = addedQuote) =>
-    JSON.stringify({ schema: "noveltea-milestone-blueprint-review/v4",
+    JSON.stringify({ schema: "noveltea-milestone-blueprint-review/v5",
       status: "pass", findings: [], prior: [{ round: 0, findingIndex: 0,
         status, reason: "The source now names the knowledge limit",
         evidence: { kind: "added", eventId: "ledger", field,
@@ -258,13 +258,13 @@ test("#207 an explicitly rejected claim cannot be approved by adding unrelated t
     correction: "REMOVE the unearned knowledge claim",
     evidence: { field: "knowledge", quote: rejected, repair: "replace" } };
   const original = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [finding], prior: [],
   }), old, assignment);
   const history = [{ draft: old, review: original,
     draftDigest: "original", reviewDigest: "rejected" }];
   const pass = (kind: "added" | "revised", after: string) => JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "pass", findings: [],
+    schema: "noveltea-milestone-blueprint-review/v5", status: "pass", findings: [],
     prior: [{ round: 0, findingIndex: 0, status: "resolved",
       reason: "Writer says this resolves the finding",
       evidence: { kind, eventId: "witness", field: "knowledge",
@@ -276,7 +276,7 @@ test("#207 an explicitly rejected claim cannot be approved by adding unrelated t
   /rejected field|verified correction/);
   assert.equal(milestoneReviewStagnation([...history, {
     draft: unrelated, review: {
-      schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+      schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
       findings: [finding],
       prior: [{ round: 0, findingIndex: 0, status: "persisting",
         reason: "The original claim remains", evidence: {
@@ -288,7 +288,7 @@ test("#207 an explicitly rejected claim cannot be approved by adding unrelated t
   assert.equal(parseMilestoneBlueprintReview(
     pass("revised", "the seal was intact"), corrected, assignment, history).status, "pass");
   assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [{ ...finding, evidence: { field: "knowledge", quote: rejected } }],
     prior: [],
   }), old, assignment), /cited defective Event field/);
@@ -312,14 +312,14 @@ test("#207 short rejected claim remains present after unrelated text is appended
     reason: "The claim is unsupported", correction: "Remove the unearned claim",
     evidence: { field: "knowledge", quote: oldClaim, repair: "replace" } };
   const negative = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [finding], prior: [],
   }), original, assignment);
   const history = [{ draft: original, review: negative,
     draftDigest: "old", reviewDigest: "negative" }];
   const appended = draft(oldClaim + " " + filler);
   const proof = (kind: "revised" | "current") => JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4",
+    schema: "noveltea-milestone-blueprint-review/v5",
     status: kind === "revised" ? "pass" : "revise",
     findings: kind === "revised" ? [] : [{
       ...finding, evidence: { ...finding.evidence, quote: oldClaim + " " + filler },
@@ -351,7 +351,7 @@ test("#207 short valid claim can be retained by an additive qualification", () =
   });
   const original = draft(oldClaim);
   const negative = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [{ eventId: "entry", anchorPath: "milestones/key.md",
       requirement: "Clarify whose missing key is actually confirmed",
       reason: "The claim lacks the player's observation limit",
@@ -363,7 +363,7 @@ test("#207 short valid claim can be retained by an additive qualification", () =
     draftDigest: "old", reviewDigest: "negative" }];
   const amended = draft(oldClaim + " " + qualifier);
   const accepted = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "pass",
     findings: [], prior: [{ round: 0, findingIndex: 0,
       status: "resolved", reason: "The observable limitation was added",
       evidence: { kind: "added", eventId: "entry", field: "knowledge",
@@ -395,7 +395,7 @@ test("#207 a short whole-array dependency remains present after another dependen
   const assignmentPath = "milestones/entry.md";
   const priorReview = (repair: "replace" | "extend") =>
     parseMilestoneBlueprintReview(JSON.stringify({
-      schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+      schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
       findings: [{ eventId: "entry", anchorPath: assignmentPath,
         requirement: repair === "replace"
           ? "Remove the unauthorized key dependency" : "Include the helper dependency",
@@ -406,7 +406,7 @@ test("#207 a short whole-array dependency remains present after another dependen
     }), old, assignment);
   const now = draft(["key", "helper"]);
   const verdict = (kind: "revised" | "added") => JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "pass",
     findings: [], prior: [{ round: 0, findingIndex: 0, status: "resolved",
       reason: "The dependency list has changed",
       evidence: { kind, eventId: "entry", field: "dependsOn",
@@ -447,14 +447,14 @@ test("#207 short entire dependency value proves correction of an empty dependenc
     correction: "Add the existing key Event dependency",
     evidence: { field: "dependsOn", quote: "[]", repair: "extend" } };
   const negative = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "revise",
+    schema: "noveltea-milestone-blueprint-review/v5", status: "revise",
     findings: [finding], prior: [],
   }), original, assignment);
   const history = [{ draft: original, review: negative,
     draftDigest: "before", reviewDigest: "negative" }];
   const corrected = draft(["key"]);
   const next = (after: string) => JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4", status: "pass", findings: [],
+    schema: "noveltea-milestone-blueprint-review/v5", status: "pass", findings: [],
     prior: [{ round: 0, findingIndex: 0, status: "resolved",
       reason: "The key Event is now a prerequisite",
       evidence: { kind: "revised", eventId: "entry", field: "dependsOn",
@@ -503,15 +503,15 @@ test("#207 old v3 sealed reviews replay without reclassifying their repair polic
   assert.equal(parseMilestoneBlueprintReview(second, fixed, assignment,
     history, "sealed-replay").status, "pass");
   assert.throws(() => parseMilestoneBlueprintReview(second, fixed, assignment,
-    history), /requires v4 source-bound repair classification/);
-  // A new v4 verdict may not inherit an unrestricted addition from old v3.
+    history), /requires v5 source-bound findings/);
+  // A new v5 verdict may not inherit an unrestricted addition from old v3.
   assert.throws(() => parseMilestoneBlueprintReview(second.replaceAll(
     "noveltea-milestone-blueprint-review/v3",
-    "noveltea-milestone-blueprint-review/v4"), fixed, assignment, history),
+    "noveltea-milestone-blueprint-review/v5"), fixed, assignment, history),
   /rejected field|verified correction/);
 });
 
-test("#207 v4 consecutive corrections on one Event/path remain productive", () => {
+test("#207 v5 consecutive corrections on one Event/path remain productive", () => {
   const assignment = { milestonePath: "milestones/test.md",
     sourcePaths: ["milestones/test.md"] };
   const plan = (knowledge: string): MilestoneBlueprint => ({
@@ -531,13 +531,13 @@ test("#207 v4 consecutive corrections on one Event/path remain productive", () =
     evidence: { field: "knowledge", quote, repair: "replace" },
   });
   const firstReview = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4",
+    schema: "noveltea-milestone-blueprint-review/v5",
     status: "revise", findings: [issue(one), issue(two)], prior: [],
   }), old, assignment);
   const rounds = [{ draft: old, review: firstReview, draftDigest: "one", reviewDigest: "negative" }];
   const stage1 = plan("verified signed entry and " + two);
   const firstCorrection = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4",
+    schema: "noveltea-milestone-blueprint-review/v5",
     status: "revise", findings: [issue(two)],
     prior: [
       { round: 0, findingIndex: 0, status: "resolved", reason: "Signed entry verified",
@@ -553,7 +553,7 @@ test("#207 v4 consecutive corrections on one Event/path remain productive", () =
   assert.equal(milestoneReviewStagnation(afterFirst), 0);
   const stage2 = plan("verified signed entry and independently dated guard roster");
   const lastReview = parseMilestoneBlueprintReview(JSON.stringify({
-    schema: "noveltea-milestone-blueprint-review/v4",
+    schema: "noveltea-milestone-blueprint-review/v5",
     status: "pass", findings: [],
     prior: [
       { round: 0, findingIndex: 0, status: "resolved", reason: "Signed entry retained",
@@ -638,7 +638,7 @@ test("#207 independently resolves distinct findings on the same Event/source wit
   const legacyPass = { ...verdict2, status: "pass", findings: [],
     prior: verdict2.prior!.map(p => ({ ...p, status: "resolved" })) };
   assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify(legacyPass),
-    current2, assignment, [original, first]), /requires v4 source-bound repair classification/);
+    current2, assignment, [original, first]), /requires v5 source-bound findings/);
   assert.equal(parseMilestoneBlueprintReview(JSON.stringify(legacyPass),
     current2, assignment, [original, first], "sealed-replay").status, "pass");
 });

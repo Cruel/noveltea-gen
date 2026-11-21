@@ -119,7 +119,7 @@ function scriptProvider(
             ? [{ type: "text", text: JSON.stringify(plan) }]
             : at === 4
               ? [{ type: "text", text: JSON.stringify({
-                  schema: "noveltea-milestone-blueprint-review/v4",
+                  schema: "noveltea-milestone-blueprint-review/v5",
                   status: "pass", findings: [], prior: [],
                 }) }]
             : at === 5

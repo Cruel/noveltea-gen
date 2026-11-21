@@ -102,7 +102,7 @@ function fixture() {
       schema: "noveltea-milestone-blueprint-review/v4",
       status: "revise", findings: [finding],
       prior: Array.from({ length: i }, (_, index) => prior(index)),
-    }), draft, assignment, rounds);
+    }), draft, assignment, rounds, "sealed-replay");
     rounds.push({ draft, review, draftDigest: sha(draft), reviewDigest: sha(review) });
   }
   const sources = { task, contract };

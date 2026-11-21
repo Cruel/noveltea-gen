@@ -81,11 +81,27 @@ function promptText(messages: readonly unknown[]) {
     !!item && typeof item === "object" && "role" in item && item.role === "user");
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
-function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "continue" = "escalate",
-  twoDistinctCases = false): Provider {
+function scripted(
+  calls: Call[],
+  diagnosticAction: "escalate" | "replace" | "continue" = "escalate",
+  twoDistinctCases = false,
+  downstreamCorrection = false,
+): Provider {
   let reviewerRound = 0;
   let writerRound = 0;
   const correctedKnowledge = "The guard can verify only the dated gate register entry";
+  const falseOwner = "No Choice or Puzzle is required for this current Milestone";
+  const falseDownstream: MilestoneBlueprint = {
+    ...draft,
+    downstream: [{ owner: "interactive", obligation: falseOwner }, ...draft.downstream],
+  };
+  const ownerFinding = {
+    anchorPath: milestonePath,
+    requirement: "Only positively required current-Milestone Interactive work has an Interactive owner",
+    reason: "The declared Interactive owner is a negative instruction, not required work",
+    correction: "Remove the false Interactive owner and retain required Composition work",
+    evidence: { target: "downstream", index: 0, field: "obligation", quote: falseOwner, repair: "replace" },
+  };
   const reads = ["skill://nt-event-design/SKILL.md", "skill://nt-catalog/SKILL.md", milestonePath];
   const stream = (_model: Model, ctx: TranscriptContext, _opts?: SimpleStreamOptions) => {
     const result = createAssistantMessageEventStream();
@@ -108,53 +124,138 @@ function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "con
     let reason: "stop" | "toolUse" = "stop";
     if (lastRole !== "toolResult") {
       content = reads.map((path): ToolCall => ({
-        type: "toolCall", id: randomUUID(), name: "read", arguments: { path },
+        type: "toolCall",
+        id: randomUUID(),
+        name: "read",
+        arguments: { path },
       }));
       reason = "toolUse";
     } else if (isDiagnostic) {
-      content = [{ type: "text", text: JSON.stringify({ ...diagnosticAnswer,
-        action: diagnosticAction }) }];
+      content = [{ type: "text", text: JSON.stringify({ ...diagnosticAnswer, action: diagnosticAction }) }];
     } else if (isReplacement) {
-      content = [{ type: "text", text: JSON.stringify({
-        schema: "noveltea-milestone-blueprint-review/v4", status: "pass",
-        findings: [], prior: [],
-      }) }];
+      content = [
+        {
+          type: "text",
+          text: JSON.stringify({
+            schema: "noveltea-milestone-blueprint-review/v5",
+            status: "pass",
+            findings: [],
+            prior: [],
+          }),
+        },
+      ];
     } else if (isReview) {
-      const resolved = diagnosticAction === "continue" && reviewerRound >= (twoDistinctCases ? 5 : 3);
-      const prior = Array.from({ length: reviewerRound }, (_, round) => ({
-        round, findingIndex: 0, status: resolved ? "resolved" : "persisting",
-        reason: resolved ? "The unsupported claim is replaced by verifiable knowledge" :
-          "Original unsupported knowledge remains verbatim and unverified",
-        evidence: resolved ? {
-          kind: "revised", eventId: "arrival", field: "knowledge",
-          before: knowledge, after: correctedKnowledge,
-        } : { kind: "current", eventId: "arrival",
-          field: "knowledge", quote: knowledge },
-      }));
-      content = [{ type: "text", text: JSON.stringify({
-        schema: "noveltea-milestone-blueprint-review/v4",
-        status: resolved ? "pass" : "revise",
-        findings: resolved ? [] : [finding], prior,
-      }) }];
-      reviewerRound++;
+      if (downstreamCorrection) {
+        content = [
+          {
+            type: "text",
+            text: JSON.stringify({
+              schema: "noveltea-milestone-blueprint-review/v5",
+              status: reviewerRound === 0 ? "revise" : "pass",
+              findings: reviewerRound === 0 ? [ownerFinding] : [],
+              prior:
+                reviewerRound === 0
+                  ? []
+                  : [
+                      {
+                        round: 0,
+                        findingIndex: 0,
+                        status: "resolved",
+                        reason: "The false Interactive owner is gone; Composition remains required",
+                        evidence: {
+                          target: "downstream",
+                          kind: "removed",
+                          index: 0,
+                          field: "obligation",
+                          before: falseOwner,
+                        },
+                      },
+                    ],
+            }),
+          },
+        ];
+        reviewerRound++;
+      } else {
+        const resolved = diagnosticAction === "continue" && reviewerRound >= (twoDistinctCases ? 5 : 3);
+        const prior = Array.from({ length: reviewerRound }, (_, round) => ({
+          round,
+          findingIndex: 0,
+          status: resolved ? "resolved" : "persisting",
+          reason: resolved
+            ? "The unsupported claim is replaced by verifiable knowledge"
+            : "Original unsupported knowledge remains verbatim and unverified",
+          evidence: resolved
+            ? {
+                kind: "revised",
+                eventId: "arrival",
+                field: "knowledge",
+                before: knowledge,
+                after: correctedKnowledge,
+              }
+            : { kind: "current", eventId: "arrival", field: "knowledge", quote: knowledge },
+        }));
+        content = [
+          {
+            type: "text",
+            text: JSON.stringify({
+              schema: "noveltea-milestone-blueprint-review/v5",
+              status: resolved ? "pass" : "revise",
+              findings: resolved ? [] : [finding],
+              prior,
+            }),
+          },
+        ];
+        reviewerRound++;
+      }
     } else {
-      const corrected = diagnosticAction === "continue" &&
-        writerRound >= (twoDistinctCases ? 5 : 3);
-      const distinctEvidence = twoDistinctCases && writerRound >= 3;
-      writerRound++;
-      content = [{ type: "text", text: JSON.stringify(corrected ? {
-        ...draft, events: [{ ...draft.events[0]!,
-          purpose: distinctEvidence ? draft.events[0]!.purpose + " A second gate document is disputed." :
-            draft.events[0]!.purpose,
-          knowledge: correctedKnowledge }],
-      } : distinctEvidence ? {
-        ...draft, events: [{ ...draft.events[0]!,
-          purpose: draft.events[0]!.purpose + " A second gate document is disputed." }],
-      } : draft) }];
+      if (downstreamCorrection) {
+        content = [{ type: "text", text: JSON.stringify(writerRound++ === 0 ? falseDownstream : draft) }];
+      } else {
+        const corrected = diagnosticAction === "continue" && writerRound >= (twoDistinctCases ? 5 : 3);
+        const distinctEvidence = twoDistinctCases && writerRound >= 3;
+        writerRound++;
+        content = [
+          {
+            type: "text",
+            text: JSON.stringify(
+              corrected
+                ? {
+                    ...draft,
+                    events: [
+                      {
+                        ...draft.events[0]!,
+                        purpose: distinctEvidence
+                          ? draft.events[0]!.purpose + " A second gate document is disputed."
+                          : draft.events[0]!.purpose,
+                        knowledge: correctedKnowledge,
+                      },
+                    ],
+                  }
+                : distinctEvidence
+                  ? {
+                      ...draft,
+                      events: [
+                        {
+                          ...draft.events[0]!,
+                          purpose: draft.events[0]!.purpose + " A second gate document is disputed.",
+                        },
+                      ],
+                    }
+                  : draft,
+            ),
+          },
+        ];
+      }
     }
     const message: AssistantMessage = {
-      role: "assistant", api: model.api, provider: model.provider, model: model.id,
-      content, usage, stopReason: reason, timestamp: Date.now(),
+      role: "assistant",
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      content,
+      usage,
+      stopReason: reason,
+      timestamp: Date.now(),
     };
     queueMicrotask(() => {
       result.push({ type: "start", partial: message });
@@ -173,11 +274,18 @@ function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "con
     return result;
   };
   return {
-    id: model.provider, name: "Deterministic Milestone diagnostic test provider",
-    auth: { apiKey: { name: "Test auth", check: async () =>
-      ({ type: "api_key", source: "test" }),
-      resolve: async () => ({ auth: { apiKey: "scripted-local" } }) } },
-    getModels: () => [model], stream, streamSimple: stream,
+    id: model.provider,
+    name: "Deterministic Milestone diagnostic test provider",
+    auth: {
+      apiKey: {
+        name: "Test auth",
+        check: async () => ({ type: "api_key", source: "test" }),
+        resolve: async () => ({ auth: { apiKey: "scripted-local" } }),
+      },
+    },
+    getModels: () => [model],
+    stream,
+    streamSimple: stream,
   };
 }
 function available() {
@@ -207,6 +315,7 @@ test("#220: three stalled Milestone reviews actually dispatch a fresh independen
   let replacementJobId: string | undefined;
   let continuationJobId: string | undefined;
   let secondCaseJobId: string | undefined;
+  let downstreamJobId: string | undefined;
   try {
     const app = join(tmp, "app"), state = join(tmp, "state"), cache = join(tmp, "cache"),
       socketDir = join(tmp, "controller");
@@ -485,11 +594,129 @@ The guard finds a dated register, but no evidence of a prior visit.
     assert.equal(secondCalls.filter(call =>
       call.prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC") &&
       call.lastRole === "toolResult").length, 2);
+
+      // #227: the independent reviewer rejects a false Interactive owner, then
+      // continues the SAME sealed review session after the planner removes it.
+      // The Story source/HEAD is never mutated by provisional planning.
+      downstreamJobId = randomUUID();
+      const downstreamDb = new DatabaseSync(join(app, "studio.sqlite"));
+      try {
+        downstreamDb
+          .prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+          .run(downstreamJobId, owner, "story", head, null);
+      } finally {
+        downstreamDb.close();
+      }
+      const downstreamJob = await startStoryJob({
+        story,
+        job: downstreamJobId,
+        worktreeCacheRoot: scoped,
+      });
+      const downstreamCalls: Call[] = [];
+      const downstreamRuntime = await ModelRuntime.create({
+        modelsPath: null,
+        refreshOnCreate: false,
+      });
+      downstreamRuntime.registerNativeProvider(scripted(downstreamCalls, "escalate", false, true));
+      await downstreamRuntime.refresh({ allowNetwork: false });
+      await configurePiPolicy(downstreamJob, {
+        version: 1,
+        profile: { provider: model.provider, model: model.id },
+        limits: { modelCalls: 12 },
+      });
+      const downstreamRun = () =>
+        withJobModelRuntime(downstreamRuntime, () =>
+          withStoryJobLock(downstreamJob, "event-sample", () =>
+            ensureMilestoneBlueprint(
+              downstreamJob,
+              plan,
+              assignment,
+              snapshot,
+              model.provider,
+              model.id,
+              task,
+              head,
+              false,
+            ),
+          ),
+        );
+      const downstreamApproved = await downstreamRun();
+      assert.deepEqual(downstreamApproved.blueprint.downstream, draft.downstream);
+      assert.deepEqual(
+        (await readReviewedMilestoneBlueprint(downstreamJob, downstreamApproved.pin, assignment)).downstream,
+        draft.downstream,
+      );
+      const downstreamFile = join(downstreamJob.stateDir, "milestone-blueprints", "sample.json");
+      const downstreamSealed = readFileSync(downstreamFile, "utf8");
+      const record = JSON.parse(downstreamSealed) as {
+        phase: string;
+        reviewer: { id: string };
+        reviewerHistory?: unknown[];
+        rounds: Array<{
+          draft: MilestoneBlueprint;
+          review: {
+            schema: string;
+            status: string;
+            findings: unknown[];
+          };
+        }>;
+      };
+      assert.equal(record.phase, "approved");
+      assert.deepEqual(
+        record.rounds.map((round) => round.review.status),
+        ["revise", "pass"],
+      );
+      assert.equal(record.rounds[0]?.review.schema, "noveltea-milestone-blueprint-review/v5");
+      assert.deepEqual(record.rounds[0]?.review.findings[0], {
+        anchorPath: milestonePath,
+        requirement: "Only positively required current-Milestone Interactive work has an Interactive owner",
+        reason: "The declared Interactive owner is a negative instruction, not required work",
+        correction: "Remove the false Interactive owner and retain required Composition work",
+        evidence: {
+          target: "downstream",
+          index: 0,
+          field: "obligation",
+          quote: "No Choice or Puzzle is required for this current Milestone",
+          repair: "replace",
+        },
+      });
+      assert.equal(record.reviewerHistory, undefined, "reviewer never replaced");
+      assert.equal(
+        downstreamCalls.filter(
+          (call) =>
+            call.prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") &&
+            call.lastRole === "toolResult",
+        ).length,
+        2,
+      );
+      const completedCalls = downstreamCalls.length;
+      assert.equal((await downstreamRun()).pin.digest, downstreamApproved.pin.digest);
+      assert.equal(
+        downstreamCalls.length,
+        completedCalls,
+        "restart must reuse the exact reviewed approval without model replay",
+      );
+      const forged = JSON.parse(downstreamSealed) as typeof record;
+      forged.rounds[0]!.draft.downstream[0]!.obligation = "A forged earlier claim";
+      writeFileSync(downstreamFile, JSON.stringify(forged));
+      await assert.rejects(
+        readReviewedMilestoneBlueprint(downstreamJob, downstreamApproved.pin, assignment),
+        /evidence changed|sealed|provenance|cited downstream/,
+      );
+      writeFileSync(downstreamFile, downstreamSealed);
+      assert.equal(
+        execFileSync("git", ["status", "--porcelain"], {
+          cwd: downstreamJob.worktreeRoot,
+          encoding: "utf8",
+        }).trim(),
+        "",
+      );
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
+    if (controller && downstreamJobId) await controller.dispose(downstreamJobId);
     if (controller && secondCaseJobId) await controller.dispose(secondCaseJobId);
     if (controller && continuationJobId) await controller.dispose(continuationJobId);
     if (controller && replacementJobId) await controller.dispose(replacementJobId);

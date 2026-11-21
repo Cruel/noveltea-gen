@@ -21,7 +21,9 @@ export interface MilestoneDiagnosis {
     kind: "material" | "deferred" | "cosmetic" | "scope";
     reason: string;
     requirement: { source: "task" | "contract"; quote: string };
-    evidence: { eventId: string; field: Field; quote: string };
+    evidence: { eventId: string; field: Field; quote: string } |
+      { target: "downstream"; index: number; field: "owner" | "obligation"; quote: string } |
+      { target: "missing-downstream"; owner: "event" | "interactive" | "composition"; quote: string };
   }>;
 }
 export type MilestoneDiagnosticSources = { task: string; contract: unknown };
@@ -76,21 +78,41 @@ export function parseMilestoneDiagnosis(text: string, draft: MilestoneBlueprint,
         !Object.hasOwn(obligations, String(item.requirement.source)) ||
         !filled(item.requirement.quote) ||
         !obligations[item.requirement.source as keyof typeof obligations].includes(item.requirement.quote as string) ||
-        !exact(item.evidence, ["eventId", "field", "quote"]) ||
-        !fields.includes(String(item.evidence.field))) {
+        !exactSourceAssessment(item.evidence, draft)) {
       throw Error("Independent Milestone diagnosis lacks a source-bound assessment.");
     }
-    const cited = item.evidence as { eventId: string; field: Field; quote: string };
-    const event = draft.events.find(e => e.id === cited.eventId);
-    if (!event) throw Error("Independent Milestone diagnosis cites an unrelated Event.");
-    const content = event[cited.field];
-    const current = typeof content === "string" ? content : JSON.stringify(content);
-    const quote = cited.quote;
-    if (typeof quote !== "string" || !quote ||
-        !(quote === current || quote.length >= 8 && current.includes(quote)))
-      throw Error("Independent Milestone diagnosis cites a noncurrent Event field.");
   }
   return raw as unknown as MilestoneDiagnosis;
+}
+
+/** The diagnostician must cite exact material current fields, including
+ * obligations already in the downstream list or a missing obligation's
+ * exact full-list witness. This provides evidence, not revision authority. */
+function exactSourceAssessment(evidence: unknown, draft: MilestoneBlueprint): boolean {
+  if (exact(evidence, ["target", "index", "field", "quote"]) &&
+      evidence.target === "downstream" &&
+      Number.isSafeInteger(evidence.index) && (evidence.index as number) >= 0 &&
+      ["owner", "obligation"].includes(String(evidence.field))) {
+    const item = draft.downstream[evidence.index as number];
+    if (!item) return false;
+    const text = item[evidence.field as "owner" | "obligation"];
+    const quote = evidence.quote;
+    return typeof quote === "string" && !!quote &&
+      (quote === text || quote.length >= 8 && text.includes(quote));
+  }
+  if (exact(evidence, ["target", "owner", "quote"]) &&
+      evidence.target === "missing-downstream" &&
+      ["event", "interactive", "composition"].includes(String(evidence.owner)))
+    return evidence.quote === JSON.stringify(draft.downstream);
+  if (!exact(evidence, ["eventId", "field", "quote"]) ||
+      !fields.includes(String(evidence.field))) return false;
+  const event = draft.events.find(e => e.id === evidence.eventId);
+  if (!event) return false;
+  const content = event[evidence.field as Field];
+  const current = typeof content === "string" ? content : JSON.stringify(content);
+  const quote = evidence.quote;
+  return typeof quote === "string" && !!quote &&
+    (quote === current || quote.length >= 8 && current.includes(quote));
 }
 
 /** The controller, never the diagnostician, owns the scheduling decision. */

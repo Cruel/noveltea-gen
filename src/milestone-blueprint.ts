@@ -46,23 +46,40 @@ type MilestoneEvent = MilestoneBlueprint["events"][number];
 type MilestoneField = Exclude<keyof MilestoneEvent, "id">;
 const MILESTONE_FIELDS: readonly MilestoneField[] =
   ["purpose", "knowledge", "dependsOn", "participants", "evidence", "routes"];
-type MilestoneFinding = {
-  eventId: string; anchorPath: string; requirement: string;
-  reason: string; correction: string;
-  /** v4 seals whether the cited defect needs replacement or an addition.
-   * Legacy sealed v3 findings lack this extra repair constraint. */
-  evidence?: { field: MilestoneField; quote: string; repair?: "replace" | "extend" };
+type MilestoneFindingBase = {
+  anchorPath: string; requirement: string; reason: string; correction: string;
 };
-type MilestonePriorEvidence =
+type MilestoneFinding = MilestoneFindingBase & (
+  | { eventId: string; evidence?: {
+      field: MilestoneField; quote: string; repair?: "replace" | "extend" } }
+  | { eventId?: never; evidence: { target: "downstream"; index: number;
+      field: "owner" | "obligation"; quote: string; repair: "replace" | "extend" } }
+  | { eventId?: never; evidence: { target: "missing-downstream"; owner: Owner;
+      quote: string; repair: "extend" } }
+);
+type EventPriorEvidence =
   | { kind: "revised" | "added"; eventId: string; field: MilestoneField;
       before: string; after: string }
   | { kind: "removed"; eventId: string; field: MilestoneField; before: string }
   | { kind: "current"; eventId: string; field: MilestoneField; quote: string };
+type DownstreamPriorEvidence =
+  | { target: "downstream"; eventId?: never; index: number; field: "owner" | "obligation";
+      kind: "revised" | "added"; before: string; after: string }
+  | { target: "downstream"; eventId?: never; index: number; field: "owner" | "obligation";
+      kind: "removed"; before: string }
+  | { target: "downstream"; eventId?: never; index: number; field: "owner" | "obligation";
+      kind: "current"; quote: string }
+  | { target: "missing-downstream"; eventId?: never; owner: Owner;
+      kind: "added"; before: string; after: string }
+  | { target: "missing-downstream"; eventId?: never; owner: Owner;
+      kind: "current"; quote: string };
+type MilestonePriorEvidence = EventPriorEvidence | DownstreamPriorEvidence;
 export interface MilestoneBlueprintReview {
-  /** Historical v1–v3 reviews replay unchanged; new reviews use v4. */
+  /** Historical v1–v4 reviews replay under their original sealed methodology. */
   schema: "noveltea-milestone-blueprint-review/v1" |
     "noveltea-milestone-blueprint-review/v2" |
-    "noveltea-milestone-blueprint-review/v3" | "noveltea-milestone-blueprint-review/v4";
+    "noveltea-milestone-blueprint-review/v3" | "noveltea-milestone-blueprint-review/v4" |
+    "noveltea-milestone-blueprint-review/v5";
   status: "pass" | "revise";
   findings: MilestoneFinding[];
   prior?: Array<{ round: number; findingIndex: number;
@@ -103,12 +120,68 @@ function milestoneFieldRetainsQuote(original: MilestoneEvent, current: Milestone
 const milestoneEvent = (draft: MilestoneBlueprint, id: string) =>
   draft.events.find(event => event.id === id);
 
+/** v5 downstream findings cite an exact current entry, or the exact complete
+ * collection when an obligation is missing. Indexes bind the rejected source;
+ * a correction can move entries, but cannot preserve a rejected claim. */
+function downstreamQuote(item: MilestoneBlueprint["downstream"][number],
+  field: "owner" | "obligation", quote: string): boolean {
+  const value = item[field];
+  return !!quote && (quote === value || quote.length >= 8 && value.includes(quote));
+}
+function downstreamCorrectionEvidence(
+  p: NonNullable<MilestoneBlueprintReview["prior"]>[number],
+  finding: MilestoneFinding, original: MilestoneBlueprint,
+  current: MilestoneBlueprint,
+): boolean {
+  const claim = finding.evidence;
+  const proof = p.evidence;
+  if (!claim || !("target" in claim) || !("target" in proof) ||
+      claim.target !== proof.target) return false;
+  if (claim.target === "missing-downstream") {
+    if (proof.target !== "missing-downstream" || claim.owner !== proof.owner)
+      return false;
+    if (proof.kind === "current") return proof.quote === JSON.stringify(current.downstream);
+    if (proof.kind !== "added" ||
+        proof.before !== JSON.stringify(original.downstream)) return false;
+    const added = current.downstream.find(item => JSON.stringify(item) === proof.after);
+    return !!added && added.owner === claim.owner &&
+      !original.downstream.some(item => JSON.stringify(item) === proof.after);
+  }
+  if (proof.target !== "downstream" || claim.index !== proof.index ||
+      claim.field !== proof.field) return false;
+  const rejected = original.downstream[claim.index];
+  if (!rejected || !downstreamQuote(rejected, claim.field, claim.quote)) return false;
+  if (proof.kind === "current") return current.downstream.some(item =>
+    downstreamQuote(item, claim.field, proof.quote) && proof.quote === claim.quote);
+  if (proof.before !== claim.quote) return false;
+  if (proof.kind === "removed")
+    return !current.downstream.some(item =>
+      JSON.stringify(item) === JSON.stringify(rejected) ||
+      (claim.field === "obligation" &&
+        downstreamQuote(item, "obligation", claim.quote)));
+  if (proof.kind === "added" && (claim.repair !== "extend" ||
+      current.downstream.some(item => JSON.stringify(item) === JSON.stringify(rejected))))
+    return false; // An unchanged defective entry cannot be laundered by a duplicate extension.
+  const repaired = current.downstream.some(item =>
+    downstreamQuote(item, claim.field, proof.after) &&
+    (proof.kind === "added"
+      ? downstreamQuote(item, claim.field, claim.quote)
+      : !downstreamQuote(item, claim.field, claim.quote)));
+  return repaired && !original.downstream.some(item =>
+    downstreamQuote(item, claim.field, proof.after)) &&
+    (proof.kind === "added" || !current.downstream.some(item =>
+      downstreamQuote(item, claim.field, claim.quote)));
+}
+
 function milestoneCorrectionEvidence(p: NonNullable<MilestoneBlueprintReview["prior"]>[number],
   finding: MilestoneFinding, original: MilestoneBlueprint, current: MilestoneBlueprint,
   legacyReplay = false,
 ): boolean {
+  if (finding.evidence && "target" in finding.evidence)
+    return downstreamCorrectionEvidence(p, finding, original, current);
   const evidence = p.evidence;
-  if (!("kind" in evidence) || evidence.eventId !== finding.eventId ||
+  if (!finding.eventId || !("kind" in evidence) || "target" in evidence ||
+      evidence.eventId !== finding.eventId ||
       !(MILESTONE_FIELDS as readonly string[]).includes(evidence.field))
     return false;
   const source = milestoneEvent(original, finding.eventId);
@@ -116,7 +189,7 @@ function milestoneCorrectionEvidence(p: NonNullable<MilestoneBlueprintReview["pr
   const before = milestoneFieldText(source, evidence.field);
   // New v3 findings bind the repair to the very field and quote that were
   // independently rejected, so unrelated Event or field edits cannot launder a PASS.
-  if (finding.evidence &&
+  if (finding.evidence && !("target" in finding.evidence) &&
       (finding.evidence.field !== evidence.field ||
        (evidence.kind === "current"
          ? finding.evidence.quote !== evidence.quote
@@ -154,7 +227,8 @@ export function milestonePassCorrections(draft: MilestoneBlueprint,
   previous: readonly Round[], review: MilestoneBlueprintReview): boolean {
   if (review.status !== "pass" || !previous.length) return true;
   if (!["noveltea-milestone-blueprint-review/v3",
-        "noveltea-milestone-blueprint-review/v4"].includes(review.schema)) return true; // sealed legacy
+        "noveltea-milestone-blueprint-review/v4",
+        "noveltea-milestone-blueprint-review/v5"].includes(review.schema)) return true; // sealed legacy
   return previous.every((round, index) => round.review.findings.every((finding, findingIndex) => {
     const proof = review.prior?.find(p => p.round === index && p.findingIndex === findingIndex);
     return proof?.status === "resolved" &&
@@ -190,33 +264,43 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
       if (p.status !== "resolved" && p.status !== "improved") return false;
       const source = rounds[p.round];
       const finding = source?.review.findings[p.findingIndex];
-      if (!finding || p.evidence.eventId !== finding.eventId) return false;
+      if (!finding) return false;
+      if (finding.evidence && "target" in finding.evidence) {
+        return current.review.schema === "noveltea-milestone-blueprint-review/v5" &&
+          "kind" in p.evidence && p.evidence.kind !== "current" &&
+          milestoneCorrectionEvidence(p, finding, source!.draft, current.draft) &&
+          sha(prior.draft.downstream) !== sha(current.draft.downstream);
+      }
+      if (!finding.eventId || p.evidence.eventId !== finding.eventId) return false;
       if (current.review.schema === "noveltea-milestone-blueprint-review/v3" ||
-          current.review.schema === "noveltea-milestone-blueprint-review/v4") {
+          current.review.schema === "noveltea-milestone-blueprint-review/v4" ||
+          current.review.schema === "noveltea-milestone-blueprint-review/v5") {
         if (!source || !milestoneCorrectionEvidence(p, finding, source.draft, current.draft,
           current.review.schema === "noveltea-milestone-blueprint-review/v3") ||
-            !("kind" in p.evidence)) return false;
+            !("kind" in p.evidence) || "target" in p.evidence) return false;
+        const proof = p.evidence as EventPriorEvidence;
         const before = milestoneEvent(prior.draft, finding.eventId);
         const after = milestoneEvent(current.draft, finding.eventId);
-        if (p.evidence.kind === "removed") return !!before && !after;
-        if (!["revised", "added"].includes(p.evidence.kind) || !before || !after ||
-            !("before" in p.evidence) || !("after" in p.evidence)) return false;
+        if (proof.kind === "removed") return !!before && !after;
+        if (!["revised", "added"].includes(proof.kind) || !before || !after ||
+            !("before" in proof) || !("after" in proof)) return false;
         const original = milestoneEvent(source.draft, finding.eventId);
         return !!original &&
-          milestoneFieldRetainsQuote(original, before, p.evidence.field, p.evidence.before) &&
-          (p.evidence.kind === "added"
-            ? milestoneFieldRetainsQuote(original, after, p.evidence.field, p.evidence.before)
-            : !milestoneFieldRetainsQuote(original, after, p.evidence.field, p.evidence.before)) &&
-          milestoneFieldQuote(after, p.evidence.field, p.evidence.after) &&
-          !milestoneFieldRetainsQuote(after, before, p.evidence.field, p.evidence.after);
+          milestoneFieldRetainsQuote(original, before, proof.field, proof.before) &&
+          (proof.kind === "added"
+            ? milestoneFieldRetainsQuote(original, after, proof.field, proof.before)
+            : !milestoneFieldRetainsQuote(original, after, proof.field, proof.before)) &&
+          milestoneFieldQuote(after, proof.field, proof.after) &&
+          !milestoneFieldRetainsQuote(after, before, proof.field, proof.after);
       }
       // Older sealed v2 reviews retain their historical convergence policy.
       if ("kind" in p.evidence) return false;
       const before = milestoneEvent(prior.draft, finding.eventId);
       const after = milestoneEvent(current.draft, finding.eventId);
+      const legacy = p.evidence as { eventId: string; quote: string };
       return !!before && !!after && sha(before) !== sha(after) &&
-        JSON.stringify(after).includes(p.evidence.quote) &&
-        !JSON.stringify(before).includes(p.evidence.quote);
+        JSON.stringify(after).includes(legacy.quote) &&
+        !JSON.stringify(before).includes(legacy.quote);
     });
     stalled = improved ? 0 : stalled + 1;
   }
@@ -375,13 +459,15 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
   let raw: unknown;
   try { raw = parse(text); } catch { throw Error("Independent Milestone review returned invalid JSON."); }
   const version = object(raw) ? raw.schema : null;
-  const strict = version === "noveltea-milestone-blueprint-review/v4";
+  const fifth = version === "noveltea-milestone-blueprint-review/v5";
+  const strict = fifth || version === "noveltea-milestone-blueprint-review/v4";
   const modern = strict || version === "noveltea-milestone-blueprint-review/v3";
   const hasPrior = modern || version === "noveltea-milestone-blueprint-review/v2";
   if (!["noveltea-milestone-blueprint-review/v1",
         "noveltea-milestone-blueprint-review/v2",
         "noveltea-milestone-blueprint-review/v3",
-        "noveltea-milestone-blueprint-review/v4"].includes(String(version)) ||
+        "noveltea-milestone-blueprint-review/v4",
+        "noveltea-milestone-blueprint-review/v5"].includes(String(version)) ||
       !exact(raw, hasPrior ? ["schema", "status", "findings", "prior"] :
         ["schema", "status", "findings"]) ||
       !["pass", "revise"].includes(String(raw.status)) ||
@@ -389,27 +475,56 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       (raw.status === "pass") !== (raw.findings.length === 0))
     throw Error("Independent Milestone review needs an explicit source-bound verdict.");
   for (const item of raw.findings) {
+    if (!object(item) || !assignment.sourcePaths.includes(String(item.anchorPath)) ||
+        ![item.requirement, item.reason, item.correction].every(v => string(v)))
+      throw Error("Independent Milestone review finding lacks a current source citation.");
+    const evidence = item.evidence;
+    if (fifth && object(evidence) && evidence.target === "downstream") {
+      const index = evidence.index;
+      const field = evidence.field;
+      if (!exact(item, ["anchorPath", "requirement", "reason", "correction", "evidence"]) ||
+          item.anchorPath !== assignment.milestonePath ||
+          !exact(evidence, ["target", "index", "field", "quote", "repair"]) ||
+          !Number.isSafeInteger(index) || (index as number) < 0 ||
+          !["owner", "obligation"].includes(String(field)) ||
+          !["replace", "extend"].includes(String(evidence.repair)) ||
+          typeof evidence.quote !== "string" ||
+          !draft.downstream[index as number] ||
+          !downstreamQuote(draft.downstream[index as number]!,
+            field as "owner" | "obligation", evidence.quote))
+        throw Error("Independent Milestone review finding has no cited downstream field.");
+      continue;
+    }
+    if (fifth && object(evidence) && evidence.target === "missing-downstream") {
+      if (!exact(item, ["anchorPath", "requirement", "reason", "correction", "evidence"]) ||
+          item.anchorPath !== assignment.milestonePath ||
+          !exact(evidence, ["target", "owner", "quote", "repair"]) ||
+          !["event", "interactive", "composition"].includes(String(evidence.owner)) ||
+          evidence.repair !== "extend" ||
+          evidence.quote !== JSON.stringify(draft.downstream))
+        throw Error("Independent Milestone review finding has no cited missing downstream obligation.");
+      continue;
+    }
     const event = draft.events.find(e => e.id === item.eventId);
     if (!exact(item, modern
           ? ["eventId", "anchorPath", "requirement", "reason", "correction", "evidence"]
           : ["eventId", "anchorPath", "requirement", "reason", "correction"]) ||
-        !event || !assignment.sourcePaths.includes(String(item.anchorPath)) ||
-        ![item.requirement, item.reason, item.correction].every(v => string(v)) ||
-        (modern && (!exact(item.evidence,
+        !event ||
+        (modern && (!exact(evidence,
             strict ? ["field", "quote", "repair"] : ["field", "quote"]) ||
-          !MILESTONE_FIELDS.includes(item.evidence.field as MilestoneField) ||
-          strict && !["replace", "extend"].includes(String(item.evidence.repair)) ||
-          typeof item.evidence.quote !== "string" ||
-          !milestoneFieldQuote(event, item.evidence.field as MilestoneField,
-            item.evidence.quote))))
+          !MILESTONE_FIELDS.includes(evidence.field as MilestoneField) ||
+          strict && !["replace", "extend"].includes(String(evidence.repair)) ||
+          typeof evidence.quote !== "string" ||
+          !milestoneFieldQuote(event, evidence.field as MilestoneField,
+            evidence.quote))))
       throw Error("Independent Milestone review finding has no cited defective Event field.");
   }
-  // Previously admitted v1–v3 receipts remain replayable, but a new
-  // independent reviewer must seal the repair classification in v4.
-  if (policy === "admission" && version !== "noveltea-milestone-blueprint-review/v4" &&
+  // Replay sealed historical reviews independently; new reviewer sessions
+  // must emit v5, including source-bound downstream/omission findings.
+  if (policy === "admission" && !fifth &&
       !(version === "noveltea-milestone-blueprint-review/v1" && !previous.length &&
         raw.status === "pass" && raw.findings.length === 0))
-    throw Error("New Milestone review requires v4 source-bound repair classification.");
+    throw Error("New Milestone review requires v5 source-bound findings.");
   if (hasPrior) {
     const review = raw as unknown as MilestoneBlueprintReview;
     const count = previous.reduce((total, round) => total + round.review.findings.length, 0);
@@ -424,15 +539,28 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
           seen.has(key) || !source || !original ||
           !["resolved", "improved", "persisting", "regressed"].includes(p.status) ||
           !string(p.reason) || !object(p.evidence) ||
-          p.evidence.eventId !== original.eventId)
+          (original.evidence && "target" in original.evidence
+            ? !fifth || !("target" in p.evidence) ||
+              p.evidence.target !== original.evidence.target
+            : p.evidence.eventId !== original.eventId))
         throw Error("Milestone previous finding assessment lacks source-bound identity.");
       if (modern) {
         const proof = p.evidence as MilestonePriorEvidence;
-        const keys = proof.kind === "revised" || proof.kind === "added"
-          ? ["kind", "eventId", "field", "before", "after"]
-          : proof.kind === "removed"
-            ? ["kind", "eventId", "field", "before"]
-            : ["kind", "eventId", "field", "quote"];
+        const keys = "target" in proof && proof.target === "missing-downstream"
+          ? proof.kind === "added"
+            ? ["target", "owner", "kind", "before", "after"]
+            : ["target", "owner", "kind", "quote"]
+          : "target" in proof && proof.target === "downstream"
+            ? proof.kind === "revised" || proof.kind === "added"
+              ? ["target", "index", "field", "kind", "before", "after"]
+              : proof.kind === "removed"
+                ? ["target", "index", "field", "kind", "before"]
+                : ["target", "index", "field", "kind", "quote"]
+            : proof.kind === "revised" || proof.kind === "added"
+              ? ["kind", "eventId", "field", "before", "after"]
+              : proof.kind === "removed"
+                ? ["kind", "eventId", "field", "before"]
+                : ["kind", "eventId", "field", "quote"];
         if (!exact(proof, keys) ||
             !milestoneCorrectionEvidence(p, original, source.draft, draft,
               !strict && policy === "sealed-replay") ||
@@ -442,7 +570,8 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
           throw Error("Milestone finding correction needs a change to its rejected field or verified Event removal.");
       } else {
         const proof = p.evidence as { eventId: string; quote: string };
-        const event = milestoneEvent(draft, original.eventId);
+        const event = original.eventId
+          ? milestoneEvent(draft, original.eventId) : undefined;
         if (!exact(proof, ["eventId", "quote"]) ||
             !string(proof.quote) || proof.quote.length < 8 ||
             !event || !JSON.stringify(event).includes(proof.quote))
@@ -453,8 +582,8 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
     if (review.status === "pass" && review.prior.some(p => p.status !== "resolved"))
       throw Error("Milestone reviewer cannot pass with unresolved historical blockers.");
     if (review.status === "pass" && previous.length &&
-        policy === "admission" && !strict)
-      throw Error("New Milestone approval requires v4 correction evidence against rejected Event fields.");
+        policy === "admission" && !fifth)
+      throw Error("New Milestone approval requires v5 correction evidence.");
     if (modern && !milestonePassCorrections(draft, previous, review))
       throw Error("Milestone pass has no verified correction of the rejected Event claim.");
   }
@@ -624,10 +753,14 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
       "action:'continue|replace|split|escalate',explanation:string," +
       "assessments:[{kind:'material|deferred|cosmetic|scope',reason:string," +
       "requirement:{source:'task|contract',quote:exact accepted 8+ character substring}," +
-      "evidence:{eventId:current provisional Event id,field:'purpose|dependsOn|" +
-      "evidence|participants|knowledge|routes',quote:exact current field text}}]}. " +
-      "Every assessment must cite the exact CURRENT Event field and existing " +
-      "accepted task or contract; never introduce requirements or return a PASS.");
+      "evidence: ONE of {eventId:current provisional Event id,field:'purpose|dependsOn|" +
+      "evidence|participants|knowledge|routes',quote:exact current field text}, " +
+      "{target:'downstream',index:current entry index,field:'owner|obligation'," +
+      "quote:current field text}, or {target:'missing-downstream'," +
+      "owner:'event|interactive|composition',quote:exact JSON serialized " +
+      "current downstream array}}]}. Every assessment must cite exact CURRENT " +
+      "Event or downstream evidence and an existing accepted task or contract; " +
+      "never introduce requirements or return a PASS.");
     const parse = () => {
       verifyReads(session.session.messages.slice(start), session.project.root, snapshot, assignment);
       return parseMilestoneDiagnosis(lastText(session.session), last.draft, { task, contract });
@@ -736,8 +869,13 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "MUST use ONLY the exact CHARACTER IDS below (or [] if empty). dependsOn " +
     "MUST use only earlier provisional Event slugs. " +
     "Evidence anchorPath MUST be an existing sourcePaths " +
-    "canonical record, not a proposed Event path. Name downstream owners for Choice/interactive " +
-    "and Composition obligations. Unknown future Events remain provisional, not verified canon. " +
+    "canonical record, not a proposed Event path. Name downstream owners for required " +
+    "CURRENT-MILESTONE work, including all Composition delivery and any genuinely necessary " +
+    "Choice/Puzzle implementation. A positive interactive owner REQUIRES Interactive work " +
+    "for this Milestone: NEVER assign that owner for a claim that no Choice/Puzzle is needed, " +
+    "for optional possibilities, or for an idea belonging to a different Milestone. " +
+    "An Event-only Milestone with no current Interactive obligation must still own Composition. " +
+    "Unknown future Events remain provisional, not verified canon. " +
     "No unrelated Milestone or protected-canon changes. Return ONLY one JSON object " +
     "{schema:'noveltea-milestone-blueprint/v1',milestoneId,events:[{id,purpose,dependsOn," +
     "evidence:[{anchorPath,source,observation,access,establishes,limits}],participants,knowledge," +
@@ -750,49 +888,72 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
       "without inventing protected authority. PRIOR PLAN: " + JSON.stringify(earlier.draft) +
       "\nINDEPENDENT REVIEW: " + JSON.stringify(earlier.review) : "");
 }
-function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, prior: Round[]) {
+function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, prior: Round[],
+  task: string, contract: unknown) {
   return "INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW. Read pinned nt-event-design and " +
     "nt-catalog skills and the selected canonical Milestone/Arc/Character/World sources. " +
     "Assess ONLY whether this PROVISIONAL local plan can plausibly support future Event " +
-    "implementation: causality, concrete inspectable sources and access/custody, earned Character " +
-    "knowledge, branching consequences and explicitly named downstream Choice/Composition owners. " +
+    "implementation: all material Event and downstream plan fields, including causality, concrete " +
+    "inspectable sources and access/custody, earned Character knowledge, branching consequences, " +
+    "complete required current-Milestone Choice/Puzzle obligations and Composition delivery. " +
+    "A positive interactive owner means REQUIRED work for THIS Milestone, never a declaration " +
+    "that none is needed, an optional idea, or work deferred to another Milestone. " +
+    "Legitimate Event-only Milestones need no interactive owner; do not fabricate a Choice. " +
     "Do not insist on canon or playable prose not yet authored, and do not call a future stage's " +
-    "obligation a current-stage blocker. Flag actual unsupported/contradictory plan claims with an " +
-    "EXISTING anchorPath and proposed eventId. Preserve your prior findings and reassess the actual " +
+    "obligation a current-stage blocker. Flag actual unsupported, contradictory or missing " +
+    "obligations with a CURRENT canonical anchorPath. Preserve prior findings and assess the " +
     "new draft, distinguishing resolved blockers and regressions. Assess EACH prior " +
     "finding by exact round and findingIndex, including distinct findings on the same " +
-    "Event/source path. Every NEW finding MUST cite the defective Event FIELD " +
-    "with its exact whole value or an 8+ character excerpt. An empty array " +
+    "Event/source path. A NEW Event finding cites its eventId and defective FIELD " +
+    "with its exact whole value or an 8+ character excerpt. A downstream finding instead " +
+    "cites the exact current entry index, owner|obligation field and quote, with anchorPath " +
+    "equal to the selected canonical Milestone path. A genuinely MISSING downstream " +
+    "requirement instead cites target:'missing-downstream', the required owner and the " +
+    "exact JSON-serialized CURRENT downstream array as quote (even if it is nonempty). " +
+    "These findings do NOT invent an eventId. An empty Event array " +
     "must be cited exactly as '[]'; a short dependency list such as [\"key\"] " +
     "must be cited as its exact whole value. Do not cite just an Event path. " +
     "For EACH NEW finding, decide now whether repair MUST replace an invalid " +
     "claim (repair:'replace') or may extend a valid but incomplete field " +
     "(repair:'extend'). This decision is SEALED with the negative finding; " +
     "later rounds CANNOT reinterpret a replace finding as extend. " +
-    "To resolve a prior finding, cite the originally rejected field quote and: " +
-    "(revised) its removal plus NEW replacement text in the SAME field; " +
-    "(added) NEW text in that same field that supplies a missing limitation, " +
-    "context or member while retaining the original quote ONLY when the " +
-    "original finding had repair:'extend'; or (removed) " +
-    "the removal of the entire defective provisional Event. " +
+    "To resolve a prior Event finding, cite the rejected field quote and: " +
+    "(revised) removal plus NEW replacement text in the SAME field; " +
+    "(added) NEW text in the same field that supplies missing context while retaining " +
+    "the original quote ONLY if repair:'extend'; or (removed) the entire defective Event. " +
+    "To resolve a downstream entry finding, use target:'downstream', its ORIGINAL index " +
+    "and field; revised/added cite before and after excerpts, removed cites before and " +
+    "requires the defective entry to be absent, current cites the unchanged rejected quote. " +
+    "To resolve a missing-downstream finding, use target:'missing-downstream', " +
+    "the same owner, kind:'added', before:the ORIGINAL exact serialized downstream array, " +
+    "after:the JSON-serialized NEW {owner,obligation} entry, or kind:'current' with the " +
+    "exact current serialized downstream array if still missing. " +
     "For an empty array, '[]' disappears when members are added: use revised. " +
     "A replacement Event may be added, but deleting the rejected ID must be verifiable. " +
     "A pass requires evidence addressing each original defect, not unrelated " +
     "Event or field edits. For unchanged blockers cite current evidence. " +
     "Cosmetic rewrites and newly discovered blockers alone are not progress. " +
-    "A pass has no findings and " +
-    "every prior finding resolved; revise reports material blockers. Return ONLY JSON " +
-    "{schema:'noveltea-milestone-blueprint-review/v4',status:'pass|revise'," +
-    "findings:[{eventId,anchorPath,requirement,reason,correction," +
+    "A concise pass has no findings and every prior finding resolved; revise " +
+    "reports material blockers. Do not enumerate valid fields or review the reviewer. " +
+    "Return ONLY JSON {schema:'noveltea-milestone-blueprint-review/v5'," +
+    "status:'pass|revise',findings:[EITHER " +
+    "{eventId,anchorPath,requirement,reason,correction," +
     "evidence:{field:'purpose|knowledge|dependsOn|participants|evidence|routes'," +
-    "quote:exact defective field text,repair:'replace|extend'}}]," +
+    "quote,repair:'replace|extend'}} OR " +
+    "{anchorPath,requirement,reason,correction," +
+    "evidence:{target:'downstream',index,field:'owner|obligation',quote,repair:'replace|extend'}} OR " +
+    "{anchorPath,requirement,reason,correction," +
+    "evidence:{target:'missing-downstream',owner:'event|interactive|composition'," +
+    "quote:exact serialized downstream array,repair:'extend'}}]," +
     "prior:[{round,findingIndex,status:'resolved|improved|persisting|regressed'," +
-    "reason,evidence:{kind:'revised|added',eventId,field," +
-    "before:exact original rejected quote,after:exact NEW field quote}|" +
-    "{kind:'removed',eventId,field," +
-    "before:exact original rejected quote}|{kind:'current',eventId,field," +
-    "quote:exact unchanged current field text}}]}. " +
+    "reason,evidence: a source-bound Event correction {kind,eventId,field,before,after} " +
+    "or {kind:'current',eventId,field,quote}; a downstream correction " +
+    "{target:'downstream',kind,index,field,before,after} or current with quote; " +
+    "a missing-downstream correction {target:'missing-downstream',kind:'added'," +
+    "owner,before,after} or current with owner and quote. Omit inapplicable fields.}]}. " +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
+    "\nAUTHOR OBJECTIVE: " + JSON.stringify(task) +
+    "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
     "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map(r => ({ draftDigest: r.draftDigest,
       review: r.review }))) + "\nCURRENT PLAN: " + JSON.stringify(draft);
 }
@@ -1155,14 +1316,14 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
           ? "FRESH INDEPENDENT REPLACEMENT REVIEWER. Previous negative verdicts and " +
             "diagnostic advice are history, not approval or authority. Independently " +
             "evaluate the current exact draft and original accepted source scope. " +
-            "Your verdict must meet the full original v4 review contract. " : "") +
-        reviewerPrompt(assignment, receipt.draft, reviewHistory));
+            "Your verdict must meet the full current v5 review contract. " : "") +
+        reviewerPrompt(assignment, receipt.draft, reviewHistory, task, plan.contract));
       verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
       const parseVerdict = () => {
         const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft!,
           assignment, reviewHistory);
-        if (verdict.schema !== "noveltea-milestone-blueprint-review/v4")
-          throw Error("New Milestone reviews require an original, field-bound repair classification.");
+        if (verdict.schema !== "noveltea-milestone-blueprint-review/v5")
+          throw Error("New Milestone reviews require the v5 full-obligation, source-bound contract.");
         return verdict;
       };
       let verdict: MilestoneBlueprintReview;
@@ -1177,7 +1338,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
           (error instanceof Error ? error.message : String(error)) +
           ". Keep all substantive findings and previous-round assessments; " +
           "do not manufacture a pass. Re-read pinned sources if missing. Return " +
-          "ONE complete v4 review JSON object with source-linked findings and " +
+          "ONE complete v5 review JSON object with source-linked findings and " +
           "a prior assessment for each sealed historical blocker.");
         verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
         verdict = parseVerdict();
@@ -1188,7 +1349,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       if (verdict.status === "pass" && previousRound?.review.status === "revise" &&
           (previousRound.draftDigest === sha(receipt.draft) ||
             !milestonePassCorrections(receipt.draft, reviewHistory, verdict)))
-        throw Error("Milestone reviewer cannot approve without repairing the exact rejected Event field.");
+        throw Error("Milestone reviewer cannot approve without repairing the exact rejected material field.");
       receipt.rounds.push({ draft: receipt.draft, review: verdict,
         draftDigest: sha(receipt.draft), reviewDigest: sha(verdict) });
       if (verdict.status === "pass") {
