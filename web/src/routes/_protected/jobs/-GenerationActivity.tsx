@@ -10,6 +10,20 @@ import type { ProgressEvent } from '@/lib/generation-progress.server'
 import type { StreamConnection } from '@/hooks/use-job-event-stream'
 
 export function progressDescription(event: ProgressEvent) {
+  if (event.detail?.source === 'controller') {
+    switch (event.detail.outcome) {
+      case 'unknown-failure-assessing':
+        return 'Read-only unfamiliar-failure assessment in progress'
+      case 'unknown-failure-operator-intervention':
+        return 'Unfamiliar failure requires operator intervention'
+      case 'unknown-failure-unsafe-evidence':
+        return 'Recovery halted: unsafe evidence'
+      case 'unknown-failure-resource-limit':
+        return 'Recovery paused by the job resource limit'
+      case 'unknown-failure-assessment':
+        return 'Recovery assessment remains incomplete'
+    }
+  }
   const unit = event.milestone ? 'Milestone ' + event.milestone : event.stage?.replaceAll('-', ' ') ?? 'Story'
   switch (event.kind) {
     case 'started': return 'Generation started'

@@ -41,6 +41,12 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
       steps.push({ id: event.id, kind: 'started', stage: null, milestone: null,
         state: 'started', files: [], outcome: null, at: event.createdAt,
         detail: event.detail })
+    } else if (event.kind === 'working' &&
+      event.detail?.source === 'controller' &&
+      event.detail.outcome === 'unknown-failure-assessing') {
+      steps.push({ id: event.id, kind: 'report', stage: 'review', milestone: null,
+        state: 'proposed', files: [], outcome: null, at: event.createdAt,
+        detail: event.detail })
     } else if (event.kind === 'working' && event.detail?.reviewPhase) {
       // Controller phase transitions are neither model prose nor a review
       // verdict. Surface them without manufacturing a verified Story stage.
@@ -97,6 +103,9 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
 export function activityTitle(step: ActivityStep): string {
   if (step.kind === 'started') return 'Started generation'
   if (step.kind === 'report') {
+    if (step.detail?.source === 'controller' &&
+        step.detail.outcome === 'unknown-failure-assessing')
+      return 'Read-only unfamiliar-failure assessment in progress'
     if (step.detail?.reviewPhase === 'diagnosing')
       return 'Independent diagnostic review in progress'
     if (step.detail?.reviewPhase === 'correcting')
@@ -104,6 +113,18 @@ export function activityTitle(step: ActivityStep): string {
     return 'Model status · ' + (step.detail?.summary ?? 'Working; unverified')
   }
   if (step.kind === 'finished') {
+    if (step.detail?.source === 'controller') {
+      switch (step.detail.outcome) {
+        case 'unknown-failure-operator-intervention':
+          return 'Unfamiliar failure requires operator intervention'
+        case 'unknown-failure-unsafe-evidence':
+          return 'Recovery halted: unsafe evidence'
+        case 'unknown-failure-resource-limit':
+          return 'Recovery paused by the job resource limit'
+        case 'unknown-failure-assessment':
+          return 'Recovery assessment remains incomplete'
+      }
+    }
     switch (step.outcome) {
       case 'completed': return 'Generation finished'
       case 'paused': return 'Generation paused'

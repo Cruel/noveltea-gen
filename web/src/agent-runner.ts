@@ -127,6 +127,14 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
           ? 'foundation' : null },
         { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
         const updates = patch as Record<string, unknown>
+        const diagnosis = updates.completion_decision as {
+          unknownRecovery?: { phase: string }
+        } | undefined
+        if (diagnosis?.unknownRecovery?.phase === 'assessment') {
+          await appendGenerationEvent(store, item.ownerId, row.id, {
+            kind: 'working', stage: 'review', outcome: 'unknown-failure-assessing', turnId,
+          })
+        }
         const intake = updates.author_update_intake as { active?: {
           stage: GenerationEvidence['stage']; milestone?: string } } | undefined
         if (intake?.active) {
@@ -174,7 +182,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         }
       }
       const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
-      const outcome = snapshot.values as { status?: string; reason?: string | null }
+      const outcome = snapshot.values as { status?: string; reason?: string | null;
+        unknownRecovery?: { phase?: string } | null }
       const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
@@ -188,8 +197,13 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         needsAuthor, item.workerId!, new Date().toISOString())) {
         throw new Error('Generation finished against a changed worker or job state.')
       }
+      const diagnosticStatus = outcome.unknownRecovery?.phase
+      const diagnosticOutcome = diagnosticStatus &&
+        ['assessment', 'resource-limit', 'operator-intervention', 'unsafe-evidence'].includes(diagnosticStatus)
+        ? 'unknown-failure-' + diagnosticStatus : undefined
       await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
-        status: state as 'paused' | 'blocked' | 'completed' | 'cancelled', turnId })
+        status: state as 'paused' | 'blocked' | 'completed' | 'cancelled',
+        ...(diagnosticOutcome ? { outcome: diagnosticOutcome } : {}), turnId })
     } finally { saver.db.close() }
   }
   try {

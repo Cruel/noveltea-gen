@@ -266,6 +266,8 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     const snapshot = await graph.getState({ configurable: { thread_id: row.threadId! } })
     const state = snapshot.values as {
       request?: GenerationRequest; status?: string; reason?: string | null
+      unknownRecovery?: { phase?: string; advisoryCategory?: string;
+        recommendation?: string; case?: { signature?: string } } | null
       active?: { stage?: string; id?: string } | null
       completedStages?: Array<{ stage: string; status: string }>
     }
@@ -337,6 +339,12 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     return { ...initial, status: interrupted ? 'interrupted' : authorReady ? 'paused' :
         (state.status ?? 'interrupted'),
       revisionVerified, recovery,
+      unknownRecovery: state.unknownRecovery ? {
+        phase: state.unknownRecovery.phase ?? 'unsafe-evidence',
+        signature: state.unknownRecovery.case?.signature ?? null,
+        advisoryCategory: state.unknownRecovery.advisoryCategory ?? null,
+        recommendation: state.unknownRecovery.recommendation ?? null,
+      } : null,
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
         : waitingForChoice ? 'The specialist is waiting for your answer in Chat or Author questions and approvals. After saving the answer, use Resume.'
         : authorReady ? 'Foundation exception approved; use Resume to request its first verified retry.'

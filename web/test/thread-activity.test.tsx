@@ -74,6 +74,31 @@ test('#213 controller-confirmed diagnosing and correction are not Pi status or e
   assert.ok(!steps.some(s => s.state === 'verified'))
 })
 
+test('unfamiliar failure states remain controller evidence without granting review approval', () => {
+  const outcomes = [
+    ['unknown-failure-operator-intervention', /operator intervention/i],
+    ['unknown-failure-unsafe-evidence', /unsafe evidence/i],
+    ['unknown-failure-resource-limit', /resource limit/i],
+    ['unknown-failure-assessment', /incomplete/i],
+  ] as const
+  for (const [outcome, text] of outcomes) {
+    const entries: ProgressEvent[] = [
+      { ...event(1, 'working', 'review'), detail: {
+        source: 'controller', outcome: 'unknown-failure-assessing',
+      } },
+      { ...event(2, 'finished', null, [], 'blocked'), detail: {
+        source: 'controller', outcome,
+      } },
+    ]
+    const steps = projectActivity(entries, 'blocked')
+    assert.equal(steps[0]?.kind, 'report')
+    assert.equal(steps[0]?.state, 'proposed')
+    assert.match(activityTitle(steps[0]!), /read-only unfamiliar-failure assessment/i)
+    assert.match(activityTitle(steps[1]!), text)
+    assert.equal(steps.some(step => step.state === 'verified'), false)
+  }
+})
+
 test('the real blocked World foundations timeline renders verified stages and files before the failure', () => {
   const events = [
     event(1, 'started'),

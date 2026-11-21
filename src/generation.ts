@@ -8,6 +8,8 @@ import { isDeepStrictEqual } from "node:util";
 import { load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
+import { diagnoseUnknownCompletion, unknownCompletionCase,
+  unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import { ProtocolExhaustedError } from "./response-contract-recovery.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
@@ -182,6 +184,7 @@ export const GenerationInputSchema = z.object({
 
 const Channels = Annotation.Root({
   recovery: Annotation<AdaptiveRecovery | null>({ reducer: (_, next) => next, default: () => null }),
+  unknownRecovery: Annotation<UnknownRecoveryStatus | null>({ reducer: (_, next) => next, default: () => null }),
   request: Annotation<GenerationRequest>(),
   cursor: Annotation<number>({ reducer: (_, next) => next, default: () => 0 }),
   completedStages: Annotation<GenerationEvidence[]>({ reducer: (_, next) => next, default: () => [] }),
@@ -1059,6 +1062,75 @@ export function createGenerationGraph(
       } catch (error) { return blocked(error); }
     })
     .addNode("assess_recovery", async s => {
+      if (s.unknownRecovery?.phase === "assessment") {
+        const target = s.unknownRecovery.case;
+        if (!target) return blocked(Error("Unknown recovery has no authenticated failure case."));
+        const job = await openJob(s);
+        const verify = () => withStoryJobLock(job, "unknown-recovery-proof", async () => {
+          clean(job);
+          if (await trustedHead(job) !== target.sourceSha ||
+              target.jobId !== job.jobId || target.threadId !== job.threadId ||
+              target.turnDigest !== (s.request.turnPlanDigest ?? null) ||
+              target.planVersion !== s.planVersion)
+            throw Error("Unfamiliar failure no longer has trusted Turn/source identity.");
+          await checkPlan(job, s.request, s.planVersion);
+          const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
+            point.eligible && point.commitSha === target.sourceSha &&
+            point.workItem === target.checkpoint &&
+            (point.semanticReview === "passed" || point.semanticReview === "not-required"));
+          if (!checkpoint || !s.inventory || !authorizedInventoryComplete(s.inventory))
+            throw Error("Unfamiliar failure lacks an eligible verified/reviewed checkpoint.");
+          const current = await inspectJobReport(s.request);
+          const same = unknownCompletionCase({
+            jobId: job.jobId, threadId: job.threadId,
+            turnDigest: s.request.turnPlanDigest ?? null, planVersion: s.planVersion!,
+            sourceSha: target.sourceSha, checkpoint: checkpoint.workItem,
+            reportStatus: current.generation.status,
+            scopeStatus: current.generation.scopeFulfillment,
+            planStatus: current.generation.planFulfillment.status,
+          });
+          if (same.signature !== target.signature || current.generation.status === "completed" ||
+              reviewEscalation(current, s.inventory))
+            throw Error("Unfamiliar failure state changed or has a deterministic recovery route.");
+        });
+        let proofTrusted = false;
+        try {
+          const control = await readJobControl(job);
+          if (control === "cancelled") return { status: "cancelled" as const,
+            reason: "Author cancelled; diagnostic model work was not started." };
+          if (control === "paused") return { status: "paused" as const,
+            reason: "Author pause precedes unfamiliar-failure diagnosis." };
+          await verify();
+          proofTrusted = true;
+          const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
+          const diagnosis = await withStoryJobLock(job, "generation-unknown-diagnostic", () =>
+            diagnoseUnknownCompletion(job, target,
+              s.request.provider ?? policy.profile.provider,
+              s.request.model ?? policy.profile.model));
+          proofTrusted = false;
+          await verify();
+          proofTrusted = true;
+          return { status: "blocked" as const,
+            reason: "Operator intervention required: unfamiliar generation completion check " +
+              "remains unresolved; the read-only diagnosis cannot waive verification or dispatch work.",
+            unknownRecovery: { case: target, phase: unknownDiagnosisDisposition(diagnosis),
+              recommendation: diagnosis.action, advisoryCategory: diagnosis.category } };
+        } catch (error) {
+          const stop = blocked(error);
+          const resourceLimit = (error as Error)?.name === "PiBudgetPause";
+          const unsafe = !proofTrusted ||
+            (error as { code?: string })?.code === "integrity-blocked";
+          return { ...stop, unknownRecovery: {
+            case: target, phase: resourceLimit ? "resource-limit" as const :
+              unsafe ? "unsafe-evidence" as const : "operator-intervention" as const },
+            reason: resourceLimit ? stop.reason :
+              unsafe
+                ? "Unsafe or incomplete unfamiliar-failure evidence; operator inspection is required. " +
+                  "Do not repeat the diagnostic against unchanged proof."
+                : "Operator intervention required: the bounded, read-only unknown-failure diagnosis " +
+                  "did not produce a verified recommendation. Do not replay the model or writer." };
+        }
+      }
       const r = s.recovery;
       if (!r || r.phase !== "assessment" || r.operation !== "adaptive-planner" ||
           r.failedPhase !== "completed-response" || r.planVersion !== s.planVersion ||
@@ -1436,6 +1508,39 @@ export function createGenerationGraph(
           const report = await inspectJobReport(s.request);
           const complete = report.generation.status === "completed" && authorizedInventoryComplete(s.inventory);
           const escalation = complete ? null : reviewEscalation(report, s.inventory);
+          // A trusted but unexplained final failure has ONE advisory diagnosis
+          // opportunity. Known incomplete assignments, required author decisions,
+          // resource pauses and unverified writes never reach the model.
+          if (!complete && !escalation && !s.request.fixture && s.planVersion &&
+              authorizedInventoryComplete(s.inventory) &&
+              !report.evidence.deferredIdeas.scopedOutstanding.length) {
+            const headSha = await trustedHead(job);
+            const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
+              point.eligible && point.commitSha === headSha &&
+              (point.semanticReview === "passed" || point.semanticReview === "not-required"));
+            if (!checkpoint) return { status: "blocked" as const,
+              reason: "Unsafe completion evidence: no eligible verified/reviewed checkpoint; operator inspection required.",
+              unknownRecovery: { case: null, phase: "unsafe-evidence" as const } };
+            const target = unknownCompletionCase({
+              jobId: job.jobId, threadId: job.threadId,
+              turnDigest: s.request.turnPlanDigest ?? null, planVersion: s.planVersion,
+              sourceSha: headSha, checkpoint: checkpoint.workItem,
+              reportStatus: report.generation.status,
+              scopeStatus: report.generation.scopeFulfillment,
+              planStatus: report.generation.planFulfillment.status,
+            });
+            if (s.unknownRecovery?.case?.signature === target.signature) {
+              return ["assessment", "resource-limit"].includes(s.unknownRecovery.phase)
+                ? { status: "running" as const, reason: "Assessing the original unfamiliar failure.",
+                    unknownRecovery: { ...s.unknownRecovery, phase: "assessment" as const } }
+                : { status: "blocked" as const,
+                    reason: "Unchanged unfamiliar failure has already received its one-time diagnosis or unsafe stop. Operator intervention is required.",
+                    unknownRecovery: s.unknownRecovery };
+            }
+            return { status: "running" as const,
+              reason: "Assessing an unfamiliar final verification failure without Story write authority.",
+              unknownRecovery: { case: target, phase: "assessment" as const } };
+          }
           const details = s.inventory?.items.filter(i => i.status !== "verified")
             .map(i => i.stage === "review" ? i.blockingReason ?? "Scope remains unverified" :
               `${i.id}: ${i.blockingReason ?? "Unresolved dependencies"}`).join("; ");
@@ -1446,6 +1551,7 @@ export function createGenerationGraph(
             // Needing a *proposal* is blocked; only a real outstanding author
             // approval interrupt or execution control may report paused.
             status: complete ? "completed" as const : "blocked" as const,
+            ...(complete ? { unknownRecovery: null } : {}),
             escalation,
             reason: complete ? null : [details || s.completedStages.at(-1)?.status ||
               "Scope remains unverified",
@@ -1475,7 +1581,8 @@ export function createGenerationGraph(
       s.result ? "verify_committed_work" : "specialist_dispatch")
     .addConditionalEdges("verify_committed_work", s => s.status !== "running" ? END :
       s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake")
-    .addEdge("completion_decision", END)
+    .addConditionalEdges("completion_decision", s => s.status === "running" &&
+      s.unknownRecovery?.phase === "assessment" ? "assess_recovery" : END, ["assess_recovery", END])
     .compile({ checkpointer });
 }
 
@@ -1500,7 +1607,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model,
           orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-legacy" : "explicit" };
-        state = { request, recovery: null, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
+        state = { request, recovery: null, unknownRecovery: null, cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
@@ -1634,7 +1741,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           visible.ideaTask ? "idea-integration" : visible.active?.stage ??
           (visible.inventory ? nextExecutionItem(visible.inventory,
             visible.pendingOrder ?? visible.orchestratorOrder ?? undefined)?.stage : undefined) ?? null,
-        recovery: visible.recovery ?? null, correctiveAssignment,
+        recovery: visible.recovery ?? null, unknownRecovery: visible.unknownRecovery ?? null, correctiveAssignment,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints,
