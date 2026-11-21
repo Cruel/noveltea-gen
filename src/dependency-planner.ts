@@ -60,8 +60,9 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
   if (entry.phase !== "reported") throw Error("Interrupted dependency planner; preserve transcript, do not replay.");
   const turn = await dependencyTurn(job);
   if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Stale dependency planning source.");
-  const reviewRequest = entry.reviewSourceSha && plan.reviewRequests?.find(r =>
-    r.sourceSha === entry.reviewSourceSha);
+  const reviewRequest = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
+    r.sourceSha === entry.reviewSourceSha) : undefined;
+  const reviewCharacter = reviewRequest?.classification === "new-full-story-record";
   if (entry.reviewSourceSha && (!reviewRequest ||
       reviewRequest.action !== "controller-amendment-required"))
     throw Error("Review dependency planner lost its sealed controller request.");
@@ -108,7 +109,7 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       "A source-bound addition to a canonical Event's existing inspection step may establish actual " +
       "knowledge through a typed knowledge effect; do not conflate that bounded on-screen " +
       "causal correction with inventing an off-page occurrence or granting new-record authority. " +
-      (reviewRequest
+      (reviewCharacter
         ? "This is a SEALED negative review for a missing central Character under the existing approved " +
           "whole-Story objective, not a request to widen scope. This is an OMISSION " +
           "finding: the named Character may have NO record or mention in the " +
@@ -180,14 +181,14 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
           .replace(/\n```$/, ""),
       ) as DependencyProposal;
     let proposal = lastJson();
-    if (proposal && needsDependencyProposalCorrection(proposal, entry, !!reviewRequest)) {
+    if (proposal && needsDependencyProposalCorrection(proposal, entry, reviewCharacter)) {
       await promptStorySpecialist(
         session,
         "Your proposal included an incorrect " +
           "source identity, altered missing-work outcome or invalid target ID. " +
           "Reassess the report and return one fresh JSON proposal only if necessary. " +
           "Copy missing EXACTLY as outcome, choose target as a " +
-          (reviewRequest
+          (reviewCharacter
             ? "new typed character.slug ID with a title"
             : "preexisting typed canonical ID from the affected IDs") +
           " (NEVER a .md path), and put your causal reasoning in reason. " +

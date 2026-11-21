@@ -14,11 +14,20 @@ import { deriveReviewDependencyRequest, type EventCharacterRepairGrant,
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
-import { authorizeDependency, authorizeReviewCharacterDependency, parseDependencyReport,
+import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, parseDependencyReport,
   type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
   type DependencyAmendment } from "./dependency-amendments.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { EditorialVerdict } from "./narrative-review-specialist.js";
+
+/** A protected other-owner source requires an explicit author decision, not
+ * a speculative controller dependency writer. */
+export class ProtectedCrossOwnerPrerequisiteError extends Error {
+  readonly name = "ProtectedCrossOwnerPrerequisiteError";
+  constructor(readonly sourcePath: string) {
+    super("Supporting prerequisite " + sourcePath + " has protected decisions; request explicit author authorization.");
+  }
+}
 
 export const dependencyDigest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export const sourceDigest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -90,12 +99,23 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
       if (!point?.assurance || !original || request.turnDigest !== turn.digest ||
           request.basePlanVersion !== point.planVersion)
         throw Error("Review dependency lost its original checkpoint, plan version or Turn assignment.");
+      if (request.otherOwnerPath)
+        dependencyGit(job, "merge-base", "--is-ancestor", turn.source.verifiedSha, point.commitSha);
       const sealed = await inspectCheckpointReview(job, point);
+      const repair = request.otherOwnerPath
+        ? await (await import("./rejected-review-repair.js")).inspectRejectedRepair(job, request.sourceSha)
+        : null;
+      if (repair && (repair.phase !== "needs-plan" ||
+          repair.outOfAuthority?.path !== request.otherOwnerPath ||
+          repair.outOfAuthority?.sourceSha !== request.sourceSha ||
+          repair.outOfAuthority?.reviewDigest !== request.reviewDigest))
+        throw Error("Cross-specialist report lost its original sealed no-write repair.");
       if (sealed?.status !== "failed" || !sealed.result ||
           JSON.stringify(deriveReviewDependencyRequest({ assurance: point.assurance,
             review: sealed.result, original, turn,
             planVersion: request.basePlanVersion,
-            originWorkItem: point.workItem })) !== JSON.stringify(request))
+            originWorkItem: point.workItem,
+            ...(repair ? { otherOwnerPath: repair.outOfAuthority!.path } : {}) })) !== JSON.stringify(request))
         throw Error("Review dependency differs from immutable source, ownership or scope.");
     }
   }
@@ -112,7 +132,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
       if (!review || review.turnDigest !== entry.report.turnDigest ||
           review.originalAssignmentId !== entry.report.assignmentId ||
           review.sourceSha !== entry.report.sourceSha ||
-          review.classification !== "new-full-story-record" ||
+          !["new-full-story-record", "other-owner"].includes(review.classification) ||
           review.action !== "controller-amendment-required" ||
           entry.fixture)
         throw Error("Supporting review-dependency report is not linked to the sealed source.");
@@ -271,10 +291,11 @@ export async function registerReviewDependency(
 ) {
   const foundations = request.originalWorkItem === "character-foundations";
   const event = /^event-[a-z][a-z0-9-]*$/.test(request.originalWorkItem);
-  if (request.classification !== "new-full-story-record" ||
+  const existingOwner = request.classification === "other-owner" && !!request.otherOwnerPath;
+  if (!["new-full-story-record", "other-owner"].includes(request.classification) ||
       request.action !== "controller-amendment-required" ||
       request.findings.length !== 1 ||
-      !(foundations && /^arcs\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path) ||
+      !(existingOwner || foundations && /^arcs\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path) ||
         event && /^events\/[a-z][a-z0-9-]*\.md$/.test(request.findings[0]!.path)))
     throw Error("Review dependency cannot be safely reduced to one scoped Character prerequisite.");
   const saved = await inspectDependencyPlan(job);
@@ -301,10 +322,10 @@ export async function registerReviewDependency(
   if (head !== request.sourceSha)
     throw Error("New review dependency requires its original negative checkpoint HEAD.");
   const original = await dependencyTurn(job);
-  if (!original.objective || original.kind !== "full-story" ||
+  if (!original.objective || (!existingOwner && original.kind !== "full-story") ||
       original.digest !== request.turnDigest)
     throw Error("Review dependency lost the whole-Story objective.");
-  if (event) {
+  if (event && !existingOwner) {
     // Reviewer prose cannot convert an invented Event into a genuine
     // prerequisite. Authenticate the original committed Event writer and
     // Pi session BEFORE any new Character path is allocated.
@@ -336,30 +357,38 @@ export async function registerReviewDependency(
       report.protection.changes?.length || report.protection.warnings?.length)
     throw Error("Review dependency requires a clean native-verifiable canonical source.");
   const finding = request.findings[0]!;
-  const sourceRecord = report.records.find(r => r.path === finding.path &&
-    r.metadata.type === (foundations ? "arc" : "event") &&
+  const sourceRecord = report.records.find(r => r.path === (existingOwner ? request.otherOwnerPath : finding.path) &&
+    (existingOwner || r.metadata.type === (foundations ? "arc" : "event")) &&
     r.metadata.status !== "superseded");
   if (!sourceRecord ||
-      !(foundations ? /^arc\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) :
+      !(existingOwner ? !!original.assignments.find(a => a.id !== request.originalAssignmentId &&
+          a.authority.existingPaths.includes(sourceRecord.path)) :
+        foundations ? /^arc\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) :
         /^event\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) &&
         Array.isArray(sourceRecord.metadata.participants) &&
         new Set(sourceRecord.metadata.participants).size ===
           sourceRecord.metadata.participants.length))
     throw Error("Review dependency cited source lacks verified canonical type, participants or ID.");
-  const file = join(job.worktreeStoryRoot, finding.path);
+  if (existingOwner && sourceRecord.metadata.decisions !== undefined &&
+      (!Array.isArray(sourceRecord.metadata.decisions) || sourceRecord.metadata.decisions.length))
+    throw new ProtectedCrossOwnerPrerequisiteError(sourceRecord.path);
+  const file = join(job.worktreeStoryRoot, sourceRecord.path);
   if (await realpath(file) !== file)
     throw Error("Review dependency source is symlinked.");
   const content = await readFile(file, "utf8");
-  const line = content.split(/\r?\n/)[finding.line - 1];
+  const line = existingOwner ? content.split(/\r?\n/).find(x => x.trim()) :
+    content.split(/\r?\n/)[finding.line - 1];
   if (!line?.trim()) throw Error("Review dependency lost its exact cited source line.");
-  const obligation = original.objective.obligations.find(x => /\bcharacters\b/i.test(x));
-  if (!obligation) throw Error("Original approved Turn has no Character delivery obligation.");
+  const obligation = existingOwner ? original.objective.obligations[0] :
+    original.objective.obligations.find(x => /\bcharacters\b/i.test(x));
+  if (!obligation) throw Error("Original approved Turn has no relevant prerequisite obligation.");
   const reportValue: DependencyReport = {
     sourceSha: head, turnDigest: request.turnDigest,
     assignmentId: request.originalAssignmentId, obligation,
     missing: finding.requiredCorrection, affectedIds: [sourceRecord.metadata.id],
-    sources: [{ path: finding.path, sha256: sourceDigest(content), quote: line.trim() }],
-    likelySpecialist: "nt-character-development", authorDecisionRequired: false,
+    sources: [{ path: sourceRecord.path, sha256: sourceDigest(content), quote: line.trim() }],
+    likelySpecialist: existingOwner ? (await import("./focused-specialist.js")).focusedSpecialist(sourceRecord.metadata.id) :
+      "nt-character-development", authorDecisionRequired: false,
   };
   const { plan, entry } = await recordDependency(job, reportValue, false);
   if (entry.reviewSourceSha && entry.reviewSourceSha !== request.sourceSha)
@@ -418,9 +447,13 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
   }
   const priorAmendments = plan.entries.filter(e => e !== entry && e.amendment)
     .map(e => e.amendment!.assignment);
-  const request = entry.reviewSourceSha && plan.reviewRequests?.find(r =>
-    r.sourceSha === entry.reviewSourceSha);
-  const amendment = request
+  const request = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
+    r.sourceSha === entry.reviewSourceSha) : undefined;
+  const amendment = request?.classification === "other-owner"
+    ? authorizeReviewOtherOwnerDependency({ plan: turn, head, request,
+        proposal, reportDigest: entry.reportDigest, records: report.records,
+        version: plan.version, priorAmendments })
+    : request
     ? authorizeReviewCharacterDependency({ plan: turn, head, request,
         proposal: proposal as ReviewCharacterProposal,
         reportDigest: entry.reportDigest, records: report.records, version: plan.version,

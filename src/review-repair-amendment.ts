@@ -78,6 +78,8 @@ export interface ReviewDependencyRequest {
   originalWorkItem: string;
   findings: Array<ReviewRepairObligation & { line: number }>;
   recordTypeHint: string | null;
+  /** A sealed no-write report from the original repair session, never a path grant. */
+  otherOwnerPath?: string;
   /** Digest of the unchanged, exact original objective and assignment ownership.
    * No newPaths, role, or target is authorized by this request. */
   digest: string;
@@ -109,6 +111,8 @@ export function deriveReviewDependencyRequest(input: {
   planVersion: number;
   originWorkItem: string;
   eventMilestone?: EventMilestoneRepairGrant;
+  /** Only an authenticated needs-plan repair receipt may supply this path. */
+  otherOwnerPath?: string;
 }): ReviewDependencyRequest {
   const { assurance, review, original, turn } = input;
   const source = { jobId: assurance.jobId, commitSha: assurance.commitSha,
@@ -118,14 +122,14 @@ export function deriveReviewDependencyRequest(input: {
   if (review.status !== "failed" || !review.findings.length ||
       JSON.stringify(review.source) !== JSON.stringify(source) ||
       turn.digest !== assurance.turnDigest ||
-      turn.source.verifiedSha !== assurance.baseSha ||
+      (!input.otherOwnerPath && turn.source.verifiedSha !== assurance.baseSha) ||
       original.id !== assurance.assignmentId || hash(original) !== assurance.assignmentDigest ||
       JSON.stringify(turn.assignments.find(a => a.id === original.id)) !== JSON.stringify(original) ||
       !turn.objective || !turn.contract?.scope ||
       !Number.isSafeInteger(input.planVersion) || input.planVersion < 1 ||
       !assurance.changedPaths.length ||
       assurance.changedPaths.some(path => !canonicalPath.test(path)) ||
-      !reviewNeedsDependency(assurance, review, input.originWorkItem, input.eventMilestone))
+      !(input.otherOwnerPath || reviewNeedsDependency(assurance, review, input.originWorkItem, input.eventMilestone)))
     throw Error("Review dependency request lacks sealed source, assignment, objective or out-of-lease evidence.");
 
   const findings = review.findings.map(f => {
@@ -143,6 +147,14 @@ export function deriveReviewDependencyRequest(input: {
     return { path: f.path, line: f.line!, kind: f.kind ?? "other",
       defect: f.message, requiredCorrection: f.requiredCorrection, affectedPaths: [...affectedPaths] };
   });
+  const ownerPath = input.otherOwnerPath;
+  const citedOtherOwner = ownerPath && findings.some(f => f.affectedPaths.includes(ownerPath));
+  const owners = ownerPath ? turn.assignments.filter(a => a.id !== original.id &&
+    (a.authority.existingPaths.includes(ownerPath) || a.authority.newPaths?.includes(ownerPath))) : [];
+  if (ownerPath && (!canonicalPath.test(ownerPath) || !citedOtherOwner ||
+      assurance.changedPaths.includes(ownerPath) || owners.length !== 1 ||
+      owners[0]!.authority.recordTypes.length === 0))
+    throw Error("Cross-specialist prerequisite has no unambiguous authenticated other-owner source.");
   const missingCharacter = findings.some(f => f.kind === "missing-requirement" &&
     /\bcharacter\b/i.test(f.defect + " " + f.requiredCorrection) &&
     /\b(?:missing|create|new|profile|record)\b/i.test(f.defect + " " + f.requiredCorrection));
@@ -158,7 +170,8 @@ export function deriveReviewDependencyRequest(input: {
     (foundationsCharacter || eventCharacter);
   // A reviewer cannot authorize changing a protected or author-owned record.
   // Even a genuine Event/Milestone correction needs its own exact field grant.
-  const protectedSource = findings.some(f =>
+  const protectedSource = !!ownerPath && /^(?:arcs|milestones|narrative-positions|creative-direction)\//.test(ownerPath) ||
+    findings.some(f =>
     (/^(?:milestones|narrative-positions|creative-direction)\//.test(f.path) &&
       f.path !== input.eventMilestone?.path) ||
     /\b(?:protected decision|author decision|retcon|author approval)\b/i.test(
@@ -170,7 +183,7 @@ export function deriveReviewDependencyRequest(input: {
       (a.authority.existingPaths.includes(path) || a.authority.newPaths?.includes(path)))));
   const classification: ReviewDependencyRequest["classification"] =
     protectedSource || missingCharacter && !newFullStoryRecord
-      ? "scope-or-protected" : newFullStoryRecord ? "new-full-story-record"
+      ? "scope-or-protected" : ownerPath ? "other-owner" : newFullStoryRecord ? "new-full-story-record"
         : otherOwner ? "other-owner" : "scope-or-protected";
   const body = {
     version: 1 as const, kind: "review-dependency" as const, classification,
@@ -182,6 +195,7 @@ export function deriveReviewDependencyRequest(input: {
     originalAssignmentId: original.id, originalAssignmentDigest: hash(original),
     originalWorkItem: input.originWorkItem, findings,
     recordTypeHint: missingCharacter ? "character" : null,
+    ...(ownerPath ? { otherOwnerPath: ownerPath } : {}),
   };
   return { ...body, digest: hash(body) };
 }

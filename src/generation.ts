@@ -736,6 +736,103 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
         }
         if (progress.next === "steering-boundary")
           return { reason: REPAIR_STEERING_BOUNDARY };
+        if (progress.next === "controller-replan" && progress.state.outOfAuthority) {
+          try {
+            const source = await (await import("./checkpoint-assurance.js")).inspectCheckpointReview(job, point);
+            const turn = await readTurnEvidence(job, s.request.contract, s.request.task,
+              s.request.turnPlanDigest);
+            const original = turn?.assignments.find(a => a.id === point.assurance?.assignmentId);
+            if (source?.status !== "failed" || !source.result || !point.assurance ||
+                !original || !turn || !s.request.turnPlanDigest)
+              throw Error("Cross-owner correction lacks the original reviewed Turn and assignment.");
+            // A later reviewed Event is a descendant, not necessarily the
+            // immediate child, of this Turn's original source. Verify its
+            // ancestry from Git before admitting the cross-owner source.
+            dependencyGit(job, "merge-base", "--is-ancestor",
+              turn.source.verifiedSha, point.commitSha);
+            const { deriveReviewDependencyRequest } = await import("./review-repair-amendment.js");
+            const request = deriveReviewDependencyRequest({
+              assurance: point.assurance, review: source.result, original, turn,
+              planVersion: point.planVersion!, originWorkItem: point.workItem,
+              otherOwnerPath: progress.state.outOfAuthority.path,
+            });
+            if (request.action !== "controller-amendment-required" ||
+                request.classification !== "other-owner")
+              return { status: "blocked", reason: "Protected or unapproved prerequisite requires " +
+                "an explicit author-approved source-bound amendment; no unrelated writer may dispatch.",
+                escalation: {
+                  kind: "protected-approval" as const, requiresTrustedApproval: true,
+                  sources: request.findings.map(f => ({ source: f.path,
+                    message: f.defect, repair: f.requiredCorrection })),
+                  action: "Obtain explicit author authority for the protected objective or scope change.",
+                } };
+            const { recordReviewDependency } = await import("./dependency-state.js");
+            const { advanceReviewDependency } = await import("./dependency-work.js");
+            const { settleOtherOwnerPrerequisite } = await import("./review-other-owner-controller.js");
+            await settleOtherOwnerPrerequisite({
+              admit: async () => {
+                await withStoryJobLock(job, "other-owner-prerequisite-admission", () =>
+                  recordReviewDependency(job, request));
+              },
+              support: () => advanceReviewDependency({
+                story: s.request.story, job: s.request.job, task: s.request.task,
+                contract: s.request.contract, skillsSource: s.request.skillsSource,
+                validatorSource: s.request.validatorSource, provider: s.request.provider,
+                model: s.request.model, turnPlanDigest: request.turnDigest, request,
+              }),
+              independentlyCovered: async () => {
+                const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(point => point.eligible);
+                const reviewed = await resolvedCheckpointReviews(job, checkpoints);
+                return reviewed.get(request.sourceSha) === "not-required";
+              },
+            });
+            // The corrected upstream source may have been consumed by earlier
+            // already-reviewed specialists. The existing selective reviewer
+            // rechecks only impacted/unknown consumers and carries proven
+            // independent checkpoints forward without replaying their writers.
+            const { revalidateOtherOwnerPrerequisite } = await import("./review-other-owner-revalidation.js");
+            const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
+            await withStoryJobLock(job, "other-owner-dependent-revalidation", () =>
+              revalidateOtherOwnerPrerequisite({
+                job, request, inventory: s.inventory ?? undefined,
+                contract: s.request.contract, task: s.request.task,
+                provider: s.request.provider ?? policy.profile.provider,
+                model: s.request.model ?? policy.profile.model,
+                skillsSource: s.request.skillsSource,
+                validatorSource: s.request.validatorSource,
+              }));
+            if (s.result.status === "review-handoff") {
+              const next = s.active.stage === "foundations" ? "character-foundations" :
+                ["interactive", "choice", "puzzle"].includes(s.active.stage) && s.active.milestone
+                  ? "interactive-" + (s.active.stage === "choice" ? "choice" : "puzzle") +
+                    "-" + s.active.milestone.slice(10) : null;
+              if (!next) throw Error("Cross-owner review handoff has no original specialist.");
+              await assertNativeReviewDependencies(job, next);
+              return { result: null, escalation: null };
+            }
+            return { result: { ...s.result, headSha: await trustedHead(job) },
+              escalation: null };
+          } catch (error) {
+            if (error instanceof Error && error.name === "SpecialistChoiceRequiredError")
+              return { status: "paused", escalation: null,
+                reason: "The separately authorized supporting specialist is awaiting an authenticated Author Choice; the original negative review remains sealed." };
+            const { ProtectedCrossOwnerPrerequisiteError } = await import("./dependency-state.js");
+            const protectedChange = error instanceof ProtectedCrossOwnerPrerequisiteError;
+            return { status: "blocked",
+              reason: "Cross-owner prerequisite remains unresolved: " +
+                (error instanceof Error ? error.message : String(error)),
+              escalation: { kind: protectedChange ? "protected-approval" as const : "dependency-replan" as const,
+                requiresTrustedApproval: protectedChange,
+                sources: [{ source: progress.state.outOfAuthority.path,
+                  message: progress.state.failure ?? "Other-owner supporting work needed",
+                  repair: "controller-amendment" }],
+                action: protectedChange
+                  ? "Obtain the author\'s explicit approval of this exact protected decision before another specialist writes."
+                  : "Inspect the existing source-bound plan, specialist receipt and independent " +
+                    "review; reconcile interrupted effects without replaying a claimed writer.",
+              } };
+          }
+        }
         if (progress.next !== "completed") return {
           ...(progress.next === "controller-replan" ? { escalation: {
             kind: "dependency-replan" as const, requiresTrustedApproval: false,

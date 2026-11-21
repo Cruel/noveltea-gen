@@ -136,15 +136,17 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
  * independent read-only review must also verify the suspended original
  * Character Foundations obligation at the new source before the review gate
  * may regard the old failure as covered. */
-export async function advanceReviewCharacterDependency(input: {
+export async function advanceReviewDependency(input: {
   story: string; job: string; task: string; contract: FocusedWorkOptions["contract"];
   skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
   turnPlanDigest: string; request: ReviewDependencyRequest;
 }) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const request = input.request;
-  const eventSource = request.originalWorkItem.startsWith("event-");
-  if (request.classification !== "new-full-story-record" ||
+  const eventSource = request.classification === "new-full-story-record" &&
+    request.originalWorkItem.startsWith("event-");
+  const otherOwner = request.classification === "other-owner";
+  if (!["new-full-story-record", "other-owner"].includes(request.classification) ||
       request.action !== "controller-amendment-required" ||
       request.turnDigest !== input.turnPlanDigest)
     throw Error("Review-dependency execution requires an unchanged full-Story Character obligation.");
@@ -256,7 +258,13 @@ export async function advanceReviewCharacterDependency(input: {
     };
     const support: ReviewAssignment = {
       ...base, paths, specialistAssignments: [assignment],
-      turnGoal: eventSource
+      turnGoal: otherOwner
+        ? "Review ONLY the separately authorized existing other-owner record " +
+          request.otherOwnerPath + " against the cited original review obligation. " +
+          "Do not broaden the original author objective or change any other Story path. " +
+          "The originating specialist remains independently failed and must be reassessed " +
+          "at the new HEAD before it can count as completed."
+        : eventSource
         ? "Review ONLY the separately authorized new Character's grounded role in the " +
           "original Event source; that Event is READ-ONLY and still has a failed review. " +
           "The Event specialist, NOT this Character specialist, must later append the " +
@@ -302,13 +310,20 @@ export async function advanceReviewCharacterDependency(input: {
     const reassess: ReviewAssignment = {
       ...base, paths: [...new Set([...originalPoint.assurance.changedPaths, ...paths])].sort(),
       specialistAssignments: [original, assignment],
-      turnGoal: "Reassess ONLY the ORIGINAL independently failed Character Foundations " +
-        "assignment of the saved whole-Story Turn at the NEW Story HEAD. Verify the " +
-        "central missing inspector now has an appropriate Character profile and an exact " +
-        "Arc Character link, and all original Character/World continuity, motivations " +
-        "and honest knowledge remain intact. The previously negative review stays sealed; " +
-        "this is an independent successor judgment, not a rewrite. Downstream Events, " +
-        "interactive Choices and final prose have not yet been assigned.",
+      turnGoal: otherOwner
+        ? "Reassess ONLY the ORIGINAL independently failed specialist assignment at the " +
+          "new Story HEAD. Verify the sealed findings now have authentic source-visible " +
+          "support from the separately authorized other-owner correction, while all " +
+          "original obligations, continuity and protected decisions remain intact. " +
+          "The failed review is historical evidence and is never rewritten. " +
+          "Do not certify completion based on the prerequisite alone."
+        : "Reassess ONLY the ORIGINAL independently failed Character Foundations " +
+          "assignment of the saved whole-Story Turn at the NEW Story HEAD. Verify the " +
+          "central missing inspector now has an appropriate Character profile and an exact " +
+          "Arc Character link, and all original Character/World continuity, motivations " +
+          "and honest knowledge remain intact. The previously negative review stays sealed; " +
+          "this is an independent successor judgment, not a rewrite. Downstream Events, " +
+          "interactive Choices and final prose have not yet been assigned.",
       reassessment: { assignmentId: original.id, failedSourceSha: request.sourceSha,
         correctedHeadSha: head },
     };
@@ -327,3 +342,6 @@ export async function advanceReviewCharacterDependency(input: {
   return { status: eventSource ? "dependency-support-verified" as const :
     "dependency-verified" as const, sourceSha: request.sourceSha };
 }
+
+/** Compatibility for the original Character-only dependency route. */
+export const advanceReviewCharacterDependency = advanceReviewDependency;

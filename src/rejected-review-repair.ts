@@ -421,7 +421,10 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
     : previous?.planAmendment.eventMilestone &&
         current.assurance!.changedPaths.includes(previous.planAmendment.eventMilestone.path)
       ? previous.planAmendment.eventMilestone : undefined;
-  const eventCharacter = origin.workItem.startsWith("event-")
+  // A settled no-write cross-owner report is authenticated against its own
+  // original receipt. It must not inspect the dependency ledger while that
+  // same ledger is reauthenticating the report (cyclic reconstruction).
+  const eventCharacter = origin.workItem.startsWith("event-") && !state.outOfAuthority
     ? await inspectReviewEventSupport(job, previous?.rootFailureSha ?? sha)
     : null;
   const expectedAmendment = deriveReviewRepairAmendment({ assurance: current.assurance!,

@@ -413,9 +413,11 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         dependency.report.turnDigest !== input.turnPlanDigest))
       throw Error("Dependency assignment differs from the trusted Turn/target.");
     const reviewAuthority = dependency?.reviewSourceSha && dependency.amendment?.assignment;
+    const reviewRequest = dependency?.reviewSourceSha ?
+      (await inspectDependencyPlan(job))?.reviewRequests?.find(r => r.sourceSha === dependency.reviewSourceSha) : undefined;
     let reviewCreate: PlannedFocusCreate | undefined;
     let reviewArc: string | undefined;
-    if (reviewAuthority) {
+    if (reviewAuthority && reviewRequest?.classification === "new-full-story-record") {
       const grant = reviewAuthority.authority;
       const proposal = dependency!.proposal as ReviewCharacterProposal | undefined;
       const foundation = dependency!.reviewSourceSha &&
@@ -435,6 +437,16 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       reviewCreate = { id: input.target, path: grant.newPaths[0], title: proposal.title,
         references: [], dependsOn: [] };
       reviewArc = foundation ? grant.existingPaths[0] : undefined;
+    } else if (reviewAuthority) {
+      const grant = reviewAuthority.authority;
+      const exactPath = reviewRequest && reviewRequest.otherOwnerPath;
+      if (reviewRequest?.classification !== "other-owner" ||
+          reviewAuthority.specialist !== focusedSpecialist(input.target) ||
+          reviewAuthority.targets.length !== 1 || reviewAuthority.targets[0] !== input.target ||
+          !exactPath || JSON.stringify(grant.existingPaths) !== JSON.stringify([exactPath]) ||
+          JSON.stringify(grant.recordTypes) !== JSON.stringify([input.target.split(".")[0]]) ||
+          grant.mayCreate || grant.newPaths?.length)
+        throw Error("Other-owner repair lacks its exact existing-record grant.");
     }
     if (!dependency && !input.contract.scope.targets.includes(input.target))
       throw new Error("Focused target is outside the explicit completion contract.");
@@ -474,6 +486,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     const own = selection.selected.find(r => r.metadata.id === input.target);
     if (!own) throw new Error("Unknown focused target: " + input.target);
     // Shared supporting targets are authorized exactly once, with the first target.
+    if (reviewRequest?.classification === "other-owner" && own.path !== reviewRequest.otherOwnerPath)
+      throw Error("Other-owner source is not the selected native record.");
     const paths = [own.path, ...(reviewArc ? [reviewArc] :
       !dependency && input.target === input.contract.scope.targets[0] ? selection.selected
         .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();

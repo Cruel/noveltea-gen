@@ -198,6 +198,38 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
       continue;
     const source = byCommit.get(entry.reviewSourceSha);
     const request = dependencies?.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
+    if (request?.classification === "other-owner") {
+      const assignment = entry.amendment?.assignment;
+      const path = request.otherOwnerPath;
+      if (!source || source.semanticReview !== "failed" || !source.assurance ||
+          source.assurance.assignmentId !== request.originalAssignmentId ||
+          !path || entry.amendment?.sourceSha !== source.commitSha ||
+          entry.amendment?.resumes !== request.originalAssignmentId ||
+          !entry.originalReview || !entry.originalReviewerSession ||
+          JSON.stringify(assignment?.authority.existingPaths) !== JSON.stringify([path]) ||
+          assignment?.authority.newPaths?.length || assignment?.authority.mayCreate ||
+          entry.report.turnDigest !== request.turnDigest)
+        throw Error("Other-owner support cannot cover an unrelated negative checkpoint.");
+      const { dependencyGit } = await import("./dependency-state.js");
+      const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items",
+        assignment!.id + ".json"), "utf8")) as {
+        phase: string; expectedHead: string; commitSha: string;
+        workItemId: string; jobId: string; assignmentDigest: string;
+        validation?: { status: string; baseSha: string; validatorVersion: string };
+      };
+      const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+      if (proof.phase !== "committed" || proof.expectedHead !== source.commitSha ||
+          proof.commitSha !== entry.commitSha || proof.workItemId !== assignment!.id ||
+          proof.jobId !== job.jobId || proof.assignmentDigest !== request.turnDigest ||
+          proof.validation?.status !== "passed" ||
+          proof.validation?.baseSha !== source.commitSha ||
+          proof.validation?.validatorVersion !== job.validatorVersion ||
+          dependencyGit(job, "rev-parse", entry.commitSha + "^") !== source.commitSha ||
+          dependencyGit(job, "diff", "--name-only", source.commitSha, entry.commitSha) !== prefix + path)
+        throw Error("Other-owner support lacks an exact validated single-path specialist commit.");
+      covered.set(source.commitSha, "not-required");
+      continue;
+    }
     if (!source || source.semanticReview !== "failed" || !source.assurance ||
         !request || request.classification !== "new-full-story-record" ||
         source.assurance.assignmentId !== request.originalAssignmentId ||

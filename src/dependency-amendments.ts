@@ -152,6 +152,69 @@ export function authorizeReviewCharacterDependency(input: {
 /** Pure authorization policy. Inputs named records/sources are controller-read
  * canonical evidence at HEAD, never the model's own catalog or permission list.
  * Only existing, typed, directly connected records can be amended here. */
+/** A sealed no-write report may need a different existing owner. The exact
+ * path comes from the original Turn leases, native catalog and authenticated
+ * finding. Planner output never grants new paths or writes to protected canon. */
+export function authorizeReviewOtherOwnerDependency(input: {
+  plan: TurnEvidence; head: string; request: ReviewDependencyRequest;
+  proposal: DependencyProposal; reportDigest: string;
+  records: CanonicalScopeRecord[]; version: number;
+  priorAmendments?: TurnAssignmentEvidence[];
+}): DependencyAmendment {
+  const { plan, head, request, proposal, records } = input;
+  const owner = plan.assignments.find(a => a.id === request.originalAssignmentId);
+  const otherPath = request.otherOwnerPath;
+  const source = records.find(r => r.path === request.findings[0]?.path);
+  const target = records.find(r => r.path === otherPath);
+  const otherOwners = plan.assignments.filter(a => a.id !== owner?.id && !!otherPath &&
+    (a.authority.existingPaths.includes(otherPath) || a.authority.newPaths?.includes(otherPath)));
+  const other = otherOwners[0];
+  const connected = !!source && !!target && (
+    declaredCanonicalReferences(source).has(target.metadata.id) ||
+    declaredCanonicalReferences(target).has(source.metadata.id));
+  if (request.kind !== "review-dependency" || request.classification !== "other-owner" ||
+      request.action !== "controller-amendment-required" ||
+      !owner || !other || otherOwners.length !== 1 || !otherPath ||
+      !path.test(otherPath) || !target || !source || !connected ||
+      request.findings.length !== 1 ||
+      !request.findings[0]!.affectedPaths.includes(otherPath) ||
+      source.metadata.status === "superseded" || target.metadata.status === "superseded" ||
+      !other.authority.recordTypes.includes(target.metadata.type) ||
+      !other.authority.existingPaths.includes(otherPath) ||
+      target.metadata.id !== proposal.target ||
+      target.metadata.type !== proposal.target.split(".")[0] ||
+      !text(proposal.reason) || !text(proposal.outcome) ||
+      !keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason") ||
+      proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest ||
+      proposal.outcome !== request.findings[0]!.requiredCorrection ||
+      proposal.specialist !== focusedSpecialist(proposal.target) ||
+      proposal.specialist === owner.specialist ||
+      /^(?:arcs|milestones|narrative-positions|creative-direction)\//.test(otherPath) ||
+      target.metadata.decisions !== undefined &&
+        (!Array.isArray(target.metadata.decisions) || target.metadata.decisions.length > 0) ||
+      (input.priorAmendments ?? []).some(a => a.authority.existingPaths.includes(otherPath) ||
+        a.authority.newPaths?.includes(otherPath)) ||
+      request.sourceSha !== head || request.turnDigest !== plan.digest ||
+      sourceHash(plan.objective) !== request.objectiveDigest ||
+      sourceHash(plan.contract.scope) !== request.scopeDigest ||
+      sourceHash(plan.assignments) !== request.ownersDigest ||
+      sourceHash(owner) !== request.originalAssignmentDigest ||
+      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
+    throw Error("Cross-specialist prerequisite is not a proven in-scope, single-owner existing canonical correction.");
+  return {
+    beforeVersion: input.version, afterVersion: input.version + 1,
+    sourceSha: head, turnDigest: plan.digest, reportDigest: input.reportDigest,
+    reason: proposal.reason, objective: structuredClone(plan.objective),
+    resumes: owner.id,
+    assignment: { id: "dependency:" + input.version + ":" + target.metadata.id,
+      specialist: proposal.specialist, outcome: proposal.outcome,
+      targets: [target.metadata.id], dependsOn: [],
+      discovery: "canonical-story-read-only",
+      authority: { recordTypes: [target.metadata.type], existingPaths: [otherPath], mayCreate: false },
+    },
+  };
+}
+
 export function authorizeDependency(input: {
   plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
   proposal: DependencyProposal; records: CanonicalScopeRecord[];
