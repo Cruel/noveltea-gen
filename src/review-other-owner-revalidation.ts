@@ -9,6 +9,50 @@ import { dependencyDigest, dependencyGit, inspectDependencyPlan, dependencyTurn 
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { assertCompletedOtherOwnerRevalidation, revalidateAfterReviewedCorrection } from "./selective-revalidation-work.js";
 
+/** Review coverage is never inferred from the supporting commit alone. A
+ * completed, authenticated dependent-revalidation receipt is required. */
+export async function hasCompletedOtherOwnerDependentRevalidation(job: JobStartResult,
+  source: { baseSha: string; successorSha: string; turnDigest: string; path: string }): Promise<boolean> {
+  try {
+    await assertCompletedOtherOwnerRevalidation(job, source);
+    return true;
+  } catch { return false; }
+}
+
+/** Recover the gap between a verified other-owner supporting commit and
+ * dependent revalidation. This runs at the safe author-intake boundary BEFORE
+ * inventory reconciliation can grant downstream writer authority. Both the
+ * original failed checkpoint and the supporting commit remain immutable.
+ * An interrupted revalidation uses its existing receipt, never a new writer. */
+export async function settlePendingOtherOwnerRevalidations(input: {
+  job: JobStartResult; inventory: GenerationInventory | undefined;
+  contract: CompletionContract; task: string; provider: string; model: string;
+  skillsSource?: string; validatorSource?: string;
+}) {
+  const plan = await inspectDependencyPlan(input.job);
+  for (const request of plan?.reviewRequests ?? []) {
+    if (request.classification !== "other-owner") continue;
+    const entries = plan!.entries.filter(entry => entry.reviewSourceSha === request.sourceSha);
+    if (!entries.length) continue; // The supporting grant has not completed.
+    if (entries.length !== 1)
+      throw Error("Other-owner supporting receipt is not unique.");
+    const entry = entries[0]!;
+    // Work not yet reviewed by the supporting owner stays under the original
+    // dependency controller. Do not preempt its authorized work-item recovery.
+    if (entry.phase !== "verified") continue;
+    if (!entry.commitSha || !request.otherOwnerPath ||
+        entry.originalReview?.verdict !== "pass" || entry.review?.verdict !== "pass")
+      throw Error("Verified other-owner support lacks both independent reviews.");
+    const source = { baseSha: request.sourceSha, successorSha: entry.commitSha,
+      turnDigest: request.turnDigest, path: request.otherOwnerPath };
+    if (await hasCompletedOtherOwnerDependentRevalidation(input.job, source)) continue;
+    // Verification may only proceed through the same source-bound original
+    // revalidation receipt. Any corrupt or unsafe in-flight reviewer remains
+    // blocked by its own reconciliation checks.
+    await revalidateOtherOwnerPrerequisite({ ...input, request });
+  }
+}
+
 /** The final Turn verdict must never use an other-owner positive rereview
  * without the separately sealed dependent revalidation. An interrupted
  * reviewer can be resumed through its persisted workflow, not marked done. */

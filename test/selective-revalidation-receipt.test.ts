@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { assertCompletedSelectiveRevalidation, assertCompletedOtherOwnerRevalidation } from "../src/selective-revalidation-work.js";
+import { hasCompletedOtherOwnerDependentRevalidation } from "../src/review-other-owner-revalidation.js";
 import { planSelectiveRevalidation, originalInventorySnapshotDigest } from "../src/selective-revalidation.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { admitCausalRevalidationFinding } from "../src/repair-ledger.js";
@@ -150,6 +151,20 @@ test("#221: other-owner completed revalidation uses the same source-bound proof,
   f.save(f.state);
   writeFileSync(f.reviewerFile, f.transcript.replace("Accepted revised source", "Forged reviewer text"));
   await assert.rejects(() => assertCompletedOtherOwnerRevalidation(f.job, source), /transcript/i);
+});
+
+test("#221: supporting commit cannot cover the failed source before dependent revalidation completes", async t => {
+  const f = await fixture(t);
+  const source = { baseSha: sha("1"), successorSha: f.successorSha,
+    turnDigest: f.turnDigest, path: "milestones/alpha.md" };
+  f.save({ ...f.state, state: "reviewing" });
+  assert.equal(await hasCompletedOtherOwnerDependentRevalidation(f.job, source), false,
+    "restart after supporting commit and two passing reviews must retain the downstream gate");
+  f.save(f.state);
+  assert.equal(await hasCompletedOtherOwnerDependentRevalidation(f.job, source), true);
+  f.save({ ...f.state, results: [] });
+  assert.equal(await hasCompletedOtherOwnerDependentRevalidation(f.job, source), false,
+    "partial reviewer results are not coverage even when the receipt says completed");
 });
 
 test("an incomplete, forged, stale, missing or interrupted reviewer never carries forward", async t => {

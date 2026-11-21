@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createAssistantMessageEventStream, type Model, type Provider, type AssistantMessage } from '@earendil-works/pi-ai';
 import { withJobModelRuntime } from '../src/model-runtime.js';
-import { configurePiPolicy } from '../src/job-pi-policy.js';
+import { configurePiPolicy, inspectPiPolicy } from '../src/job-pi-policy.js';
 import { withStoryJobLock } from '../src/job-lock.js';
 import type { JobStartResult } from '../src/job.js';
 import {
@@ -128,6 +128,8 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
     const first = await run();
     assert.equal(first.action, 'inspect-existing-receipt');
     assert.equal(calls, 1);
+    assert.equal((await inspectPiPolicy(job)).budget.modelCalls, 1,
+      'a successful first response must be metered without a correction');
     const second = await run();
     assert.deepEqual(second, first);
     assert.equal(calls, 1, 'same material evidence never creates a second model call');
@@ -168,6 +170,8 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
     const resumed = await runSecond();
     assert.equal(resumed.signature, secondCase.signature);
     assert.equal(calls, 3, 'original session receives only a format correction');
+    assert.equal((await inspectPiPolicy(secondJob)).budget.modelCalls, 2,
+      'both original and corrected calls remain in the same job ledger');
     assert.deepEqual(await runSecond(), resumed);
     assert.equal(calls, 3, 'accepted original transcript never receives another model call');
   } finally { rmSync(root, { recursive: true, force: true }); }

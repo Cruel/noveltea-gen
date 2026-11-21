@@ -315,7 +315,7 @@ export async function preflightPiAssignment(job: JobStartResult, step: string,
 
 /** Record the just-completed session without imposing a new budget gate after
  * edits. The next safe boundary will inspect its actual usage and pause. */
-async function recordPiSession(job: JobStartResult, sessionFile: string): Promise<void> {
+export async function recordPiSession(job: JobStartResult, sessionFile: string): Promise<void> {
   if (!sessionFile.startsWith(stateDir(job) + sep) || !existsSync(sessionFile) ||
       await realpath(sessionFile) !== sessionFile) {
     throw new Error("Cannot record missing or unsafe Pi session usage.");

@@ -30,17 +30,67 @@ export class AdaptiveRecoveryRequired extends Error {
 }
 const parse = (text: string): AdaptiveProposal => JSON.parse(text.trim()
   .replace(/^```(?:json)?\s*\n/i, "").replace(/\n```\s*$/, ""));
-const validate = (text: string) => {
+/** Only response *shape* is a format error. The trusted controller still
+ * owns all source, scope, dependency, and authorization decisions. */
+export function adaptiveResponseFailures(text: string): Array<{ path: string; expected: string }> {
   let p: AdaptiveProposal;
   try { p = parse(text); } catch { return [{ path: "$", expected: "one complete adaptive proposal JSON object" }]; }
   if (!p || typeof p !== "object" || Array.isArray(p)) return [{ path: "$", expected: "a proposal object" }];
-  return ["sourceSha", "turnDigest", "reason", "beforeVersion", "actions", "order"].flatMap(k => {
-    const value = p[k as keyof AdaptiveProposal];
-    const expected = ["actions", "order"].includes(k) ? "array" : k === "beforeVersion" ? "integer" : "string";
-    return (expected === "array" ? Array.isArray(value) : expected === "integer" ? Number.isInteger(value) : typeof value === "string")
-      ? [] : [{ path: "$." + k, expected }];
+  const errors: Array<{ path: string; expected: string }> = [];
+  const shape: Record<string, readonly string[]> = {
+    add: ["kind", "stage", "milestone", "dependsOn"],
+    split: ["kind", "item", "domains"],
+    depend: ["kind", "item", "needs"],
+    narrow: ["kind", "item", "sourcePath", "sourceHash", "outcome"],
+    omit: ["kind", "item"],
+  };
+  const check = (value: unknown, path: string, expected: string) => {
+    const valid = expected === "array" ? Array.isArray(value) :
+      expected === "integer" ? Number.isInteger(value) : typeof value === expected;
+    if (!valid) errors.push({ path, expected });
+    return valid;
+  };
+  for (const field of ["sourceSha", "turnDigest", "reason", "beforeVersion", "actions", "order"] as const) {
+    check(p[field], "$." + field,
+      field === "actions" || field === "order" ? "array" :
+      field === "beforeVersion" ? "integer" : "string");
+  }
+  if (Array.isArray(p.order)) p.order.forEach((id, index) =>
+    check(id, "$.order[" + index + "]", "string"));
+  if (Array.isArray(p.actions)) p.actions.forEach((action, index) => {
+    const path = "$.actions[" + index + "]";
+    if (!action || typeof action !== "object" || Array.isArray(action)) {
+      errors.push({ path, expected: "action object with a recognized kind" });
+      return;
+    }
+    const record = action as unknown as Record<string, unknown>;
+    const kind = record.kind;
+    if (typeof kind !== "string" || !(kind in shape)) {
+      errors.push({ path: path + ".kind", expected: "add|split|depend|narrow|omit" });
+      return;
+    }
+    const keys = shape[kind]!;
+    for (const key of keys) {
+      if (key === "kind") continue;
+      const expected = key === "dependsOn" || key === "domains" ? "array" : "string";
+      if (check(record[key], path + "." + key, expected) && expected === "array")
+        (record[key] as unknown[]).forEach((value, i) =>
+          check(value, path + "." + key + "[" + i + "]", "string"));
+    }
+    if (kind === "add" && typeof record.stage === "string" &&
+        !["event", "interactive", "composition"].includes(record.stage))
+      errors.push({ path: path + ".stage", expected: "event|interactive|composition" });
+    if (kind === "split" && Array.isArray(record.domains))
+      record.domains.forEach((domain, i) => {
+        if (typeof domain === "string" && !["choice", "puzzle"].includes(domain))
+          errors.push({ path: path + ".domains[" + i + "]", expected: "choice|puzzle" });
+      });
+    for (const key of Object.keys(record)) if (!keys.includes(key))
+      errors.push({ path: path + "." + key, expected: "no unknown fields" });
   });
-};
+  return errors;
+}
+const validate = adaptiveResponseFailures;
 async function transcript(job: JobStartResult, file: string) {
   if (dirname(file) !== join(job.stateDir, "adaptive-planning-sessions") || !file.endsWith(".jsonl") ||
       await realpath(file) !== file) throw Error("Unsafe adaptive recovery transcript");

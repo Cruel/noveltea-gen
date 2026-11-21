@@ -4,9 +4,11 @@
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 
-export type Operation = "scheduling" | "author-update-intake" | "idea-integration" | "idea-verification";
+export type Operation = "scheduling" | "adaptive-admission" | "author-update-intake" |
+  "idea-integration" | "idea-verification";
 export const operationChecks: Record<Operation, string> = {
   scheduling: "generation-scheduling.v1",
+  "adaptive-admission": "adaptive-admission.v1",
   "author-update-intake": "author-update-intake.v1",
   "idea-integration": "idea-dispatch.v1",
   "idea-verification": "idea-placement-provenance.v1",
@@ -25,6 +27,9 @@ export interface GenerationOperationRecovery {
     reference: "generation-checkpoint" | "author-updates" | "generation-idea-dispatch";
     ideaId?: string; action?: "place" | "reassess"; signature?: string;
     priorHead?: string; resultStatus?: string;
+    /** A known verifier fix can expose a *new* admission failure, not
+     * another failure of the fixed response format contract. */
+    previousCheck?: string; previousCheckVersion?: number; previousSignature?: string;
   };
   reason: string;
   nextAction: string;
@@ -51,6 +56,8 @@ export async function assessGenerationOperation(input: {
     evidence: input.evidence, reason: input.reason,
     nextAction: safeAction === "continue-independent"
       ? "Keep the deferred idea outstanding. Continue only dependency-independent work from the same verified Story HEAD; reconsider placement when eligible source evidence changes."
+      : input.operation === "adaptive-admission"
+        ? "The original response passed its fixed format verifier but failed a distinct controller admission check. Inspect that new failure with the original fix proof; do not replay the planner."
       : input.operation === "author-update-intake"
         ? "Inspect the original author message and acknowledgement receipts. Reconcile that intake before any writer or scheduler replay."
         : input.operation === "idea-integration" || input.operation === "idea-verification"

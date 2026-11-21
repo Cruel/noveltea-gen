@@ -251,6 +251,11 @@ test("production start assesses thrown author-update intake and restart cannot r
   assert.deepEqual(resumed.operationRecovery, initial.operationRecovery);
   assert.equal(resumed.status, "blocked");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+  unlinkSync(join(folder, "broken.json"));
+  const repaired = f.cli(["generate", "resume"]);
+  assert.equal(repaired.operationRecovery?.phase, "continued",
+    "reconciled intake resumes the same Turn rather than being permanently fenced");
+  assert.equal(repaired.operationRecovery?.operation, "author-update-intake");
 });
 
 test("production resume assesses failed scheduling without repeating completed work", { skip: !available }, () => {
@@ -271,6 +276,14 @@ test("production resume assesses failed scheduling without repeating completed w
   assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
   assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  // Restore only the exact original controller schedule shape; no write
+  // operation is authorized merely because the earlier failure is gone.
+  writeFileSync(join(f.job.stateDir, "idea-placement-tasks.json"),
+    JSON.stringify({ version: 1, jobId: "single", history: [] }));
+  const repaired = f.cli(["generate", "resume"]);
+  assert.equal(repaired.operationRecovery?.phase, "continued",
+    "a restored read-only schedule receipt unblocks the same persisted Turn");
+  assert.equal(repaired.operationRecovery?.source.headSha, head);
 });
 
 test("unknown original idea dispatch is fenced on resume without restarting a writer", { skip: !available }, () => {

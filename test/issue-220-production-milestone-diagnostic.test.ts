@@ -81,7 +81,8 @@ function promptText(messages: readonly unknown[]) {
     !!item && typeof item === "object" && "role" in item && item.role === "user");
   return JSON.stringify(users.at(-1)?.content ?? "");
 }
-function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "continue" = "escalate"): Provider {
+function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "continue" = "escalate",
+  twoDistinctCases = false): Provider {
   let reviewerRound = 0;
   let writerRound = 0;
   const correctedKnowledge = "The guard can verify only the dated gate register entry";
@@ -119,7 +120,7 @@ function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "con
         findings: [], prior: [],
       }) }];
     } else if (isReview) {
-      const resolved = diagnosticAction === "continue" && reviewerRound >= 3;
+      const resolved = diagnosticAction === "continue" && reviewerRound >= (twoDistinctCases ? 5 : 3);
       const prior = Array.from({ length: reviewerRound }, (_, round) => ({
         round, findingIndex: 0, status: resolved ? "resolved" : "persisting",
         reason: resolved ? "The unsupported claim is replaced by verifiable knowledge" :
@@ -137,10 +138,18 @@ function scripted(calls: Call[], diagnosticAction: "escalate" | "replace" | "con
       }) }];
       reviewerRound++;
     } else {
-      const corrected = diagnosticAction === "continue" && writerRound >= 3;
+      const corrected = diagnosticAction === "continue" &&
+        writerRound >= (twoDistinctCases ? 5 : 3);
+      const distinctEvidence = twoDistinctCases && writerRound >= 3;
       writerRound++;
       content = [{ type: "text", text: JSON.stringify(corrected ? {
-        ...draft, events: [{ ...draft.events[0]!, knowledge: correctedKnowledge }],
+        ...draft, events: [{ ...draft.events[0]!,
+          purpose: distinctEvidence ? draft.events[0]!.purpose + " A second gate document is disputed." :
+            draft.events[0]!.purpose,
+          knowledge: correctedKnowledge }],
+      } : distinctEvidence ? {
+        ...draft, events: [{ ...draft.events[0]!,
+          purpose: draft.events[0]!.purpose + " A second gate document is disputed." }],
       } : draft) }];
     }
     const message: AssistantMessage = {
@@ -197,6 +206,7 @@ test("#220: three stalled Milestone reviews actually dispatch a fresh independen
   let jobId: string | undefined;
   let replacementJobId: string | undefined;
   let continuationJobId: string | undefined;
+  let secondCaseJobId: string | undefined;
   try {
     const app = join(tmp, "app"), state = join(tmp, "state"), cache = join(tmp, "cache"),
       socketDir = join(tmp, "controller");
@@ -435,11 +445,52 @@ The guard finds a dated register, but no evidence of a prior visit.
       call.lastRole === "toolResult").length, 1);
     assert.equal(execFileSync("git", ["status", "--porcelain"],
       { cwd: continuingJob.worktreeRoot, encoding: "utf8" }).trim(), "");
+
+    // The first CONTINUE produces a different still-negative evidence state.
+    // A second independent diagnosis also recommends CONTINUE; its writer
+    // turn must execute before unchanged-round stagnation is considered again.
+    secondCaseJobId = randomUUID();
+    const secondDb = new DatabaseSync(join(app, "studio.sqlite"));
+    try {
+      secondDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(secondCaseJobId, owner, "story", head, null);
+    } finally { secondDb.close(); }
+    const secondJob = await startStoryJob({
+      story, job: secondCaseJobId, worktreeCacheRoot: scoped,
+    });
+    const secondCalls: Call[] = [];
+    const secondRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    secondRuntime.registerNativeProvider(scripted(secondCalls, "continue", true));
+    await secondRuntime.refresh({ allowNetwork: false });
+    await configurePiPolicy(secondJob, {
+      version: 1, profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: 48 },
+    });
+    const secondRun = () => withJobModelRuntime(secondRuntime, () =>
+      withStoryJobLock(secondJob, "event-sample", () =>
+        ensureMilestoneBlueprint(secondJob, plan, assignment, snapshot,
+          model.provider, model.id, task, head, false)));
+    await secondRun();
+    const secondReceipt = JSON.parse(readFileSync(join(secondJob.stateDir,
+      "milestone-blueprints", "sample.json"), "utf8")) as {
+        phase: string; rounds: unknown[]; diagnostics: Array<{ diagnosis: { action: string } }>;
+      };
+    assert.equal(secondReceipt.phase, "approved");
+    assert.equal(secondReceipt.diagnostics.length, 2,
+      "two distinct stalled evidence states each receive one fresh diagnosis");
+    assert.deepEqual(secondReceipt.diagnostics.map(d => d.diagnosis.action),
+      ["continue", "continue"]);
+    assert.equal(secondReceipt.rounds.length, 6,
+      "the original writer receives its turn after the second diagnosis");
+    assert.equal(secondCalls.filter(call =>
+      call.prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC") &&
+      call.lastRole === "toolResult").length, 2);
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
+    if (controller && secondCaseJobId) await controller.dispose(secondCaseJobId);
     if (controller && continuationJobId) await controller.dispose(continuationJobId);
     if (controller && replacementJobId) await controller.dispose(replacementJobId);
     if (controller && jobId) await controller.dispose(jobId);

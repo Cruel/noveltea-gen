@@ -227,6 +227,15 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
           dependencyGit(job, "rev-parse", entry.commitSha + "^") !== source.commitSha ||
           dependencyGit(job, "diff", "--name-only", source.commitSha, entry.commitSha) !== prefix + path)
         throw Error("Other-owner support lacks an exact validated single-path specialist commit.");
+      // A supporting commit and two passing reviews are necessary, but not
+      // sufficient: dependent reviewers must also have sealed their result.
+      // A crash in between must keep the old failed checkpoint gating work.
+      const { hasCompletedOtherOwnerDependentRevalidation } =
+        await import("./review-other-owner-revalidation.js");
+      if (!await hasCompletedOtherOwnerDependentRevalidation(job, {
+        baseSha: request.sourceSha, successorSha: entry.commitSha,
+        turnDigest: request.turnDigest, path,
+      })) continue;
       covered.set(source.commitSha, "not-required");
       continue;
     }

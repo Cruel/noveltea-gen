@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { recheckExhaustedProtocolResponse } from '../src/response-contract-recovery'
 import { recheckAdaptiveResponse, type AdaptiveRecovery } from '../src/adaptive-protocol'
+import { assessGenerationOperation } from '../src/generation-operation-recovery'
 import type { JobStartResult } from '../src/job'
 
 const sha = (input: string) => createHash('sha256').update(input).digest('hex')
@@ -18,6 +19,25 @@ const assistant = (text: string) => ({ type: 'message', message: {
 const user = () => ({ type: 'message', message: { role: 'user', content: [
   { type: 'text', text: 'Correct the invalid original format' },
 ] } })
+
+test('#223 separately assesses a new admission failure with the original verifier link', async () => {
+  const job = { jobId: 'job-admission', threadId: 'thread-admission',
+    worktreeRoot: '/nonexistent-known-fix-test' } as JobStartResult
+  const recovery = await assessGenerationOperation({
+    job, threadId: 'thread-admission:generation', planVersion: 2,
+    operation: 'adaptive-admission', outcome: 'exception',
+    reason: 'The fixed response is structurally valid but fails objective admission',
+    evidence: { reference: 'generation-checkpoint',
+      previousCheck: 'adaptive-plan.v1', previousCheckVersion: 1,
+      previousSignature: sourceDigest },
+  })
+  assert.equal(recovery.check, 'adaptive-admission.v1')
+  assert.equal(recovery.phase, 'assessment')
+  assert.equal(recovery.evidence.previousCheck, contract)
+  assert.equal(recovery.evidence.previousSignature, sourceDigest)
+  assert.equal(recovery.safeAction, 'reconcile-original-operation')
+  assert.match(recovery.nextAction, /passed its fixed format verifier/)
+})
 
 test('#223 known fix rechecks one sealed response, with no model or writer, and refuses forged evidence', async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-known-verifier-fix-'))

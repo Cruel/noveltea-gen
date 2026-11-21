@@ -528,8 +528,17 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
         error.message.includes("Original response still fails the fixed verifier"))
       return { request, active: null, status: "blocked", fixPickup: null,
         reason: "protocol-exhausted: original response still fails this deployed verifier fix; no writer was started." };
-    if (s.fixPickup) return { request, active: null, status: "blocked", fixPickup: null,
-      reason: error instanceof Error ? error.message : String(error) };
+    if (s.fixPickup) {
+      // The fixed verifier accepted the original bytes. A subsequent
+      // admission/source failure is a *different* check and must have its own
+      // assessment, linked to that successful read-only recheck.
+      const assessed = await operationFailure(s, job, "adaptive-admission", error, {
+        reference: "generation-checkpoint", previousCheck: s.fixPickup.check,
+        previousCheckVersion: s.fixPickup.failedVersion,
+        previousSignature: s.fixPickup.signature,
+      });
+      return { ...assessed, request, active: null, fixPickup: null };
+    }
     throw error;
   }
   if (s.recovery && s.recovery.phase !== "completed" && !adaptive?.recovered)
@@ -1013,6 +1022,12 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
   }
 }
 
+/** Every graph edge defers to an unresolved checkpointed operation
+ * assessment before routing to another stage or specialist. */
+function routeAfterOperationAssessment(s: State, normal: string): string {
+  return s.operationRecovery?.phase === "assessment" ? "assess_recovery" : normal;
+}
+
 /** The production parent graph. Specialists retain ownership of side effects and recovery. */
 export function createGenerationGraph(
   checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server",
@@ -1024,8 +1039,16 @@ export function createGenerationGraph(
     .addNode("schedule", async (s, config) => {
       // A new graph invocation must not re-enter a fenced or not-yet-assessed
       // external operation. The original checkpoint remains inspectable.
-      if (s.operationRecovery?.phase === "fenced") return {
-        status: "blocked" as const, reason: s.operationRecovery.nextAction };
+      if (s.operationRecovery?.phase === "fenced") {
+        const op = s.operationRecovery;
+        // Read-only scheduling/intake may be rechecked against reconciled
+        // receipts. An uncertain idea writer remains permanently fenced until
+        // its original dispatch is explicitly reconciled.
+        return op.safeAction === "reconcile-original-operation" &&
+          (op.operation === "scheduling" || op.operation === "author-update-intake") ?
+          { status: "running" as const, operationRecovery: { ...op, phase: "assessment" as const } } :
+          { status: "blocked" as const, reason: op.nextAction };
+      }
       if (s.operationRecovery?.phase === "assessment") return { status: "running" as const };
       if (s.fixPickup) {
         const r = s.recovery, f = s.fixPickup;
@@ -1208,6 +1231,46 @@ export function createGenerationGraph(
             op.source.turnDigest !== (s.request.turnPlanDigest ?? null) ||
             op.source.planVersion !== (s.planVersion ?? null))
           return fence("Controller recovery source identity is missing or mismatched.");
+        if (op.safeAction === "reconcile-original-operation" &&
+            (op.operation === "scheduling" || op.operation === "author-update-intake")) {
+          try {
+            const control = await readJobControl(job);
+            if (control === "cancelled" || control === "paused")
+              return { status: control, reason: "Author control takes precedence over recovery.",
+                operationRecovery: { ...op, phase: "fenced" as const } };
+            await withStoryJobLock(job, "generation-read-only-reconciliation", async () => {
+              clean(job);
+              const head = await trustedHead(job);
+              if (!op.source.headSha || head !== op.source.headSha)
+                throw Error("Scheduling/intake source changed; original operation cannot be replayed.");
+              await verifyDependencyHistory(job, s.dependencyHistory ?? []);
+              await verifyPinnedPendingWork(job, s.request.turnPlanDigest, s.pendingVersion);
+              await checkPlan(job, s.request, s.planVersion);
+              if (op.operation === "scheduling" &&
+                  s.request.orchestrationPolicy === "explicit" && s.request.turnPlanDigest) {
+                const turn = await readTurnEvidence(job, s.request.contract,
+                  s.request.task, s.request.turnPlanDigest);
+                if (!turn || turn.objective && (!s.orchestratorOrder ||
+                    !s.orchestratorPlanningDigest || !s.orchestratorSnapshotId))
+                  throw Error("Original objective planning has no sealed graph result; do not skip its reconciliation.");
+              }
+              if (op.operation === "author-update-intake") {
+                const updates = await processAuthorUpdatesAfterWork(job);
+                if ("error" in updates || updates.status !== "ready")
+                  throw Error("Author intake still has an unresolved message or acknowledgement.");
+              } else if (!isFocusedScope(s.request.contract)) {
+                // This is the original read-only scheduling operation, not an
+                // idea placement or a new Pi writer invocation.
+                await scheduleIdeasAtBoundary(job, "parent-generation");
+              }
+            });
+            return { status: "running" as const, reason: null,
+              operationRecovery: { ...op, phase: "continued" as const } };
+          } catch (error) {
+            return fence("Read-only recovery remains unresolved: " +
+              (error instanceof Error ? error.message : String(error)));
+          }
+        }
         if (op.safeAction !== "continue-independent") return fence(op.reason);
         try {
           await withStoryJobLock(job, "generation-operation-assessment", async () => {
@@ -1259,6 +1322,18 @@ export function createGenerationGraph(
           const stopped = await authorBoundary(job, s);
           if (stopped) return stopped;
           const receipt = await checkPlan(job, s.request, s.planVersion);
+          // A verified other-owner correction is not review coverage until
+          // impacted dependents have been revalidated. Resume this persisted
+          // read-only operation before even considering another writer.
+          const { settlePendingOtherOwnerRevalidations } =
+            await import("./review-other-owner-revalidation.js");
+          const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
+          await settlePendingOtherOwnerRevalidations({
+            job, inventory: s.inventory ?? undefined, contract: s.request.contract,
+            task: s.request.task, provider: s.request.provider ?? policy.profile.provider,
+            model: s.request.model ?? policy.profile.model,
+            skillsSource: s.request.skillsSource, validatorSource: s.request.validatorSource,
+          });
           // Preserve an in-flight result. For interrupted external effects, only the
           // original specialist may reconcile the dirty/unpublished work boundary.
           if (s.ideaTask) return {};
@@ -1704,34 +1779,34 @@ export function createGenerationGraph(
       } catch (error) { return blocked(error); }
     })
     .addEdge(START, "schedule")
-    .addConditionalEdges("schedule", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
-      s.status !== "running" ? END : "author_update_intake", [END, "assess_recovery", "author_update_intake"])
+    .addConditionalEdges("schedule", s => routeAfterOperationAssessment(s,
+      s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("assess_recovery", s => s.status !== "running" ? END : "author_update_intake", [END, "author_update_intake"])
-    .addConditionalEdges("author_update_intake", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
+    .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.recovery?.phase === "assessment" ? "assess_recovery" :
       s.ideaTask ? "idea_integration" : s.active && s.result ? "independent_assignment_review" :
-      s.active ? "specialist_dispatch" : "completion_decision", [END, "assess_recovery", "idea_integration", "independent_assignment_review", "specialist_dispatch", "completion_decision"])
-    .addConditionalEdges("idea_integration", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
-      s.status !== "running" ? END : "verify_idea_integration", [END, "assess_recovery", "verify_idea_integration"])
-    .addConditionalEdges("verify_idea_integration", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
+      s.active ? "specialist_dispatch" : "completion_decision"), [END, "assess_recovery", "idea_integration", "independent_assignment_review", "specialist_dispatch", "completion_decision"])
+    .addConditionalEdges("idea_integration", s => routeAfterOperationAssessment(s,
+      s.status !== "running" ? END : "verify_idea_integration"), [END, "assess_recovery", "verify_idea_integration"])
+    .addConditionalEdges("verify_idea_integration", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
-      s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake")
-    .addConditionalEdges("specialist_dispatch", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
+      s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake"))
+    .addConditionalEdges("specialist_dispatch", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.result?.status === "dependency-required" ? "dependency_amendment" :
-      s.active ? "independent_assignment_review" : "author_update_intake", [END, "assess_recovery", "dependency_amendment", "independent_assignment_review", "author_update_intake"])
-    .addConditionalEdges("dependency_amendment", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
-      s.status !== "running" ? END : "author_update_intake", [END, "assess_recovery", "author_update_intake"])
-    .addConditionalEdges("independent_assignment_review", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
+      s.active ? "independent_assignment_review" : "author_update_intake"), [END, "assess_recovery", "dependency_amendment", "independent_assignment_review", "author_update_intake"])
+    .addConditionalEdges("dependency_amendment", s => routeAfterOperationAssessment(s,
+      s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
+    .addConditionalEdges("independent_assignment_review", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.reason === REPAIR_STEERING_BOUNDARY ? "author_update_intake" :
-      s.result ? "verify_committed_work" : "specialist_dispatch", [END, "assess_recovery", "author_update_intake", "verify_committed_work", "specialist_dispatch"])
-    .addConditionalEdges("verify_committed_work", s => s.operationRecovery?.phase === "assessment" ? "assess_recovery" :
+      s.result ? "verify_committed_work" : "specialist_dispatch"), [END, "assess_recovery", "author_update_intake", "verify_committed_work", "specialist_dispatch"])
+    .addConditionalEdges("verify_committed_work", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
-      s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake")
-    .addConditionalEdges("completion_decision", s => s.operationRecovery?.phase === "assessment" ||
-      s.status === "running" && s.unknownRecovery?.phase === "assessment" ? "assess_recovery" : END,
+      s.recovery?.phase === "assessment" ? "assess_recovery" : "author_update_intake"))
+    .addConditionalEdges("completion_decision", s => routeAfterOperationAssessment(s,
+      s.status === "running" && s.unknownRecovery?.phase === "assessment" ? "assess_recovery" : END),
       ["assess_recovery", END])
     .compile({ checkpointer });
 }

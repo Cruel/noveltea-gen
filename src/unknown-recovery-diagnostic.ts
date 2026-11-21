@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { guardPiBudget, resolvePiModel } from "./job-pi-policy.js";
+import { guardPiBudget, recordPiSession, resolvePiModel } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { beginProtocolInvocation, inspectCompletedProtocolResponse,
@@ -246,6 +246,9 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: U
       "The latter advises the operator to inspect the EXISTING receipt; it never " +
       "automatically reruns work. Summary: one concise, nonprivate sentence. " +
       "VERIFIED OPERATION AND FAILED CHECK: " + JSON.stringify(evidence));
+    // A valid first response needs no correction; meter its completed session
+    // without applying a second admission check after the model has answered.
+    await recordPiSession(job, file);
     return await correction(session, file);
   } finally { session.dispose(); }
 }
