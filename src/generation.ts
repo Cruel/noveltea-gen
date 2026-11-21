@@ -660,9 +660,9 @@ async function dispatch(s: Pick<State, "request" | "active">) {
     case "architecture": return runArchitectureJob({ ...input, action: "run" });
     case "foundations": return runCharacterWorldJob({ ...input, steering, action: "run" });
     case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
-    case "interactive": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
-    case "choice": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run", unit: "choice" });
-    case "puzzle": return runInteractiveWorkItem({ ...input, task: guidedTask, milestone, action: "run", unit: "puzzle" });
+    case "interactive": case "choice": case "puzzle": return runInteractiveWorkItem({ ...input,
+      generationObjective: input.task, task: guidedTask, milestone, action: "run",
+      unit: s.active.stage === "interactive" ? undefined : s.active.stage });
     case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
     case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering });
     case "review": return runNarrativeReview({ ...input, action: "run" });

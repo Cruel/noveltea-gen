@@ -1510,6 +1510,29 @@ before a separately approved Milestone closeout. Existing pre-Blueprint Event
 receipts retain their historical interpretation; changed or missing new pins
 fail closed, and completed writers are not replayed to repair provenance.
 
+**Corrections after Event approval (#229).** Before the first Interactive
+assignment, the generation controller can reconcile a reviewed Event-only
+omission with an erroneous Interactive owner. A reviewer passing a valid Event
+can also cite a defect in a particular private Blueprint field: the challenge
+names the original pin, field and old value, a proposed value, and an exact
+changed canonical source line. Neither report grants write authority. At a
+clean verified boundary the controller checks the Turn, planning owner,
+protected scope, Event checkpoint and both sources before recording a bounded
+`blueprintRepairs` entry in the existing Turn Repair ledger. Structurally
+identical JSON needs no new review. A material correction uses a fresh
+read-only Milestone planning/review cycle, never an Event writer.
+
+The Event receipt and Git trailer always refer to the original approval.
+The original private review survives in `milestone-blueprint-history/`;
+`job event inspect` distinguishes its consumed `milestoneBlueprint` from
+`localPlanning`, whose replacement records `supersedes`. Only an approved,
+ledger-linked successor can supply pending obligations. No successor means no
+fallback to the archived plan. A restart rechecks source proofs and can finish
+archival or publication without a second omission review. An uncertain Pi
+invocation remains fenced; a negative verdict cannot publish the candidate.
+This first path does not revise already-started dependents or silently transfer
+a corrected approval through the older single-pin fork format.
+
 The LangGraph work item delegates canonical `events/*.md` to a **real, pinned
 `nt-event-design` Pi specialist**, carrying the authorized architecture
 contract, existing Creative Direction, selected Milestone/Arcs, linked Character,

@@ -138,6 +138,7 @@ export async function reviewedAdaptiveOmissions(input: {
     const reviewed = await runInteractiveWorkItem({
       story: job.storyRoot, job: job.jobId, action: "review-omission",
       milestone: item.milestone, fixture: false,
+      generationObjective: request.task, turnPlanDigest: request.turnPlanDigest,
       skillsSource: request.skillsSource, validatorSource: request.validatorSource,
       provider: request.provider, model: request.model,
     });

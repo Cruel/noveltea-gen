@@ -42,7 +42,7 @@ export function saveFixtureTurn(
       "review",
     ].map((id) => ({
       id,
-      specialist: "nt-" + id,
+      specialist: id === "event" ? "nt-event-design" : "nt-" + id,
       outcome: "Complete the " + id + " Story milestone.",
       targets: ["milestone.disclosure"],
       dependsOn: [],

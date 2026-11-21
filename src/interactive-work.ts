@@ -24,8 +24,9 @@ import type { Plan } from "./architecture.js";
 import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { decideEventOnlyOmission, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
-import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition,
+import { reviewedMilestoneHandoff, consumedCorrection, assertMilestoneInteractiveDisposition,
   type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
+import { correctPendingBlueprint } from "./milestone-blueprint-correction.js";
 import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import type { EventAssignment } from "./event-specialist.js";
 
@@ -44,6 +45,7 @@ interface Receipt {
   version: 1; jobId: string; baseSha: string; workItemId: string; milestoneId: string;
   planVersion: number; planDigest: string; eventHead: string; worker: "fixture" | "pi";
   provider: string; model: string; thinking?: "low" | "medium" | "high"; snapshot?: SkillSnapshot;
+  correctedBlueprintPin?: MilestoneBlueprintPin;
   eventSource?: InteractiveAssignment["eventSource"]; units: [Unit, Unit];
 }
 interface SourceReceipt {
@@ -84,6 +86,7 @@ export interface InteractiveOptions {
   /** Production graph can checkpoint Choice and Puzzle independently; the
    * persisted two-unit receipt and original writer/review gates are shared. */
   unit?: InteractiveDomain;
+  generationObjective?: string; turnPlanDigest?: string;
 }
 const validMilestone = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -995,7 +998,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           }))) {
       throw new Error("Event source and deferred obligations changed after their original sealed commit.");
     }
-    const milestoneBlueprint = await reviewedMilestoneHandoff(job, event);
+    let milestoneBlueprint: ReviewedMilestoneHandoff | undefined;
     const eventSource: NonNullable<InteractiveAssignment["eventSource"]> = {
       headSha: event.commitSha, snapshotId: event.snapshot.id,
       eventIds: event.validation.eventIds,
@@ -1047,6 +1050,12 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             fixture: !!input.fixture, skillsSource: input.skillsSource,
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
           });
+        await correctPendingBlueprint(job, architecture.plan, event, {
+          head, fixture: !!input.fixture, omission, protectionBase: baseline.protection.base,
+          objective: input.generationObjective, turnDigest: input.turnPlanDigest,
+          native: baseline,
+        });
+        milestoneBlueprint = await reviewedMilestoneHandoff(job, event);
         if (omission) {
           assertMilestoneInteractiveDisposition(milestoneBlueprint, true);
           const unit = (domain: InteractiveDomain): Unit => ({
@@ -1058,6 +1067,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             workItemId: "interactive-" + input.milestone.slice(10),
             milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
             eventHead: event.commitSha, eventSource, worker: input.fixture ? "fixture" : "pi",
+            correctedBlueprintPin: consumedCorrection(milestoneBlueprint),
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
             thinking: input.thinking, units: [unit("choice"), unit("puzzle")] };
           await persist(file, receipt);
@@ -1069,7 +1079,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       if (input.action === "review-omission")
         return { status: "omission-not-justified", headSha: await trustedHead(job),
           milestoneId: input.milestone };
+      milestoneBlueprint ??= await reviewedMilestoneHandoff(job, event);
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
+        correctedBlueprintPin: consumedCorrection(milestoneBlueprint),
         workItemId: "interactive-" + input.milestone.slice(10),
         milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
         eventHead: event.commitSha, eventSource, worker: input.fixture ? "fixture" : "pi",
@@ -1078,6 +1090,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           { id: "interactive-puzzle-" + input.milestone.slice(10), domain: "puzzle", phase: "pending" }] };
       await persist(file, receipt);
     }
+    milestoneBlueprint ??= await reviewedMilestoneHandoff(job, event);
+    if (JSON.stringify(receipt.correctedBlueprintPin) !== JSON.stringify(consumedCorrection(milestoneBlueprint)))
+      throw Error("Interactive receipt lost its consumed Blueprint supersession.");
     if (receipt.units[0].phase === "not-applicable" || receipt.units[0].eventOnly) {
       const first = receipt.units[0], second = receipt.units[1];
       if (first.phase !== "not-applicable" || second.phase !== "not-applicable" ||

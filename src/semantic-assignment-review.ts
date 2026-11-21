@@ -80,7 +80,8 @@ export interface SemanticVerdict {
   sourceDigest: string;
   verdict: "pass" | "fail";
   findings: SemanticFinding[];
-  evidence: Array<{ commitSha: string; assignmentId: string; path: string; line: number; explanation: string }>;
+  evidence: Array<{ commitSha: string; assignmentId: string; path: string; line: number; explanation: string;
+    blueprintChallenge?: import("./milestone-blueprint-correction.js").BlueprintChallenge }>;
 }
 
 /** Model output is untrusted. An evaluator receives only this immutable packet;
@@ -228,7 +229,11 @@ export async function prepareSemanticReview(job: JobStartResult,
             milestoneBlueprintObligations = "\nINDEPENDENTLY REVIEWED PRIVATE MILESTONE OBLIGATIONS: " +
               JSON.stringify(local) + ". Check actual committed Event evidence against current-stage " +
               "local promises; defer only named interactive/Composition obligations. " +
-              "The private plan is NOT canonical Story proof and grants NO additional write scope.";
+              "The private plan is NOT canonical Story proof and grants NO additional write scope. " +
+              "If this Event is valid but a material field of its private Blueprint contradicts the cited changed canonical line, " +
+              "you may attach blueprintChallenge:{pinDigest,field,before,proposed,sourceQuote} to that evidence entry only. " +
+              "Use the exact field path events/<index>/<field> or downstream/<index>/<field>, its full old and suggested values, " +
+              "the exact trimmed source line, and pinDigest " + receipt.blueprintPin.digest + ". This is not repair authority.";
           }
           // A later Event receipt or an old checkpoint never supplies evidence
           // for this exact reviewed SHA. The sealed sources remain primary.
@@ -267,6 +272,7 @@ export async function prepareSemanticReview(job: JobStartResult,
         : join(job.stateDir, "interactive-items", slug + ".json");
       const stageReceipt = JSON.parse(await readFile(stageFile, "utf8")) as {
         jobId: string; milestoneId: string; commitSha?: string; eventHead?: string;
+        correctedBlueprintPin?: import("./milestone-blueprint.js").MilestoneBlueprintPin;
         units?: Array<{ id: string; commitSha?: string }>;
       };
       const unit = stage === "composition" ? stageReceipt :
@@ -276,8 +282,10 @@ export async function prepareSemanticReview(job: JobStartResult,
         throw Error("Independent downstream Milestone review lost its authenticated work item.");
       const source = JSON.parse(await readFile(join(job.stateDir, "event-items",
         slug + ".json"), "utf8")) as import("./milestone-obligation-handoff.js").MilestoneEventSource;
-      const { reviewedMilestoneHandoff } = await import("./milestone-obligation-handoff.js");
+      const { reviewedMilestoneHandoff, consumedCorrection } = await import("./milestone-obligation-handoff.js");
       const handoff = await reviewedMilestoneHandoff(job, source);
+      if (JSON.stringify(stageReceipt.correctedBlueprintPin) !== JSON.stringify(consumedCorrection(handoff)))
+        throw Error("Independent review lost the Blueprint supersession consumed by the stage writer.");
       if (handoff) {
         git(job, "merge-base", "--is-ancestor", handoff.eventHead, point.commitSha);
         if (stage !== "composition" && stageReceipt.eventHead !== handoff.eventHead)

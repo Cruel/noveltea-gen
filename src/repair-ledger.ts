@@ -85,6 +85,12 @@ export interface PrerequisiteRepair {
   attempts: Array<{ sourceSha: string; submittedSha: string; paths: string[];
     reviewDigest?: string; verdict?: "passed" | "failed" }>;
 }
+export interface BlueprintRepair {
+  owner: "nt-event-design";
+  original: import("./milestone-blueprint.js").MilestoneBlueprintPin;
+  eventHead: string; sourceSha: string; planDigest: string; evidenceDigest: string; originalReviewDigest: string;
+  successor?: import("./milestone-blueprint.js").MilestoneBlueprintPin;
+}
 export interface RepairLedger {
   version: 1;
   jobId: string;
@@ -94,6 +100,7 @@ export interface RepairLedger {
   corrections: RepairCorrection[];
   /** Additive private controller state; pre-existing ledgers remain readable. */
   prerequisites?: PrerequisiteRepair[];
+  blueprintRepairs?: BlueprintRepair[];
   authorGrants?: AuthorRepairGrant[];
 }
 export function totalTurnCorrections(ledger: RepairLedger): number {
@@ -146,6 +153,15 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
   if (raw.version !== 1 || raw.jobId !== job.jobId || raw.threadId !== job.threadId ||
       raw.turnDigest !== turnDigest || !Array.isArray(raw.findings) ||
       !Array.isArray(raw.corrections) || raw.findings.length > 512 ||
+      (raw.blueprintRepairs !== undefined && (!Array.isArray(raw.blueprintRepairs) ||
+        raw.blueprintRepairs.length > 512 || new Set(raw.blueprintRepairs.map(r => r.original.milestoneId)).size !== raw.blueprintRepairs.length ||
+        raw.blueprintRepairs.some(r => r.owner !== "nt-event-design" || !SHA.test(r.eventHead) ||
+          !SHA.test(r.sourceSha) || !DIGEST.test(r.planDigest) || !DIGEST.test(r.evidenceDigest) || !DIGEST.test(r.originalReviewDigest) ||
+          !/^milestone\.[a-z][a-z0-9-]*$/.test(r.original.milestoneId) ||
+          !SHA.test(r.original.sourceSha) || !DIGEST.test(r.original.digest) || !DIGEST.test(r.original.cycleId) ||
+          r.successor && (r.successor.milestoneId !== r.original.milestoneId || r.successor.sourceSha !== r.sourceSha ||
+            !DIGEST.test(r.successor.digest) || !DIGEST.test(r.successor.cycleId) || r.successor.digest === r.original.digest ||
+            r.successor.cycleId === r.original.cycleId)))) ||
       (raw.prerequisites !== undefined && (!Array.isArray(raw.prerequisites) ||
         raw.prerequisites.length > 512 ||
         new Set(raw.prerequisites.map(p => p.id)).size !== raw.prerequisites.length ||
@@ -221,6 +237,24 @@ async function save(job: JobStartResult, ledger: RepairLedger) {
   const tmp = file + "." + randomUUID() + ".tmp";
   await writeFile(tmp, JSON.stringify(ledger, null, 2) + "\n", { mode: 0o600, flag: "wx" });
   await rename(tmp, file);
+}
+/** Called by the locked Blueprint correction controller after authenticating
+ * the finding, and again after authenticating the independent approval. */
+export async function recordBlueprintRepair(job: JobStartResult, turn: string, grant: BlueprintRepair) {
+  const ledger = await inspectRepairLedger(job, turn);
+  const repairs = ledger.blueprintRepairs ??= [];
+  const prior = repairs.find(r => r.original.milestoneId === grant.original.milestoneId);
+  if (prior) {
+    if (JSON.stringify({ ...prior, successor: undefined }) !== JSON.stringify({ ...grant, successor: undefined }) ||
+        prior.successor && JSON.stringify(prior.successor) !== JSON.stringify(grant.successor))
+      throw Error("Conflicting Milestone Blueprint repair authority.");
+    if (!grant.successor || prior.successor) return;
+    prior.successor = grant.successor;
+  } else {
+    if (grant.successor) throw Error("Unadmitted Milestone Blueprint supersession.");
+    repairs.push(grant);
+  }
+  await save(job, ledger);
 }
 /** Only the authenticated Studio control adapter may request post-stop
  * guidance under the job writer lease. Historic allowance metadata is kept

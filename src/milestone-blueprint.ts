@@ -327,7 +327,9 @@ interface DiagnosticReceipt {
   sources: { task: string; contract: unknown };
   diagnosis: MilestoneDiagnosis; session: SessionSeal;
 }
+export interface Supersession { original: MilestoneBlueprintPin; eventHead: string; turnDigest: string; evidenceDigest: string; originalReviewDigest: string }
 interface Receipt {
+  supersedes?: Supersession;
   schema: "noveltea-milestone-plan-receipt/v1";
   lineage: Lineage; phase: Phase; rounds: Round[];
   draft?: MilestoneBlueprint; writer?: SessionSeal; reviewer?: SessionSeal;
@@ -636,6 +638,25 @@ async function verifySeal(job: JobStartResult, sealValue: SessionSeal,
   if (first.type !== "session" || first.id !== sealValue.id ||
       sealValue.bytes !== bytes.length || sealValue.digest !== sha(bytes.toString("utf8")))
     throw Error("Milestone plan " + role + " transcript changed after sealing.");
+}
+/** A post-approval grant must cite actual independent answers, not just a
+ * self-consistent set of hashes copied into a private planning receipt. Pi
+ * retains earlier answers in JSONL across compaction and protocol retries. */
+async function assertBlueprintReplies(session: SessionSeal, expected: string[]) {
+  let matched = 0, last: string | undefined;
+  for (const line of (await readFile(session.file, "utf8")).split("\n")) {
+    if (!line.trim()) continue;
+    const entry = JSON.parse(line);
+    if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+    last = undefined;
+    if (["error", "aborted", "toolUse"].includes(entry.message.stopReason)) continue;
+    const text = entry.message.content.filter((c: { type: string }) => c.type === "text")
+      .map((c: { text: string }) => c.text).join("");
+    try { last = sha(parse(text)); } catch { continue; } // e.g. the original protocol-error response
+    if (last === expected[matched]) matched++;
+  }
+  if (!expected.length || matched !== expected.length || last !== expected.at(-1))
+    throw Error("Milestone Blueprint history differs from the sealed Pi answers.");
 }
 function validateReceiptShape(value: Receipt, id: string) {
   if (value?.schema !== "noveltea-milestone-plan-receipt/v1" ||
@@ -1021,15 +1042,24 @@ function lastText(session: { messages: any[]; getLastAssistantText(): string | u
   return session.getLastAssistantText() ?? "";
 }
 function verifyReads(messages: Parameters<typeof completedPinnedSkillReads>[0],
-  project: string, snapshot: SkillSnapshot, assignment: EventAssignment) {
+  project: string, snapshot: SkillSnapshot, assignment: EventAssignment, sources: string[] = []) {
   const reads = completedPinnedSkillReads(messages, project, snapshot.path);
   const required = [...REQUIRED.map(path => join(snapshot.path, "skills", path)),
-    join(project, assignment.milestonePath)];
+    join(project, assignment.milestonePath), ...sources.map(path => join(project, path))];
   if (required.some(path => !reads.includes(path)))
     throw Error("Milestone Blueprint agent did not inspect the pinned skills and source Milestone.");
 }
 
 /** Safe read-only status for a paused or completed local plan. This is not approval. */
+export async function assertFutureBlueprintActive(job: JobStartResult, pin: MilestoneBlueprintPin, supersedes?: Supersession) {
+  const current = await load(job, pin.milestoneId);
+  if (existsSync(historicalFileFor(job, pin))) throw Error("An archived Blueprint cannot supply active obligations.");
+  if (!current && !supersedes && job.recoveryFork) return;
+  if (!current || JSON.stringify(pinOf(current)) !== JSON.stringify(pin) ||
+      JSON.stringify(current.supersedes) !== JSON.stringify(supersedes))
+    throw Error("Pending Milestone obligations lack the active controller-approved Blueprint version.");
+}
+
 export async function inspectMilestoneBlueprint(job: JobStartResult, milestoneId: string) {
   const receipt = await load(job, milestoneId);
   if (!receipt) return null;
@@ -1048,6 +1078,7 @@ export async function inspectMilestoneBlueprint(job: JobStartResult, milestoneId
       action: receipt.diagnostics.at(-1)!.diagnosis.action,
       explanation: receipt.diagnostics.at(-1)!.diagnosis.explanation,
     } : null,
+    ...(receipt.supersedes ? { supersedes: receipt.supersedes } : {}),
     stopReason: receipt.stopReason ?? null };
 }
 
@@ -1056,10 +1087,13 @@ export async function inspectMilestoneBlueprint(job: JobStartResult, milestoneId
 export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   pin: MilestoneBlueprintPin, assignment: Pick<EventAssignment,
     "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
+  expected?: Pick<Lineage, "provider" | "model" | "planDigest" | "contractDigest" | "snapshotId">,
 ): Promise<MilestoneBlueprint> {
-  let record = await load(job, pin.milestoneId);
+  const archived = historicalFileFor(job, pin);
+  // An unfinished or damaged replacement must not obscure the immutable
+  // original review used by the Event commit.
+  let record = existsSync(archived) ? null : await load(job, pin.milestoneId);
   if (record?.lineage.reviewCycleId !== pin.cycleId) {
-    const archived = historicalFileFor(job, pin);
     if (!existsSync(archived)) {
       // A same-Thread continuation inherits an authenticated historical Event,
       // not the parent's mutable Pi transcript or job-local plan receipt.
@@ -1073,7 +1107,7 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
         path.startsWith("event-items/") &&
         JSON.stringify(source.blueprintPin) === JSON.stringify(pin) &&
         JSON.stringify(source.assignment) === JSON.stringify(assignment));
-      if (!inherited || !originalEvent) throw Error("Missing reviewed historical Milestone Blueprint.");
+      if (expected || !inherited || !originalEvent) throw Error("Missing reviewed historical Milestone Blueprint.");
       if (JSON.stringify(inherited.pin) !== JSON.stringify(pin) ||
           inherited.pin.digest !== sha(inherited.design) ||
           inherited.sourceDigest !== await sourceDigest(job, assignment.sourcePaths, pin.sourceSha))
@@ -1093,6 +1127,7 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   if (record.lineage.jobId !== job.jobId || record.lineage.threadId !== job.threadId ||
       record.lineage.baseSha !== job.baseSha || record.lineage.executionHead !== pin.sourceSha ||
       record.lineage.reviewCycleId !== pin.cycleId ||
+      expected && Object.entries(expected).some(([k, v]) => record.lineage[k as keyof Lineage] !== v) ||
       cycleFor(record.lineage) !== record.lineage.reviewCycleId)
     throw Error("Milestone Blueprint pin belongs to another job, Thread or source.");
   if (record.lineage.sourceDigest !== await sourceDigest(job, assignment.sourcePaths, pin.sourceSha))
@@ -1110,8 +1145,27 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
       { id: record.reviewer.id, file: record.reviewer.file });
     await verifySeal(job, record.writer, "writer");
     await verifySeal(job, record.reviewer, record.reviewerRole ?? "reviewer");
+    if (expected || record.supersedes) {
+      const starts = record.reviewStarts ?? (record.reviewStart ? [record.reviewStart] : []);
+      await assertBlueprintReplies(record.writer, record.rounds.filter((_, i) => !starts.includes(i)).map(r => r.draftDigest));
+      const reviewers = [...(record.reviewerHistory ?? []).map(h => h.session), record.reviewer];
+      if (reviewers.length !== starts.length + 1) throw Error("Incomplete Blueprint reviewer lineage.");
+      for (const [index, session] of reviewers.entries())
+        await assertBlueprintReplies(session, record.rounds.slice(index ? starts[index - 1] : 0, starts[index]).map(r => r.reviewDigest));
+    }
   }
   return record.draft!;
+}
+
+/** Hash the whole original cycle, not just the material draft in the Git
+ * trailer. The caller has authenticated its rounds, source and Pi seals. */
+export async function originalBlueprintReviewDigest(job: JobStartResult, pin: MilestoneBlueprintPin) {
+  const archived = historicalFileFor(job, pin);
+  const file = existsSync(archived) ? archived : fileFor(job, pin.milestoneId);
+  if (await realpath(file) !== file || !(await lstat(file)).isFile()) throw Error("Unsafe original Blueprint approval.");
+  const bytes = await readFile(file, "utf8");
+  if (JSON.stringify(pinOf(JSON.parse(bytes) as Receipt)) !== JSON.stringify(pin)) throw Error("Wrong original Blueprint approval.");
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /** Transfer only the authenticated design/commit binding into a sealed fork.
@@ -1122,6 +1176,14 @@ export async function collectInheritedMilestoneBlueprint(job: JobStartResult,
     "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
 ): Promise<InheritedMilestoneBlueprint> {
   const design = await readReviewedMilestoneBlueprint(job, pin, assignment);
+  // The existing fork format carries a single historical Event pin. Never
+  // export it as pending authority after correction without the successor.
+  const { readReviewTurnEvidence } = await import("./fork-review-turn.js");
+  const turn = await readReviewTurnEvidence(job);
+  if (turn && (await (await import("./repair-ledger.js")).inspectRepairLedger(job, turn.digest))
+      .blueprintRepairs?.some(repair => repair.original.milestoneId === pin.milestoneId))
+    throw Error("Cannot fork pending obligations without the complete Blueprint supersession history.");
+  await assertFutureBlueprintActive(job, pin);
   return { pin, design, sourceDigest: await sourceDigest(job, assignment.sourcePaths, pin.sourceSha) };
 }
 
@@ -1151,6 +1213,8 @@ export async function archiveReviewedMilestoneBlueprint(job: JobStartResult,
 export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   assignment: EventAssignment, snapshot: SkillSnapshot, provider: string, model: string,
   task: string, head: string, fixture: boolean,
+  correction?: { candidate: MilestoneBlueprint; supersedes: Supersession; sources: string[];
+    exactPatch: boolean; accepts: (draft: MilestoneBlueprint) => boolean },
 ): Promise<{ blueprint: MilestoneBlueprint; pin: MilestoneBlueprintPin }> {
   if (!MILESTONE.test(assignment.milestoneId) || !plan.items.some(i =>
       i.id === "global-architecture" && i.status === "verified" &&
@@ -1166,6 +1230,8 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   if (receipt) {
     validateReceiptShape(receipt, assignment.milestoneId);
     assertLineage(receipt.lineage, binding);
+    if (JSON.stringify(receipt.supersedes) !== JSON.stringify(correction?.supersedes))
+      throw Error("Blueprint replacement belongs to a different correction grant.");
     assertRounds(receipt, assignment);
     await assertDiagnostics(job, receipt);
     if (receipt.phase === "approved") {
@@ -1186,16 +1252,36 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     if (receipt.reviewer) await verifySeal(job, receipt.reviewer, receipt.reviewerRole ?? "reviewer");
   } else {
     receipt = { schema: "noveltea-milestone-plan-receipt/v1",
-      lineage: binding, phase: "admitted", rounds: [] };
+      lineage: binding, phase: "admitted", rounds: [], ...(correction ? { supersedes: correction.supersedes } : {}) };
     await persist(file, receipt);
   }
+  const checkCandidate = (draft: MilestoneBlueprint) => {
+    if (correction && !correction.accepts(draft))
+      throw Error("Correction changed material outside the exact authorized Blueprint patch.");
+    return draft;
+  };
   if (fixture) {
-    const draft = parseMilestoneBlueprint(JSON.stringify(fixtureDraft(assignment)), assignment);
+    const proposed = correction?.candidate ?? fixtureDraft(assignment);
+    if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-interactive")
+      proposed.downstream.push({ owner: "interactive", obligation: "Keep this opening Event-only; the consequential Choice occurs later." });
+    if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge")
+      proposed.events[0]!.knowledge = "Ada never sees the original signed transfer ledger.";
+    const draft = parseMilestoneBlueprint(JSON.stringify(proposed), assignment);
+    const reject = correction?.exactPatch && process.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT === "revise";
     const review = parseMilestoneBlueprintReview(JSON.stringify({
-      schema: "noveltea-milestone-blueprint-review/v1", status: "pass", findings: [],
+      schema: correction ? "noveltea-milestone-blueprint-review/v5" : "noveltea-milestone-blueprint-review/v1", status: reject ? "revise" : "pass",
+      findings: reject ? [{ anchorPath: assignment.milestonePath, requirement: "Preserve the approved delivery scope", reason: "The proposed removal loses a required obligation.",
+        correction: "Reassess scope before dropping the obligation", evidence: { target: "missing-downstream", owner: "interactive", quote: JSON.stringify(draft.downstream), repair: "extend" } }] : [],
+      ...(correction ? { prior: [] } : {}),
     }), draft, assignment);
     receipt.draft = draft;
     receipt.rounds = [{ draft, review, draftDigest: sha(draft), reviewDigest: sha(review) }];
+    if (review.status === "revise") {
+      receipt.phase = "stopped";
+      receipt.stopReason = "Independent reviewer rejected the exact authorized patch; a different correction needs controller reassessment.";
+      await persist(file, receipt);
+      throw Error(receipt.stopReason);
+    }
     receipt.approvedDigest = sha(draft);
     receipt.phase = "approved";
     await persist(file, receipt);
@@ -1265,7 +1351,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         if (previousPhase === "revision") await reportControllerReviewPhase("correcting");
         await promptStorySpecialist(writer.session, writer.context.contextNote +
           plannerPrompt(assignment, task, receipt.rounds.at(-1)));
-        verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment);
+        verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment, correction?.sources);
         let draft: MilestoneBlueprint;
         try {
           draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
@@ -1295,7 +1381,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         }
         await writer.context.completed(writer.session.sessionManager.getSessionFile()!, writer.session.sessionId);
         receipt.writer = await seal(writer.session);
-        receipt.draft = draft;
+        receipt.draft = checkCandidate(draft);
         receipt.phase = "draft";
         await persist(file, receipt);
       } finally { writer.session.dispose(); }
@@ -1324,6 +1410,12 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         { id: reviewer.session.sessionId,
           file: reviewer.session.sessionManager.getSessionFile() ?? "" },
         receipt.reviewer ? { id: receipt.reviewer.id, file: receipt.reviewer.file } : undefined);
+      if (correction) {
+        const old = JSON.parse(await readFile(historicalFileFor(job, correction.supersedes.original), "utf8")) as Receipt;
+        if (!old.reviewer) throw Error("Historical approval lacks the original reviewer identity.");
+        assertReviewCycleSession(old.reviewer, { id: reviewer.session.sessionId,
+          file: reviewer.session.sessionManager.getSessionFile() ?? "" });
+      }
       const start = reviewer.session.messages.length;
       const reviewHistory = receipt.rounds.slice(receipt.reviewStart ?? 0);
       await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
@@ -1333,7 +1425,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
             "evaluate the current exact draft and original accepted source scope. " +
             "Your verdict must meet the full current v5 review contract. " : "") +
         reviewerPrompt(assignment, receipt.draft, reviewHistory, task, plan.contract));
-      verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
+      verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment, correction?.sources);
       const parseVerdict = () => {
         const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft!,
           assignment, reviewHistory);
@@ -1372,6 +1464,12 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         receipt.phase = "approved";
         await persist(file, receipt);
         return { blueprint: receipt.draft, pin: pinOf(receipt) };
+      }
+      if (correction?.exactPatch) {
+        receipt.phase = "stopped";
+        receipt.stopReason = "Independent reviewer rejected the exact authorized patch; a different correction needs controller reassessment.";
+        await persist(file, receipt);
+        throw Error(receipt.stopReason);
       }
       receipt.phase = "revision";
       await persist(file, receipt);

@@ -144,7 +144,7 @@ function reportOf(result: ValidationResult, baseline: string): Report {
   }
   return r;
 }
-function selectedAssignment(job: JobStartResult, plan: Plan, report: Report, milestoneId: string, workItemId: string): EventAssignment {
+export function selectedAssignment(job: JobStartResult, plan: Plan, report: Pick<Report, "records">, milestoneId: string, workItemId: string): EventAssignment {
   if (plan.contract.scope.depth === "architecture") {
     throw new Error("The author completion contract does not authorize interactive Event realization.");
   }

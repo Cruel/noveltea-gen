@@ -22,7 +22,7 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
-import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition,
+import { reviewedMilestoneHandoff, consumedCorrection, assertMilestoneInteractiveDisposition,
   type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import type { EventAssignment } from "./event-specialist.js";
@@ -50,6 +50,7 @@ interface EventSourceReceipt {
   assignment?: EventAssignment;
 }
 interface InteractiveReceipt {
+  correctedBlueprintPin?: MilestoneBlueprintPin;
   jobId: string; milestoneId: string; planVersion: number; planDigest: string;
   eventHead?: string; baseSha?: string; worker?: string; provider?: string; model?: string;
   snapshot?: SkillSnapshot; eventSource?: { eventIds: string[]; missingObligations: string[] };
@@ -64,6 +65,7 @@ interface ArchReceipt { jobId: string; phase: string; plan?: Plan }
 interface ReviewEvidence { status: "passed"; outcomes: string[]; solutions: string[];
   sourceEvidence: string[]; reviewer: "independent-pi" | "fixture-structural-only"; sessionFile?: string }
 interface Receipt {
+  correctedBlueprintPin?: MilestoneBlueprintPin;
   version: 1; jobId: string; baseSha: string; milestoneId: string; workItemId: string;
   planVersion: number; planDigest: string; interactiveHead: string;
   worker: "fixture" | "pi"; provider: string; model: string; thinking?: "low" | "high";
@@ -576,6 +578,9 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     const units = source.units;
     const eventOnly = units?.[0]?.phase === "not-applicable" && !!units?.[0]?.eventOnly;
     const milestoneBlueprint = await reviewedMilestoneHandoff(job, eventSource);
+    const correctedBlueprintPin = consumedCorrection(milestoneBlueprint);
+    if (JSON.stringify(source.correctedBlueprintPin) !== JSON.stringify(correctedBlueprintPin))
+      throw Error("Composition lost the Blueprint supersession consumed by Interactive.");
     assertMilestoneInteractiveDisposition(milestoneBlueprint, eventOnly);
     if (source.jobId !== job.jobId || source.milestoneId !== input.milestone ||
         eventSource.jobId !== job.jobId || eventSource.milestoneId !== input.milestone ||
@@ -675,6 +680,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       state = JSON.parse(await readFile(file, "utf8")) as Receipt;
       if (state.version !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha ||
           state.milestoneId !== input.milestone || state.interactiveHead !== interactiveHead ||
+          JSON.stringify(state.correctedBlueprintPin) !== JSON.stringify(correctedBlueprintPin) ||
           !state.planVersion || !state.planDigest)
         throw new Error("Composition receipt mismatches verified plan or interactive source.");
       assertPlanContinuity(job, architecture, "composition:" + input.milestone,
@@ -685,7 +691,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       await verifiedNarrativeSuccessor(job, interactiveHead);
       state = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         milestoneId: input.milestone, workItemId: "composition-" + input.milestone.slice(10),
-        planVersion: architecture.plan.version, planDigest, interactiveHead,
+        planVersion: architecture.plan.version, planDigest, interactiveHead, correctedBlueprintPin,
         worker: input.fixture ? "fixture" : "pi", provider: input.provider ?? "openai",
         model: input.model ?? "gpt-6-luna", thinking: input.thinking,
         authorTask: input.task, phase: "pending" };

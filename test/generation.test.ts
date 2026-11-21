@@ -407,11 +407,24 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
       assert.equal(point.semanticReview, "required-pending", workItem);
       await reviewBoundedAssignments(job, [point], async packet => ({
         sourceDigest: packet.sourceDigest, verdict: "pass" as const,
-        findings: [], evidence: packet.items.map(item => ({
+        findings: [], evidence: packet.items.map(item => {
+          if (workItem === "event-disclosure" && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge") {
+            const path = "events/disclose-ledger.md";
+            const lines = item.canonicalContext.find(source => source.path === path)!.content.split("\n");
+            const index = lines.findIndex(s => s.startsWith("Neri opens the original"));
+            assert.ok(index > 0);
+            const receipt = JSON.parse(readFileSync(join(job.stateDir, "event-items/disclosure.json"), "utf8"));
+            return { path, line: index + 1, explanation: "The reviewed Event is valid. The private plan misstates Ada's access.",
+              commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+              blueprintChallenge: { pinDigest: process.env.NT_BLUEPRINT_CORRECTION_FIXTURE_CHALLENGE === "wrong-pin"
+                ? "0".repeat(64) : receipt.blueprintPin.digest, sourceQuote: lines[index]!.trim(), field: "events/0/knowledge",
+                before: "Ada never sees the original signed transfer ledger.", proposed: "Ada sees the original ledger and checks it against the daily register." } };
+          }
+          return {
           commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: item.assurance.changedPaths[0]!, line: 1,
           explanation: "Deterministic fixture structural review, never a live Pi verdict.",
-        })),
+        }; }),
       }), "deterministic-prerequisite-fixture", true);
     } finally {
       for (const [key, value] of Object.entries(old)) {
@@ -421,8 +434,11 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
     }
 }
 
-test("actual generation graph resumes Event-only Composition without Choice/Puzzle writer commits (fixture structural certification)", { skip: !available }, async () => {
-  const f = setup("generation-event-only-no-write");
+for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test("actual generation graph resumes Event-only Composition after historical " + defect + " correction (#229 fixture)", { skip: !available }, async () => {
+  const f = setup("generation-event-only-no-write-" + defect);
+  f.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE = "historical-" + (defect === "rejected" ? "interactive" : defect === "tampered" ? "knowledge" : defect);
+  if (defect === "rejected") f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT = "revise";
+  if (defect === "tampered") f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_CHALLENGE = "wrong-pin";
   for (const key of ["NT_ARCHITECTURE_FIXTURE_CASE", "NT_EVENT_FIXTURE_CASE",
     "NT_INTERACTIVE_FIXTURE_CASE", "NT_COMPOSITION_FIXTURE_CASE"])
     f.env[key] = "event-only";
@@ -450,12 +466,68 @@ test("actual generation graph resumes Event-only Composition without Choice/Puzz
   assert.equal(first.status, "paused", JSON.stringify(first));
   await seal("event-disclosure");
   const eventHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const eventFile = join(f.job.stateDir, "event-items/disclosure.json");
+  const originalEvent = readFileSync(eventFile, "utf8");
+  const activeFile = join(f.job.stateDir, "milestone-blueprints/disclosure.json");
+  const original = JSON.parse(readFileSync(activeFile, "utf8"));
+  if (defect === "interactive") {
+    assert.ok(original.draft.downstream.some((entry: any) => entry.owner === "interactive"));
+    const refused = f.cli(["interactive", "run", "--milestone", "milestone.disclosure", "--fixture", "--skills-source", source], false);
+    assert.match(refused, /No current reviewed Event, protected Turn scope or planning owner/);
+    assert.deepEqual(JSON.parse(readFileSync(activeFile, "utf8")), original, "a challenge alone cannot archive approval");
+    f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT = "archived";
+    const interrupted = f.cli(["generate", "resume", "--pause-after", "composition"]);
+    assert.equal(interrupted.status, "paused", interrupted.reason);
+    assert.match(interrupted.reason, /interruption after original Blueprint archival/);
+    assert.equal(existsSync(activeFile), false);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+    delete f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT;
+  }
   const resumed = f.cli(["generate", "resume", "--pause-after", "composition"]);
+  if (defect === "tampered") {
+    assert.equal(resumed.status, "blocked");
+    assert.match(resumed.reason, /Blueprint challenge is not bound to the reviewed Event source/);
+    assert.deepEqual(JSON.parse(readFileSync(activeFile, "utf8")), original);
+    assert.equal(existsSync(join(f.job.stateDir, "milestone-blueprint-history",
+      "disclosure-" + original.lineage.reviewCycleId + ".json")), false);
+    assert.equal(existsSync(join(f.job.stateDir, "interactive-items/disclosure.json")), false);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+    assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
+    return;
+  }
+  if (defect === "rejected") {
+    assert.equal(resumed.status, "blocked");
+    assert.match(resumed.reason, /rejected the exact authorized patch/);
+    const rejected = JSON.parse(readFileSync(activeFile, "utf8"));
+    assert.equal(rejected.rounds.at(-1).review.status, "revise");
+    assert.equal(rejected.approvedDigest, undefined);
+    assert.equal(existsSync(join(f.job.stateDir, "interactive-items/disclosure.json")), false);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+    assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
+    assert.equal(f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]).milestoneBlueprint.digest, original.approvedDigest);
+    return;
+  }
   assert.equal(resumed.status, "paused", JSON.stringify(resumed));
+  const corrected = JSON.parse(readFileSync(activeFile, "utf8"));
+  assert.notEqual(corrected.lineage.reviewCycleId, original.lineage.reviewCycleId);
+  assert.deepEqual(corrected.supersedes.original, JSON.parse(originalEvent).blueprintPin);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.job.stateDir, "milestone-blueprint-history",
+    "disclosure-" + original.lineage.reviewCycleId + ".json"), "utf8")), original);
+  assert.equal(corrected.rounds.length, 1);
+  assert.equal(corrected.rounds[0].review.status, "pass");
+  if (defect === "interactive") assert.deepEqual(corrected.draft.events, original.draft.events);
+  else assert.equal(corrected.draft.events[0].knowledge, "Ada sees the original ledger and checks it against the daily register.");
+  assert.equal(corrected.draft.downstream.some((entry: any) => entry.owner === "interactive"), false);
+  assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
+  assert.ok(git(f.job.worktreeRoot, "log", "-1", "--format=%B", eventHead)
+    .includes("NovelTea-Milestone-Blueprint: " + original.approvedDigest));
   const omission = JSON.parse(readFileSync(join(f.job.stateDir,
     "interactive-items/disclosure.json"), "utf8"));
   assert.deepEqual(omission.units.map((unit: any) => unit.phase),
     ["not-applicable", "not-applicable"]);
+  assert.equal(omission.correctedBlueprintPin.digest, corrected.approvedDigest);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.job.stateDir, "composition-items/disclosure.json"), "utf8")).correctedBlueprintPin,
+    omission.correctedBlueprintPin);
   assert.equal(omission.worker, "fixture", "fixture proof is not independent live Pi judgment");
   assert.equal(omission.units[0].beforeHead, eventHead);
   assert.equal(omission.units[1].beforeHead, eventHead);
@@ -479,6 +551,11 @@ test("actual generation graph resumes Event-only Composition without Choice/Puzz
     ?.map((entry: any) => entry.workItem),
   ["interactive-choice-disclosure", "interactive-puzzle-disclosure"]);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  if (defect === "interactive") {
+    unlinkSync(activeFile);
+    assert.match(f.cli(["composition", "inspect", "--milestone", "milestone.disclosure"], false), /active controller-approved Blueprint/);
+    assert.equal(f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]).milestoneBlueprint.digest, original.approvedDigest);
+  }
 });
 
 test("#213 narrative-led full-Story handoff keeps omitted mechanics distinct from a completed Story", {

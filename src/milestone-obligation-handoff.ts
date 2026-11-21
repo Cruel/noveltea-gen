@@ -4,7 +4,9 @@ import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
 import type { EventAssignment } from "./event-specialist.js";
 import { eventCompletionDigest } from "./event-work.js";
-import { readReviewedMilestoneBlueprint, type MilestoneBlueprint,
+import { readReviewTurnEvidence } from "./fork-review-turn.js";
+import { inspectRepairLedger } from "./repair-ledger.js";
+import { assertFutureBlueprintActive, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, type MilestoneBlueprint,
   type MilestoneBlueprintPin } from "./milestone-blueprint.js";
 
 export interface MilestoneEventSource {
@@ -25,6 +27,7 @@ export interface MilestoneEventSource {
 
 export interface ReviewedMilestoneHandoff {
   pin: MilestoneBlueprintPin;
+  supersedes?: MilestoneBlueprintPin;
   design: MilestoneBlueprint;
   eventHead: string;
   eventIds: string[];
@@ -41,7 +44,7 @@ function git(job: JobStartResult, ...args: string[]): string {
 
 /** The Event's immutable commit and original assignment provide the ONLY
  * valid authority for this handoff. Old pre-Blueprint Events remain legacy. */
-export async function reviewedMilestoneHandoff(job: JobStartResult,
+export async function historicalMilestoneHandoff(job: JobStartResult,
   source: MilestoneEventSource): Promise<ReviewedMilestoneHandoff | undefined> {
   if (source.jobId !== job.jobId || source.phase !== "committed" ||
       !source.commitSha || !source.validation || source.validation.status !== "passed")
@@ -57,7 +60,7 @@ export async function reviewedMilestoneHandoff(job: JobStartResult,
   }
   const pin = source.blueprintPin;
   const milestoneState = source.validation.milestoneState;
-  if (!milestoneState || !source.expectedHead || !source.snapshot?.id ||
+  if (!milestoneState || !source.expectedHead || pin.sourceSha !== source.expectedHead || !source.snapshot?.id ||
       !source.contentDigest || !Array.isArray(source.obligations) ||
       git(job, "rev-parse", source.commitSha + "^") !== source.expectedHead ||
       !git(job, "log", "-1", "--format=%B", source.commitSha).split("\n").includes(
@@ -75,9 +78,40 @@ export async function reviewedMilestoneHandoff(job: JobStartResult,
     throw Error("Milestone Blueprint is not linked to the original committed Event assignment.");
   git(job, "merge-base", "--is-ancestor", pin.sourceSha, source.commitSha);
   const design = await readReviewedMilestoneBlueprint(job, pin, source.assignment);
+  const consumed = source.assignment.milestoneBlueprint;
+  if (consumed && (consumed.digest !== pin.digest || JSON.stringify(consumed.design) !== JSON.stringify(design)))
+    throw Error("Event assignment differs from the original reviewed Blueprint.");
   return { pin, design, eventHead: source.commitSha,
     eventIds: [...source.validation.eventIds],
     milestoneState };
+}
+
+/** Pending assignments consume only the current approved successor. Always
+ * authenticate the Event against its original pin first, never against HEAD. */
+export async function reviewedMilestoneHandoff(job: JobStartResult, source: MilestoneEventSource): Promise<ReviewedMilestoneHandoff | undefined> {
+  const historical = await historicalMilestoneHandoff(job, source);
+  if (!historical || !source.assignment) return historical;
+  const turn = await readReviewTurnEvidence(job);
+  const repair = turn && (await inspectRepairLedger(job, turn.digest)).blueprintRepairs?.find(r =>
+    r.original.milestoneId === source.milestoneId);
+  if (!repair) {
+    await assertFutureBlueprintActive(job, historical.pin);
+    return historical;
+  }
+  if (repair.eventHead !== historical.eventHead || JSON.stringify(repair.original) !== JSON.stringify(historical.pin) || !repair.successor)
+    throw Error("Milestone Blueprint correction is unresolved or has a different historical Event source.");
+  git(job, "merge-base", "--is-ancestor", historical.eventHead, repair.sourceSha);
+  git(job, "merge-base", "--is-ancestor", repair.sourceSha, "HEAD");
+  if (await originalBlueprintReviewDigest(job, historical.pin) !== repair.originalReviewDigest)
+    throw Error("Original Blueprint review history changed after supersession.");
+  await assertFutureBlueprintActive(job, repair.successor, { original: repair.original, eventHead: repair.eventHead,
+    turnDigest: turn!.digest, evidenceDigest: repair.evidenceDigest, originalReviewDigest: repair.originalReviewDigest });
+  const design = await readReviewedMilestoneBlueprint(job, repair.successor, source.assignment);
+  return { ...historical, design, pin: repair.successor, supersedes: historical.pin };
+}
+
+export function consumedCorrection(handoff?: ReviewedMilestoneHandoff) {
+  return handoff?.supersedes ? handoff.pin : undefined;
 }
 
 /** An omission is not authorization to discard promises assigned to an

@@ -230,9 +230,20 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   const turn = await readReviewTurnEvidence(job);
   if (!turn?.digest || !turn.objective) return null;
   const path = pathFor(job, milestone);
-  if (existsSync(path))
-    throw Error("Started Event-only omission review exists; reconcile its sealed receipt or preserved transcript, never replay.");
   const reviewHead = git(job, "rev-parse", "HEAD");
+  if (existsSync(path)) {
+    const saved = JSON.parse(await readFile(path, "utf8")) as Seal;
+    if (saved.phase !== "sealed")
+      throw Error("Started Event-only omission review exists; preserve its interrupted transcript, never replay.");
+    const ref = { nonce: saved.nonce, digest: saved.digest };
+    const prior = await readEventOnlyOmission(job, milestone, ref, { eventHead,
+      eventSnapshotId, planDigest: sha256(plan), validatorVersion: job.validatorVersion });
+    if (prior.reviewHead !== reviewHead || prior.reviewMode !== (input.fixture ? "fixture" : "pi") ||
+        prior.planVersion !== plan.version || JSON.stringify(prior.eventIds) !== JSON.stringify(eventIds) ||
+        JSON.stringify(prior.sourceHashes) !== JSON.stringify(await sourceHashes(job, report, milestone, eventIds)))
+      throw Error("Interrupted Event-only decision no longer matches this exact assignment.");
+    return ref;
+  }
   git(job, "merge-base", "--is-ancestor", eventHead, reviewHead);
   const hashes = await sourceHashes(job, report, milestone, eventIds);
   const planDigest = sha256(plan);
