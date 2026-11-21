@@ -1033,7 +1033,7 @@ export function createGenerationGraph(
             executionOwner !== "server" || s.status !== "blocked" || !s.orchestratorOrder ||
             !s.orchestratorPlanningDigest || !s.orchestratorSnapshotId ||
             !s.graphThreadId || r.planVersion !== s.planVersion ||
-            r.sourceSha !== s.inventory?.headSha || r.phase !== "protocol-exhausted" ||
+            r.phase !== "protocol-exhausted" ||
             r.check !== f.check || r.checkVersion !== f.failedVersion ||
             r.signature !== f.signature || r.jobId !== s.request?.job ||
             r.turnDigest !== s.request?.turnPlanDigest || !/^[a-z0-9][a-z0-9.-]{0,100}$/.test(f.id))

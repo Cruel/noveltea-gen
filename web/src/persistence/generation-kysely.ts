@@ -184,8 +184,7 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
             'v.attemptedFixesJson'])
           .where('v.checkId', '=', fix.check).where('v.checkVersion', '=', fix.failedVersion)
           .where('s.status', '=', 'blocked').where('q.phase', '=', 'finished')
-          .where('r.needsAuthor', '=', 0).where('t.deletedAt', 'is', null)
-          .whereRef('r.threadId', '=', 'v.threadId').execute()
+          .where('r.needsAuthor', '=', 0).where('t.deletedAt', 'is', null).execute()
         return rows.filter(row => {
           try {
             const attempted: unknown = JSON.parse(row.attemptedFixesJson)
@@ -218,8 +217,7 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
             .where('r.jobId', '=', jobId).where('r.ownerUserId', '=', owner)
             .where('r.needsAuthor', '=', 0).where('t.deletedAt', 'is', null)
             .executeTakeFirst()
-          if (!membership || membership.threadId !== row?.threadId ||
-              !row || !live || live.status !== 'blocked' || !live.requestJson ||
+          if (!membership || !row || !live || live.status !== 'blocked' || !live.requestJson ||
               live.threadId !== row.threadId || queue?.phase !== 'finished' ||
               queue.ownerId !== owner || queue.fixId === fix.id ||
               row.checkId !== expected.check || row.checkVersion !== expected.checkVersion ||

@@ -5,7 +5,7 @@ import { deployedVerifierFixes } from '../../../src/known-verifier-fix'
 import { readJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { trustedHead } from '../../../src/revision'
-import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from '../../../src/adaptive-protocol'
+import { verifyAdaptivePickupProof, type AdaptiveRecovery } from '../../../src/adaptive-protocol'
 import { readTurnEvidence } from '../../../src/turn-plan-evidence'
 import { sameGenerationRequest, assertServerClaimPermitted } from '../../../src/generation-owner'
 import type { GenerationRequest } from '../../../src/generation'
@@ -34,7 +34,7 @@ export async function verifyKnownFixProof(job: JobStartResult, request: Generati
     const state = saved.values as {
       status?: string; request?: typeof request; recovery?: AdaptiveRecovery | null;
       active?: unknown; result?: unknown; ideaTask?: unknown; ideaResult?: unknown;
-      planVersion?: number; inventory?: { headSha?: string };
+      planVersion?: number;
       orchestratorOrder?: string[]; orchestratorPlanningDigest?: string;
       orchestratorSnapshotId?: string; graphThreadId?: string;
     }
@@ -48,10 +48,9 @@ export async function verifyKnownFixProof(job: JobStartResult, request: Generati
         r.check !== stop.check || r.checkVersion !== stop.checkVersion ||
         r.signature !== stop.signature || r.sourceSha !== stop.sourceSha ||
         r.turnDigest !== stop.turnDigest || r.planVersion !== state.planVersion ||
-        state.inventory?.headSha !== stop.sourceSha ||
         r.jobId !== job.jobId || r.threadId !== job.threadId)
       throw Error('Known-fix pickup lost the original blocked graph checkpoint')
-    await verifyAdaptiveRecoveryProof(job, r)
+    await verifyAdaptivePickupProof(job, r)
   } finally { saver.db.close() }
 }
 

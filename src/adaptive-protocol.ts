@@ -6,6 +6,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AdaptiveProposal } from "./adaptive-assignments.js";
 import type { JobStartResult } from "./job.js";
+import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { beginProtocolInvocation, recoverResponseContract, recheckExhaustedProtocolResponse,
   inspectCompletedProtocolReads, type ResponseContractSession } from "./response-contract-recovery.js";
 
@@ -67,21 +68,34 @@ export async function verifyAdaptiveRecoveryProof(job: JobStartResult, decision:
     throw Error("Original adaptive response changed");
 }
 
-export async function recheckAdaptiveResponse(job: JobStartResult, decision: AdaptiveRecovery) {
+/** Read-only eligibility gate. A declared fix is not enough: the original
+ * terminal receipt and transcript must survive, and the newly shipped
+ * contract must actually accept the SAME exhausted response. */
+export async function verifyAdaptivePickupProof(job: JobStartResult, decision: AdaptiveRecovery) {
   if (decision.phase !== "protocol-exhausted")
     throw Error("Only an exact exhausted original response can be rechecked");
   await verifyAdaptiveRecoveryProof(job, decision);
+  return recheckExhaustedProtocolResponse({
+    receiptFile: join(job.stateDir, "adaptive-protocol", decision.signature),
+    sourceDigest: decision.signature, contract,
+    sessionRoots: [dirname(decision.proof.file)],
+    expectedSession: { id: decision.proof.id, file: decision.proof.file },
+    validate, parse,
+  });
+}
+
+export async function recheckAdaptiveResponse(job: JobStartResult, decision: AdaptiveRecovery,
+  snapshotRoot: string) {
+  const proposal = await verifyAdaptivePickupProof(job, decision);
   const receiptFile = join(job.stateDir, "adaptive-protocol", decision.signature);
   const options = { receiptFile, sourceDigest: decision.signature,
     contract, sessionRoots: [dirname(decision.proof.file)] };
-  const proposal = await recheckExhaustedProtocolResponse({
-    ...options, expectedSession: { id: decision.proof.id, file: decision.proof.file },
-    validate, parse,
-  });
   const provenance = await inspectCompletedProtocolReads({ ...options, allowExhausted: true });
   if (provenance.sessionFile !== decision.proof.file)
     throw Error("Rechecked adaptive session no longer matches the original");
-  return { proposal, sessionFile: provenance.sessionFile, skillReads: provenance.reads };
+  return { proposal, sessionFile: provenance.sessionFile,
+    skillReads: [...new Set(provenance.reads.map(path =>
+      canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshotRoot)))], };
 }
 
 export async function correctAdaptiveResponse(job: JobStartResult, decision: AdaptiveRecovery,

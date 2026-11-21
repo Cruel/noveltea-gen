@@ -55,16 +55,17 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     t.after(() => f.close())
     const owner = await f.owner(), stranger = await f.owner()
     const repository = randomUUID(), story = randomUUID(), id = randomUUID()
-    const threadId = randomUUID()
+    const threadId = 'graph:' + randomUUID()
+    const authorThreadId = randomUUID()
     await f.records.insert('repositories', { id: repository, ownerUserId: owner,
       provider: 'github', providerRepositoryId: repository, name: 'Story', createdAt: now })
     await f.records.insert('stories', { id: story, ownerUserId: owner, repositoryId: repository,
       directory: 'story', title: 'Story', sourceCommitSha: original.sourceSha, createdAt: now })
-    await f.records.insert('story_threads', { id: threadId, storyId: story, ownerUserId: owner,
+    await f.records.insert('story_threads', { id: authorThreadId, storyId: story, ownerUserId: owner,
       title: 'Original Turn', createdAt: now, activityAt: now })
     assert.equal(await f.generation.jobs.register(owner, id, story, 'Story', original.sourceSha, now), true)
     await f.records.insert('story_thread_runs', {
-      jobId: id, ownerUserId: owner, threadId, runOrder: 0,
+      jobId: id, ownerUserId: owner, threadId: authorThreadId, runOrder: 0,
     })
     const pinned = '{"task":"original"}'
     const queue = f.generation.queue, jobs = f.generation.jobs, worker = 'host:1:worker'

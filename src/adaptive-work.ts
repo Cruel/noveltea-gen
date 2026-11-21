@@ -374,7 +374,7 @@ export async function reconcileAdaptiveWork(input: {
       let proposed: Awaited<ReturnType<typeof proposeAdaptiveWork>>;
       try {
         proposed = input.fixRecheck && interrupted && input.recovery
-          ? await recheckAdaptiveResponse(job, input.recovery)
+          ? await recheckAdaptiveResponse(job, input.recovery, selected.receipt.skillSnapshot.path)
           : await proposeAdaptiveWork({
           job, selected, turn, inventory: effective, planning, metrics,
           provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
