@@ -12,6 +12,8 @@ import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
+import { sourceBoundBlueprintChallenge } from "./blueprint-challenge.js";
+import type { MilestoneBlueprint, MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { sealIndependentReview, inspectCheckpointReview, repairReviewAssignment, readRepairCommitProof,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
@@ -42,6 +44,10 @@ export interface SemanticReviewItem {
   /** Historical failed promise, not an additional grant or inherited verdict. */
   rejectedEventComparison?: { sourceCommitSha: string; findings: IndependentReviewResult["findings"];
     originalProof: EventConsequenceProof };
+  /** A cited reviewed Event may challenge its original exact private plan.
+   * Later stage reviews must report their defects as ordinary FAIL findings
+   * until a separate dependency amendment is admitted by the controller. */
+  milestoneBlueprint?: { pin: MilestoneBlueprintPin; design: MilestoneBlueprint };
   /** Every repaired specialist, not just Events, is reviewed against the
    * original sealed failure and the previous attempted correction. */
   priorNegative?: { sourceCommitSha: string; rootFailureSha: string;
@@ -210,6 +216,7 @@ export async function prepareSemanticReview(job: JobStartResult,
     const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
     let eventConsequenceProof: EventConsequenceProof | undefined;
     let milestoneBlueprintObligations = "";
+    let milestoneBlueprint: SemanticReviewItem["milestoneBlueprint"];
     if (point.workItem.startsWith("event-")) {
       const slug = point.workItem.slice("event-".length);
       if (/^[a-z][a-z0-9-]*$/.test(slug)) {
@@ -226,6 +233,7 @@ export async function prepareSemanticReview(job: JobStartResult,
               throw Error("Reviewed Event lost its source-bound Milestone planning handoff.");
             const { readReviewedMilestoneBlueprint } = await import("./milestone-blueprint.js");
             const local = await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
+            milestoneBlueprint = { pin: receipt.blueprintPin, design: local };
             milestoneBlueprintObligations = "\nINDEPENDENTLY REVIEWED PRIVATE MILESTONE OBLIGATIONS: " +
               JSON.stringify(local) + ". Check actual committed Event evidence against current-stage " +
               "local promises; defer only named interactive/Composition obligations. " +
@@ -347,6 +355,7 @@ export async function prepareSemanticReview(job: JobStartResult,
           "this text grants no additional path, domain or protected-decision authority." : ""),
       assurance, diff, canonicalContext,
       readOnlyPaths, repairTargets,
+      ...(milestoneBlueprint ? { milestoneBlueprint } : {}),
       ...(eventMilestone ? { eventMilestoneFieldGrant: { ...eventMilestone,
         fields: ["completeness", "fulfillment"] as ["completeness", "fulfillment"] } } : {}),
       ...(eventConsequenceProof ? { eventConsequenceProof } : {}),
@@ -475,8 +484,22 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
         f.affectedPaths.some(path => !packet.items.find(item =>
           item.assurance.commitSha === f.commitSha && item.assignment.id === f.assignmentId)?.canonicalContext
           .some(record => record.path === path))) ||
-      verdict.evidence.some(e => !e || !belongs(e.commitSha, e.assignmentId, e.path, e.line) ||
-        typeof e.explanation !== "string" || !e.explanation.trim()) ||
+      verdict.evidence.some(e => {
+        if (!e || !belongs(e.commitSha, e.assignmentId, e.path, e.line) ||
+            typeof e.explanation !== "string" || !e.explanation.trim()) return true;
+        if (e.blueprintChallenge === undefined) return false;
+        // A reviewer may only CHALLENGE the precise approved version in the
+        // authenticated packet. An arbitrary JSON extension cannot confer scope.
+        const item = packet.items.find(i => i.assurance.commitSha === e.commitSha &&
+          i.assignment.id === e.assignmentId);
+        if (!item?.milestoneBlueprint || verdict.verdict !== "pass") return true;
+        try {
+          sourceBoundBlueprintChallenge(item.milestoneBlueprint.design,
+            item.milestoneBlueprint.pin.digest, e.blueprintChallenge, e,
+            item.canonicalContext.find(c => c.path === e.path), item.assurance.changedPaths);
+          return false;
+        } catch { return true; }
+      }) ||
       (verdict.verdict === "pass" && verdict.findings.length > 0) ||
       (verdict.verdict === "fail" && !verdict.findings.length) ||
       packet.items.some(item =>

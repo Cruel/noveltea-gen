@@ -2,6 +2,7 @@
  * writer lease. Only the private planning owner runs; the Event never reruns. */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual as equal } from "node:util";
 import type { JobStartResult } from "./job.js";
@@ -18,21 +19,34 @@ import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-on
 import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint, milestoneBlueprintApprovalProvenance, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, parseMilestoneBlueprint, type MilestoneBlueprint } from "./milestone-blueprint.js";
 import { classifyApprovalRevisionCause, approvalRevisionSeverity, inspectRepairLedger, recordBlueprintRepair, type BlueprintRepair } from "./repair-ledger.js";
 import { execFileSync } from "./git-read-cache.js";
+import { sourceBoundBlueprintChallenge, proposedBlueprintField,
+  type BlueprintChallenge, type SpecialistBlueprintChallenge } from "./blueprint-challenge.js";
+import { verifyJobPiSession } from "./job-session.js";
+import { lastSpecialistManifest } from "./specialist-manifest.js";
+export type { BlueprintChallenge } from "./blueprint-challenge.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-/** A reviewer of a valid Event can flag a defect in the private plan, not
- * grant an Event rewrite. The controller checks both exact source values. */
-export interface BlueprintChallenge {
-  pinDigest: string; field: string; before: unknown; proposed: unknown; sourceQuote: string;
-}
-function proposedField(design: MilestoneBlueprint, c: BlueprintChallenge) {
-  const match = /^(events|downstream)\/(0|[1-9]\d?)\/(purpose|dependsOn|evidence|participants|knowledge|routes|owner|obligation)$/.exec(c.field);
-  if (!match) throw Error("Invalid material Blueprint field selector.");
-  const result = structuredClone(design);
-  const entry = result[match[1] as "events" | "downstream"][Number(match[2])] as unknown as Record<string, unknown> | undefined;
-  if (!entry || !Object.hasOwn(entry, match[3]!) || !equal(entry[match[3]!], c.before)) throw Error("Blueprint finding does not match the original material field.");
-  entry[match[3]!] = c.proposed;
-  return result;
+/** Verify a claimed specialist challenge against the original completed Pi
+ * response; changing a private receipt cannot create a new model finding. */
+async function originalSpecialistChallenge(job: JobStartResult, event: {
+  worker?: string; sessionFile?: string; sessionId?: string; workItemId?: string;
+  blueprintChallenge?: SpecialistBlueprintChallenge }, challenge: SpecialistBlueprintChallenge) {
+  if (event.worker === "fixture") return; // Only the deterministic fixture worker may report fixture evidence.
+  if (event.worker !== "pi" || !event.workItemId)
+    throw Error("Blueprint specialist challenge has no original worker identity.");
+  await verifyJobPiSession(job, "event", event.sessionFile, event.sessionId, event.workItemId);
+  if (!event.sessionFile || !event.sessionId)
+    throw Error("Blueprint specialist challenge lost its original session identity.");
+  const messages = (await readFile(event.sessionFile, "utf8")).trim().split("\n").map(line => JSON.parse(line) as {
+    type?: string; message?: { role?: string; stopReason?: string;
+      content?: Array<{ type: string; text?: string }> } });
+  const completed = messages.filter(m => m.type === "message" && m.message?.role === "assistant" &&
+    !["aborted", "error"].includes(m.message.stopReason ?? ""));
+  const last = completed.at(-1)?.message;
+  const text = last?.content?.filter(c => c.type === "text").map(c => c.text ?? "").join("\n") ?? "";
+  if (!equal(lastSpecialistManifest(text)?.blueprintChallenge, challenge) ||
+      !equal(event.blueprintChallenge, challenge))
+    throw Error("Blueprint specialist challenge was not present in the completed pinned Pi response.");
 }
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
@@ -40,7 +54,8 @@ function git(job: JobStartResult, ...args: string[]) {
   return execFileSync("git", args, { cwd: job.worktreeRoot, env, encoding: "utf8" });
 }
 export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
-  event: MilestoneEventSource & { snapshot?: SkillSnapshot; worker?: string; provider?: string; model?: string; planDigest?: string },
+  event: MilestoneEventSource & { snapshot?: SkillSnapshot; worker?: string; provider?: string; model?: string; planDigest?: string;
+    sessionFile?: string; sessionId?: string; workItemId?: string; blueprintChallenge?: SpecialistBlueprintChallenge },
   input: { head: string; fixture: boolean; omission: EventOnlyRef | null; protectionBase?: string; objective?: string; turnDigest?: string; native: Parameters<typeof selectedAssignment>[2] }) {
   const old = await historicalMilestoneHandoff(job, event);
   if (!old || !event.assignment || !event.snapshot) return;
@@ -51,7 +66,12 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   const evidence = review?.result?.evidence;
   const entries = evidence?.includes('"blueprintChallenge"') && evidence.startsWith("{") ? JSON.parse(evidence).evidence : [];
   const findings = Array.isArray(entries) ? entries.filter(e => e.blueprintChallenge !== undefined) : [];
-  if (!ownerConflict && !findings.length) return;
+  const specialist = event.blueprintChallenge;
+  const trailer = git(job, "log", "-1", "--format=%B", old.eventHead).split("\n")
+    .find(line => line.startsWith("NovelTea-Blueprint-Challenge: "));
+  if (trailer !== (specialist ? "NovelTea-Blueprint-Challenge: " + sha(specialist) : undefined))
+    throw Error("Specialist Blueprint challenge does not match the immutable Event commit.");
+  if (!ownerConflict && !findings.length && !specialist) return;
   if (!existsSync(join(job.stateDir, "turn-plan.json")))
     throw Error("Post-approval Blueprint challenge lacks the authenticated Turn plan.");
   const head = input.head;
@@ -84,18 +104,36 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   let candidate = structuredClone(old.design);
   const sources = new Set<string>();
   if (findings.length > 1) throw Error("Multiple material challenges need a separately bounded assignment.");
+  const claims: Array<{ c: BlueprintChallenge; path: string; line: number; origin: "reviewer" | "specialist" }> = [];
   for (const e of findings) {
-    const c = e.blueprintChallenge as BlueprintChallenge;
-    if (!c || c.pinDigest !== old.pin.digest || e.commitSha !== old.eventHead || e.assignmentId !== "event" ||
-        !point.assurance.changedPaths.includes(e.path) || !Number.isSafeInteger(e.line) || e.line < 1 ||
-        typeof c.sourceQuote !== "string" || c.sourceQuote.trim().length < 8 || c.sourceQuote.length > 1000)
+    if (e.commitSha !== old.eventHead || e.assignmentId !== "event")
+      throw Error("Blueprint reviewer challenge is not bound to the original Event review.");
+    claims.push({ c: e.blueprintChallenge, path: e.path, line: e.line, origin: "reviewer" });
+  }
+  if (specialist) {
+    await originalSpecialistChallenge(job, event, specialist);
+    claims.push({ c: specialist, path: specialist.path, line: specialist.line, origin: "specialist" });
+  }
+  // Contradictory proposals about ONE material field are a bounded semantic
+  // dispute: authenticate both before a fresh independent correction review.
+  // Unrelated fields require separate assignments, never a combined grant.
+  if (claims.length > 1 && claims.some(entry => entry.c.field !== claims[0]!.c.field ||
+      !equal(entry.c.before, claims[0]!.c.before) || entry.c.pinDigest !== claims[0]!.c.pinDigest))
+    throw Error("Multiple unrelated material challenges require separately bounded adjudication.");
+  const disputed = claims.length > 1 && !claims.every(entry => equal(entry.c, claims[0]!.c));
+  for (const { c, path, line } of claims) {
+    if (!point.assurance.changedPaths.includes(path))
       throw Error("Blueprint challenge is not bound to the reviewed Event source.");
-    const path = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + e.path;
-    const source = git(job, "show", old.eventHead + ":" + path);
-    if (source.split(/\r?\n/)[e.line - 1]?.trim() !== c.sourceQuote || git(job, "show", head + ":" + path) !== source)
-      throw Error("Blueprint challenge canonical quote changed or was not in its reviewed source.");
-    candidate = proposedField(candidate, c);
-    sources.add(e.path);
+    const repoPath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path;
+    const source = git(job, "show", old.eventHead + ":" + repoPath);
+    if (git(job, "show", head + ":" + repoPath) !== source)
+      throw Error("Blueprint challenge cited an Event source changed since its independent review.");
+    const proposed = sourceBoundBlueprintChallenge(old.design, old.pin.digest, c,
+      { path, line }, { path, content: source }, point.assurance.changedPaths);
+    // Reviewer evidence is independently sealed; a competing specialist
+    // proposal is carried into adjudication, not silently applied as a grant.
+    if (c === claims[0]!.c) candidate = proposed;
+    sources.add(path);
   }
   if (input.omission) {
     const proof = await readEventOnlyOmission(job, event.milestoneId, input.omission, {
@@ -115,12 +153,13 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   // Different JSON key ordering (or an identical suggestion) changes no
   // obligation. Deterministically retain the original approval, no Pi turn.
   if (equal(candidate, old.design)) return;
-  const evidenceDigest = sha([input.omission, findings, sha(candidate)]);
-  // Both paths have already authenticated the immutable Event and independent
-  // review above. A later Event-only omission is a newly discovered constraint;
-  // a reviewer claim with no PREapproval contradiction proof stays unclassified.
+  const evidenceDigest = sha(specialist || disputed
+    ? [input.omission, findings, specialist, disputed, sha(candidate)]
+    : [input.omission, findings, sha(candidate)]);
+  // The Event-only omission is independently verified as newly discovered;
+  // a specialist/reviewer claim after approval cannot prove a PREapproval escape.
   const cause = classifyApprovalRevisionCause({
-    kind: input.omission && !findings.length ? "later-constraint" : "unknown",
+    kind: input.omission && !findings.length && !specialist ? "later-constraint" : "unknown",
     originalSourceSha: old.pin.sourceSha, verifiedSourceSha: head,
   });
   const grant: BlueprintRepair = { owner: "nt-event-design", original: old.pin, eventHead: old.eventHead,
@@ -128,9 +167,13 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
     sourceSha: head, planDigest: sha(plan), evidenceDigest,
     incident: { id: sha({ jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest,
         original: old.pin, evidenceDigest }), cause, severity: approvalRevisionSeverity(cause),
-      trigger: { kind: findings.length ? input.omission ? "combined" : "independent-event-review" : "event-only",
+      trigger: {
+        kind: [!!input.omission, !!findings.length, !!specialist].filter(Boolean).length > 1
+          ? "combined" : specialist ? "event-specialist" : findings.length
+            ? "independent-event-review" : "event-only",
         fields: [...(ownerConflict ? ["downstream/interactive"] : []),
-          ...findings.map(f => (f.blueprintChallenge as BlueprintChallenge).field)].sort(),
+          ...findings.map(f => (f.blueprintChallenge as BlueprintChallenge).field),
+          ...(specialist ? [specialist.field] : [])].sort(),
         sourcePaths: [...sources].sort(), reviewDigest: findings.length ? sha(review?.result) : null },
       affectedWork: ["interactive:" + event.milestoneId, "composition:" + event.milestoneId],
       originalApproval: await milestoneBlueprintApprovalProvenance(job, old.pin, event.assignment) } };
@@ -149,18 +192,23 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   const accepts = (draft: MilestoneBlueprint) => {
     if (equal(draft, candidate)) return true;
     if (equal(draft, old.design)) return false;
-    if (ownerConflict || findings.length !== 1 || input.omission && draft.downstream.some(item => item.owner === "interactive")) return false;
-    const c: BlueprintChallenge = findings[0].blueprintChallenge;
+    if (ownerConflict || claims.length === 0 || input.omission && draft.downstream.some(item => item.owner === "interactive")) return false;
+    const c = claims[0]!.c;
     const [array, index, field] = c.field.split("/");
     const entry = draft[array as "events" | "downstream"][Number(index)] as unknown as Record<string, unknown> | undefined;
-    return !!entry && equal(proposedField(old.design, { ...c, proposed: entry[field!] }), draft);
+    try { return !!entry && equal(proposedBlueprintField(old.design, { ...c, proposed: entry[field!] }), draft); }
+    catch { return false; }
   };
-  const task = "Post-approval correction for FUTURE obligations only; the reviewed Event remains valid. " +
+  const task = (disputed ? "DISPUTED APPROVED PLAN: The specialist and Event reviewer proposed different corrections " +
+    "to the same cited field. Independently adjudicate both source-bound claims; reject if evidence cannot resolve " +
+    "the contradiction. A prior PASS and either proposed value alone are NOT sufficient. " : "") +
+    "Post-approval correction for FUTURE obligations only; the reviewed Event remains valid. " +
     "Do not regenerate it or modify canonical sources. Read the cited Event sources. Independently reject if the exact proposed correction " +
     "would drop real obligations, change protected decisions, or is not justified. No scope outside this patch. " +
-    JSON.stringify({ goal: turn.goal, grant, findings, eventOnly: input.omission, sources: [...sources], original: old.design, proposed: candidate });
+    JSON.stringify({ goal: turn.goal, grant, findings, specialist, eventOnly: input.omission,
+      sources: [...sources], original: old.design, proposed: candidate });
   const next = await ensureMilestoneBlueprint(job, plan, event.assignment, event.snapshot, event.provider, event.model,
-    task, head, input.fixture, { candidate, sources: [...sources], accepts, exactPatch: ownerConflict, supersedes: {
+    task, head, input.fixture, { candidate, sources: [...sources], accepts, exactPatch: ownerConflict || disputed, supersedes: {
       original: old.pin, eventHead: old.eventHead, turnDigest: turn.digest, evidenceDigest: grant.evidenceDigest, originalReviewDigest: grant.originalReviewDigest } });
   const approved = await readReviewedMilestoneBlueprint(job, next.pin, event.assignment);
   await clean();

@@ -115,7 +115,7 @@ export interface BlueprintApprovalProvenance {
 export interface BlueprintRevisionIncident {
   id: string; cause: ApprovalRevisionCause; severity: ApprovalRevisionSeverity;
   /** Immutable references only; raw transcripts, quoted prose and credentials stay private. */
-  trigger: { kind: "event-only" | "independent-event-review" | "combined";
+  trigger: { kind: "event-only" | "event-specialist" | "independent-event-review" | "combined";
     fields: string[]; sourcePaths: string[]; reviewDigest: string | null };
   affectedWork: string[];
   originalApproval: BlueprintApprovalProvenance;
@@ -202,7 +202,7 @@ function incidentValid(r: BlueprintRepair, job: JobStartResult, turnDigest: stri
     provenanceValid(i.originalApproval, r.original.cycleId) &&
     (!i.successorApproval || !!r.successor && provenanceValid(i.successorApproval, r.successor.cycleId)) &&
     (!!r.successor === !!i.successorApproval) &&
-    !!i.trigger && ["event-only", "independent-event-review", "combined"].includes(i.trigger.kind) &&
+    !!i.trigger && ["event-only", "event-specialist", "independent-event-review", "combined"].includes(i.trigger.kind) &&
     Array.isArray(i.trigger.fields) && i.trigger.fields.length <= 12 &&
     i.trigger.fields.every(f => typeof f === "string" && f.length <= 100 &&
       /^(events|downstream)\/[a-z0-9/-]+$/.test(f)) &&

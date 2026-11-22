@@ -58,11 +58,14 @@ export interface EventEvidence {
   authorQuestion?: SpecialistChoiceQuestion;
   /** No-write source-bound claim only; does not authorize an Architecture edit. */
   causalDiscovery?: CausalDiscovery;
+  /** Source-backed challenge to the provisional approved plan; no write grant. */
+  blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge;
   skillReads: string[];
 }
 
 export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[];
-  laterObligations: string[]; causalDiscovery?: CausalDiscovery } {
+  laterObligations: string[]; causalDiscovery?: CausalDiscovery;
+  blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge } {
   const obj = lastSpecialistManifest(text);
   const strings = (value: unknown): value is string[] =>
     Array.isArray(value) && value.every(x => typeof x === "string" && x.trim().length > 0);
@@ -85,8 +88,28 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
       throw Error("Causal discovery must be an exact no-write source-bound prerequisite claim.");
     causalDiscovery = claim as CausalDiscovery;
   }
+  let blueprintChallenge: import("./blueprint-challenge.js").SpecialistBlueprintChallenge | undefined;
+  if (obj.blueprintChallenge !== undefined) {
+    const challenge = obj.blueprintChallenge as Record<string, unknown> | null;
+    if (!challenge || typeof challenge !== "object" || Array.isArray(challenge) ||
+        Object.keys(challenge).some(key => ![
+          "path", "line", "pinDigest", "field", "before", "proposed", "sourceQuote", "violatedObligation",
+        ].includes(key)) ||
+        !obj.modifiedRecords.length || !challenge.path ||
+        typeof challenge.path !== "string" || !obj.modifiedRecords.includes(challenge.path) ||
+        !Number.isSafeInteger(challenge.line) || (challenge.line as number) < 1 ||
+        !/^[0-9a-f]{64}$/.test(String(challenge.pinDigest)) ||
+        typeof challenge.field !== "string" || !/^(events|downstream)\/[0-9]+\/[a-zA-Z]+$/.test(challenge.field) ||
+        typeof challenge.sourceQuote !== "string" || challenge.sourceQuote.length < 8 ||
+        typeof challenge.violatedObligation !== "string" ||
+        challenge.violatedObligation.length < 8 ||
+        challenge.before === undefined || challenge.proposed === undefined)
+      throw Error("Event specialist Blueprint challenge must cite one changed Event source and approved field.");
+    blueprintChallenge = challenge as unknown as import("./blueprint-challenge.js").SpecialistBlueprintChallenge;
+  }
   return { modifiedRecords: obj.modifiedRecords, architecturalConflicts: obj.architecturalConflicts,
-    laterObligations: obj.laterObligations, ...(causalDiscovery ? { causalDiscovery } : {}) };
+    laterObligations: obj.laterObligations, ...(causalDiscovery ? { causalDiscovery } : {}),
+    ...(blueprintChallenge ? { blueprintChallenge } : {}) };
 }
 
 /** The actual selected Milestone must positively describe player-visible
@@ -455,6 +478,11 @@ export function eventSpecialistPrompt(
       "purpose/downstream obligation in the independently reviewed local plan. " +
       "A contradiction or reviewer request is NOT permission to change Architecture; " +
       "the controller will independently verify and authorize any adjustment. " +
+      "When authored Event evidence contradicts an approved LOCAL plan obligation, " +
+      "you may add blueprintChallenge:{pinDigest,field,before,proposed,sourceQuote,path,line,violatedObligation} " +
+      "to the completed manifest. Cite an exact changed Event line and one existing material " +
+      "events/<index>/<field> or downstream/<index>/<field> with full before/proposed values. " +
+      "This reports a challenge for later independent/controller checks; NEVER edit the private plan. " +
       "An authored Event with an in-scope evidence gap needs a bounded " +
       "same-session correction, not an invented downstream owner. The graph verifies " +
       "source, manifests, authority and validation.",
@@ -633,6 +661,7 @@ export async function authorEventCluster(
       }
       const evidence: EventEvidence = { claimedPaths: summary.modifiedRecords,
         conflicts: summary.architecturalConflicts, obligations: summary.laterObligations,
+        blueprintChallenge: summary.blueprintChallenge,
         sessionFile: session.sessionManager.getSessionFile() ?? undefined,
         skillReads };
       const diagnostics = await verifyDraft(evidence);

@@ -1522,6 +1522,20 @@ protected scope, Event checkpoint and both sources before recording a bounded
 identical JSON needs no new review. A material correction uses a fresh
 read-only Milestone planning/review cycle, never an Event writer.
 
+**Source-backed challenges (#231).** The Event specialist can also attach a
+structured challenge to its completed, source-grounded manifest without editing
+the private Blueprint. The controller authenticates the exact material field,
+original value, source line, current Turn and independent Event checkpoint,
+then verifies both the persisted Pi response and a challenge digest in the
+immutable Event commit. The independent Event reviewer can attach the same
+source-bound claim to a passing verdict. Forged pins, altered receipts,
+source drift and unrelated owner fields are rejected before a new approval is
+published. When both reviewers disagree about a single field, the original
+claims go to a separate bounded independent correction review; unrelated
+fields do not receive a combined grant. A rejected review cannot become a
+self-approved patch. Existing omission and reviewer-only grant identities
+remain compatible with earlier receipts.
+
 The Event receipt and Git trailer always refer to the original approval.
 The original private review survives in `milestone-blueprint-history/`;
 `job event inspect` distinguishes its consumed `milestoneBlueprint` from

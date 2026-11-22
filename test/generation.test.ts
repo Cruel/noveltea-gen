@@ -409,7 +409,9 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
       await reviewBoundedAssignments(job, [point], async packet => ({
         sourceDigest: packet.sourceDigest, verdict: "pass" as const,
         findings: [], evidence: packet.items.map(item => {
-          if (workItem === "event-disclosure" && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge") {
+          if (workItem === "event-disclosure" && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge" &&
+              (!process.env.NT_BLUEPRINT_SPECIALIST_FIXTURE ||
+                process.env.NT_BLUEPRINT_SPECIALIST_FIXTURE === "disagree")) {
             const path = "events/disclose-ledger.md";
             const lines = item.canonicalContext.find(source => source.path === path)!.content.split("\n");
             const index = lines.findIndex(s => s.startsWith("Neri opens the original"));
@@ -435,9 +437,17 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
     }
 }
 
-for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test("actual generation graph resumes Event-only Composition after historical " + defect + " correction (#229 fixture)", { skip: !available }, async () => {
+for (const defect of ["interactive", "knowledge", "rejected", "tampered", "specialist", "specialist-tampered", "specialist-disputed",
+  "specialist-restart", "specialist-wrong-path"]) test("actual generation graph resumes Event-only Composition after historical " + defect + " correction (#229/#231 fixture)", { skip: !available }, async () => {
   const f = setup("generation-event-only-no-write-" + defect);
-  f.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE = "historical-" + (defect === "rejected" ? "interactive" : defect === "tampered" ? "knowledge" : defect);
+  f.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE = "historical-" + (defect === "rejected" ? "interactive" :
+    ["tampered", "specialist", "specialist-tampered", "specialist-disputed",
+      "specialist-restart", "specialist-wrong-path"].includes(defect) ? "knowledge" : defect);
+  if (defect.startsWith("specialist"))
+    f.env.NT_BLUEPRINT_SPECIALIST_FIXTURE = ["specialist", "specialist-restart"].includes(defect)
+      ? "knowledge" : defect === "specialist-disputed" ? "disagree" :
+      defect === "specialist-wrong-path" ? "wrong-path" : "wrong-pin";
+  if (defect === "specialist-disputed") f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT = "revise";
   if (defect === "rejected") f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT = "revise";
   if (defect === "tampered") f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_CHALLENGE = "wrong-pin";
   for (const key of ["NT_ARCHITECTURE_FIXTURE_CASE", "NT_EVENT_FIXTURE_CASE",
@@ -465,17 +475,28 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
   await seal("character-foundations");
   const first = f.cli(["generate", "resume", "--pause-after", "event"]);
   assert.equal(first.status, "paused", JSON.stringify(first));
+  if (defect === "tampered") {
+    const pinnedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const pinned = readFileSync(join(f.job.stateDir, "milestone-blueprints/disclosure.json"), "utf8");
+    await assert.rejects(seal("event-disclosure"), /Semantic reviewer lacks assignment-specific, source-linked evidence/);
+    assert.equal(readFileSync(join(f.job.stateDir, "milestone-blueprints/disclosure.json"), "utf8"), pinned);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), pinnedHead);
+    assert.equal(existsSync(join(f.job.stateDir, "interactive-items/disclosure.json")), false);
+    return;
+  }
   await seal("event-disclosure");
   const eventHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const eventFile = join(f.job.stateDir, "event-items/disclosure.json");
   const originalEvent = readFileSync(eventFile, "utf8");
   const activeFile = join(f.job.stateDir, "milestone-blueprints/disclosure.json");
   const original = JSON.parse(readFileSync(activeFile, "utf8"));
-  if (defect === "interactive") {
-    assert.ok(original.draft.downstream.some((entry: any) => entry.owner === "interactive"));
-    const refused = f.cli(["interactive", "run", "--milestone", "milestone.disclosure", "--fixture", "--skills-source", source], false);
-    assert.match(refused, /No current reviewed Event, protected Turn scope or planning owner/);
-    assert.deepEqual(JSON.parse(readFileSync(activeFile, "utf8")), original, "a challenge alone cannot archive approval");
+  if (defect === "interactive" || defect === "specialist-restart") {
+    if (defect === "interactive") assert.ok(original.draft.downstream.some((entry: any) => entry.owner === "interactive"));
+    if (defect === "interactive") {
+      const refused = f.cli(["interactive", "run", "--milestone", "milestone.disclosure", "--fixture", "--skills-source", source], false);
+      assert.match(refused, /No current reviewed Event, protected Turn scope or planning owner/);
+      assert.deepEqual(JSON.parse(readFileSync(activeFile, "utf8")), original, "a challenge alone cannot archive approval");
+    }
     f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT = "archived";
     const interrupted = f.cli(["generate", "resume", "--pause-after", "composition"]);
     assert.equal(interrupted.status, "paused", interrupted.reason);
@@ -495,9 +516,9 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
     delete f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT;
   }
   const resumed = f.cli(["generate", "resume", "--pause-after", "composition"]);
-  if (defect === "tampered") {
+  if (defect === "specialist-tampered" || defect === "specialist-wrong-path") {
     assert.equal(resumed.status, "blocked");
-    assert.match(resumed.reason, /Blueprint challenge is not bound to the reviewed Event source/);
+    assert.match(resumed.reason, /Blueprint challenge is not bound to the reviewed (Event|specialist) source/);
     assert.deepEqual(JSON.parse(readFileSync(activeFile, "utf8")), original);
     assert.equal(existsSync(join(f.job.stateDir, "milestone-blueprint-history",
       "disclosure-" + original.lineage.reviewCycleId + ".json")), false);
@@ -508,7 +529,7 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
       "unverified model challenges must not forge admin warnings");
     return;
   }
-  if (defect === "rejected") {
+  if (defect === "rejected" || defect === "specialist-disputed") {
     assert.equal(resumed.status, "blocked");
     assert.match(resumed.reason, /rejected the exact authorized patch/);
     const rejected = JSON.parse(readFileSync(activeFile, "utf8"));

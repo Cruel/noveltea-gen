@@ -51,6 +51,7 @@ interface EventReceipt {
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[];
   causalDiscovery?: CausalDiscovery;
+  blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge;
   /** Advisory typed evidence tied to native-validated draft and final commit. */
   consequenceProof?: EventConsequenceProof;
   /** A completed, clean no-write original session; never executable authority. */
@@ -386,6 +387,13 @@ async function publishHead(job: JobStartResult, prior: string, commit: string, w
   await finalizeRecoveryCheckpoint(job, workItem, prior, commit);
 }
 function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string) {
+  // A post-approval challenge is noncanonical model evidence, but its exact
+  // submitted bytes must be attributable to this immutable Event commit.
+  const challengeTrailer = git(job, "log", "-1", "--format=%B", commit).split("\n")
+    .find(line => line.startsWith("NovelTea-Blueprint-Challenge: "));
+  if (challengeTrailer !== (receipt.blueprintChallenge
+    ? "NovelTea-Blueprint-Challenge: " + hash(JSON.stringify(receipt.blueprintChallenge))
+    : undefined)) throw Error("Event Blueprint challenge differs from the committed specialist report.");
   if (!receipt.contentDigest || !receipt.paths ||
       !git(job, "log", "-1", "--format=%B", commit).split("\n").includes(
         "NovelTea-Job: " + commitOrigin(job, receipt.workItemId, commit).jobId) ||
@@ -551,7 +559,28 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
   }
   if (variant === "mismatch") files.push("events/never-written.md");
   if (configured === "phantom-milestone") files.push(assignment.milestonePath);
-  return { claimedPaths: files, conflicts: [], obligations:
+  // The initial approved local plan is wrong about the source-grounded
+  // knowledge claim. The specialist can cite it without editing the plan.
+  const challengeCase = process.env.NT_BLUEPRINT_SPECIALIST_FIXTURE;
+  let blueprintChallenge: import("./blueprint-challenge.js").SpecialistBlueprintChallenge | undefined;
+  if (challengeCase && assignment.milestoneBlueprint) {
+    const path = "events/disclose-ledger.md";
+    const lines = (await readFile(join(job.worktreeStoryRoot, path), "utf8")).split("\n");
+    const index = lines.findIndex(line => line.startsWith("Neri opens the original"));
+    if (index < 0) throw Error("Specialist fixture missing its original canonical source.");
+    const before = assignment.milestoneBlueprint.design.events[0]!.knowledge;
+    blueprintChallenge = {
+      pinDigest: challengeCase === "wrong-pin" ? "0".repeat(64) : assignment.milestoneBlueprint.digest,
+      field: "events/0/knowledge", before,
+      proposed: challengeCase === "disagree"
+        ? "Ada sees a copy of the register but cannot inspect the signed original."
+        : "Ada sees the original ledger and checks it against the daily register.",
+      sourceQuote: lines[index]!.trim(),
+      path: challengeCase === "wrong-path" ? "events/nonexistent.md" : path,
+      line: index + 1, violatedObligation: before,
+    };
+  }
+  return { claimedPaths: files, ...(blueprintChallenge ? { blueprintChallenge } : {}), conflicts: [], obligations:
     ["decision-pending", "false-decision-complete", "fake-unrelated-effects"].includes(variant)
       ? ["Formal Choice Point binding and outcome-specific later consumers remain with the Choice specialist."]
       : variant === "event-only"
@@ -1012,8 +1041,10 @@ export async function runEventWorkItem(input: EventOptions) {
           receipt.claimedPaths = evidence.claimedPaths;
           receipt.conflicts = evidence.conflicts;
           receipt.obligations = evidence.obligations;
+          receipt.blueprintChallenge = evidence.blueprintChallenge;
           receipt.skillReads = evidence.skillReads;
           receipt.sessionFile = evidence.sessionFile ?? receipt.sessionFile;
+          receipt.sessionId = evidence.piSessionId ?? receipt.sessionId;
           receipt.paths = await changedPaths(job, assign, evidence.claimedPaths);
           receipt.contentDigest = await contentDigest(job, receipt.paths);
           receipt.phase = "authored";
@@ -1066,7 +1097,8 @@ export async function runEventWorkItem(input: EventOptions) {
           git(job, "add", "--", ...paths.map(p => repoPath(job, p)));
           git(job, "-c", "user.name=NovelTea Generator", "-c", "user.email=noveltea-gen@users.noreply.github.com",
             "commit", "-m", `Realize ${receipt.milestoneId} [${job.jobId}]\n\nNovelTea-Job: ${job.jobId}\nNovelTea-Work-Item: ${receipt.workItemId}\nNovelTea-Plan-Version: ${receipt.planVersion}\nNovelTea-Event-Design: ${receipt.contentDigest}\nNovelTea-Event-Completion: ${completionDigest}\nNovelTea-Event-Consequence: ${typedDigest}${receipt.blueprintPin ?
-              `\nNovelTea-Milestone-Blueprint: ${receipt.blueprintPin.digest}` : ""}`);
+              `\nNovelTea-Milestone-Blueprint: ${receipt.blueprintPin.digest}` : ""}${receipt.blueprintChallenge ?
+              `\nNovelTea-Blueprint-Challenge: ${hash(JSON.stringify(receipt.blueprintChallenge))}` : ""}`);
         }
         if (dirty(job).length) throw new Error("Event commit left unexpected modifications.");
         const commit = git(job, "rev-parse", "HEAD");

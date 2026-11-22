@@ -549,7 +549,16 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "[{commitSha,assignmentId,path,line,kind,message,requiredCorrection,affectedPaths}] " +
       "Finding kind MUST be exactly one of missing-requirement, unrequested-change, " +
       "continuity, other (do not invent specialized kind names). " +
-      "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. Use one real " +
+      "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. When the " +
+      "packet includes milestoneBlueprint and the committed source PROVES a material " +
+      "private-plan defect, a PASS may attach to that evidence item " +
+      "blueprintChallenge:{pinDigest,field,before,proposed,sourceQuote,violatedObligation}. " +
+      "Cite the exact trimmed changed source line and an actual existing " +
+      "events/<index>/<field> or downstream/<index>/<field> with the full approved " +
+      "before and proposed values. The controller independently authenticates the " +
+      "citation, scope and approval; this is NOT permission to edit or self-approve " +
+      "the plan. A failed specialist assignment still needs an ordinary FAIL, not " +
+      "a PASS challenge to erase the negative finding. Use one real " +
       "changed record and 1-based canonicalContext line for every source-linked finding; " +
       "supporting evidence MAY ALSO cite a source-bound, immutable read-only " +
       "canonicalContext record (such as a Character's initial knowledge that " +
