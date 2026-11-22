@@ -31,6 +31,7 @@ import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adapt
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
 import { reconcileInventory, nextExecutionItem, withCausalEventPriority } from "../src/generation-plan.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { inspectModernGenerationRecovery } from "../src/generation-recovery-inspection.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
 after(() => {
@@ -271,6 +272,41 @@ test("production start assesses thrown author-update intake and restart cannot r
   assert.equal(repaired.operationRecovery?.phase, "continued",
     "reconciled intake resumes the same Turn rather than being permanently fenced");
   assert.equal(repaired.operationRecovery?.operation, "author-update-intake");
+});
+
+test("C02 current-format checkpoint tampering cannot grant a new recovery or writer attempt", { skip: !available }, async () => {
+  const f = setup("recovery-current-tamper");
+  const folder = join(f.job.stateDir, "author-updates", "messages");
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, "bad.json"), "not valid JSON");
+  const initial = f.cli(f.start);
+  assert.equal(initial.status, "blocked");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const before = (await inspectPiPolicy(f.job)).budget.modelCalls;
+  const saver = SqliteSaver.fromConnString(initial.checkpointPath);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: f.job.threadId + ":generation" } };
+    const saved = await graph.getState(cfg);
+    const state = saved.values as { recoveryLifecycle: import("../src/generation-recovery-contract.js").RecoveryLifecycle };
+    assert.ok(state.recoveryLifecycle);
+    const verified = await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id);
+    assert.deepEqual(verified, state.recoveryLifecycle,
+      "the original unmodified current-format checkpoint remains inspectable");
+    await graph.updateState(cfg, {
+      recoveryLifecycle: { ...state.recoveryLifecycle, phase: "correcting", decision: null },
+    }, "schedule");
+    const fenced = await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id);
+    assert.equal(fenced?.phase, "fenced");
+    assert.equal(fenced?.active, null);
+    assert.ok(fenced?.inspectionFences.length);
+  } finally { saver.db.close(); }
+  const resumed = f.cli(["generate", "resume"]);
+  assert.equal(resumed.status, "blocked");
+  assert.equal(resumed.nextStage, null);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, before,
+    "a forged current-case phase cannot charge or replay the original specialist");
 });
 
 test("production resume assesses failed scheduling without repeating completed work", { skip: !available }, () => {
@@ -614,287 +650,8 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
     assert.equal(proof.eligible, true, proof.reason);
     assert.equal(proof.assignmentId, active,
       "only the exact settled no-write dependent failure can be cleared");
-    // Reopen the actual parent LangGraph state in the original Studio Thread.
-    // The prior Interactive effect has its sealed no-write review, but the
-    // parent was interrupted before it recorded that stage's completion.
-    // Resume only through schedule + author intake, with NO specialist call.
-    const earlier = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
-    let previous: Record<string, any>;
-    try {
-      const source = createGenerationGraph(earlier, "cli");
-      previous = (await source.getState({ configurable: {
-        thread_id: f.job.threadId + ":generation",
-      } })).values as Record<string, any>;
-    } finally { earlier.db.close(); }
-    const webThreadId = f.job.threadId + ":generation:web";
-    const webRecovery = await assessGenerationOperation({
-      job: f.job, threadId: webThreadId, turnDigest: turn.digest,
-      planVersion, operation: "specialist-dispatch", outcome: "exception",
-      safeAction: "continue-independent", reason: assessed.reason,
-      evidence: { reference: "specialist-receipt", assignmentId: active,
-        priorHead: eventHead },
-    });
-    const blockedGraphState = {
-      ...previous, request: { ...previous.request, turnPlanDigest: turn.digest },
-      graphThreadId: webThreadId, status: "blocked", reason: assessed.reason,
-      planVersion, operationRecovery: { ...webRecovery, phase: "continued" },
-      failures: { ...previous.failures, [active]: webRecovery.reason },
-      completedStages: previous.completedStages.filter((stage: any) =>
-        stage.stage !== "interactive" && stage.stage !== "composition"),
-      active: null, result: null,
-      inventory: { ...previous.inventory, headSha: eventHead,
-        items: previous.inventory.items.map((item: any) => item.id === active
-          ? { ...item, status: "blocked", blockingReason: webRecovery.reason,
-            verifiedSha: undefined } : item),
-      },
-    };
-    const keys = ["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR"];
-    const envBefore = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-    for (const key of keys) if (f.env[key]) process.env[key] = f.env[key];
-    const selectionPath = join(f.job.stateDir, "orchestrator-selection.json");
-    const savedSelection = readFileSync(selectionPath, "utf8");
-    const selectedReceipt = JSON.parse(savedSelection);
-    writeFileSync(selectionPath, JSON.stringify({ ...selectedReceipt,
-      graphThreadId: webThreadId, turnPlanDigest: turn.digest }));
-    const webSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "web-generation.sqlite"));
-    try {
-      const webEligibility = await inspectBlockedOriginalThreadCorrection(f.job, webThreadId,
-        blockedGraphState);
-      assert.equal(webEligibility.eligible, true, webEligibility.reason);
-      const webGraph = createGenerationGraph(webSaver, "server");
-      const config = { configurable: { thread_id: webThreadId } };
-      await webGraph.updateState(config, blockedGraphState, "completion_decision");
-      const admission = await webGraph.getState(config);
-      assert.equal(admission.next.length, 0, "blocked parent must have an idle terminal checkpoint");
-      const beforeCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
-      const noWriteFile = join(f.job.stateDir, "interactive-items", "disclosure.json");
-      const preservedNoWrite = readFileSync(noWriteFile, "utf8");
-      try {
-        unlinkSync(noWriteFile);
-        await assert.rejects(() => safeToResume(f.job, webThreadId,
-          JSON.stringify(blockedGraphState.request), false, "blocked"),
-        /no-write Interactive receipt/,
-        "the original writer must remain fenced without its completed, reviewed result");
-      } finally { writeFileSync(noWriteFile, preservedNoWrite); }
-      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
-        "refused read-only admission cannot charge a Pi call");
-      assert.equal(await safeToResume(f.job, webThreadId,
-        JSON.stringify(blockedGraphState.request), false, "blocked"), "resume",
-        "Studio must admit only the exact stopped original graph and request");
-      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
-        "admission must not invoke Pi or charge model usage");
-      // #235: exercise the production Kysely Studio queue with this SAME
-      // pinned, already blocked LangGraph Thread (not a synthetic second
-      // controller). Approved-work is a precise blocked-to-queued CAS reason.
-      const q = await openKyselyFeatureFixture("sqlite");
-      try {
-        const owner = await q.owner();
-        const repo = "certification-repo", story = "certification-story";
-        const at = "2026-11-21T12:00:00Z", later = "2026-11-21T13:00:00Z";
-        const request = JSON.stringify(blockedGraphState.request);
-        await q.records.insert("repositories", { id: repo, ownerUserId: owner,
-          provider: "github", providerRepositoryId: repo, name: "Cert/Story", createdAt: at });
-        await q.records.insert("stories", { id: story, ownerUserId: owner,
-          repositoryId: repo, directory: "story", title: "Certification",
-          sourceCommitSha: f.initial, createdAt: at });
-        assert.equal(await q.generation.jobs.register(owner, f.job.jobId,
-          story, "Approved-work recovery", f.initial, at), true);
-        await q.generation.queue.enqueue(owner, f.job.jobId, "start", "prepared",
-          at, request, webThreadId);
-        assert.equal((await q.generation.queue.claim("original-worker", 1, at))?.jobId, f.job.jobId);
-        assert.equal(await q.generation.jobs.start(owner, f.job.jobId,
-          webThreadId, request, "original-worker", at), true);
-        assert.equal(await q.generation.jobs.finish(owner, f.job.jobId,
-          webThreadId, "blocked", false, "original-worker", later), true);
-        assert.equal(await q.generation.queue.finish(f.job.jobId, "original-worker",
-          true, later), true);
-        const saved = { status: "blocked", request, thread: webThreadId };
-        await assert.rejects(q.generation.queue.reconcileAndEnqueue(owner,
-          f.job.jobId, "resume", saved, false, later),
-        /lacks verified original-Thread recovery/);
-        await assert.rejects(q.generation.queue.reconcileAndEnqueue(owner,
-          f.job.jobId, "resume", { ...saved, thread: webThreadId + ":substitute" },
-          false, later, true, "approved-work"),
-        /verified checkpoint/, "a substitute Thread cannot consume the approval");
-        await q.generation.queue.reconcileAndEnqueue(owner, f.job.jobId,
-          "resume", saved, false, later, true, "approved-work");
-        assert.equal((await q.generation.queue.record(f.job.jobId))?.resumeKind,
-          "approved-work");
-        await assert.rejects(q.generation.queue.reconcileAndEnqueue(owner,
-          f.job.jobId, "resume", saved, false, later, true, "approved-work"),
-        /verified checkpoint/, "a duplicate resume cannot enqueue another worker");
-        const claimed = await q.generation.queue.claim("recovery-worker", 1, later);
-        assert.equal((await q.generation.jobs.state(owner, f.job.jobId))?.threadId,
-          webThreadId, "the queued recovery still owns the original checked Thread");
-        assert.equal(claimed?.resumeKind, "approved-work");
-        assert.equal(await q.generation.jobs.start(owner, f.job.jobId,
-          webThreadId, request, "recovery-worker", later), true);
-        const running = await webGraph.invoke({ request: blockedGraphState.request }, {
-          ...config, interruptAfter: ["author_update_intake"] });
-        assert.equal(running.status, "running", running.reason ?? undefined);
-        assert.equal(running.failures[active], undefined,
-          "the current checked source, not the prior failed writer, clears the exact failure");
-        assert.equal(running.operationRecovery.phase, "continued");
-        assert.equal(running.graphThreadId, webThreadId);
-        const persisted = await webGraph.getState(config);
-        assert.equal(persisted.values.graphThreadId, webThreadId);
-        assert.notEqual((persisted.values as any).status, "completed");
-        assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead,
-          "original-Thread scheduling/intake must not duplicate any Git commit");
-        assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
-          "continuing the original sealed no-write assignment cannot replay a model call");
-        assert.equal(await q.generation.jobs.finish(owner, f.job.jobId,
-          webThreadId, "paused", false, "recovery-worker", later), true);
-        assert.equal(await q.generation.queue.finish(f.job.jobId,
-          "recovery-worker", true, later), true);
-        assert.equal((await q.generation.queue.record(f.job.jobId))?.phase, "finished");
-      } finally { await q.close(); }
-    } finally {
-      webSaver.db.close();
-      writeFileSync(selectionPath, savedSelection);
-      for (const key of keys) {
-        if (envBefore[key] === undefined) delete process.env[key];
-        else process.env[key] = envBefore[key];
-      }
-    }
-    // #237: a separately checkpointed original Event verifier with a
-    // completed and reviewed source result can re-enter its own verifier,
-    // not its Event writer or independent reviewer, after approved correction.
-    // This graph-state reconstruction isolates the restart boundary; the
-    // original reviewed Git work and actual correction above are unmodified.
-    assert.ok(originalVerifier);
-    const resumedThread = webThreadId;
-    const verdict = await assessGenerationOperation({
-      job: f.job, threadId: resumedThread, turnDigest: turn.digest, planVersion,
-      operation: "commit-verification", outcome: "exception",
-      reason: "A previously approved downstream prerequisite failed verification.",
-      evidence: { reference: "review-checkpoints",
-        assignmentId: originalEventAssignment.id, verifier: originalVerifier },
-    });
-    const eventItem = previous.inventory.items.find((item: any) =>
-      item.id === originalEventAssignment.id);
-    assert.ok(eventItem);
-    const originalFailedVerifier = {
-      ...previous, request: { ...previous.request, turnPlanDigest: turn.digest },
-      graphThreadId: resumedThread, status: "blocked", reason: verdict.reason,
-      planVersion, operationRecovery: { ...verdict, phase: "fenced" },
-      active: { ...eventItem, status: "pending" }, result: originalEventResult,
-      completedStages: previous.completedStages.filter((stage: any) =>
-        !["event", "interactive", "composition"].includes(stage.stage)),
-      inventory: { ...previous.inventory, headSha: eventHead,
-        items: previous.inventory.items.map((item: any) =>
-          item.id === originalEventAssignment.id
-            ? { ...item, status: "pending", verifiedSha: undefined } : item) },
-      pauseAfter: "event",
-    };
-    const previousEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-    for (const key of keys) if (f.env[key]) process.env[key] = f.env[key];
-    const verifierSelection = readFileSync(selectionPath, "utf8");
-    writeFileSync(selectionPath, JSON.stringify({ ...JSON.parse(verifierSelection),
-      graphThreadId: resumedThread, turnPlanDigest: turn.digest }));
-    const restoredSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "web-generation.sqlite"));
-    try {
-      const restoredGraph = createGenerationGraph(restoredSaver, "server");
-      const config = { configurable: { thread_id: resumedThread } };
-      await restoredGraph.updateState(config, originalFailedVerifier, "completion_decision");
-      assert.equal((await restoredGraph.getState(config)).next.length, 0,
-        "a blocked verifier is an idle terminal graph checkpoint");
-      assert.equal((await inspectBlockedOriginalThreadCorrection(f.job,
-        resumedThread, originalFailedVerifier)).eligible, true);
-      const denied = await inspectBlockedOriginalThreadCorrection(f.job,
-        resumedThread, { ...originalFailedVerifier,
-          result: { ...originalEventResult, headSha: "f".repeat(40) } });
-      assert.equal(denied.eligible, false, "altered specialist HEAD cannot resume");
-      const wrongThread = await inspectBlockedOriginalThreadCorrection(f.job,
-        resumedThread + ":unrelated", originalFailedVerifier);
-      assert.equal(wrongThread.eligible, false, "the saved Thread is immutable");
-      const alreadyCompleted = await inspectBlockedOriginalThreadCorrection(f.job,
-        resumedThread, { ...originalFailedVerifier,
-          completedStages: [...originalFailedVerifier.completedStages, {
-            stage: "event", milestone: "milestone.disclosure", headSha: eventHead }] });
-      assert.equal(alreadyCompleted.eligible, false,
-        "the same original completed result cannot be acknowledged twice");
-      const wrongModel = await inspectBlockedOriginalThreadCorrection(f.job,
-        resumedThread, { ...originalFailedVerifier, request: {
-          ...originalFailedVerifier.request, model: "substituted-model" } });
-      assert.equal(wrongModel.eligible, false, "the pinned model cannot be substituted");
-      assert.match(wrongModel.reason, /provider\/model/);
-      const forgedVerifier = await inspectBlockedOriginalThreadCorrection(f.job,
-        resumedThread, { ...originalFailedVerifier,
-          operationRecovery: { ...originalFailedVerifier.operationRecovery,
-            evidence: { ...verdict.evidence, verifier: {
-              ...originalVerifier, checkpointWorkItem: "different-commit" } } } });
-      assert.equal(forgedVerifier.eligible, false, "altered verifier receipt cannot resume");
-      const reviewPath = join(f.job.stateDir, "independent-reviews", eventHead + ".json");
-      const originalReview = readFileSync(reviewPath, "utf8");
-      try {
-        const untrusted = JSON.parse(originalReview);
-        untrusted.status = "failed";
-        writeFileSync(reviewPath, JSON.stringify(untrusted));
-        const refused = await inspectBlockedOriginalThreadCorrection(f.job,
-          resumedThread, originalFailedVerifier);
-        assert.equal(refused.eligible, false,
-          "a superseded or tampered original independent verdict must remain fenced");
-      } finally { writeFileSync(reviewPath, originalReview); }
-      const dirty = join(f.job.worktreeRoot, "uncommitted-draft-verifier.txt");
-      writeFileSync(dirty, "Not part of the independently reviewed Story");
-      try {
-        const refused = await inspectBlockedOriginalThreadCorrection(f.job,
-          resumedThread, originalFailedVerifier);
-        assert.equal(refused.eligible, false, "an untracked writer draft must prevent recovery");
-        assert.match(refused.reason, /uncommitted/);
-      } finally { unlinkSync(dirty); }
-      await setJobControl(f.job, "paused");
-      try {
-        const refused = await inspectBlockedOriginalThreadCorrection(f.job,
-          resumedThread, originalFailedVerifier);
-        assert.equal(refused.eligible, false, "author pause must override recovery");
-        assert.match(refused.reason, /control/);
-      } finally { await setJobControl(f.job, "running"); }
-      const beforeCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
-      assert.equal(await safeToResume(f.job, resumedThread,
-        JSON.stringify(originalFailedVerifier.request), false, "blocked"), "resume");
-      const next = await restoredGraph.invoke({ request: originalFailedVerifier.request }, {
-        ...config, interruptAfter: ["verify_committed_work"] });
-      assert.equal(next.status, "paused", next.reason);
-      assert.equal(next.operationRecovery, null);
-      assert.equal(next.active, null);
-      assert.equal(next.result, null);
-      assert.equal(next.completedStages.filter((entry: any) =>
-        entry.stage === "event" && entry.milestone === "milestone.disclosure").length, 1,
-        "the original Event is acknowledged exactly once");
-      assert.equal(next.completedStages.find((entry: any) =>
-        entry.stage === "event")?.headSha, eventHead);
-      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
-        "verifier reconciliation cannot replay the writer, reviewer, or adaptive planner");
-      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
-    } finally {
-      restoredSaver.db.close();
-      writeFileSync(selectionPath, verifierSelection);
-      for (const key of keys) {
-        if (previousEnv[key] === undefined) delete process.env[key];
-        else process.env[key] = previousEnv[key];
-      }
-    }
-    const unresolvedReview = await assessGenerationOperation({ job: f.job,
-      threadId: f.job.threadId, turnDigest: turn.digest, planVersion: planVersion,
-      operation: "independent-review", outcome: "exception",
-      reason: "Unsettled previous specialist result cannot be replayed.",
-      evidence: { reference: "review-checkpoints", assignmentId: active },
-    });
-    const unsafe = await inspectBlockedOriginalThreadCorrection(f.job, f.job.threadId, {
-      status: "blocked", graphThreadId: f.job.threadId,
-      request: { job: f.job.jobId, task: f.start[3], fixture: true,
-        contract: { scope: { kind: "full-story" } }, turnPlanDigest: turn.digest },
-      planVersion: planVersion,
-      inventory: { headSha: eventHead, items: [{ id: active, status: "blocked" }] },
-      active: { id: active, stage: "interactive", milestone: "milestone.disclosure" },
-      operationRecovery: { ...unresolvedReview, phase: "fenced" },
-    });
-    assert.equal(unsafe.eligible, false,
-      "unsettled review cannot re-enter specialist_dispatch even if Blueprint is corrected");
-    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead,
-      "read-only eligibility cannot advance the writer or original Event source");
+    // Resume through the current-format CLI and original sealed no-write
+    // specialist receipt. No historical graph schema is reconstructed.
     resumed = f.cli(["generate", "resume", "--pause-after", "composition"]);
   }
   if (defect === "specialist-tampered" || defect === "specialist-wrong-path") {

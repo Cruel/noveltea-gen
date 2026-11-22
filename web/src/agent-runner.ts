@@ -5,6 +5,7 @@ import { withSteeringBoundary } from '../../src/steering-boundary'
 import { validateStoryJob } from '../../src/validator'
 import { trustedHead } from '../../src/revision'
 import { execFileSync } from 'node:child_process'
+import { isDeepStrictEqual } from 'node:util'
 import { join } from 'node:path'
 import type { StudioStore as StudioDatabase } from './persistence/store'
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
@@ -13,6 +14,9 @@ import { readJobControl } from '../../src/job-control'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { withStoryJobLock } from '../../src/job-lock'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
+import { inspectModernGenerationRecovery } from '../../src/generation-recovery-inspection'
+import { projectRecovery } from '../../src/generation-recovery-graph'
+import type { RecoveryLifecycle } from '../../src/generation-recovery-contract'
 import { reconcileRecoveryCheckpoints, inspectRecoveryCheckpoints } from '../../src/recovery-checkpoints'
 import { configurePiPolicy, resolvePiModel, type PiPolicy } from '../../src/job-pi-policy'
 import { withActiveExecutionTime } from '../../src/job-active-time'
@@ -160,6 +164,11 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
           reconcileRecoveryCheckpoints(job))
       }
       const prior = await graph.getState({ configurable: { thread_id: threadId } })
+      const modern = await inspectModernGenerationRecovery(job, saver, threadId)
+      if (modern && !isDeepStrictEqual(modern,
+        (prior.values as { recoveryLifecycle?: RecoveryLifecycle }).recoveryLifecycle))
+        throw new Error('Saved recovery failed original Pi, source or decision authentication; ' +
+          'do not stream the original writer. Inspect the preserved checkpoint.')
       const stages = (prior.values as { completedStages?: GenerationEvidence[] }).completedStages ?? []
       let working = '', verified = stages.length
       let previousHead = stages.at(-1)?.headSha ?? job.headSha
@@ -171,9 +180,10 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
         const updates = patch as Record<string, unknown>
         const diagnosis = updates.completion_decision as {
-          unknownRecovery?: { phase: string }
+          recoveryLifecycle?: RecoveryLifecycle
         } | undefined
-        if (diagnosis?.unknownRecovery?.phase === 'assessment') {
+        if (diagnosis?.recoveryLifecycle?.active?.origin.operation === 'completion-verification' &&
+            diagnosis.recoveryLifecycle.phase === 'assessing') {
           await appendGenerationEvent(store, item.ownerId, row.id, {
             kind: 'working', stage: 'review', outcome: 'unknown-failure-assessing', turnId,
           })
@@ -226,8 +236,13 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       }
       const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
       const outcome = snapshot.values as { status?: string; reason?: string | null;
-        unknownRecovery?: { phase?: string } | null;
-        recovery?: AdaptiveRecovery | null; request?: typeof pinned }
+        recoveryLifecycle: RecoveryLifecycle;
+        recoverySources: import('../../src/generation-recovery-graph').RecoverySource[];
+        request?: typeof pinned }
+      const compatibility = projectRecovery({
+        recoveryLifecycle: outcome.recoveryLifecycle,
+        recoverySources: outcome.recoverySources,
+      })
       const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
@@ -240,16 +255,16 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         item.ownerId, row.id, threadId, state as 'paused' | 'blocked' | 'completed' | 'cancelled',
         needsAuthor, item.workerId!, new Date().toISOString(),
         state === 'blocked' && !needsAuthor && outcome.reason?.startsWith('protocol-exhausted:') &&
-          outcome.recovery?.phase === 'protocol-exhausted' &&
-          outcome.recovery.check === 'adaptive-plan.v1' &&
+          compatibility.recovery?.phase === 'protocol-exhausted' &&
+          compatibility.recovery.check === 'adaptive-plan.v1' &&
           outcome.request && sameGenerationRequest(outcome.request, pinned) &&
-          await trustedHead(job) === outcome.recovery.sourceSha
-          ? { check: outcome.recovery.check, checkVersion: outcome.recovery.checkVersion,
-              signature: outcome.recovery.signature, sourceSha: outcome.recovery.sourceSha,
-              turnDigest: outcome.recovery.turnDigest } : null)) {
+          await trustedHead(job) === compatibility.recovery.sourceSha
+          ? { check: compatibility.recovery.check, checkVersion: compatibility.recovery.checkVersion,
+              signature: compatibility.recovery.signature, sourceSha: compatibility.recovery.sourceSha,
+              turnDigest: compatibility.recovery.turnDigest } : null)) {
         throw new Error('Generation finished against a changed worker or job state.')
       }
-      const diagnosticStatus = outcome.unknownRecovery?.phase
+      const diagnosticStatus = compatibility.unknownRecovery?.phase
       const diagnosticOutcome = diagnosticStatus &&
         ['assessment', 'resource-limit', 'operator-intervention', 'unsafe-evidence'].includes(diagnosticStatus)
         ? 'unknown-failure-' + diagnosticStatus : undefined

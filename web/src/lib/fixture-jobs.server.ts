@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -15,6 +16,10 @@ import { reusableExistingFoundation } from '../../../src/foundation-readiness'
 import { validateStoryJob } from '../../../src/validator'
 import { inspectRecoveryCheckpoints } from '../../../src/recovery-checkpoints'
 import { inspectUnknownRecoveryStatus, type UnknownRecoveryStatus } from '../../../src/unknown-recovery-diagnostic'
+import { projectRecoveryInspection, inspectModernGenerationRecovery } from '../../../src/generation-recovery-inspection'
+import { projectRecovery, type RecoverySource } from '../../../src/generation-recovery-graph'
+import { admitRecovery, emptyRecoveryLifecycle, inspectionFence } from '../../../src/generation-recovery-lifecycle'
+import type { RecoveryLifecycle } from '../../../src/generation-recovery-contract'
 import { forkSourceSummary, verifyReadyRecoveryFork } from '../../../src/recovery-fork-state'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
@@ -267,6 +272,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     const snapshot = await graph.getState({ configurable: { thread_id: row.threadId! } })
     const state = snapshot.values as {
       request?: GenerationRequest; status?: string; reason?: string | null
+      recoveryLifecycle?: RecoveryLifecycle; recoverySources?: RecoverySource[]
       unknownRecovery?: { phase?: string; advisoryCategory?: string;
         recommendation?: string; case?: { signature?: string } } | null
       active?: { stage?: string; id?: string } | null
@@ -337,11 +343,28 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
         guidance: 'An unfinished work item has unverified files or receipts. Inspect its saved session and Git changes, reconcile the original specialist, then verify the parent generation checkpoint before resuming. Automatic retry is disabled.',
       }
     }
+    // Read current-format recovery evidence without mutating its checkpoint.
+    const modern = await inspectModernGenerationRecovery(job, saver, row.threadId!)
+      .catch(() => admitRecovery(emptyRecoveryLifecycle(), {
+        outcome: 'fenced',
+        fence: inspectionFence('untrusted-receipt', {}, [], null,
+          'Original graph checkpoint or Pi attempt could not be authenticated.'),
+      }))
+    const normalized = modern && !isDeepStrictEqual(modern, state.recoveryLifecycle) ? {
+      recoveryLifecycle: modern, recoverySources: [],
+    } : {
+      recoveryLifecycle: state.recoveryLifecycle ?? emptyRecoveryLifecycle(),
+      recoverySources: state.recoverySources ?? [],
+    }
+    const projection = projectRecovery(normalized)
     const inspectedUnknownRecovery = await inspectUnknownRecoveryStatus(job,
-      (state.unknownRecovery ?? null) as UnknownRecoveryStatus | null)
+      (projection.unknownRecovery ?? null) as UnknownRecoveryStatus | null)
+    const l = normalized.recoveryLifecycle
+    const recoveryInspection = l.active || l.pending.length || l.inspectionFences.length
+      ? projectRecoveryInspection(l) : null
     return { ...initial, status: interrupted ? 'interrupted' : authorReady ? 'paused' :
         (state.status ?? 'interrupted'),
-      revisionVerified, recovery,
+      revisionVerified, recovery, recoveryInspection,
       unknownRecovery: inspectedUnknownRecovery ? {
         phase: inspectedUnknownRecovery.phase,
         signature: inspectedUnknownRecovery.case?.signature ?? null,

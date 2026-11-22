@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -17,6 +18,11 @@ import { activeSpecialistChoice, focusedChoiceWorkItem, verifySpecialistChoice }
 import { validateStoryJob } from '../../../src/validator'
 import { authorizedFoundationException } from '../../../src/foundation-conflict'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
+import { inspectModernGenerationRecovery } from '../../../src/generation-recovery-inspection'
+import { projectRecovery } from '../../../src/generation-recovery-graph'
+import { emptyRecoveryLifecycle } from '../../../src/generation-recovery-lifecycle'
+import type { RecoveryLifecycle } from '../../../src/generation-recovery-contract'
+import type { RecoverySource } from '../../../src/generation-recovery-graph'
 import { inspectRejectedRepair, acceptGuidedRepairContinuation, type RepairReceipt } from '../../../src/rejected-review-repair'
 import { inspectRepairLedger, authorizeRepairGuidance, totalTurnCorrections,
   MAX_AUTHOR_REPAIR_GRANTS, MAX_AUTHOR_GRANTS_PER_ROOT, type AuthorRepairGrant } from '../../../src/repair-ledger'
@@ -237,8 +243,14 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
     const { saver, graph } = openWebGenerationGraph(checkpoint)
     try {
       const state = await graph.getState({ configurable: { thread_id: threadId } })
-      const saved = state.values as PendingReviewChoiceState & { request?: unknown;
-        operationRecovery?: { operation?: string } | null }
+      const raw = state.values as PendingReviewChoiceState & { request?: unknown;
+        recoveryLifecycle?: RecoveryLifecycle; recoverySources?: RecoverySource[] }
+      const checkedModern = await inspectModernGenerationRecovery(job, saver, threadId)
+      const recovered = {
+        recoveryLifecycle: raw.recoveryLifecycle ?? emptyRecoveryLifecycle(),
+        recoverySources: raw.recoverySources ?? [],
+      }
+      const saved = { ...raw, ...projectRecovery(recovered) }
       if (originalStatus === 'blocked' && saved.status !== 'blocked')
         throw new Error('Blocked Studio status differs from its original graph checkpoint.')
       if (originalStatus === 'blocked' && await readJobControl(job) === 'cancelled')
@@ -319,6 +331,10 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
         : null
       if (approvedWork && !approvedWork.eligible && !guidedRepairBoundary && !authorBoundary)
         throw new Error(approvedWork.reason)
+      // The specific original-domain denial above is more useful than a
+      // generic C01 fence, but neither can ever grant a new writer.
+      if (checkedModern && !isDeepStrictEqual(checkedModern, raw.recoveryLifecycle))
+        throw new Error('Saved recovery has untrusted original checkpoint, model attempt or decision proof.')
       const correctedBoundary = approvedWork?.eligible === true
       if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !correctedBoundary && saved.status !== 'paused') ||
           (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) ||
@@ -362,7 +378,16 @@ async function inspectOriginalThreadResume(job: Awaited<ReturnType<typeof author
     const { graph, saver } = openWebGenerationGraph(checkpoint)
     try {
       const snapshot = await graph.getState({ configurable: { thread_id: saved.thread } })
-      const state = snapshot.values as PendingReviewChoiceState & { request?: GenerationRequest }
+      const current = snapshot.values as PendingReviewChoiceState & { request?: GenerationRequest;
+        recoveryLifecycle?: RecoveryLifecycle; recoverySources?: RecoverySource[] }
+      const checkedModern = await inspectModernGenerationRecovery(job, saver, saved.thread)
+      if (checkedModern && !isDeepStrictEqual(checkedModern, current.recoveryLifecycle))
+        return refused('Saved modern recovery has unsafe original identity or attempt proof.')
+      const recovered = {
+        recoveryLifecycle: current.recoveryLifecycle ?? emptyRecoveryLifecycle(),
+        recoverySources: current.recoverySources ?? [],
+      }
+      const state = { ...current, ...projectRecovery(recovered) }
       if (snapshot.next.length || !state.request ||
           !sameGenerationRequest(state.request, JSON.parse(saved.request) as GenerationRequest))
         return refused('The saved graph is not idle at the original pinned request.')

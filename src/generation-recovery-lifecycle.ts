@@ -195,13 +195,9 @@ function validDecision(value: unknown): value is RecoveryDecision {
       );
     case "integrity-fence":
       return (
-        [
-          "untrusted-source",
-          "untrusted-receipt",
-          "ambiguous-writer",
-          "conflicting-cases",
-          "unsupported-legacy",
-        ].includes(d.reason) && populated(d.requiredInspection)
+        ["untrusted-source", "untrusted-receipt", "ambiguous-writer", "conflicting-cases"].includes(
+          d.reason,
+        ) && populated(d.requiredInspection)
       );
     default:
       return false;
@@ -533,6 +529,52 @@ export function selectPendingRecovery(
   };
 }
 
+/** A previously fenced ORIGINAL read-only check may be reassessed after
+ * independently authenticated repair, without new writer or Pi entitlement.
+ * Exhausted protocols, missing provenance and attempted invocations are
+ * never eligible for this path. The caller MUST already have verified the
+ * original source and proved that no writer can be retried by reassessment. */
+export function reassessFencedReadOnlyRecovery(
+  state: RecoveryLifecycle,
+  authenticated: boolean,
+): RecoveryLifecycle {
+  if (
+    !authenticated ||
+    state.phase !== "fenced" ||
+    !state.active ||
+    !!state.attempt ||
+    state.inspectionFences.length ||
+    state.decision?.action !== "integrity-fence" ||
+    !["scheduling", "author-update-intake"].includes(state.active.origin.operation)
+  )
+    throw Error("Fenced recovery cannot be reexamined without the original read-only source proof");
+  return { ...state, phase: "assessing", decision: null };
+}
+
+/** An original source-bound verifier or specialist may prove it has already
+ * reconciled its effects AFTER an older fence. This is never a lease: only
+ * the already authenticated original effect can advance to verification.
+ * The caller must verify the original receipt and source under the job lock.
+ */
+export function reassessFencedVerifiedOriginal(
+  state: RecoveryLifecycle,
+  authenticatedOriginalEffect: boolean,
+): RecoveryLifecycle {
+  if (
+    !authenticatedOriginalEffect ||
+    state.phase !== "fenced" ||
+    !state.active ||
+    !!state.attempt ||
+    state.inspectionFences.length ||
+    state.decision?.action !== "integrity-fence" ||
+    !["commit-verification", "specialist-dispatch", "adaptive-admission"].includes(
+      state.active.origin.operation,
+    )
+  )
+    throw Error("Fenced original operation cannot acquire a new dispatch from a checkpoint phase");
+  return { ...state, phase: "assessing", decision: null };
+}
+
 /** An actual typed controller resume is required after author/resource pause;
  * calling decideRecovery directly on a paused state cannot grant a lease. */
 export function resumePausedRecovery(state: RecoveryLifecycle, authenticated: boolean): RecoveryLifecycle {
@@ -548,180 +590,134 @@ export function resumePausedRecovery(state: RecoveryLifecycle, authenticated: bo
   return { ...state, phase: "assessing", decision: null };
 }
 
-export type LegacyChannel = "recovery" | "operationRecovery" | "unknownRecovery";
-type LegacyReader = {
-  modern?: unknown;
-  legacy?: Partial<Record<LegacyChannel, unknown>>;
+type CurrentRecoveryReader = {
+  current: unknown;
   request: { jobId: string; jobThreadId: string; graphThreadId: string; turnDigest: string | null };
-  /** The actual original LangGraph failed-task/checkpoint pointer. A resume
-   * cursor or freshly created snapshot is not evidence of the original check. */
   checkpointRef: RecoveryEvidence | null;
   authenticate: (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) => Promise<boolean>;
-  /** Original Pi/protocol and controller source receipts must be rechecked
-   * before interpreting a saved started attempt or effect-bearing decision. */
   authenticateAttempt?: (attempt: RecoveryAttempt) => Promise<boolean>;
   authenticateDecision?: (decision: RecoveryDecision) => Promise<boolean>;
-  /** Only a trusted domain-specific compatibility reader may decode a v1
-   * channel into an authenticated case. No fallback based on phase/reason. */
-  resolveLegacy?: (
-    channel: LegacyChannel,
-    raw: unknown,
-    originalCheckpoint: RecoveryEvidence,
-  ) => Promise<RecoveryAdmission>;
+  authenticateVerification?: (lifecycle: RecoveryLifecycle) => Promise<boolean>;
+  authenticateCompletion?: (lifecycle: RecoveryLifecycle) => Promise<boolean>;
 };
-const channels: readonly LegacyChannel[] = ["recovery", "operationRecovery", "unknownRecovery"];
-/** Legacy shape is read-only provenance. Normalization is a single admission
- * boundary; it does not re-enable superseded live graph channels. */
-export async function normalizeRecoveryCheckpoint(input: LegacyReader): Promise<RecoveryLifecycle> {
-  let state = emptyRecoveryLifecycle();
-  if (input.modern != null) {
-    const value = input.modern as RecoveryLifecycle;
-    const cases = [value?.active, ...(Array.isArray(value?.pending) ? value.pending : [])].filter(
-      (c): c is RecoveryCase => !!c,
+/** Checkpointed routing phases must agree with the single selected
+ * disposition. A forged phase can never turn a fence or pause into an
+ * executable adapter, even if the decision fields themselves parse. */
+function validLifecyclePhase(value: RecoveryLifecycle): boolean {
+  const { active, phase, decision, pending, inspectionFences } = value;
+  if (!active) {
+    return (
+      !decision && !value.attempt && (phase === "idle" || (phase === "fenced" && inspectionFences.length > 0))
     );
-    const structural =
-      value?.schema === schema &&
-      Array.isArray(value.pending) &&
-      Array.isArray(value.inspectionFences) &&
-      value.active !== undefined &&
-      value.decision !== undefined &&
-      value.attempt !== undefined &&
-      value.pending.every(validCase) &&
-      (value.active === null || validCase(value.active)) &&
-      value.inspectionFences.every(
-        (f) =>
-          f?.schema === "noveltea-generation-recovery-inspection-fence/v1" &&
-          Array.isArray(f.evidence) &&
-          f.evidence.every(validEvidence),
-      ) &&
-      (!value.decision || (value.active?.id === value.decision.caseId && validDecision(value.decision))) &&
-      (!value.attempt || (value.active?.id === value.attempt.caseId && validAttempt(value.attempt))) &&
-      [
-        "idle",
-        "assessing",
-        "reconciling",
-        "diagnosing",
-        "correcting",
-        "verifying",
-        "paused",
-        "fenced",
-        "resolved",
-      ].includes(value.phase) &&
-      (value.active !== null ||
-        value.phase === "idle" ||
-        (value.phase === "fenced" && value.inspectionFences.length > 0)) &&
-      (value.active === null || value.phase !== "idle") &&
-      (value.phase === "fenced" || !value.inspectionFences.length);
-    let authenticated = structural;
-    if (authenticated) {
-      for (const c of cases) {
-        if (
-          c.origin.jobId !== input.request.jobId ||
-          c.origin.jobThreadId !== input.request.jobThreadId ||
-          c.origin.graphThreadId !== input.request.graphThreadId ||
-          c.origin.turnDigest !== input.request.turnDigest ||
-          !(await input.authenticate(c.origin, c.evidence))
-        ) {
-          authenticated = false;
-          break;
-        }
-      }
+  }
+  const unique = [active, ...pending];
+  if (unique.some((c, i) => unique.findIndex((other) => sameAnchor(other, c)) !== i)) return false;
+  if (inspectionFences.length) return phase === "fenced";
+  switch (phase) {
+    case "idle":
+      return false;
+    case "assessing":
+      return !decision || decision.action === "continue-independent";
+    case "reconciling":
+      return decision?.action === "reconcile-effects";
+    case "diagnosing":
+      return decision?.action === "diagnostic";
+    case "correcting":
+      return decision?.action === "known-correction" || decision?.action === "plan-amendment";
+    case "verifying":
+    case "resolved":
+      return (
+        !!decision &&
+        !["pause", "exhausted", "integrity-fence", "continue-independent"].includes(decision.action)
+      );
+    case "paused":
+      return decision?.action === "pause";
+    case "fenced":
+      return decision?.action === "integrity-fence" || decision?.action === "exhausted";
+  }
+}
+/** Authenticate the current checkpoint, not an old schema.
+ * Missing original proof preserves the observed state only as a read-only
+ * inspection fence. A saved phase or Pi attempt never grants capabilities.
+ */
+export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Promise<RecoveryLifecycle> {
+  let state = emptyRecoveryLifecycle();
+  const value = input.current as RecoveryLifecycle;
+  const cases = [value?.active, ...(Array.isArray(value?.pending) ? value.pending : [])].filter(
+    (c): c is RecoveryCase => !!c,
+  );
+  const structural =
+    value?.schema === schema &&
+    Array.isArray(value.pending) &&
+    Array.isArray(value.inspectionFences) &&
+    value.active !== undefined &&
+    value.decision !== undefined &&
+    value.attempt !== undefined &&
+    value.pending.every(validCase) &&
+    (value.active === null || validCase(value.active)) &&
+    value.inspectionFences.every(
+      (f) =>
+        f?.schema === "noveltea-generation-recovery-inspection-fence/v1" &&
+        Array.isArray(f.evidence) &&
+        f.evidence.every(validEvidence),
+    ) &&
+    (!value.decision || (value.active?.id === value.decision.caseId && validDecision(value.decision))) &&
+    (!value.attempt || (value.active?.id === value.attempt.caseId && validAttempt(value.attempt))) &&
+    (!["reconciling", "diagnosing", "correcting", "verifying", "paused", "resolved"].includes(value.phase) ||
+      !!value.decision) &&
+    [
+      "idle",
+      "assessing",
+      "reconciling",
+      "diagnosing",
+      "correcting",
+      "verifying",
+      "paused",
+      "fenced",
+      "resolved",
+    ].includes(value.phase) &&
+    (value.active !== null ||
+      value.phase === "idle" ||
+      (value.phase === "fenced" && value.inspectionFences.length > 0)) &&
+    (value.active === null || value.phase !== "idle") &&
+    (value.phase === "fenced" || !value.inspectionFences.length) &&
+    validLifecyclePhase(value);
+  let authenticated = structural;
+  if (authenticated) {
+    for (const c of cases) {
       if (
-        value.attempt &&
-        value.attempt.phase !== "prepared" &&
-        !(await input.authenticateAttempt?.(value.attempt))
-      )
+        c.origin.jobId !== input.request.jobId ||
+        c.origin.jobThreadId !== input.request.jobThreadId ||
+        c.origin.graphThreadId !== input.request.graphThreadId ||
+        c.origin.turnDigest !== input.request.turnDigest ||
+        !(await input.authenticate(c.origin, c.evidence))
+      ) {
         authenticated = false;
-      if (value.decision && !(await input.authenticateDecision?.(value.decision))) authenticated = false;
+        break;
+      }
     }
-    if (authenticated) state = value;
-    else
-      state = admitRecovery(state, {
-        outcome: "fenced",
-        fence: inspectionFence(
-          "untrusted-receipt",
-          {},
-          [],
-          input.checkpointRef,
-          "Inspect original graph, Pi and source receipts before accepting this checkpoint.",
-        ),
-      });
-  }
-  for (const channel of channels) {
-    const raw = input.legacy?.[channel];
-    if (raw == null) continue;
-    // A completed old adaptive correction is only historical evidence. The
-    // original protocol receipts, not this completed flag, prove its effects.
     if (
-      channel === "recovery" &&
-      typeof raw === "object" &&
-      (raw as { phase?: string }).phase === "completed"
+      value.attempt &&
+      value.attempt.phase !== "prepared" &&
+      !(await input.authenticateAttempt?.(value.attempt))
     )
-      continue;
-    if (
-      !input.checkpointRef ||
-      !validEvidence(input.checkpointRef) ||
-      input.checkpointRef.store !== "graph-checkpoint"
-    ) {
-      state = admitRecovery(state, {
-        outcome: "fenced",
-        fence: inspectionFence(
-          "missing-original-failure",
-          {},
-          [],
-          input.checkpointRef,
-          "Locate the original failed LangGraph task/checkpoint before migration.",
-        ),
-      });
-      continue;
-    }
-    if (!input.resolveLegacy) {
-      state = admitRecovery(state, {
-        outcome: "fenced",
-        fence: inspectionFence(
-          "unsupported-legacy",
-          {},
-          [input.checkpointRef],
-          input.checkpointRef,
-          "Read-only legacy inspection requires a source-verified original receipt.",
-        ),
-      });
-      continue;
-    }
-    let admission: RecoveryAdmission;
-    try {
-      admission = await input.resolveLegacy(channel, raw, input.checkpointRef);
-      if (
-        admission.outcome === "admitted" &&
-        (admission.case.origin.jobId !== input.request.jobId ||
-          admission.case.origin.jobThreadId !== input.request.jobThreadId ||
-          admission.case.origin.graphThreadId !== input.request.graphThreadId ||
-          admission.case.origin.turnDigest !== input.request.turnDigest ||
-          !(await input.authenticate(admission.case.origin, admission.case.evidence)))
-      )
-        admission = {
-          outcome: "fenced",
-          fence: inspectionFence(
-            "untrusted-source",
-            admission.case.origin,
-            admission.case.evidence,
-            input.checkpointRef,
-            "Original legacy job, graph Thread, Turn or failed check could not be authenticated.",
-          ),
-        };
-    } catch {
-      admission = {
-        outcome: "fenced",
-        fence: inspectionFence(
-          "unsupported-legacy",
-          {},
-          [input.checkpointRef],
-          input.checkpointRef,
-          "Historical channel could not be verified against its original source.",
-        ),
-      };
-    }
-    state = admitRecovery(state, admission);
+      authenticated = false;
+    if (value.decision && !(await input.authenticateDecision?.(value.decision))) authenticated = false;
+    if (value.phase === "verifying" && !(await input.authenticateVerification?.(value)))
+      authenticated = false;
+    if (value.phase === "resolved" && !(await input.authenticateCompletion?.(value))) authenticated = false;
   }
+  if (authenticated) state = value;
+  else
+    state = admitRecovery(state, {
+      outcome: "fenced",
+      fence: inspectionFence(
+        "untrusted-receipt",
+        {},
+        [],
+        input.checkpointRef,
+        "Inspect original graph, Pi and source receipts before accepting this checkpoint.",
+      ),
+    });
   return state;
 }

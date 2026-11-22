@@ -61,7 +61,6 @@ export type RecoveryInspectionFence = Readonly<{
     | "untrusted-receipt"
     | "ambiguous-writer"
     | "conflicting-cases"
-    | "unsupported-legacy"
     | "missing-original-failure";
   observedOrigin: Readonly<Partial<RecoveryOrigin>>;
   evidence: readonly RecoveryEvidence[];
@@ -163,12 +162,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
       }
     | {
         action: "integrity-fence";
-        reason:
-          | "untrusted-source"
-          | "untrusted-receipt"
-          | "ambiguous-writer"
-          | "conflicting-cases"
-          | "unsupported-legacy";
+        reason: "untrusted-source" | "untrusted-receipt" | "ambiguous-writer" | "conflicting-cases";
         requiredInspection: string;
       }
   >;

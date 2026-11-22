@@ -35,6 +35,7 @@ const siteNames = [
   "operationFailure",
   "blocked",
   "runStoryGeneration",
+  "recoveryNode",
 ] as const;
 
 /** Explicitly reviewed counts. Changes require a source-linked matrix review
@@ -56,7 +57,8 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independentAssignmentBoundary: "returns:18,status:8,operationFailure:1,throws:9",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
-  runStoryGeneration: "returns:5,status:5,blocked:5,operationFailure:1,reconcile:1,throws:14",
+  runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
+  recoveryNode: "returns:9,status:3",
 };
 const operations = [
   "adaptive-admission",
@@ -91,7 +93,17 @@ function graphNodes(source: ts.SourceFile = file): Map<string, ts.Node> {
       node.arguments.length === 2 &&
       ts.isStringLiteral(node.arguments[0]!)
     ) {
-      nodes.set((node.arguments[0] as ts.StringLiteral).text, node.arguments[1]!);
+      const callback = node.arguments[1]!;
+      assert.ok(
+        ts.isCallExpression(callback) &&
+          ts.isIdentifier(callback.expression) &&
+          callback.expression.text === "recoveryNode" &&
+          callback.arguments.length === 2 &&
+          ts.isStringLiteral(callback.arguments[0]!) &&
+          (callback.arguments[0] as ts.StringLiteral).text === (node.arguments[0] as ts.StringLiteral).text,
+        "Every production node must use the shared single-authority recovery boundary.",
+      );
+      nodes.set((node.arguments[0] as ts.StringLiteral).text, callback.arguments[1]!);
     }
     ts.forEachChild(node, visit);
   }
@@ -159,16 +171,16 @@ function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
 
 /** Baseline from the current C01 source: any changed route must be audited. */
 const approvedEdgeSignatures: Record<string, string> = {
-  assess_recovery: "2c998b80011fa55085363af1fd409eb7ac22d011f50f5ff84cf2bcf3c5cebb73",
-  author_update_intake: "b99c8153d8510a00b9f7bae3e8ddc4bdb6ddedfedffda0b40cdba3e99a7830d0",
-  completion_decision: "0c826ad6ed55f2fb1e19b3e7fe7333a17d8aa04e8aa59005f3f463f00bbdaa88",
+  assess_recovery: "a7e087431cb6115e49c2839f82ad6d29c5b2b537c0ee260d0596180d3902c6a2",
+  author_update_intake: "42c83cc765e4c73fccfa23f7b41d430cd24289ba1d206c6e2d03bd02e9de6623",
+  completion_decision: "bfd624a3c649168730ee8ab989cfd4da251bc961904368f218cdd0f524130f0d",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   idea_integration: "2a18b888743ce1be5a7c8e570b8c1e903874e38bec4fd2c9531d7826bb930235",
   independent_assignment_review: "31df641ec3ac30f6ced3f0a9584607eae707dec055b280620f5e0f500a259262",
   schedule: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   specialist_dispatch: "fb238e11658e9aec770037118d2a8a2e08bed03d1c5e822d993125e9337a9286",
-  verify_committed_work: "9fbefd5978a9b759ffe379eeee824ef6a9c2b22129825bf314a0474164aff134",
-  verify_idea_integration: "9fbefd5978a9b759ffe379eeee824ef6a9c2b22129825bf314a0474164aff134",
+  verify_committed_work: "c9e06e8e57be3071c6ab2c9b959f7f905f023fbccade47f695d7bdcd83f89453",
+  verify_idea_integration: "c9e06e8e57be3071c6ab2c9b959f7f905f023fbccade47f695d7bdcd83f89453",
 };
 
 function helpers(source: ts.SourceFile = file): Map<string, ts.Node> {
@@ -315,6 +327,32 @@ test("every individual return and throw has a stable source ID, reviewed disposi
     "Original assessment routing helper changed",
   );
 });
+test("C02 production graph has exactly one authoritative recovery annotation", () => {
+  const declarations = file.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations]);
+  const channels = declarations.find(
+    (declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === "Channels",
+  );
+  assert.ok(
+    channels && ts.isCallExpression(channels.initializer!),
+    "Production graph annotations must be statically auditable",
+  );
+  const root = channels.initializer.arguments[0];
+  assert.ok(root && ts.isObjectLiteralExpression(root));
+  const names = root.properties
+    .filter(ts.isPropertyAssignment)
+    .map((property) => property.name.getText(file).replace(/^["']|["']$/g, ""));
+  assert.equal(names.filter((name) => name === "recoveryLifecycle").length, 1);
+  assert.equal(names.filter((name) => name === "recoverySources").length, 1);
+  for (const legacy of ["recovery", "operationRecovery", "unknownRecovery"])
+    assert.equal(
+      names.includes(legacy),
+      false,
+      legacy + " must never become another active graph-level phase channel",
+    );
+});
+
 test("production graph nodes and conditional END gates are all in the recovery exit inventory", () => {
   const nodes = [...graphNodes().keys()].sort();
   assert.deepEqual(
@@ -338,7 +376,7 @@ test("shared routing helper cannot bypass assessments even when call sites are u
   const bypass = ts.createSourceFile(
     "generation.ts",
     text.replace(
-      'return s.operationRecovery?.phase === "assessment" ? "assess_recovery" : normal;',
+      'return s.recoveryLifecycle.phase === "assessing" && !!s.recoveryLifecycle.active\n    ? "assess_recovery" : normal;',
       "return normal;",
     ),
     ts.ScriptTarget.Latest,

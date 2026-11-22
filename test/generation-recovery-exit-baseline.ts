@@ -41,7 +41,9 @@ export const reviewedReturnExits = {
   operationFailure: "d7c8939bedacfd7d:B 6f8e137a514dd144:F d44d809a12edfc48:R",
   blocked: "b3b5e10959cccbdb:B",
   runStoryGeneration:
-    "0406cd248a3f01af:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B 6d26fa567ea6d2c5:V",
+    "43a2198a880e0449:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B b00891ce57d109ec:V",
+  recoveryNode:
+    "88726aa97c88548a:F 1b2bfd3978e6627c:R 743adc8f9eef5471:F ae4b8b3ed4e09466:G fd84a377b95224bd:F dabbdf16b8204c2b:G c272e3fabaa29905:G 7b0156c35455d536:G 02a29103aa2a4514:G",
 } as const;
 
 export const reviewedThrowExits = {
@@ -66,6 +68,7 @@ export const reviewedThrowExits = {
   blocked: "",
   runStoryGeneration:
     "360d5873992ab308 1f073098fec5b883 81328ed5be7b3037 92a11bc28aa574d0 6d650ac07ddbbb11 1ef54c75bb3f63d1 1584a040886ce2c1 0d6a3899cce3ad54 8c468a57ba68bc74 864da9fe60badee0 8fbc3551aaf81e59 362c25579a3d70fb ec97d854a242f0ab a0aa48577281543a",
+  recoveryNode: "",
 } as const;
 
 /** Status-property exits also cover concise-arrow helpers (such as the
@@ -92,7 +95,8 @@ export const reviewedStatusExits = {
   operationFailure: "2b78ad3f49b1ead6:F",
   blocked: "097627765dc0b25c:B",
   runStoryGeneration:
-    "4b91bbe4dcd1d136:G 28b465f0a9b56ebd:U 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F aa0aa6c25fa8d276:S",
+    "4b91bbe4dcd1d136:G 28b465f0a9b56ebd:U 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F aa0aa6c25fa8d276:S",
+  recoveryNode: "2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F",
 } as const;
 
-export const reviewedSharedRouteHelper = "14787908c661c3f2678baacaf9b16cf16a07e706cbae1cbba3c429ef19b7768c";
+export const reviewedSharedRouteHelper = "662b9ad5f20965e86fd41675b9a57e7d2eb9640dfbe7460f322fd9e6a1883a1d";

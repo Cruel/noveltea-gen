@@ -11,7 +11,7 @@ import {
   recoveryAdmission,
   recoveryCaseId,
   recordRecoveryOutcome,
-  normalizeRecoveryCheckpoint,
+  verifyRecoveryCheckpoint,
 } from "../src/generation-recovery-lifecycle.js";
 import type { RecoveryCase, RecoveryOrigin, RecoveryEvidence } from "../src/generation-recovery-contract.js";
 
@@ -358,8 +358,8 @@ test("C02 paused author control requires authenticated resume and cannot be over
 
 test("C02 corrupted modern case and attempted invoke-ID mutation fail closed", async () => {
   const first = caseOf(await admitted());
-  const invalid = await normalizeRecoveryCheckpoint({
-    modern: {
+  const invalid = await verifyRecoveryCheckpoint({
+    current: {
       ...emptyRecoveryLifecycle(),
       active: {
         ...first,
@@ -433,8 +433,8 @@ test("C02 corrupted modern case and attempted invoke-ID mutation fail closed", a
 
 test("C02 persisted decisions reject invented action variants before controller authentication", async () => {
   const first = caseOf(await admitted());
-  const invalid = await normalizeRecoveryCheckpoint({
-    modern: {
+  const invalid = await verifyRecoveryCheckpoint({
+    current: {
       ...emptyRecoveryLifecycle(),
       active: first,
       phase: "correcting",
@@ -463,55 +463,115 @@ test("C02 persisted decisions reject invented action variants before controller 
   assert.equal(invalid.inspectionFences[0]?.reason, "untrusted-receipt");
 });
 
-test("C02 legacy migration never invents a case from unsupported or missing checkpoint proof", async () => {
-  const result = await normalizeRecoveryCheckpoint({
-    legacy: { operationRecovery: { phase: "assessment", operation: "scheduling" } },
-    request: {
-      jobId: "job-1",
-      jobThreadId: "thread-1",
-      graphThreadId: "thread-1:generation",
-      turnDigest: digest,
-    },
-    checkpointRef: null,
-    authenticate: trusted,
-  });
-  assert.equal(result.phase, "fenced");
-  assert.equal(result.active, null);
-  assert.equal(result.inspectionFences[0]?.reason, "missing-original-failure");
-});
-
-test("C02 legacy simultaneous assessments must not overwrite one another", async () => {
-  const a = caseOf(await admitted());
-  const b = caseOf(
-    await admitted({
-      ...origin,
-      failureAnchor: {
-        ...origin.failureAnchor,
-        ref: "original-task-10",
-        failedCheckInstanceId: "no-write",
-      },
-    }),
-  );
-  const state = await normalizeRecoveryCheckpoint({
-    legacy: {
-      operationRecovery: { version: 1, phase: "assessment" },
-      unknownRecovery: { phase: "assessment" },
-    },
-    request: {
-      jobId: "job-1",
-      jobThreadId: "thread-1",
-      graphThreadId: "thread-1:generation",
-      turnDigest: digest,
-    },
+test("C02 modern resolved state requires independently authenticated completion, not a saved phase", async () => {
+  const c = caseOf(await admitted());
+  const request = {
+    jobId: origin.jobId,
+    jobThreadId: origin.jobThreadId,
+    graphThreadId: origin.graphThreadId,
+    turnDigest: origin.turnDigest,
+  };
+  const decision = {
+    schema: "noveltea-generation-recovery-decision/v1" as const,
+    caseId: c.id,
+    checkedSourceHeadSha: source,
+    evidence: [evidence],
+    action: "reconcile-effects" as const,
+    adapter: "original-specialist" as const,
+    originalRef: evidence,
+  };
+  const resolved = { ...emptyRecoveryLifecycle(), active: c, decision, phase: "resolved" as const };
+  const unproved = await verifyRecoveryCheckpoint({
+    current: resolved,
+    request,
     checkpointRef: evidence,
     authenticate: trusted,
-    resolveLegacy: async (channel) =>
-      channel === "operationRecovery" ? { outcome: "admitted", case: a } : { outcome: "admitted", case: b },
+    authenticateDecision: trusted,
   });
-  assert.equal(state.active?.id, a.id);
-  assert.deepEqual(
-    state.pending.map((c) => c.id),
-    [b.id],
+  assert.equal(unproved.phase, "fenced");
+  assert.equal(unproved.active, null);
+  const verified = await verifyRecoveryCheckpoint({
+    current: resolved,
+    request,
+    checkpointRef: evidence,
+    authenticate: trusted,
+    authenticateDecision: trusted,
+    authenticateCompletion: async (state) => state.active?.id === c.id && state.decision?.caseId === c.id,
+  });
+  assert.equal(verified.phase, "resolved");
+  assert.equal(verified.active?.id, c.id);
+  const verifying = { ...resolved, phase: "verifying" as const };
+  const unprovedVerification = await verifyRecoveryCheckpoint({
+    current: verifying,
+    request,
+    checkpointRef: evidence,
+    authenticate: trusted,
+    authenticateDecision: trusted,
+    authenticateCompletion: async () => true,
+  });
+  assert.equal(
+    unprovedVerification.phase,
+    "fenced",
+    "completed-review attestation cannot stand in for original-effect settlement",
   );
-  assert.equal(state.inspectionFences.length, 0);
+  const checkedVerification = await verifyRecoveryCheckpoint({
+    current: verifying,
+    request,
+    checkpointRef: evidence,
+    authenticate: trusted,
+    authenticateDecision: trusted,
+    authenticateVerification: async (state) => state.active?.id === c.id,
+  });
+  assert.equal(
+    checkedVerification.phase,
+    "verifying",
+    "a reconciled original writer can resume verification without a completed review",
+  );
+  const missingDecision = await verifyRecoveryCheckpoint({
+    current: { ...resolved, decision: null },
+    request,
+    checkpointRef: evidence,
+    authenticate: trusted,
+    authenticateCompletion: async () => true,
+  });
+  assert.equal(missingDecision.phase, "fenced");
+});
+
+test("C02 modern checkpoint rejects incompatible phases and duplicate original cases", async () => {
+  const c = caseOf(await admitted());
+  const request = {
+    jobId: origin.jobId,
+    jobThreadId: origin.jobThreadId,
+    graphThreadId: origin.graphThreadId,
+    turnDigest: origin.turnDigest,
+  };
+  const effectDecision = {
+    schema: "noveltea-generation-recovery-decision/v1" as const,
+    caseId: c.id,
+    checkedSourceHeadSha: source,
+    evidence: [evidence],
+    action: "reconcile-effects" as const,
+    adapter: "original-specialist" as const,
+    originalRef: evidence,
+  };
+  for (const modern of [
+    { ...emptyRecoveryLifecycle(), active: c, pending: [c], phase: "assessing" as const },
+    { ...emptyRecoveryLifecycle(), active: c, pending: [c, c], phase: "assessing" as const },
+    { ...emptyRecoveryLifecycle(), active: c, phase: "paused" as const, decision: effectDecision },
+    { ...emptyRecoveryLifecycle(), active: c, phase: "diagnosing" as const, decision: effectDecision },
+    { ...emptyRecoveryLifecycle(), active: c, phase: "fenced" as const, decision: effectDecision },
+    { ...emptyRecoveryLifecycle(), active: c, phase: "idle" as const },
+    { ...emptyRecoveryLifecycle(), phase: "correcting" as const },
+  ]) {
+    const inspected = await verifyRecoveryCheckpoint({
+      current: modern,
+      request,
+      checkpointRef: evidence,
+      authenticate: trusted,
+      authenticateDecision: trusted,
+      authenticateCompletion: trusted,
+    });
+    assert.equal(inspected.phase, "fenced");
+    assert.equal(inspected.active, null);
+  }
 });

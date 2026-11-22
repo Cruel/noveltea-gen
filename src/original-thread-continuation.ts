@@ -20,6 +20,8 @@ import { operationChecks, type GenerationOperationRecovery } from "./generation-
 import { verifyCorrectedOriginalResult } from "./commit-verification-continuation.js";
 import { readJobControl } from "./job-control.js";
 import type { GenerationStage } from "./generation-plan.js";
+import { assertRecoverySources, projectRecovery, type RecoverySource } from "./generation-recovery-graph.js";
+import type { RecoveryLifecycle } from "./generation-recovery-contract.js";
 
 export type BlockedOriginalThreadState = {
   status?: string;
@@ -37,6 +39,8 @@ export type BlockedOriginalThreadState = {
   ideaTask?: unknown; ideaResult?: unknown;
   recovery?: { phase: string } | null;
   unknownRecovery?: { phase: string } | null;
+  recoveryLifecycle?: RecoveryLifecycle;
+  recoverySources?: readonly RecoverySource[];
   operationRecovery?: GenerationOperationRecovery | null;
 };
 
@@ -74,9 +78,18 @@ export function inspectSettledAdaptiveVersion(adaptive: AdaptiveState, parentVer
  * assignment, whose controller failure was sealed at the exact source. Merely
  * finding an unrelated successful correction in the job is insufficient. */
 export async function inspectBlockedOriginalThreadCorrection(
-  job: JobStartResult, threadId: string, saved: BlockedOriginalThreadState,
+  job: JobStartResult, threadId: string, original: BlockedOriginalThreadState,
 ): Promise<{ eligible: boolean; reason: string; assignmentId?: string }> {
   const refuse = (reason: string) => ({ eligible: false, reason });
+  if (original.recoveryLifecycle) {
+    try {
+      assertRecoverySources({ recoveryLifecycle: original.recoveryLifecycle,
+        recoverySources: original.recoverySources ?? [] });
+    } catch { return refuse("Original recovery case and source receipts disagree."); }
+  }
+  const saved = original.recoveryLifecycle ?
+    { ...original, ...projectRecovery({ recoveryLifecycle: original.recoveryLifecycle,
+      recoverySources: original.recoverySources ?? [] }) } : original;
   const request = saved.request;
   const active = saved.active;
   const op = saved.operationRecovery;
@@ -140,7 +153,8 @@ export async function inspectBlockedOriginalThreadCorrection(
   // branch once. Invoking/legacy receipts remain ambiguous; a completed
   // response must first be admitted and authenticated by readAdaptiveState.
   if (op.operation === "adaptive-admission") {
-    if (op.phase !== "fenced" || op.safeAction !== "reconcile-original-operation" ||
+    if (!["fenced", "continued"].includes(op.phase) ||
+        op.safeAction !== "reconcile-original-operation" ||
         op.evidence.reference !== "generation-checkpoint" || active ||
         !adaptive || saved.planVersion == null)
       return refuse("Original adaptive operation lacks a settled recovery identity.");
@@ -150,7 +164,8 @@ export async function inspectBlockedOriginalThreadCorrection(
       head, saved.orchestratorSnapshotId);
   }
   if (commitVerifier) {
-    if (op.phase !== "fenced" || op.outcome !== "exception" ||
+    if (!["fenced", "continued"].includes(op.phase) ||
+        op.outcome !== "exception" ||
         op.safeAction !== "reconcile-original-operation" ||
         op.evidence.reference !== "review-checkpoints" ||
         !op.evidence.verifier || !active || !saved.result ||
