@@ -525,7 +525,8 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
     const pending = f.cli(["approval-revisions", "inspect"]);
     assert.equal(pending.total, 1, "the incident is durable before semantic correction resumes");
     assert.equal(pending.records[0].disposition, "awaiting-review");
-    assert.equal(pending.records[0].severity, "info");
+    assert.equal(pending.records[0].severity,
+      defect === "specialist-restart" ? "warning" : "info");
     const pendingPath = join(f.job.stateDir, "repair-ledgers", pending.records[0].turnDigest + ".json");
     const historical = JSON.parse(readFileSync(pendingPath, "utf8"));
     delete historical.blueprintRepairs[0].incident;
@@ -558,7 +559,8 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
     assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
     assert.equal(f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]).milestoneBlueprint.digest, original.approvedDigest);
-    const pendingIncident = f.cli(["approval-revisions", "inspect", "--severity", "info"]);
+    const pendingIncident = f.cli(["approval-revisions", "inspect", "--severity",
+      defect === "specialist-disputed" ? "warning" : "info"]);
     assert.equal(pendingIncident.total, 1);
     assert.equal(pendingIncident.records[0].disposition, "awaiting-review",
       "negative review must not falsely settle the incident");
@@ -582,6 +584,13 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   assert.equal(incident.disposition, "corrected");
   assert.equal(incident.cause, defect === "interactive" ? "newly-discovered-constraint" : "unclassified");
   assert.equal(incident.severity, defect === "interactive" ? "info" : "warning");
+  assert.equal(incident.trigger.kind, defect === "interactive" ? "event-only" : "combined",
+    "a source-backed challenge and the Event-only disposition have distinct authenticated origins");
+  if (defect.startsWith("specialist")) {
+    assert.deepEqual(incident.trigger.fields, ["events/0/knowledge"]);
+    assert.deepEqual(incident.trigger.sourcePaths, ["events/disclose-ledger.md"]);
+    assert.equal(incident.trigger.reviewDigest, null);
+  }
   assert.equal(incident.originalApproval.model, "fixture");
   assert.equal(incident.originalApproval.reviewerId, "fixture");
   assert.equal(incident.successorApproval.reviewerId, "fixture");
