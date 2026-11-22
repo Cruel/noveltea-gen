@@ -544,8 +544,14 @@ async function certify(options: StudioSchemaOptions) {
       'owned Story and Thread cascades are preserved',
     )
     await migrateStudioKysely(connection, config, 'down')
+    assert.equal(await inspectStudioMigrationHistory(connection), 5,
+      'first rollback removes only the queued original-resume reason migration')
+    assert.equal((await selectedTables(connection))
+      .some(row => row.name === 'generation_verifier_stops'), true)
+    await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /migrations are pending/)
+    await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 4,
-      'first rollback removes only the known-verifier-fix pickup migration')
+      'second rollback removes only the known-verifier-fix pickup migration')
     assert.equal((await selectedTables(connection))
       .some(row => row.name === 'generation_verifier_stops'), false)
     assert.equal((await selectedTables(connection))
@@ -553,15 +559,15 @@ async function certify(options: StudioSchemaOptions) {
     await assert.rejects(assertKyselyStudioSchemaCurrent(connection), /migrations are pending/)
     await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 3,
-      'second rollback removes only the source-bound steering amendment table')
+      'third rollback removes only the source-bound steering amendment table')
     assert.equal((await selectedTables(connection))
       .some(row => row.name === 'thread_steering_plan_amendments'), false)
     await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 2,
-      'third rollback removes only the trusted-catalog view')
+      'fourth rollback removes only the trusted-catalog view')
     await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 1,
-      'fourth rollback reverses only the Git binding migration')
+      'fifth rollback reverses only the Git binding migration')
     await migrateStudioKysely(connection, config, 'down')
     assert.equal(await inspectStudioMigrationHistory(connection), 0)
     assert.ok(!(await selectedTables(connection)).some((row) => row.name === 'repositories'))

@@ -84,6 +84,24 @@ const passProof = (evidence: unknown) =>
     ],
   );
 
+test("#227 rejects non-string owner even when string coercion resembles an Interactive stage", () => {
+  const malformed = { ...draft, downstream: [
+    { owner: ["interactive"], obligation: "Must create a consequential Choice" },
+    ...draft.downstream,
+  ] };
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify(malformed), assignment),
+    /downstream obligation/);
+  // In particular, a malformed owner may never bypass the Event-only
+  // omission safeguard by surviving as an array in the reviewed plan.
+  assert.equal(malformed.downstream.some(item => item.owner === "interactive"), false);
+  const correct = { ...draft, downstream: [
+    { owner: "interactive", obligation: "Must create a consequential Choice" },
+    ...draft.downstream,
+  ] };
+  assert.equal(parseMilestoneBlueprint(JSON.stringify(correct), assignment).downstream[0]?.owner,
+    "interactive");
+});
+
 test("#227 valid Event-only and genuinely interactive Milestones have a v5 path to approval", () => {
   assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(draft), assignment), draft);
   assert.equal(parseMilestoneBlueprintReview(review("pass"), draft, assignment).status, "pass");

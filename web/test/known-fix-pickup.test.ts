@@ -10,6 +10,7 @@ import { startStoryJob } from '../../src/job'
 import { planWholeStory } from '../src/lib/turn-plan'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { pickupKnownVerifierFixes, verifyKnownFixProof } from '../src/lib/known-fix-pickup.server'
+import { runPersistedGeneration } from '../src/agent-runner'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
 import { migrateStudio, openStudioDatabase } from './support/studio-database'
 import { studioSeed } from './support/studio-seed'
@@ -177,6 +178,33 @@ test('#223 Studio startup picks only a source- and check-matched stopped Turn fr
       'duplicate startup never allocates another queue record')
     assert.equal(git(eligible.job.worktreeRoot, 'rev-parse', 'HEAD'), sha,
       'recheck admission must not write Story content')
+    const claimed = await q.claim('known-fix-production-worker', 1, now)
+    assert.equal(claimed?.jobId, eligible.id)
+    assert.equal(claimed?.fixId, fix.id)
+    assert.equal(claimed?.resumeKind, null,
+      'the indexed original verifier fix cannot be relabeled a Blueprint recovery')
+    const required = ['NT_REQUIRE_USER_PI_RUNTIME', 'NT_SANDBOX_SOCKET',
+      'NT_SANDBOX_TOKEN_FILE'] as const
+    const environment = Object.fromEntries(required.map(key => [key, process.env[key]]))
+    Object.assign(process.env, { NT_REQUIRE_USER_PI_RUNTIME: '1',
+      NT_SANDBOX_SOCKET: join(root, 'not-connected.sock'),
+      NT_SANDBOX_TOKEN_FILE: join(root, 'no-access-token') })
+    try {
+      let error: Error | null = null
+      try { await runPersistedGeneration(store!, claimed!) }
+      catch (caught) { error = caught as Error }
+      assert.ok(error, 'the test has no user Pi credentials or a running sandbox')
+      assert.doesNotMatch(error.message, /Blocked original-Thread recovery|Queued recovery reason|Blueprint recovery/i,
+        'the production worker must preserve the indexed known-fix path instead of applying a Blueprint gate')
+      assert.match(error.message, /model|credential|provider|account|authentication|token|connection/i,
+        'the worker must reach the separate user-model preflight after source-bound known-fix checks')
+      assert.equal((await q.record(eligible.id))?.phase, 'running')
+    } finally {
+      for (const key of required) {
+        if (environment[key] === undefined) delete process.env[key]
+        else process.env[key] = environment[key]
+      }
+    }
   } finally {
     if (store) await store.close()
     for (const key of keys) {

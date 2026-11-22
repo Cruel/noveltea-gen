@@ -3,10 +3,11 @@
  * capacity and FIFO claims using their audited per-engine locking primitives.
  */
 export type QueueIntent = 'start' | 'resume'
+export type ResumeKind = 'ordinary' | 'approved-work' | 'adaptive' | 'guided-repair' | 'foundation'
 export type QueuePhase = 'queued' | 'running' | 'finished' | 'interrupted'
 export type QueueRecord = {
   jobId: string; ownerId: string; intent: QueueIntent; phase: QueuePhase
-  workerId: string | null; sequence: number; fixId: string | null
+  workerId: string | null; sequence: number; fixId: string | null; resumeKind: ResumeKind | null
 }
 export type JobState = {
   status: 'running' | 'paused' | 'blocked' | 'completed' | 'cancelled'
@@ -50,7 +51,8 @@ export interface GenerationQueueStore {
   dequeue(owner: string, jobId: string): Promise<boolean>
   reconcileAndEnqueue(owner: string, jobId: string, intent: QueueIntent,
     saved: { status: string; request: string; thread: string },
-    interrupted: boolean, now: string, verifiedBlocked?: boolean): Promise<void>
+    interrupted: boolean, now: string, verifiedBlocked?: boolean,
+    resumeKind?: ResumeKind | null): Promise<void>
 }
 export type FinalizedTranscriptCandidate = {
   owner: string; jobId: string; threadId: string; completedAt: string;

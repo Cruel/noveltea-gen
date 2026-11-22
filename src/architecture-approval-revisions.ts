@@ -35,16 +35,17 @@ async function safeJson(path: string) {
 }
 type ArchitectureHistory = {
   plan: Plan; proposal: string; verifiedHead: string;
+  approvedContract: Plan["contract"];
   causalAmendment?: CausalAmendment;
 };
 export interface ArchitectureApprovalRevision {
-  kind: "architecture-causal-amendment";
+  kind: "architecture-causal-amendment" | "architecture-author-revision";
   id: string; turnDigest: string; jobId: string; threadId: string;
   original: { milestoneId: string; digest: string; version: number; sourceSha: string };
   originalReviewDigest: string;
   eventHead: string; triggeringSourceSha: string;
   cause: ApprovalRevisionCause; severity: ApprovalRevisionSeverity;
-  trigger: { kind: "event-causal-amendment"; fields: string[];
+  trigger: { kind: "event-causal-amendment" | "author-plan-revision"; fields: string[];
     sourcePaths: string[]; reviewDigest: string };
   originalApproval: { reviewerId: string; reviewDigest: string; commitSha: string };
   successor: { milestoneId: string; digest: string; version: number; sourceSha: string } | null;
@@ -105,7 +106,8 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
   const entries = receipt.history as ArchitectureHistory[];
   // Ordinary job reporting must not rescan review checkpoints or load the
   // Architecture verifier unless this job actually has a signed challenge.
-  if (!entries.some(entry => entry.causalAmendment)) return [];
+  if (!entries.some(entry => entry.causalAmendment ||
+      JSON.stringify(entry.plan.contract) !== JSON.stringify(entry.approvedContract))) return [];
   const { verifyPlanHistory } = await import("./architecture.js");
   verifyPlanHistory(job, receipt as Parameters<typeof verifyPlanHistory>[1]);
   const checkpoints = await inspectRecoveryCheckpoints(job);
@@ -125,7 +127,9 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
   const result: ArchitectureApprovalRevision[] = [];
   for (const [index, entry] of entries.entries()) {
     const proposal = entry.causalAmendment;
-    if (!proposal) continue;
+    const authorChange = !proposal &&
+      JSON.stringify(entry.plan.contract) !== JSON.stringify(entry.approvedContract);
+    if (!proposal && !authorChange) continue;
     const originalCommit = entry.plan.items.find(i => i.id === "global-architecture")?.verifiedSha;
     if (!originalCommit || !sha.test(originalCommit) ||
         !checkpoints.some(p => p.commitSha === originalCommit && p.workItem === "global-architecture"))
@@ -134,49 +138,69 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
     // An unreviewed Architecture is not a second *reviewed* artifact. Never
     // present a purported historical approval based on a model assertion.
     if (!originalReview) continue;
-    if (proposal.jobId !== job.jobId || proposal.threadId !== job.threadId ||
-        proposal.source.planVersion !== entry.plan.version ||
-        proposal.source.sha !== entry.verifiedHead ||
-        !sha.test(proposal.source.sha))
-      throw Error("Stale Architecture causal amendment identity.");
-    // git merge-base --is-ancestor has no output; it throws on failure.
-    git(job, "merge-base", "--is-ancestor", originalCommit!, proposal.source.sha);
-    await originalEvent(job, proposal, entry.plan);
+    if (proposal) {
+      if (proposal.jobId !== job.jobId || proposal.threadId !== job.threadId ||
+          proposal.source.planVersion !== entry.plan.version ||
+          proposal.source.sha !== entry.verifiedHead ||
+          !sha.test(proposal.source.sha))
+        throw Error("Stale Architecture causal amendment identity.");
+      // git merge-base --is-ancestor has no output; it throws on failure.
+      git(job, "merge-base", "--is-ancestor", originalCommit!, proposal.source.sha);
+      await originalEvent(job, proposal, entry.plan);
+    } else {
+      // verifyPlanHistory above authenticated the exact author-signed change
+      // and its source HEAD. An ordinary consent to a causal correction is
+      // not mislabeled as an author-initiated change.
+      if (!sha.test(entry.verifiedHead) ||
+          JSON.stringify(entry.approvedContract) === JSON.stringify(entry.plan.contract))
+        throw Error("Author-directed Architecture revision lost its signed scope change.");
+      git(job, "merge-base", "--is-ancestor", originalCommit!, entry.verifiedHead);
+    }
     const later = (entries[index + 1]?.plan ?? receipt.plan) as Plan | undefined;
     if (!later || later.version !== entry.plan.version + 1 ||
-        JSON.stringify(later.causalAmendment) !== JSON.stringify(proposal))
+        JSON.stringify(later.causalAmendment ?? null) !== JSON.stringify(proposal ?? null) ||
+        JSON.stringify(later.contract) !== JSON.stringify(entry.approvedContract))
       throw Error("Architecture revision lost its exact signed successor plan.");
     const updatedCommit = later.items.find(i => i.id === "global-architecture")?.verifiedSha;
     const approvedReview = updatedCommit && sha.test(updatedCommit)
       ? await reviewed(updatedCommit, later.version) : null;
     if (updatedCommit) {
-      git(job, "merge-base", "--is-ancestor", proposal.source.sha, updatedCommit);
-      const changed = git(job, "diff", "--name-only", proposal.source.sha, updatedCommit);
-      const expected = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + proposal.source.path;
-      if (changed !== expected)
-        throw Error("Architecture correction changed sources outside its approved Milestone.");
+      git(job, "merge-base", "--is-ancestor", proposal?.source.sha ?? entry.verifiedHead, updatedCommit);
+      if (proposal) {
+        const changed = git(job, "diff", "--name-only", proposal.source.sha, updatedCommit);
+        const expected = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + proposal.source.path;
+        if (changed !== expected)
+          throw Error("Architecture correction changed sources outside its approved Milestone.");
+      }
     }
-    const cause = classifyApprovalRevisionCause({ kind: "unknown",
-      originalSourceSha: originalCommit!, verifiedSourceSha: proposal.source.sha });
+    const cause = classifyApprovalRevisionCause({ kind: authorChange ? "author-change" : "unknown",
+      originalSourceSha: originalCommit!,
+      verifiedSourceSha: proposal?.source.sha ?? entry.verifiedHead,
+      authorizedAuthorChange: authorChange });
     const base = { jobId: job.jobId, threadId: job.threadId,
-      proposal: entry.proposal, reportDigest: proposal.source.reportDigest };
+      proposal: entry.proposal, reportDigest: proposal?.source.reportDigest ?? null };
     result.push({
-      kind: "architecture-causal-amendment", id: hash(base),
+      kind: proposal ? "architecture-causal-amendment" : "architecture-author-revision", id: hash(base),
       turnDigest: originalReview.turnDigest, jobId: job.jobId, threadId: job.threadId,
-      original: { milestoneId: proposal.source.milestoneId,
+      original: { milestoneId: proposal?.source.milestoneId ?? "global-architecture",
         digest: hash(entry.plan), version: entry.plan.version, sourceSha: originalCommit! },
       originalReviewDigest: originalReview.reviewDigest,
-      eventHead: proposal.source.sha, triggeringSourceSha: proposal.source.sha,
+      eventHead: proposal?.source.sha ?? entry.verifiedHead,
+      triggeringSourceSha: proposal?.source.sha ?? entry.verifiedHead,
       cause, severity: approvalRevisionSeverity(cause),
-      trigger: { kind: "event-causal-amendment", fields: [proposal.source.path],
-        sourcePaths: [proposal.source.path], reviewDigest: proposal.source.reportDigest },
+      trigger: proposal
+        ? { kind: "event-causal-amendment", fields: [proposal.source.path],
+          sourcePaths: [proposal.source.path], reviewDigest: proposal.source.reportDigest }
+        : { kind: "author-plan-revision", fields: ["contract"], sourcePaths: [],
+          reviewDigest: entry.proposal },
       originalApproval: { reviewerId: originalReview.reviewerId,
         reviewDigest: originalReview.reviewDigest, commitSha: originalCommit! },
-      successor: approvedReview ? { milestoneId: proposal.source.milestoneId,
+      successor: approvedReview ? { milestoneId: proposal?.source.milestoneId ?? "global-architecture",
         digest: hash(later), version: later.version, sourceSha: updatedCommit! } : null,
       successorApproval: approvedReview ? { reviewerId: approvedReview.reviewerId,
         reviewDigest: approvedReview.reviewDigest, commitSha: updatedCommit! } : null,
-      affectedWork: [...proposal.affected], disposition: approvedReview ? "corrected" : "awaiting-review",
+      affectedWork: proposal ? [...proposal.affected] : ["global-architecture"],
+      disposition: approvedReview ? "corrected" : "awaiting-review",
     });
   }
   return result;

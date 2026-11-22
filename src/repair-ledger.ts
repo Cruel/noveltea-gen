@@ -382,10 +382,7 @@ export async function inspectApprovalRevisionIncidents(job: JobStartResult, filt
     const ledger = await inspectRepairLedger(job, turnDigest);
     for (const repair of ledger.blueprintRepairs ?? []) {
       const incident = repair.incident;
-      if (!incident || filter.cause && incident.cause !== filter.cause ||
-          filter.severity && incident.severity !== filter.severity ||
-          filter.milestoneId && repair.original.milestoneId !== filter.milestoneId ||
-          filter.id && incident.id !== filter.id) continue;
+      if (!incident) continue;
       const eventPath = join(job.stateDir, "event-items", repair.original.milestoneId.slice(10) + ".json");
       const stat = await lstat(eventPath);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256_000)
@@ -411,6 +408,15 @@ export async function inspectApprovalRevisionIncidents(job: JobStartResult, filt
         if (JSON.stringify(after) !== JSON.stringify(incident.successorApproval))
           throw Error("Post-approval incident successor review proof mismatch.");
       }
+      const { verifyBlueprintRevisionEvidence } = await import("./milestone-blueprint-correction.js");
+      await verifyBlueprintRevisionEvidence(job, repair, turnDigest,
+        event as Parameters<typeof verifyBlueprintRevisionEvidence>[3]);
+      // Check the source-bound classification BEFORE filtering. An edited
+      // severity must not hide a formerly visible warning from operators.
+      if (filter.cause && incident.cause !== filter.cause ||
+          filter.severity && incident.severity !== filter.severity ||
+          filter.milestoneId && repair.original.milestoneId !== filter.milestoneId ||
+          filter.id && incident.id !== filter.id) continue;
       records.push({ kind: "milestone-blueprint", id: incident.id, turnDigest, jobId: job.jobId, threadId: job.threadId,
         original: repair.original, originalReviewDigest: repair.originalReviewDigest,
         eventHead: repair.eventHead, triggeringSourceSha: repair.sourceSha,

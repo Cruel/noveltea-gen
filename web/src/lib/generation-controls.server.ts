@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
+import type { ResumeKind, QueueIntent } from '../persistence/generation-contracts'
 import { requireUser } from './access.server'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { queueGeneration, queueRecord, dequeueBeforeStart } from './generation-queue.server'
@@ -213,8 +214,9 @@ export function matchesRepairSteeringReviewBoundary(
 }
 
 /** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
-export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
-  threadId: string, pinned: string, retry: boolean, originalStatus?: string): Promise<'start' | 'resume'> {
+export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
+  threadId: string, pinned: string, retry: boolean, originalStatus?: string):
+  Promise<{ intent: QueueIntent; resumeKind: ResumeKind | null }> {
   return withStoryJobLock(job, 'studio-control-recovery', async () => {
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
@@ -230,12 +232,13 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
       if (retry || existsSync(join(job.stateDir, 'generation-server-owner.json')) ||
           originalStatus === 'blocked')
         throw new Error('An unfinished writer claim has no checkpoint; operator recovery is required.')
-      return 'start'
+      return { intent: 'start', resumeKind: null }
     }
     const { saver, graph } = openWebGenerationGraph(checkpoint)
     try {
       const state = await graph.getState({ configurable: { thread_id: threadId } })
-      const saved = state.values as PendingReviewChoiceState & { request?: unknown }
+      const saved = state.values as PendingReviewChoiceState & { request?: unknown;
+        operationRecovery?: { operation?: string } | null }
       if (originalStatus === 'blocked' && saved.status !== 'blocked')
         throw new Error('Blocked Studio status differs from its original graph checkpoint.')
       if (originalStatus === 'blocked' && await readJobControl(job) === 'cancelled')
@@ -323,9 +326,17 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
           (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
             JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')
-      return 'resume'
+      return { intent: 'resume', resumeKind:
+        guidedRepairBoundary ? 'guided-repair' : authorBoundary ? 'foundation' :
+        correctedBoundary && saved.operationRecovery?.operation === 'adaptive-admission' ? 'adaptive' :
+        correctedBoundary ? 'approved-work' : 'ordinary' }
     } finally { saver.db.close() }
   })
+}
+/** Legacy caller contract; new enqueue paths persist the richer verified reason. */
+export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
+  threadId: string, pinned: string, retry: boolean, originalStatus?: string): Promise<'start' | 'resume'> {
+  return (await verifiedResumeAdmission(job, threadId, pinned, retry, originalStatus)).intent
 }
 
 /** Read-only original-Thread eligibility for owner-scoped Studio inspection.
@@ -375,12 +386,12 @@ export async function enqueueAnsweredSpecialistContinuation(store: StudioDatabas
   const choice = await activeSpecialistChoice(job)
   if (choice?.phase !== 'answered')
     throw Error('An exact answered specialist receipt is required before continuation.')
-  const intent = await safeToResume(job, current.threadId, current.requestJson, false)
+  const { intent, resumeKind } = await verifiedResumeAdmission(job, current.threadId, current.requestJson, false)
   if (intent !== 'resume') throw Error('Original specialist checkpoint is unavailable.')
   await setJobControl(job, 'running')
   await store.persistence.generation.queue.reconcileAndEnqueue(owner, id, intent, {
     status: current.status, request: current.requestJson, thread: current.threadId,
-  }, false, new Date().toISOString())
+  }, false, new Date().toISOString(), false, resumeKind)
   return { control: 'running' as const, queue: 'queued' as const, intent }
 }
 
@@ -500,11 +511,11 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       })
       const current = await store.persistence.generation.jobs.state(user.id, id)
       if (!current?.requestJson || !current.threadId) throw Error('Repair continuation lost its pinned job.')
-      const intent = await safeToResume(job, current.threadId, current.requestJson, false)
+      const { intent, resumeKind } = await verifiedResumeAdmission(job, current.threadId, current.requestJson, false)
       await setJobControl(job, 'running')
       await store.persistence.generation.queue.reconcileAndEnqueue(user.id, id, intent, {
         status: current.status, request: current.requestJson, thread: current.threadId,
-      }, false, new Date().toISOString())
+      }, false, new Date().toISOString(), false, resumeKind)
       return reply({ control: 'running', queue: 'queued', intent, grantId: grant.id }, 202)
     }
     if (action === 'budget') {
@@ -580,14 +591,14 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       return reply({ error: 'Interrupted writers need explicit recovery inspection, not Resume.' }, 409)
     if (action === 'retry' && queued?.phase !== 'interrupted')
       return reply({ error: 'Retry is reserved for a reconciled interrupted attempt.' }, 409)
-    const intent = await safeToResume(job, saved.thread, saved.request, action === 'retry', saved.status)
+    const { intent, resumeKind } = await verifiedResumeAdmission(job, saved.thread, saved.request, action === 'retry', saved.status)
     // Persist one exact transition; a second attempt never races this queue
     // claim into a changed request or alternate thread.
     await setJobControl(job, 'running')
     await store.persistence.generation.queue.reconcileAndEnqueue(
       user.id, id, intent, {
         status: saved.status, request: saved.request, thread: saved.thread,
-      }, queued?.phase === 'interrupted', new Date().toISOString(), saved.status === 'blocked' && action === 'resume')
+      }, queued?.phase === 'interrupted', new Date().toISOString(), saved.status === 'blocked' && action === 'resume', resumeKind)
     // The agent polls this durable queue. No HTTP request owns execution.
     return reply({ control: 'running', queue: 'queued', intent }, 202)
   } catch (error) {

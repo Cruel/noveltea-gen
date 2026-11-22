@@ -9,6 +9,8 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
 import { createGenerationGraph, runStoryGeneration } from "../src/generation.js";
 import { configurePiPolicy, inspectPiPolicy } from "../src/job-pi-policy.js";
+import { assessGenerationOperation } from "../src/generation-operation-recovery.js";
+import { inspectBlockedOriginalThreadCorrection } from "../src/original-thread-continuation.js";
 import { readAdaptiveState, saveAdaptiveState } from "../src/adaptive-state.js";
 import { setJobControl } from "../src/job-control.js";
 import { startStoryJob } from "../src/job.js";
@@ -92,6 +94,18 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       assert.equal(before.attempts.length, 1);
       assert.equal(before.attempts[0]?.phase, "unchanged");
       assert.equal(before.attempts[0]?.effect?.phase, "responded");
+      const settled = await assessGenerationOperation({ job, threadId: config.configurable.thread_id,
+        turnDigest: turn.digest, planVersion: 1, operation: "adaptive-admission",
+        outcome: "exception", reason: "Parent checkpoint was interrupted after settling the response",
+        evidence: { reference: "generation-checkpoint" },
+      });
+      const originalState = (await graph.getState(config)).values;
+      const safe = await inspectBlockedOriginalThreadCorrection(job, config.configurable.thread_id,
+        { ...originalState, status: "blocked", active: null, result: null,
+          operationRecovery: { ...settled, phase: "fenced" },
+        });
+      assert.equal(safe.eligible, true, safe.reason);
+      assert.match(safe.reason, /no-change adaptive response/);
       const usage = (await inspectPiPolicy(job)).budget.modelCalls;
       // Deterministically simulate a crash AFTER the original Pi response
       // was checkpointed but BEFORE the parent admitted its disposition.

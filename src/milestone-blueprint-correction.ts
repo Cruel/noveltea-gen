@@ -2,7 +2,7 @@
  * writer lease. Only the private planning owner runs; the Event never reruns. */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual as equal } from "node:util";
 import type { JobStartResult } from "./job.js";
@@ -53,6 +53,40 @@ function git(job: JobStartResult, ...args: string[]) {
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[name];
   return execFileSync("git", args, { cwd: job.worktreeRoot, env, encoding: "utf8" });
 }
+type VerifiedChallenge = { c: BlueprintChallenge; path: string; line: number;
+  origin: "reviewer" | "specialist" };
+function reviewBlueprintFindings(review: Awaited<ReturnType<typeof readIndependentReview>> | null | undefined) {
+  const evidence = review?.result?.evidence;
+  const parsed = evidence?.includes('"blueprintChallenge"') && evidence.startsWith("{")
+    ? JSON.parse(evidence).evidence : [];
+  return Array.isArray(parsed) ? parsed.filter(e => e.blueprintChallenge !== undefined) : [];
+}
+/** A postapproval Event cannot retroactively prove a defect in an earlier
+ * review. Only a sealed reviewer challenge citing the SAME canonical line
+ * at the historical approval source can establish a prior-visible defect. */
+export function historicallyVisibleReview(job: JobStartResult, originalSha: string,
+  claims: VerifiedChallenge[], omitted: boolean, specialist: boolean): boolean {
+  if (omitted || specialist || !claims.length || claims.some(c => c.origin !== "reviewer"))
+    return false;
+  return claims.every(({ c, path, line }) => {
+    try {
+      const source = git(job, "show", originalSha + ":" +
+        (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path);
+      return source.split(/\r?\n/)[line - 1]?.trim() === c.sourceQuote;
+    } catch { return false; }
+  });
+}
+function blueprintRevisionCause(job: JobStartResult, originalSha: string, head: string,
+  omission: boolean, findings: unknown[], specialist: boolean, claims: VerifiedChallenge[]) {
+  const historical = historicallyVisibleReview(job, originalSha, claims, omission, specialist);
+  return classifyApprovalRevisionCause({
+    kind: historical ? "historical-contradiction" :
+      omission && !findings.length && !specialist ? "later-constraint" : "unknown",
+    originalSourceSha: originalSha,
+    verifiedSourceSha: historical ? originalSha : head,
+  });
+}
+
 export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   event: MilestoneEventSource & { snapshot?: SkillSnapshot; worker?: string; provider?: string; model?: string; planDigest?: string;
     sessionFile?: string; sessionId?: string; workItemId?: string; blueprintChallenge?: SpecialistBlueprintChallenge },
@@ -63,9 +97,7 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   const point = (await inspectRecoveryCheckpoints(job)).find(p => p.commitSha === event.commitSha && p.eligible &&
     p.workItem === "event-" + event.milestoneId.slice(10));
   const review = point?.assurance && await readIndependentReview(job, point.assurance);
-  const evidence = review?.result?.evidence;
-  const entries = evidence?.includes('"blueprintChallenge"') && evidence.startsWith("{") ? JSON.parse(evidence).evidence : [];
-  const findings = Array.isArray(entries) ? entries.filter(e => e.blueprintChallenge !== undefined) : [];
+  const findings = reviewBlueprintFindings(review);
   const specialist = event.blueprintChallenge;
   const trailer = git(job, "log", "-1", "--format=%B", old.eventHead).split("\n")
     .find(line => line.startsWith("NovelTea-Blueprint-Challenge: "));
@@ -104,7 +136,7 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   let candidate = structuredClone(old.design);
   const sources = new Set<string>();
   if (findings.length > 1) throw Error("Multiple material challenges need a separately bounded assignment.");
-  const claims: Array<{ c: BlueprintChallenge; path: string; line: number; origin: "reviewer" | "specialist" }> = [];
+  const claims: VerifiedChallenge[] = [];
   for (const e of findings) {
     if (e.commitSha !== old.eventHead || e.assignmentId !== "event")
       throw Error("Blueprint reviewer challenge is not bound to the original Event review.");
@@ -157,12 +189,9 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   const evidenceDigest = sha(specialist || disputed
     ? [input.omission, findings, specialist, disputed, sha(candidate)]
     : [input.omission, findings, sha(candidate)]);
-  // The Event-only omission is independently verified as newly discovered;
-  // a specialist/reviewer claim after approval cannot prove a PREapproval escape.
-  const cause = classifyApprovalRevisionCause({
-    kind: input.omission && !findings.length && !specialist ? "later-constraint" : "unknown",
-    originalSourceSha: old.pin.sourceSha, verifiedSourceSha: head,
-  });
+  // Controller-observed source and review citations, never a model's cause.
+  const cause = blueprintRevisionCause(job, old.pin.sourceSha, head,
+    !!input.omission, findings, !!specialist, claims);
   const grant: BlueprintRepair = { owner: "nt-event-design", original: old.pin, eventHead: old.eventHead,
     originalReviewDigest: await originalBlueprintReviewDigest(job, old.pin),
     sourceSha: head, planDigest: sha(plan), evidenceDigest,
@@ -224,4 +253,98 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   await recordBlueprintRepair(job, turn.digest, { ...grant, successor: next.pin,
     incident: grant.incident && { ...grant.incident,
       successorApproval: await milestoneBlueprintApprovalProvenance(job, next.pin, event.assignment) } });
+}
+
+/** Reconstruct the incident's classification from original independently
+ * reviewed Event findings, the Git-bound specialist challenge and the sealed
+ * Event-only omission. A mutable ledger cannot relabel a warning as info, or
+ * change trigger metadata to manufacture a different explanation. This check
+ * is read-only and runs BEFORE admin inspection applies severity/cause filters. */
+export async function verifyBlueprintRevisionEvidence(job: JobStartResult,
+  repair: BlueprintRepair, turnDigest: string,
+  event: MilestoneEventSource & { snapshot?: SkillSnapshot; worker?: string;
+    blueprintChallenge?: SpecialistBlueprintChallenge; sessionFile?: string;
+    sessionId?: string; workItemId?: string }) {
+  const incident = repair.incident;
+  if (!incident || !event.assignment) throw Error("Post-approval incident lacks its verified Event.");
+  const historical = await historicalMilestoneHandoff(job, event);
+  if (!historical || !equal(historical.pin, repair.original) ||
+      historical.eventHead !== repair.eventHead)
+    throw Error("Post-approval incident lost its authenticated historical Blueprint.");
+  const points = await inspectRecoveryCheckpoints(job);
+  const point = points.find(p => p.eligible && p.commitSha === repair.eventHead &&
+    p.workItem === "event-" + event.milestoneId.slice(10) &&
+    p.semanticReview === "passed" && p.assurance);
+  if (!point?.assurance) throw Error("Post-approval incident lost independent Event review.");
+  const review = await readIndependentReview(job, point.assurance);
+  if (review.status !== "passed" || !review.result)
+    throw Error("Post-approval incident lost its original independently sealed verdict.");
+  const findings = reviewBlueprintFindings(review);
+  const specialist = event.blueprintChallenge;
+  const trailer = git(job, "log", "-1", "--format=%B", repair.eventHead).split("\n")
+    .find(line => line.startsWith("NovelTea-Blueprint-Challenge: "));
+  if (trailer !== (specialist ? "NovelTea-Blueprint-Challenge: " + sha(specialist) : undefined))
+    throw Error("Post-approval incident lost its immutable specialist challenge.");
+  if (specialist) await originalSpecialistChallenge(job, event, specialist);
+  const slug = event.milestoneId.slice(10);
+  const omissionPath = join(job.stateDir, "interactive-event-only", slug + ".json");
+  let omission: Awaited<ReturnType<typeof readEventOnlyOmission>> | null = null;
+  if (existsSync(omissionPath)) {
+    const stat = await lstat(omissionPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256_000)
+      throw Error("Post-approval incident Event-only omission has unsafe evidence.");
+    const seal = JSON.parse(await readFile(omissionPath, "utf8")) as {
+      phase?: string; nonce?: string; digest?: string };
+    if (seal.phase !== "sealed" || !seal.nonce || !seal.digest || !event.snapshot?.id)
+      throw Error("Post-approval incident Event-only omission is not sealed.");
+    const checked = await readEventOnlyOmission(job, event.milestoneId,
+      { nonce: seal.nonce, digest: seal.digest }, {
+        eventHead: repair.eventHead, planDigest: repair.planDigest,
+        eventSnapshotId: event.snapshot.id, validatorVersion: job.validatorVersion,
+      });
+    if (checked.reviewHead !== repair.sourceSha || checked.turnDigest !== turnDigest ||
+        checked.reviewMode !== event.worker)
+      throw Error("Post-approval incident Event-only review changed its source or author Turn.");
+    omission = checked;
+  }
+  const ownerConflict = !!omission &&
+    historical.design.downstream.some(item => item.owner === "interactive");
+  const claims: VerifiedChallenge[] = findings.map(f => {
+    if (f.commitSha !== repair.eventHead || f.assignmentId !== "event")
+      throw Error("Post-approval incident reviewer challenge has changed its Event source.");
+    return { c: f.blueprintChallenge, path: f.path, line: f.line, origin: "reviewer" };
+  });
+  if (specialist) claims.push({ c: specialist, path: specialist.path,
+    line: specialist.line, origin: "specialist" });
+  const sources = new Set<string>();
+  for (const claim of claims) {
+    if (!point.assurance.changedPaths.includes(claim.path) ||
+        !Number.isSafeInteger(claim.line))
+      throw Error("Post-approval incident challenge lost its independently reviewed file.");
+    const source = git(job, "show", repair.eventHead + ":" +
+      (job.storyRelativePath ? job.storyRelativePath + "/" : "") + claim.path);
+    sourceBoundBlueprintChallenge(historical.design, repair.original.digest,
+      claim.c, { path: claim.path, line: claim.line }, { path: claim.path, content: source },
+      point.assurance.changedPaths);
+    sources.add(claim.path);
+  }
+  if (omission)
+    for (const path of Object.keys(omission.sourceHashes).filter(p => p.startsWith("events/")))
+      sources.add(path);
+  const trigger = {
+    kind: [!!omission, !!findings.length, !!specialist].filter(Boolean).length > 1
+      ? "combined" : specialist ? "event-specialist" : findings.length
+        ? "independent-event-review" : "event-only",
+    fields: [...(ownerConflict ? ["downstream/interactive"] : []),
+      ...findings.map(f => (f.blueprintChallenge as BlueprintChallenge).field),
+      ...(specialist ? [specialist.field] : [])].sort(),
+    sourcePaths: [...sources].sort(),
+    reviewDigest: findings.length ? sha(review.result) : null,
+  };
+  const cause = blueprintRevisionCause(job, repair.original.sourceSha, repair.sourceSha,
+    !!omission, findings, !!specialist, claims);
+  if (!findings.length && !specialist && !omission ||
+      !equal(incident.trigger, trigger) || incident.cause !== cause ||
+      incident.severity !== approvalRevisionSeverity(cause))
+    throw Error("Post-approval incident classification or triggering evidence changed.");
 }

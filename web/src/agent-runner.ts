@@ -29,7 +29,7 @@ import { deployedVerifierFixes, withKnownFixDispatch } from '../../src/known-ver
 import { verifyKnownFixProof } from './lib/known-fix-pickup.server'
 import { sameGenerationRequest } from '../../src/generation-owner'
 import type { AdaptiveRecovery } from '../../src/adaptive-protocol'
-import { inspectBlockedOriginalThreadCorrection } from '../../src/original-thread-continuation'
+import { verifiedResumeAdmission } from './lib/generation-controls.server'
 
 /** Verify the queued identity and resume the pinned graph, never browser inputs. */
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
@@ -41,6 +41,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     ? deployedVerifierFixes().find(candidate => candidate.id === item.fixId) : null
   const indexedStop = fix
     ? await store.persistence.generation.queue.verifierStop(item.ownerId, item.jobId) : null
+  if (item.fixId && item.resumeKind)
+    throw Error('A queued known-fix pickup cannot inherit a second recovery reason.')
   if (item.fixId && (!fix || !indexedStop ||
       fix.check !== indexedStop.check || fix.failedVersion !== indexedStop.checkVersion ||
       item.fixId !== fix.id))
@@ -65,6 +67,31 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
     cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()) throw new Error('Job has uncommitted work; manual reconciliation required.')
+  const threadId = row.threadId!
+  // A known-verifier-fix pickup already carries its durable fixId and exact
+  // indexed-stop proof, which claim() re-verifies under the Story lock. It is
+  // not an approved-Blueprint correction. Other blocked resumes (guided
+  // repair, foundation exception, and corrected Blueprint) must re-run the
+  // SAME full admission verifier as Studio control against this saved Thread.
+  // Never reinterpret one recovery disposition as a different writer grant.
+  if (item.intent === 'resume' && !item.fixId) {
+    const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
+    try {
+      const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
+      if ((snapshot.values as { status?: string }).status === 'blocked') {
+        if (snapshot.next.length)
+          throw Error('Blocked original-Thread recovery is not at an idle checkpoint.')
+        if (!item.resumeKind || item.resumeKind === 'ordinary')
+          throw Error('Blocked original Thread lost its queued recovery reason.')
+        const admitted = await verifiedResumeAdmission(job, threadId,
+          JSON.stringify(pinned), false, 'blocked')
+        if (admitted.intent !== 'resume' || admitted.resumeKind !== item.resumeKind)
+          throw Error('Queued recovery reason differs from the original verified Studio admission.')
+      } else if (item.resumeKind && item.resumeKind !== 'ordinary') {
+        throw Error('Original blocked recovery checkpoint was replaced before dispatch.')
+      }
+    } finally { saver.db.close() }
+  }
   let runtime: ModelRuntime | undefined
   if (selected) {
     // This is an entirely read-only preflight: no Pi call, Git write, sandbox
@@ -84,22 +111,6 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       await assertUserPiSelection(store, item.ownerId, selected)
       return createUserPiRuntime(store, item.ownerId)
     }, verify)
-  }
-  const threadId = row.threadId!
-  // A blocked execution can be atomically moved to the existing queue's
-  // paused admission state. Its ORIGINAL blocked graph disposition must still
-  // match the reviewed source at dispatch, not merely when HTTP admitted it.
-  if (item.intent === 'resume') {
-    const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
-    try {
-      const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
-      if ((snapshot.values as { status?: string }).status === 'blocked') {
-        const check = await inspectBlockedOriginalThreadCorrection(job, threadId,
-          snapshot.values as Parameters<typeof inspectBlockedOriginalThreadCorrection>[2])
-        if (!check.eligible || snapshot.next.length)
-          throw Error('Blocked original-Thread recovery is no longer eligible: ' + check.reason)
-      }
-    } finally { saver.db.close() }
   }
   // Resolve the durable Turn->execution association once, owner-scoped, so
   // replayed controller events identify the exact author request.

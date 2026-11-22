@@ -18,16 +18,21 @@ const ownerRequired = (owner: string) => {
 }
 
 const queueColumns = ['jobId', 'ownerUserId as ownerId', 'intent', 'phase',
-  'workerId', 'sequence', 'fixId'] as const
+  'workerId', 'sequence', 'fixId', 'resumeKind'] as const
 
 function queueValue(row: {
   jobId: string; ownerId: string; intent: string; phase: string
-  workerId: string | null; sequence: number | string | bigint; fixId: string | null
+  workerId: string | null; sequence: number | string | bigint; fixId: string | null;
+  resumeKind: string | null
 }): QueueRecord {
   if (!['start', 'resume'].includes(row.intent) ||
-      !['queued', 'running', 'finished', 'interrupted'].includes(row.phase))
+      !['queued', 'running', 'finished', 'interrupted'].includes(row.phase) ||
+      row.resumeKind !== null && !['ordinary', 'approved-work', 'adaptive', 'guided-repair', 'foundation'].includes(row.resumeKind) ||
+      row.fixId !== null && row.resumeKind !== null ||
+      row.intent === 'start' && row.resumeKind !== null)
     throw new Error('Persisted generation queue phase or intent is invalid.')
-  return { ...row, intent: row.intent as QueueIntent, phase: row.phase as QueueRecord['phase'],
+  return { ...row, intent: row.intent as QueueIntent,
+    resumeKind: row.resumeKind as QueueRecord['resumeKind'], phase: row.phase as QueueRecord['phase'],
     sequence: studioSafeInteger(row.sequence) }
 }
 
@@ -296,7 +301,7 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
             .where('ownerUserId', '=', owner).where('jobId', '=', jobId)
             .where('phase', '=', 'queued').executeTakeFirst()))
       },
-      async reconcileAndEnqueue(owner, jobId, intent, saved, interrupted, now, verifiedBlocked = false) {
+      async reconcileAndEnqueue(owner, jobId, intent, saved, interrupted, now, verifiedBlocked = false, resumeKind = null) {
         ownerRequired(owner)
         await db.withWriteTransaction([job(jobId)], async tx => {
           await assertNotDeleted(tx, owner, jobId)
@@ -314,6 +319,10 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
           } else if (existing?.phase === 'interrupted') {
             throw new Error('Interrupted attempt requires operator reconciliation before retry.')
           }
+          if (resumeKind !== null && !['ordinary', 'approved-work', 'adaptive', 'guided-repair', 'foundation'].includes(resumeKind) ||
+              intent !== 'resume' && resumeKind !== null ||
+              verifiedBlocked && (!resumeKind || resumeKind === 'ordinary'))
+            throw new Error('Invalid queued resume proof kind.')
           if (verifiedBlocked && (saved.status !== 'blocked' || interrupted || intent !== 'resume'))
             throw new Error('Only an authenticated blocked original Thread may be readmitted.')
           if (saved.status === 'blocked') {
@@ -342,7 +351,7 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
             .where('jobId', '=', jobId).where('ownerUserId', '=', owner)
             .where('phase', '=', 'finished').execute()
           await tx.insertInto('generationRunQueue').values({
-            jobId, ownerUserId: owner, intent, phase: 'queued', createdAt: now, updatedAt: now,
+            jobId, ownerUserId: owner, intent, resumeKind, phase: 'queued', createdAt: now, updatedAt: now,
           }).execute()
         })
       },

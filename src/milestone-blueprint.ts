@@ -461,7 +461,8 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
   }
   for (const item of raw.downstream)
     if (!exact(item, ["owner", "obligation"]) ||
-        !["event", "interactive", "composition"].includes(String(item.owner)) ||
+        typeof item.owner !== "string" ||
+        !["event", "interactive", "composition"].includes(item.owner) ||
         !string(item.obligation))
       throw Error("Milestone downstream obligation needs an explicit responsible stage.");
   if (!raw.downstream.some(item => item.owner === "composition"))
@@ -516,7 +517,8 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       if (!exact(item, ["anchorPath", "requirement", "reason", "correction", "evidence"]) ||
           item.anchorPath !== assignment.milestonePath ||
           !exact(evidence, ["target", "owner", "quote", "repair"]) ||
-          !["event", "interactive", "composition"].includes(String(evidence.owner)) ||
+          typeof evidence.owner !== "string" ||
+          !["event", "interactive", "composition"].includes(evidence.owner) ||
           evidence.repair !== "extend" ||
           evidence.quote !== JSON.stringify(draft.downstream))
         throw Error("Independent Milestone review finding has no cited missing downstream obligation.");

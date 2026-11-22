@@ -772,6 +772,20 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   }
   assert.equal((await inspectRepairLedger(f.job, incident.turnDigest)).blueprintRepairs?.length, 1,
     "repeated reconciliation never appends another incident");
+  if (defect === "knowledge") {
+    const ledgerFile = join(f.job.stateDir, "repair-ledgers", incident.turnDigest + ".json");
+    const originalLedger = readFileSync(ledgerFile, "utf8");
+    const tampered = JSON.parse(originalLedger);
+    tampered.blueprintRepairs[0].incident.cause = "newly-discovered-constraint";
+    tampered.blueprintRepairs[0].incident.severity = "info";
+    writeFileSync(ledgerFile, JSON.stringify(tampered));
+    try {
+      assert.match(f.cli(["approval-revisions", "inspect", "--severity", "warning"], false),
+        /classification or triggering evidence changed/,
+        "internally consistent info labels cannot hide a source-bound warning");
+    } finally { writeFileSync(ledgerFile, originalLedger); }
+    assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].severity, "warning");
+  }
   await assert.rejects(recordBlueprintRepair(f.job, incident.turnDigest, { ...repair,
     incident: { ...repair.incident!, cause: "approval-escape", severity: "warning" } }),
   /Conflicting Milestone Blueprint repair authority/);
@@ -1953,6 +1967,46 @@ test("#212: exact author-signed causal replan revises only the contradicted Mile
   assert.match(readFileSync(join(f.job.worktreeStoryRoot, "milestones/disclosure.md"), "utf8"),
     /disputed timestamp/);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
+
+test("#233: authenticated author-directed Architecture change is visible in operator incident inspection", {
+  skip: !available,
+}, async () => {
+  const f = setup("approved-author-incident");
+  const original = JSON.parse(readFileSync(f.contract, "utf8"));
+  original.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(original));
+  saveFixtureTurn(f.job, original, f.start[3]!,
+    ["The witness can be questioned without exposing confidential sources."]);
+  const first = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(first.status, "paused", JSON.stringify(first));
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const architecture = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused", JSON.stringify(architecture));
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0,
+    "an approved Architecture with no later revision is not an incident");
+  const revisedFile = join(root, "approved-author-incident-v2.json");
+  writeFileSync(revisedFile, JSON.stringify({
+    ...original,
+    constraints: [...original.constraints, "The author additionally requires a second ethical consequence"],
+  }));
+  const proposed = f.cli(["architecture", "propose", "--contract", revisedFile]);
+  const signed = authorApproval(f.story, "single", f.env, root,
+    { ...proposed.authorSigningRequest,
+      reason: "I explicitly authorize this new author-directed ethical consequence in the signed scope." });
+  const accepted = f.cli(["architecture", "approve", "--proposal", proposed.proposal.digest,
+    "--approval", signed.file]);
+  assert.equal(accepted.plan.version, 2);
+  const incidents = f.cli(["approval-revisions", "inspect"]);
+  assert.equal(incidents.total, 1, JSON.stringify(incidents));
+  const incident = incidents.records[0];
+  assert.equal(incident.kind, "architecture-author-revision");
+  assert.equal(incident.cause, "author-directed");
+  assert.equal(incident.severity, "info");
+  assert.equal(incident.trigger.kind, "author-plan-revision");
+  assert.equal(f.cli(["approval-revisions", "inspect", "--cause", "author-directed"]).total, 1);
+  assert.equal(f.cli(["approval-revisions", "inspect", "--severity", "warning"]).total, 0);
 });
 
 test("#212: certified predecessor is carried across approval, corrected source gets a fresh Event and Blueprint", { skip: !available }, async () => {

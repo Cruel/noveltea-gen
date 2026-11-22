@@ -369,20 +369,27 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     await assert.rejects(queue.reconcileAndEnqueue(x.stranger, original.id, 'resume',
       saved, false, later, true), /verified checkpoint/)
     await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'start',
-      saved, false, later, true), /authenticated blocked original Thread/)
+      saved, false, later, true), /Invalid queued resume proof kind/)
     await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
       { ...saved, thread: 'substitute' }, false, later, true), /verified checkpoint/)
     assert.equal((await jobs.state(x.owner, original.id))?.status, 'blocked')
     assert.equal((await queue.record(original.id))?.phase, 'finished')
+    await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
+      saved, false, later, true), /Invalid queued resume proof kind/)
     await queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
-      saved, false, later, true)
+      saved, false, later, true, 'approved-work')
     assert.equal((await jobs.state(x.owner, original.id))?.status, 'paused')
     assert.equal((await queue.record(original.id))?.phase, 'queued')
     assert.equal((await queue.record(original.id))?.intent, 'resume')
+    assert.equal((await queue.record(original.id))?.resumeKind, 'approved-work',
+      'the exact reviewed recovery reason survives the atomic blocked→queued CAS')
     await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
       saved, false, later, true), /verified checkpoint/)
     assert.equal((await queue.record(original.id))?.phase, 'queued')
-    assert.equal((await queue.claim('continued-worker', 1, later))?.jobId, original.id)
+    const handoff = await queue.claim('continued-worker', 1, later)
+    assert.equal(handoff?.jobId, original.id)
+    assert.equal(handoff?.resumeKind, 'approved-work',
+      'worker claim must retain the original admission mechanism')
     assert.equal(await jobs.start(x.owner, original.id, original.threadId,
       original.request, 'continued-worker', later), true)
     assert.equal(await jobs.finish(x.owner, original.id, original.threadId,

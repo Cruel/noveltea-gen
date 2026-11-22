@@ -8,7 +8,7 @@ import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectRepairLedger, inspectApprovalRevisionIncidents } from "./repair-ledger.js";
 import { reviewedMilestoneHandoff, type MilestoneEventSource } from "./milestone-obligation-handoff.js";
-import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
+import { readAdaptiveState, assertAdaptiveSettled, type AdaptiveState } from "./adaptive-state.js";
 import { loadSelectedStoryOrchestrator } from "./orchestrator-selection.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { validateStoryJob } from "./validator.js";
@@ -33,6 +33,37 @@ export type BlockedOriginalThreadState = {
   operationRecovery?: GenerationOperationRecovery | null;
 };
 
+/** Decide exactly one parent/receipt transition AFTER readAdaptiveState has
+ * authenticated every saved amendment, original session, and Pi effect.
+ * No new planner session is possible from this read-only inspection. */
+export function inspectSettledAdaptiveVersion(adaptive: AdaptiveState, parentVersion: number,
+  head: string, snapshotId: string | null | undefined): { eligible: boolean; reason: string } {
+  const refuse = (reason: string) => ({ eligible: false, reason });
+  if (!Number.isSafeInteger(parentVersion) || parentVersion < 1 ||
+      adaptive.version < parentVersion || adaptive.version > parentVersion + 1)
+    return refuse("Original adaptive operation has an unexpected receipt-version transition.");
+  const atSource = adaptive.attempts.filter(attempt => attempt.sourceSha === head);
+  const attempt = atSource.at(-1);
+  if (!attempt?.effect || attempt.effect.snapshotId !== snapshotId)
+    return refuse("The original adaptive effect is missing or not snapshot-bound.");
+  if (attempt.phase === "planning" && attempt.effect.phase === "prepared" &&
+      adaptive.version === parentVersion && atSource.length === 1 &&
+      !attempt.effect.invocation && !attempt.session && !attempt.malformedResponse)
+    return { eligible: true, reason: "Original adaptive operation was proven never invoked; resume its pinned attempt." };
+  if ((attempt.phase === "admitted" || attempt.phase === "unchanged") &&
+      attempt.effect.phase === "responded" && attempt.session) {
+    assertAdaptiveSettled(adaptive);
+    const last = adaptive.entries.at(-1);
+    if (attempt.phase === "admitted" && adaptive.version === parentVersion + 1 &&
+        last?.beforeVersion === parentVersion && last.sourceSha === head &&
+        adaptive.attempts.filter(a => a.phase === "admitted").at(-1) === attempt)
+      return { eligible: true, reason: "Original completed adaptive amendment has an authenticated admission receipt." };
+    if (attempt.phase === "unchanged" && adaptive.version === parentVersion)
+      return { eligible: true, reason: "Original completed no-change adaptive response is authenticated; resume without another planner call." };
+  }
+  return refuse("Adaptive Pi effects are unfinished or ambiguous; no new model call is permitted.");
+}
+
 /** A corrected approval is relevant only to an original blocked *dependent*
  * assignment, whose controller failure was sealed at the exact source. Merely
  * finding an unrelated successful correction in the job is insufficient. */
@@ -45,7 +76,8 @@ export async function inspectBlockedOriginalThreadCorrection(
   const op = saved.operationRecovery;
   if (saved.status !== "blocked" || !request?.turnPlanDigest ||
       saved.graphThreadId !== threadId || request.job !== job.jobId ||
-      saved.result || saved.ideaTask || saved.ideaResult || !saved.inventory ||
+      saved.result || saved.ideaTask || saved.ideaResult ||
+      (!saved.inventory && saved.operationRecovery?.operation !== "adaptive-admission") ||
       saved.unknownRecovery || saved.recovery && saved.recovery.phase !== "completed")
     return refuse("The blocked graph is not an idle, source-bound recovery handoff.");
   if (!op || !["fenced", "continued"].includes(op.phase) ||
@@ -56,7 +88,7 @@ export async function inspectBlockedOriginalThreadCorrection(
     return refuse("No exact controller recovery disposition exists for this blocked operation.");
 
   const head = await trustedHead(job);
-  if (saved.inventory.headSha !== head || op.source.headSha !== head)
+  if (saved.inventory && saved.inventory.headSha !== head || op.source.headSha !== head)
     return refuse("The blocked source or controller recovery head changed.");
   const pi = await inspectPiPolicy(job);
   if (request.provider && request.provider !== pi.policy.profile.provider ||
@@ -87,26 +119,16 @@ export async function inspectBlockedOriginalThreadCorrection(
   if (op.operation === "adaptive-admission") {
     if (op.phase !== "fenced" || op.safeAction !== "reconcile-original-operation" ||
         op.evidence.reference !== "generation-checkpoint" || active ||
-        !adaptive || saved.planVersion == null ||
-        saved.adaptiveVersion != null && saved.adaptiveVersion !== adaptive.version)
+        !adaptive || saved.planVersion == null)
       return refuse("Original adaptive operation lacks a settled recovery identity.");
-    const original = adaptive.attempts.filter(attempt => attempt.sourceSha === head);
-    if (original.length !== 1 || !original[0]?.effect ||
-        original[0].effect.snapshotId !== saved.orchestratorSnapshotId)
-      return refuse("The original adaptive effect is missing or not snapshot-bound.");
-    const attempt = original[0];
-    if (attempt.phase === "planning" && attempt.effect!.phase === "prepared" &&
-        !attempt.effect!.invocation && !attempt.session && !attempt.malformedResponse)
-      return { eligible: true, reason: "Original adaptive operation was proven never invoked; resume its pinned attempt." };
-    if (attempt.phase === "admitted" && attempt.effect!.phase === "responded" && attempt.session) {
-      assertAdaptiveSettled(adaptive);
-      return { eligible: true, reason: "Original completed adaptive proposal has an authenticated admission receipt." };
-    }
-    return refuse("Adaptive Pi effects are unfinished or ambiguous; no new model call is permitted.");
+    // The authenticated original effect may have settled exactly one signed
+    // amendment or an unchanged response after the parent checkpoint.
+    return inspectSettledAdaptiveVersion(adaptive, saved.adaptiveVersion ?? 1,
+      head, saved.orchestratorSnapshotId);
   }
   if (adaptive) assertAdaptiveSettled(adaptive);
   const assignmentId = op.evidence.assignmentId;
-  const item = saved.inventory.items.find(entry => entry.id === assignmentId);
+  const item = saved.inventory!.items.find(entry => entry.id === assignmentId);
   const milestone = item?.id.match(/^(?:interactive|composition):(milestone\.[a-z][a-z0-9-]*)$/)?.[1];
   const settledNoWriteFailure = op.operation === "specialist-dispatch" &&
     op.phase === "continued" && op.safeAction === "continue-independent" &&
