@@ -14,7 +14,7 @@ import { createSkillSnapshot } from "../src/snapshot.js";
 import { pendingDigest } from "../src/pending-work-amendments.js";
 import { beginAdaptiveAttempt, beginAdaptiveInvocation, bindAdaptiveContext,
   completeAdaptiveInvocation, emptyAdaptiveState, readAdaptiveState,
-  assertAdaptiveSettled, settleAdaptiveAttempt } from "../src/adaptive-state.js";
+  assertAdaptiveSettled, isProvablyUninvokedAdaptiveAttempt, settleAdaptiveAttempt } from "../src/adaptive-state.js";
 import { recoverCompletedAdaptiveProposal } from "../src/adaptive-planner.js";
 import { inspectPiPolicy, guardPiBudget, registerPendingPiSession, recordPiSession } from "../src/job-pi-policy.js";
 
@@ -58,6 +58,7 @@ test("#228: pre-call crash is provably uninvoked and stable across repeated read
     const prepared = (await readAdaptiveState(f.job, turn, 1))!;
     assert.equal(prepared.attempts[0]?.effect?.phase, "prepared");
     assert.equal(prepared.attempts[0]?.effect?.invocation, undefined);
+    assert.equal(isProvablyUninvokedAdaptiveAttempt(prepared.attempts[0]), true);
     assert.throws(() => assertAdaptiveSettled(prepared), /Interrupted adaptive/);
     for (let restart = 0; restart < 3; restart++) {
       assert.equal((await readAdaptiveState(f.job, turn, 1))?.attempts[0]?.effect?.phase, "prepared");
@@ -73,9 +74,12 @@ test("#228: pre-call crash is provably uninvoked and stable across repeated read
     // after the write-ahead invocation marker, even absence stays fenced.
     await beginAdaptiveInvocation(f.job, state, signature, sessionFile, "none", "Original work");
     assert.equal((await readAdaptiveState(f.job, turn, 1))?.attempts[0]?.effect?.phase, "invoking");
+    assert.equal(isProvablyUninvokedAdaptiveAttempt(state.attempts[0]), false,
+      "a started original model invocation is not an inspect-only prepared effect");
     assert.equal((await readAdaptiveState(f.job, turn, 1))?.attempts[0]?.effect?.invocation?.prefixBytes, 0);
     const legacy = emptyAdaptiveState(f.job, turn, 1);
     legacy.attempts.push({ signature, sourceSha: f.head, phase: "planning" });
+    assert.equal(isProvablyUninvokedAdaptiveAttempt(legacy.attempts[0]), false);
     assert.throws(() => assertAdaptiveSettled(legacy), /Interrupted/);
     // A ledger replay must not turn a legacy no-session receipt into proof.
     await assert.rejects(beginAdaptiveInvocation(f.job, legacy, signature, sessionFile, "none"),

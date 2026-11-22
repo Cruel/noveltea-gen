@@ -13,9 +13,11 @@ import { validateStoryJob } from "../src/validator.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { reviewedMilestoneHandoff } from "../src/milestone-obligation-handoff.js";
 import { inspectBlockedOriginalThreadCorrection } from "../src/original-thread-continuation.js";
+import { captureVerificationFailure, verifyCorrectedOriginalResult } from "../src/commit-verification-continuation.js";
 import { assessGenerationOperation } from "../src/generation-operation-recovery.js";
 import { safeToResume } from "../web/src/lib/generation-controls.server.js";
 import { inspectPiPolicy } from "../src/job-pi-policy.js";
+import { setJobControl } from "../src/job-control.js";
 import { assertMilestoneStageClosure } from "../src/turn-fulfillment.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { inspectRepairLedger, recordBlueprintRepair } from "../src/repair-ledger.js";
@@ -522,6 +524,25 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   const originalEvent = readFileSync(eventFile, "utf8");
   const activeFile = join(f.job.stateDir, "milestone-blueprints/disclosure.json");
   const original = JSON.parse(readFileSync(activeFile, "utf8"));
+  // An original verifier snapshots its already-reviewed specialist effect
+  // BEFORE any later independently approved correction. Tests never invent
+  // the later correction digest or a substitute writer result.
+  const originalTurn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const originalEventAssignment = { id: "event:milestone.disclosure",
+    stage: "event" as const, milestone: "milestone.disclosure" };
+  const originalEventResult = { status: "event-cluster-committed", headSha: eventHead };
+  const originalPlanVersion = JSON.parse(readFileSync(join(f.job.stateDir,
+    "architecture.json"), "utf8")).plan.version as number;
+  const originalVerifier = ["interactive", "knowledge"].includes(defect)
+    ? await captureVerificationFailure(f.job, originalTurn.digest,
+        originalEventAssignment, originalEventResult, originalPlanVersion) : null;
+  if (originalVerifier) {
+    const untouched = await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+      originalEventAssignment, originalEventResult, originalVerifier, originalPlanVersion);
+    assert.equal(untouched.eligible, false,
+      "unchanged verifier inputs cannot retry the original failure");
+    assert.match(untouched.reason, /no new authenticated corrective evidence/);
+  }
   if (defect === "specialist-receipt-tamper" || defect === "specialist-model-tamper") {
     const edited = JSON.parse(originalEvent);
     if (defect === "specialist-receipt-tamper")
@@ -736,6 +757,125 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
         else process.env[key] = envBefore[key];
       }
     }
+    // #237: a separately checkpointed original Event verifier with a
+    // completed and reviewed source result can re-enter its own verifier,
+    // not its Event writer or independent reviewer, after approved correction.
+    // This graph-state reconstruction isolates the restart boundary; the
+    // original reviewed Git work and actual correction above are unmodified.
+    assert.ok(originalVerifier);
+    const resumedThread = webThreadId;
+    const verdict = await assessGenerationOperation({
+      job: f.job, threadId: resumedThread, turnDigest: turn.digest, planVersion,
+      operation: "commit-verification", outcome: "exception",
+      reason: "A previously approved downstream prerequisite failed verification.",
+      evidence: { reference: "review-checkpoints",
+        assignmentId: originalEventAssignment.id, verifier: originalVerifier },
+    });
+    const eventItem = previous.inventory.items.find((item: any) =>
+      item.id === originalEventAssignment.id);
+    assert.ok(eventItem);
+    const originalFailedVerifier = {
+      ...previous, request: { ...previous.request, turnPlanDigest: turn.digest },
+      graphThreadId: resumedThread, status: "blocked", reason: verdict.reason,
+      planVersion, operationRecovery: { ...verdict, phase: "fenced" },
+      active: { ...eventItem, status: "pending" }, result: originalEventResult,
+      completedStages: previous.completedStages.filter((stage: any) =>
+        !["event", "interactive", "composition"].includes(stage.stage)),
+      inventory: { ...previous.inventory, headSha: eventHead,
+        items: previous.inventory.items.map((item: any) =>
+          item.id === originalEventAssignment.id
+            ? { ...item, status: "pending", verifiedSha: undefined } : item) },
+      pauseAfter: "event",
+    };
+    const previousEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+    for (const key of keys) if (f.env[key]) process.env[key] = f.env[key];
+    const verifierSelection = readFileSync(selectionPath, "utf8");
+    writeFileSync(selectionPath, JSON.stringify({ ...JSON.parse(verifierSelection),
+      graphThreadId: resumedThread, turnPlanDigest: turn.digest }));
+    const restoredSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "web-generation.sqlite"));
+    try {
+      const restoredGraph = createGenerationGraph(restoredSaver, "server");
+      const config = { configurable: { thread_id: resumedThread } };
+      await restoredGraph.updateState(config, originalFailedVerifier, "completion_decision");
+      assert.equal((await restoredGraph.getState(config)).next.length, 0,
+        "a blocked verifier is an idle terminal graph checkpoint");
+      assert.equal((await inspectBlockedOriginalThreadCorrection(f.job,
+        resumedThread, originalFailedVerifier)).eligible, true);
+      const denied = await inspectBlockedOriginalThreadCorrection(f.job,
+        resumedThread, { ...originalFailedVerifier,
+          result: { ...originalEventResult, headSha: "f".repeat(40) } });
+      assert.equal(denied.eligible, false, "altered specialist HEAD cannot resume");
+      const wrongThread = await inspectBlockedOriginalThreadCorrection(f.job,
+        resumedThread + ":unrelated", originalFailedVerifier);
+      assert.equal(wrongThread.eligible, false, "the saved Thread is immutable");
+      const alreadyCompleted = await inspectBlockedOriginalThreadCorrection(f.job,
+        resumedThread, { ...originalFailedVerifier,
+          completedStages: [...originalFailedVerifier.completedStages, {
+            stage: "event", milestone: "milestone.disclosure", headSha: eventHead }] });
+      assert.equal(alreadyCompleted.eligible, false,
+        "the same original completed result cannot be acknowledged twice");
+      const wrongModel = await inspectBlockedOriginalThreadCorrection(f.job,
+        resumedThread, { ...originalFailedVerifier, request: {
+          ...originalFailedVerifier.request, model: "substituted-model" } });
+      assert.equal(wrongModel.eligible, false, "the pinned model cannot be substituted");
+      assert.match(wrongModel.reason, /provider\/model/);
+      const forgedVerifier = await inspectBlockedOriginalThreadCorrection(f.job,
+        resumedThread, { ...originalFailedVerifier,
+          operationRecovery: { ...originalFailedVerifier.operationRecovery,
+            evidence: { ...verdict.evidence, verifier: {
+              ...originalVerifier, checkpointWorkItem: "different-commit" } } } });
+      assert.equal(forgedVerifier.eligible, false, "altered verifier receipt cannot resume");
+      const reviewPath = join(f.job.stateDir, "independent-reviews", eventHead + ".json");
+      const originalReview = readFileSync(reviewPath, "utf8");
+      try {
+        const untrusted = JSON.parse(originalReview);
+        untrusted.status = "failed";
+        writeFileSync(reviewPath, JSON.stringify(untrusted));
+        const refused = await inspectBlockedOriginalThreadCorrection(f.job,
+          resumedThread, originalFailedVerifier);
+        assert.equal(refused.eligible, false,
+          "a superseded or tampered original independent verdict must remain fenced");
+      } finally { writeFileSync(reviewPath, originalReview); }
+      const dirty = join(f.job.worktreeRoot, "uncommitted-draft-verifier.txt");
+      writeFileSync(dirty, "Not part of the independently reviewed Story");
+      try {
+        const refused = await inspectBlockedOriginalThreadCorrection(f.job,
+          resumedThread, originalFailedVerifier);
+        assert.equal(refused.eligible, false, "an untracked writer draft must prevent recovery");
+        assert.match(refused.reason, /uncommitted/);
+      } finally { unlinkSync(dirty); }
+      await setJobControl(f.job, "paused");
+      try {
+        const refused = await inspectBlockedOriginalThreadCorrection(f.job,
+          resumedThread, originalFailedVerifier);
+        assert.equal(refused.eligible, false, "author pause must override recovery");
+        assert.match(refused.reason, /control/);
+      } finally { await setJobControl(f.job, "running"); }
+      const beforeCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+      assert.equal(await safeToResume(f.job, resumedThread,
+        JSON.stringify(originalFailedVerifier.request), false, "blocked"), "resume");
+      const next = await restoredGraph.invoke({ request: originalFailedVerifier.request }, {
+        ...config, interruptAfter: ["verify_committed_work"] });
+      assert.equal(next.status, "paused", next.reason);
+      assert.equal(next.operationRecovery, null);
+      assert.equal(next.active, null);
+      assert.equal(next.result, null);
+      assert.equal(next.completedStages.filter((entry: any) =>
+        entry.stage === "event" && entry.milestone === "milestone.disclosure").length, 1,
+        "the original Event is acknowledged exactly once");
+      assert.equal(next.completedStages.find((entry: any) =>
+        entry.stage === "event")?.headSha, eventHead);
+      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
+        "verifier reconciliation cannot replay the writer, reviewer, or adaptive planner");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+    } finally {
+      restoredSaver.db.close();
+      writeFileSync(selectionPath, verifierSelection);
+      for (const key of keys) {
+        if (previousEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = previousEnv[key];
+      }
+    }
     const unresolvedReview = await assessGenerationOperation({ job: f.job,
       threadId: f.job.threadId, turnDigest: turn.digest, planVersion: planVersion,
       operation: "independent-review", outcome: "exception",
@@ -802,6 +942,25 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   const ledgerFile = join(f.job.stateDir, "repair-ledgers", turn.digest + ".json");
   const ledgerOriginal = readFileSync(ledgerFile, "utf8");
   const repaired = JSON.parse(ledgerOriginal);
+  if (originalVerifier) {
+    const checked = await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+      originalEventAssignment, originalEventResult, originalVerifier, originalPlanVersion);
+    assert.equal(checked.eligible, false,
+      "once later work advances HEAD, the old verifier is historical and must not retry");
+    if (defect === "interactive")
+      assert.match(checked.reason, /HEAD advanced without exact signed carry-forward/);
+    if (defect === "knowledge")
+      assert.match(checked.reason, /affects the completed specialist/,
+        "a material Event revision must revalidate the old Event, not skip it");
+    if (defect === "interactive") {
+      const tampered = await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+        originalEventAssignment, originalEventResult,
+        { ...originalVerifier, checkpointDigest: "f".repeat(64) }, originalPlanVersion);
+      assert.equal(tampered.eligible, false,
+        "a forged or altered original checkpoint digest is not retry authority");
+      assert.match(tampered.reason, /checkpoint.*changed/);
+    }
+  }
   assert.deepEqual(repaired.blueprintRepairs[0].affected, {
     event: defect === "knowledge" || defect.startsWith("specialist"),
     interactive: true, composition: true, completion: true,
@@ -2216,6 +2375,25 @@ test("#212: certified predecessor is carried across approval, corrected source g
   await sealFixtureGenerationCheckpoint(f, "world-foundations");
   f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
   await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  // #237: A completed Foundations specialist can retain its reviewed original
+  // source across a later independently signed Architecture carry-forward.
+  const originalFoundationsHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const originalTurn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const originalFoundationsAssignment = { id: "foundations", stage: "foundations" as const };
+  const originalFoundationsResult = { status: "foundations-committed", headSha: originalFoundationsHead };
+  const originalFoundationsProof = await captureVerificationFailure(f.job, originalTurn.digest,
+    originalFoundationsAssignment, originalFoundationsResult, 1);
+  const originalWebThread = f.job.threadId + ":generation:web";
+  const originalVerifierAssessment = await assessGenerationOperation({
+    job: f.job, threadId: originalWebThread, turnDigest: originalTurn.digest,
+    planVersion: 1, operation: "commit-verification", outcome: "exception",
+    reason: "Original dependent prerequisites lacked a signed controller transition.",
+    evidence: { reference: "review-checkpoints", assignmentId: "foundations",
+      verifier: originalFoundationsProof },
+  });
+  assert.equal((await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+    originalFoundationsAssignment, originalFoundationsResult, originalFoundationsProof, 1)).eligible,
+    false, "An unchanged verifier cannot be retried without a new signed correction.");
   const blocked = f.cli(["generate", "resume"]);
   const candidate = blocked.causalAmendment;
   assert.equal(blocked.status, "paused", blocked.reason);
@@ -2256,6 +2434,83 @@ test("#212: certified predecessor is carried across approval, corrected source g
   assert.equal(reviewedRevision.records[0].originalReviewDigest, incident.originalReviewDigest,
     "Historical reviewer evidence remains immutable.");
   assert.notEqual(reviewedRevision.records[0].successor.sourceSha, incident.original.sourceSha);
+  const verifiedFoundations = await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+    originalFoundationsAssignment, originalFoundationsResult, originalFoundationsProof, 1);
+  assert.equal(verifiedFoundations.eligible, true, verifiedFoundations.reason);
+  assert.notEqual(git(f.job.worktreeRoot, "rev-parse", "HEAD"), originalFoundationsHead,
+    "a signed revised Architecture may advance HEAD while carrying the earlier Foundations");
+  const forgedFoundations = await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+    originalFoundationsAssignment, originalFoundationsResult,
+    { ...originalFoundationsProof, planVersion: 2 }, 1);
+  assert.equal(forgedFoundations.eligible, false, "the original plan version cannot be reassigned");
+  // Reopen the actual CLI graph's verified state as a blocked web graph,
+  // retaining its historical Foundations result instead of replaying the
+  // writer. The v2 Architecture's new Git HEAD is signed carry-forward, not
+  // an excuse to discard the v1 Foundations receipt.
+  const sourceSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+  let previous: any;
+  try {
+    previous = (await createGenerationGraph(sourceSaver, "cli").getState({
+      configurable: { thread_id: f.job.threadId + ":generation" },
+    })).values;
+  } finally { sourceSaver.db.close(); }
+  const foundationsItem = previous.inventory?.items?.find((item: any) =>
+    item.id === "foundations");
+  assert.ok(foundationsItem);
+  const signedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const blockedOriginalVerifier = {
+    ...previous, graphThreadId: originalWebThread,
+    request: { ...previous.request, turnPlanDigest: originalTurn.digest },
+    status: "blocked", reason: originalVerifierAssessment.reason,
+    planVersion: 1, operationRecovery: { ...originalVerifierAssessment, phase: "fenced" },
+    active: { ...foundationsItem, status: "pending" }, result: originalFoundationsResult,
+    completedStages: previous.completedStages.filter((stage: any) =>
+      stage.stage !== "foundations" && stage.stage !== "event"),
+    inventory: { ...previous.inventory, items: previous.inventory.items.map((item: any) =>
+      item.id === "foundations"
+        ? { ...item, status: "pending", verifiedSha: undefined } : item) },
+    pauseAfter: "foundations",
+  };
+  const envKeys = ["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR"];
+  const priorEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+  for (const key of envKeys) if (f.env[key]) process.env[key] = f.env[key];
+  const selectionPath = join(f.job.stateDir, "orchestrator-selection.json");
+  const oldSelection = readFileSync(selectionPath, "utf8");
+  writeFileSync(selectionPath, JSON.stringify({ ...JSON.parse(oldSelection),
+    graphThreadId: originalWebThread, turnPlanDigest: originalTurn.digest }));
+  const webSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "web-generation.sqlite"));
+  try {
+    const graph = createGenerationGraph(webSaver, "server");
+    const config = { configurable: { thread_id: originalWebThread } };
+    await graph.updateState(config, blockedOriginalVerifier, "completion_decision");
+    assert.equal((await graph.getState(config)).next.length, 0);
+    const eligibility = await inspectBlockedOriginalThreadCorrection(f.job,
+      originalWebThread, blockedOriginalVerifier);
+    assert.equal(eligibility.eligible, true, eligibility.reason);
+    const beforeCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+    assert.equal(await safeToResume(f.job, originalWebThread,
+      JSON.stringify(blockedOriginalVerifier.request), false, "blocked"), "resume");
+    const restored = await graph.invoke({ request: blockedOriginalVerifier.request }, {
+      ...config, interruptAfter: ["verify_committed_work"] });
+    assert.equal(restored.status, "paused", restored.reason ?? undefined);
+    assert.equal(restored.operationRecovery, null);
+    assert.equal(restored.active, null);
+    assert.equal(restored.completedStages.filter((stage: any) =>
+      stage.stage === "foundations").length, 1,
+      "only the original Foundations result can be acknowledged");
+    assert.equal(restored.completedStages.find((stage: any) =>
+      stage.stage === "foundations")?.headSha, originalFoundationsHead);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), signedHead,
+      "a verifier retry must not rewrite the new Architecture or old Foundations");
+  } finally {
+    webSaver.db.close();
+    writeFileSync(selectionPath, oldSelection);
+    for (const key of envKeys) {
+      if (priorEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = priorEnv[key];
+    }
+  }
   const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
   assert.equal(resumed.status, "paused", JSON.stringify(resumed));
   assert.equal(resumed.inventory.items.find((item: any) =>
@@ -2265,6 +2520,11 @@ test("#212: certified predecessor is carried across approval, corrected source g
   assert.equal(JSON.parse(readFileSync(eventHistory, "utf8")).phase, "prerequisite-reported");
   const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
   assert.equal(event.phase, "committed");
+  const obsolete = await verifyCorrectedOriginalResult(f.job, originalTurn.digest,
+    originalFoundationsAssignment, originalFoundationsResult, originalFoundationsProof, 1);
+  assert.equal(obsolete.eligible, false,
+    "a later Event commit cannot revive the older Foundations verifier after signed carry-forward");
+  assert.match(obsolete.reason, /later work cannot revive/);
   assert.equal(event.planVersion, 2);
   assert.notEqual(event.expectedHead, candidate.source.sha);
   assert.deepEqual(f.cli(["approval-revisions", "inspect"]).records[0], reviewedRevision.records[0],

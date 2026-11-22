@@ -186,6 +186,13 @@ export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
 /** Interrupted or rejected planning requires explicit reconciliation, even
  * when HEAD stayed clean. Settling a rejection records evidence, not permission
  * to dispatch the old plan or silently replace the original model attempt. */
+/** A read-only verifier may inspect a prepared original attempt without
+ * falsely treating it as a completed Pi call or invoking it. This does NOT
+ * admit any adaptive proposal or grant another session. */
+export function isProvablyUninvokedAdaptiveAttempt(attempt: AdaptiveAttempt | null | undefined): boolean {
+  return !!attempt && attempt.phase === "planning" && attempt.effect?.phase === "prepared" &&
+    !attempt.effect.invocation && !attempt.session && !attempt.malformedResponse;
+}
 export function assertAdaptiveSettled(state: AdaptiveState) {
   if (state.attempts.some(a => a.phase === "planning"))
     throw Error("Interrupted adaptive orchestrator session: preserve its transcript and reconcile before another plan.");

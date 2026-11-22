@@ -37,6 +37,10 @@ export interface GenerationOperationRecovery {
       "specialist-receipt" | "dependency-plan" | "review-checkpoints" |
       "completion-report" | "generation-checkpoints";
     assignmentId?: string; resultStatus?: string;
+    /** Controller-captured verifier input; its source and correction baseline are not model claims. */
+    verifier?: { assignmentId: string; stage: string; resultStatus: string;
+      resultHeadSha: string; checkpointWorkItem: string; checkpointDigest: string;
+      planVersion: number | null; correctionDigest: string; };
     ideaId?: string; action?: "place" | "reassess"; signature?: string;
     priorHead?: string;
     /** A known verifier fix can expose a *new* admission failure, not

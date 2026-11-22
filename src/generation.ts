@@ -13,6 +13,7 @@ import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, unknownComplet
 import { assessGenerationOperation, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
+import { captureVerificationFailure, verifyCorrectedOriginalResult, verifiableResultStatus } from "./commit-verification-continuation.js";
 import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
 import { ProtocolExhaustedError, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -677,11 +678,7 @@ export async function dispatchGenerationAssignment(s: { request: GenerationReque
   return dispatch(s);
 }
 const accepted: Record<Stage, readonly string[]> = {
-  foundation: ["committed"], architecture: ["architecture-committed", "complete-in-scope"],
-  foundations: ["foundations-committed"], event: ["event-cluster-committed"],
-  interactive: ["interactive-slice-committed"], choice: ["interactive-choice-committed"],
-  puzzle: ["interactive-slice-committed"], composition: ["composition-committed"],
-  focus: ["focused-committed"],
+  ...verifiableResultStatus,
   review: ["complete-in-scope", "editorial-unverified", "blocked"],
 };
 async function operationFailure(s: State, job: JobStartResult, operation: Operation,
@@ -1462,6 +1459,11 @@ export function createGenerationGraph(
         try {
           const stopped = await authorBoundary(job, s);
           if (stopped) return stopped;
+          // The completed result was authenticated by both Studio and graph
+          // entry. No model-backed review or planning before verifier retry.
+          if (s.operationRecovery?.operation === "commit-verification" &&
+              s.operationRecovery.phase === "continued" && s.active && s.result)
+            return {};
           const receipt = await checkPlan(job, s.request, s.planVersion);
           // A verified other-owner correction is not review coverage until
           // impacted dependents have been revalidated. Resume this persisted
@@ -1884,6 +1886,40 @@ export function createGenerationGraph(
                 resultStatus: s.result?.status ?? "absent" }, "returned-failure");
           const completedStages = [...s.completedStages, { stage, milestone: s.active?.milestone,
             headSha: s.result.headSha ?? headSha, status: s.result.status, planVersion: planVersion ?? undefined }];
+          if (s.operationRecovery?.operation === "commit-verification" &&
+              s.operationRecovery.phase === "continued") {
+            const proof = s.request.turnPlanDigest && s.operationRecovery.evidence.verifier &&
+              await verifyCorrectedOriginalResult(job, s.request.turnPlanDigest,
+                s.active, s.result, s.operationRecovery.evidence.verifier, s.planVersion);
+            if (!proof || !proof.eligible ||
+                s.operationRecovery.source.headSha !== s.result.headSha)
+              throw Error("Original verifier reconciliation changed after admission: " +
+                (proof ? proof.reason : "original input is unavailable"));
+            // Recheck the *actual* verifier's dependency and plan invariants
+            // without starting a pending reviewer/planner or giving a writer a
+            // new lease. A newly approved correction is not, by itself, proof
+            // that the failed verifier's prerequisite was satisfied.
+            const rechecked = await reconcile({ ...s, completedStages,
+              active: null, result: null, planVersion }, job, false);
+            const verified = rechecked.inventory?.items.find(item =>
+              item.id === s.active!.id);
+            const retained = rechecked.completedStages?.some(entry =>
+              entry.stage === stage && entry.milestone === s.active?.milestone &&
+              entry.headSha === s.result?.headSha);
+            if (!retained || verified?.status !== "verified" ||
+                rechecked.status === "blocked" || rechecked.status === "paused" ||
+                rechecked.operationRecovery?.phase === "assessment" ||
+                rechecked.recovery?.phase === "assessment")
+              throw Error("Corrected verifier did not independently revalidate the original completed result.");
+            // This step acknowledges only the original already-reviewed
+            // result. New adaptive proposals or dependent reviewers run
+            // later through the normal author-intake boundary.
+            return { completedStages, active: null, result: null, planVersion,
+              operationRecovery: null, cursor: s.cursor + 1,
+              ...(s.pauseAfter === stage
+                ? { status: "paused" as const, reason: "Requested safe-boundary pause" }
+                : { status: "running" as const, reason: null }) };
+          }
           const next = await reconcile({ ...s, completedStages, active: null, result: null, planVersion }, job);
           // A newly verified specialist has just reached a safe boundary. The
           // next assignment must not become in-flight until author steering and
@@ -1894,8 +1930,13 @@ export function createGenerationGraph(
         } catch (error) {
           const stop = blocked(error);
           if (stop.status !== "blocked") return stop;
+          // Capture verified original inputs at failure, never from user or
+          // model prose. Missing checkpoint provenance remains safely fenced.
+          const verifier = s.request.turnPlanDigest ? await captureVerificationFailure(job,
+            s.request.turnPlanDigest, s.active, s.result, s.planVersion).catch(() => null) : null;
           return operationFailure(s, job, "commit-verification", error,
-            { reference: "review-checkpoints", assignmentId: s.active?.id });
+            { reference: "review-checkpoints", assignmentId: s.active?.id,
+              ...(verifier ? { verifier } : {}) });
         }
       });
     })
@@ -2019,8 +2060,11 @@ export function createGenerationGraph(
     .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.recovery?.phase === "assessment" ? "assess_recovery" :
-      s.ideaTask ? "idea_integration" : s.active && s.result ? "independent_assignment_review" :
-      s.active ? "specialist_dispatch" : "completion_decision"), [END, "assess_recovery", "idea_integration", "independent_assignment_review", "specialist_dispatch", "completion_decision"])
+      s.ideaTask ? "idea_integration" :
+      s.active && s.result && s.operationRecovery?.operation === "commit-verification" &&
+        s.operationRecovery.phase === "continued" ? "verify_committed_work" :
+      s.active && s.result ? "independent_assignment_review" :
+      s.active ? "specialist_dispatch" : "completion_decision"), [END, "assess_recovery", "idea_integration", "independent_assignment_review", "verify_committed_work", "specialist_dispatch", "completion_decision"])
     .addConditionalEdges("idea_integration", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "verify_idea_integration"), [END, "assess_recovery", "verify_idea_integration"])
     .addConditionalEdges("verify_idea_integration", s => routeAfterOperationAssessment(s,

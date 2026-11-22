@@ -1,0 +1,29 @@
+# #237 — Source-authenticated original-Thread commit-verifier continuation
+
+This is a production recovery contract, not a one-run or legacy-state repair. It reuses the existing generation graph, operation-assessment checkpoint, Studio queue, native validator, specialist checkpoints, signed Architecture history, reviewed Milestone revisions and adaptive write-ahead ledger.
+
+## Recovery authority
+
+The original graph may resume a failed `commit-verification` operation only if the saved controller has captured a *unique completed specialist result and independently reviewed checkpoint*. The evidence pins its assignment/stage/status, original Git commit, original plan version, checkpoint content, Turn and controller check/version, and the correction baseline. Receipt absence, reviewer incompleteness, and unsupported stage shapes are not proof.
+
+An original blocked graph must be idle, with the result still present and the stage not already completed. Studio and the graph call the **same** read-only inspector, checking the exact Job and graph Thread, original Turn, selected provider/model and skill snapshot, unchanged original operation identity, cumulative resource pause, running author control, clean worktree, native validation and authenticated adaptive effects. A prepared adaptive effect may be inspected but cannot imply a model invocation; invoking, legacy no-effect, and ambiguous effects stay fenced. No fork, new reviewer, or new writer is authorized.
+
+The concrete correction adapters currently implemented by the common policy are:
+
+- **Reviewed Milestone Blueprint supersession**, verified from the existing Repair ledger, independent original/successor reviews and versioned handoff. A change affecting the completed assignment itself is not carry-forward authority; the affected unit requires its own reviewed revalidation.
+- **Signed Architecture carry-forward**, checked against every original author-signed plan revision and the immutable historical specialist receipt. The *current* HEAD must be the new independently reviewed Architecture checkpoint; a later unrelated Git commit makes the old verifier stale.
+
+The completed result never takes the `specialist_dispatch` or independent-review edge again. On verified re-entry, the parent runs the ordinary **read-only** dependency/inventory reconciliation (`allowAmend=false`) to establish that the corrected plan actually retains the original reviewed assignment. It then acknowledges exactly that result and clears the completed operation. The later normal author-intake boundary is responsible for new authorized planning and dependent work; verifier recovery itself makes **zero Pi calls and Git commits**. Any unresolved or changed inputs produce another durable fence, not a success marker.
+
+This is deliberately fail-closed for other unimplemented correction adapters, unknown historical verifier records, uncertain external effects, unreviewed/commitless results, or stages without suitable provenance. A generic correction or operator claim never overrides the original failed check.
+
+## Deterministic evidence
+
+- `test/generation.test.ts` — disposable real Git/native fixtures certify an already-reviewed **Event** with a later approved Interactive obligation revision, and separately a reviewed **Foundations** stage carried into a later signed, independently reviewed Architecture version. Each exercises Studio `safeToResume`, a persisted blocked SqliteSaver checkpoint, a restarted original production graph, and final verifier acknowledgement without new specialist/reviewer/plan calls or Git edits.
+- The Event fixture tests missing/altered checkpoint identity, wrong model/Thread/HEAD, tampered independent review, worktree edits, author pause, repeated-completion refusal and unchanged-failure refusal. An Event source affected by the corrected Milestone is not eligible for this carry-forward path.
+- The Foundations fixture confirms the original pre-replan Git source survives a signed new Architecture HEAD, rejects a forged plan version, rejects replay after later Event work moves HEAD, and continues subsequent authorized work through the ordinary graph.
+- `test/adaptive-operation-recovery.test.ts`, `test/original-thread-continuation.test.ts`, `test/post-approval-revision-warning.test.ts`, `test/blueprint-challenge.test.ts` verify legacy ambiguity, prepared/invoking effects, recovery source binding and review/incident classification. Studio generation-controls/queue tests cover owner-scoped CAS and cancellation.
+
+**Observed checks (2026-11-22):** Six selected production-generation tests, 11 focused recovery/approval tests, and nine Studio/SQLite tests passed. Seven opt-in PostgreSQL tests were skipped without `NT_TEST_PG_URL`. TypeScript, lint, and whitespace checks passed. The full root `pnpm test` run reached its 295-second tool limit before completion. Its three observed failures were from an overly broad recovery-state reset; that change was corrected, and all three now pass together with the new cases. This is **not** a green full-suite certification.
+
+**Evidence limits:** The saved blocked verifier is reconstructed at the production test seam using real controller assessment and authentic previously committed/reviewed receipts. The tests do not falsely claim to induce the historical underlying failure again, nor to provide a paid real-Pi independent judgment. They prove the new resume branch with the production graph, not every possible provider-session crash. Unsupported cases remain fenced. These remaining acceptance distinctions belong on #237 until a naturally captured failing-verifier, nonfixture scripted-provider integration and the full interruption matrix are independently certified. Existing broader recovery and whole-Story certification issues remain separate.

@@ -21,7 +21,7 @@ import { pendingDigest } from "./pending-work-amendments.js";
 import { evaluateAdaptiveProposal, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
   removeAdaptiveOverlays, assertReviewedOmissionDisposition,
   type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment } from "./adaptive-assignments.js";
-import { emptyAdaptiveState, readAdaptiveState,
+import { emptyAdaptiveState, readAdaptiveState, isProvablyUninvokedAdaptiveAttempt,
   assertAdaptiveSettled, beginAdaptiveAttempt, settleAdaptiveAttempt, saveAdaptiveState,
   bindAdaptiveContext, beginAdaptiveInvocation, completeAdaptiveInvocation } from "./adaptive-state.js";
 import { AdaptiveRecoveryRequired, MalformedAdaptiveResponse, recheckAdaptiveResponse, type AdaptiveRecovery, type AdaptiveResponseProof } from "./adaptive-protocol.js";
@@ -309,7 +309,8 @@ export async function reconcileAdaptiveWork(input: {
   // Legacy receipts without a write-ahead effect phase remain ambiguous. A
   // prepared original is never replayed in inspection; only the controller
   // execution boundary can verify and continue the SAME operation.
-  const recoverable = input.allowAmend !== false && !!originalAttempt;
+  const recoverable = !!originalAttempt && (input.allowAmend !== false ||
+    isProvablyUninvokedAdaptiveAttempt(originalAttempt));
   assertAdaptiveSettled(interrupted && (format || recoverable)
     ? { ...state, attempts: state.attempts.filter(a => a !== interrupted) } : state);
   if (originalAttempt && (originalAttempt.effect!.snapshotId !== selected.receipt.skillSnapshot.id ||

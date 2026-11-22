@@ -322,7 +322,7 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
       const correctedBoundary = approvedWork?.eligible === true
       if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !correctedBoundary && saved.status !== 'paused') ||
           (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) ||
-          (saved.result && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary) || saved.ideaTask || saved.ideaResult ||
+          (saved.result && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) || saved.ideaTask || saved.ideaResult ||
           (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
             JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
         throw new Error('Checkpoint is not at a verified, idle safe boundary. Inspect the original specialist receipts.')

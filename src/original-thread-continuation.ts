@@ -1,19 +1,25 @@
-/** Exact, read-only disposition for a blocked original Thread after a reviewed
- * Milestone Blueprint correction. This is neither a fork nor a writer grant.
- * The same proof is checked by Studio admission and by the production graph. */
+/** Exact, read-only disposition for a blocked original Thread after a
+ * source-authenticated approved-work correction or verifier reconciliation.
+ * This is neither a fork nor a writer grant; Studio admission and the
+ * production graph independently check the same proof. */
 import { lstat, readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectRepairLedger, inspectApprovalRevisionIncidents } from "./repair-ledger.js";
 import { reviewedMilestoneHandoff, type MilestoneEventSource } from "./milestone-obligation-handoff.js";
-import { readAdaptiveState, assertAdaptiveSettled, type AdaptiveState } from "./adaptive-state.js";
+import { readAdaptiveState, assertAdaptiveSettled, isProvablyUninvokedAdaptiveAttempt,
+  type AdaptiveState } from "./adaptive-state.js";
 import { loadSelectedStoryOrchestrator } from "./orchestrator-selection.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { validateStoryJob } from "./validator.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { verifyCorrectedOriginalResult } from "./commit-verification-continuation.js";
+import { readJobControl } from "./job-control.js";
+import type { GenerationStage } from "./generation-plan.js";
 
 export type BlockedOriginalThreadState = {
   status?: string;
@@ -23,9 +29,10 @@ export type BlockedOriginalThreadState = {
   planVersion?: number | null;
   adaptiveVersion?: number | null;
   orchestratorSnapshotId?: string | null;
-  active?: { id: string; stage: string; milestone?: string } | null;
+  active?: { id: string; stage: GenerationStage; milestone?: string } | null;
   failures?: Record<string, string>;
-  result?: unknown;
+  result?: { status?: string; headSha?: string } | null;
+  completedStages?: Array<{ stage: string; milestone?: string; headSha?: string }>;
   inventory?: { headSha: string; items: Array<{ id: string; status: string }> } | null;
   ideaTask?: unknown; ideaResult?: unknown;
   recovery?: { phase: string } | null;
@@ -46,9 +53,8 @@ export function inspectSettledAdaptiveVersion(adaptive: AdaptiveState, parentVer
   const attempt = atSource.at(-1);
   if (!attempt?.effect || attempt.effect.snapshotId !== snapshotId)
     return refuse("The original adaptive effect is missing or not snapshot-bound.");
-  if (attempt.phase === "planning" && attempt.effect.phase === "prepared" &&
-      adaptive.version === parentVersion && atSource.length === 1 &&
-      !attempt.effect.invocation && !attempt.session && !attempt.malformedResponse)
+  if (isProvablyUninvokedAdaptiveAttempt(attempt) &&
+      adaptive.version === parentVersion && atSource.length === 1)
     return { eligible: true, reason: "Original adaptive operation was proven never invoked; resume its pinned attempt." };
   if ((attempt.phase === "admitted" || attempt.phase === "unchanged") &&
       attempt.effect.phase === "responded" && attempt.session) {
@@ -74,9 +80,10 @@ export async function inspectBlockedOriginalThreadCorrection(
   const request = saved.request;
   const active = saved.active;
   const op = saved.operationRecovery;
+  const commitVerifier = op?.operation === "commit-verification";
   if (saved.status !== "blocked" || !request?.turnPlanDigest ||
       saved.graphThreadId !== threadId || request.job !== job.jobId ||
-      saved.result || saved.ideaTask || saved.ideaResult ||
+      (saved.result && !commitVerifier) || saved.ideaTask || saved.ideaResult ||
       (!saved.inventory && saved.operationRecovery?.operation !== "adaptive-admission") ||
       saved.unknownRecovery || saved.recovery && saved.recovery.phase !== "completed")
     return refuse("The blocked graph is not an idle, source-bound recovery handoff.");
@@ -87,8 +94,24 @@ export async function inspectBlockedOriginalThreadCorrection(
       op.source.planVersion !== (saved.planVersion ?? null))
     return refuse("No exact controller recovery disposition exists for this blocked operation.");
 
+  if (await readJobControl(job) !== "running")
+    return refuse("Author execution control must be running before recovery.");
+  // Admission and graph entry share this source gate. A dirty/untracked draft
+  // cannot be hidden behind an otherwise valid historical checkpoint.
+  const gitEnv = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE", "GIT_PREFIX"]) delete gitEnv[key];
+  if (execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd: job.worktreeRoot, env: gitEnv, encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim()) return refuse("Original Thread contains uncommitted Story edits; reconcile the writer first.");
   const head = await trustedHead(job);
-  if (saved.inventory && saved.inventory.headSha !== head || op.source.headSha !== head)
+  // A specialist result may have advanced HEAD beyond the inventory built
+  // immediately before its dispatch. That old inventory is expected here:
+  // only the failed verifier's result/checkpoint may authenticate the new HEAD.
+  if ((!commitVerifier && ((saved.inventory && saved.inventory.headSha !== head) ||
+        op.source.headSha !== head)) ||
+      (commitVerifier && op.source.headSha !== saved.result?.headSha))
     return refuse("The blocked source or controller recovery head changed.");
   const pi = await inspectPiPolicy(job);
   if (request.provider && request.provider !== pi.policy.profile.provider ||
@@ -125,6 +148,35 @@ export async function inspectBlockedOriginalThreadCorrection(
     // amendment or an unchanged response after the parent checkpoint.
     return inspectSettledAdaptiveVersion(adaptive, saved.adaptiveVersion ?? 1,
       head, saved.orchestratorSnapshotId);
+  }
+  if (commitVerifier) {
+    if (op.phase !== "fenced" || op.outcome !== "exception" ||
+        op.safeAction !== "reconcile-original-operation" ||
+        op.evidence.reference !== "review-checkpoints" ||
+        !op.evidence.verifier || !active || !saved.result ||
+        !saved.result.headSha ||
+        !saved.inventory || !saved.inventory.items.some(item => item.id === active.id &&
+          (item.status === "pending" || item.status === "blocked")) ||
+        saved.completedStages?.some(stage => stage.stage === active.stage &&
+          stage.milestone === active.milestone) ||
+        op.evidence.assignmentId !== active.id)
+      return refuse("The failed verifier has no complete, unused original result and controller-captured input.");
+    if (adaptive) {
+      if (adaptive.attempts.some(attempt => attempt.phase === "planning")) {
+        const settled = inspectSettledAdaptiveVersion(adaptive, saved.adaptiveVersion ?? adaptive.version,
+          head, saved.orchestratorSnapshotId);
+        if (!settled.eligible)
+          return refuse("Original adaptive effect must settle before verifier recovery: " + settled.reason);
+      } else assertAdaptiveSettled(adaptive);
+    } else if (saved.adaptiveVersion != null && saved.adaptiveVersion > 1)
+      return refuse("Original admitted adaptive work is missing its authenticated receipts.");
+    const proof = await verifyCorrectedOriginalResult(job, request.turnPlanDigest,
+      active, saved.result, op.evidence.verifier, op.source.planVersion);
+    if (!proof.eligible) return proof;
+    const validation = await validateStoryJob(job);
+    if (validation.status !== "passed")
+      return refuse("Native validation does not pass the unchanged original specialist commit.");
+    return proof;
   }
   if (adaptive) assertAdaptiveSettled(adaptive);
   const assignmentId = op.evidence.assignmentId;
