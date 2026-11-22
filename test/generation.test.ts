@@ -584,7 +584,8 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   const ledgerOriginal = readFileSync(ledgerFile, "utf8");
   const repaired = JSON.parse(ledgerOriginal);
   assert.deepEqual(repaired.blueprintRepairs[0].affected, {
-    event: defect === "knowledge", interactive: true, composition: true, completion: true,
+    event: defect === "knowledge" || defect.startsWith("specialist"),
+    interactive: true, composition: true, completion: true,
   }, "only the owners dependent on the corrected plan must be revalidated");
   if (defect === "interactive") {
     repaired.blueprintRepairs[0].affected.interactive = false;
