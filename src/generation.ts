@@ -15,7 +15,9 @@ import { assessGenerationOperation, nodeFailureSource, operationChecks, type Gen
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
-import { admitRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
+import { selectOperationStrategy, executeOperationStrategy,
+  authenticateSealedDiagnosticStop } from "./generation-operation-strategy.js";
+import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
   resumePausedRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
@@ -42,7 +44,6 @@ import { runInteractiveWorkItem } from "./interactive-work.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { runCompositionWorkItem } from "./composition-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
-import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { runNarrativeReview } from "./narrative-review.js";
 import { runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
@@ -241,7 +242,8 @@ const Channels = Annotation.Root({
   crossDomainCloseout: Annotation<{ milestoneId: string; planVersion: number;
     sourceSha: string; proposalDigest: string; repairId: string } | null>(),
 });
-type CoreState = typeof Channels.State;
+export type GenerationGraphState = typeof Channels.State;
+type CoreState = GenerationGraphState;
 // Local node observations only; never LangGraph channels or resume authority.
 type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict" };
 const openJob = async (s: Pick<State, "request">) => {
@@ -1109,7 +1111,7 @@ function blockedAssignmentInventory(s: State, reason: string): GenerationInvento
 /** Every graph edge defers to an unresolved checkpointed operation
  * assessment before routing to another stage or specialist. */
 function routeAfterOperationAssessment(s: CoreState, normal: string): string {
-  return s.recoveryLifecycle.phase === "assessing" && !!s.recoveryLifecycle.active
+  return (s.recoveryLifecycle.phase === "assessing" || s.recoveryLifecycle.assessorPending) && !!s.recoveryLifecycle.active
     ? "assess_recovery" : normal;
 }
 
@@ -1210,12 +1212,46 @@ export function recoveryNode(
           fence: inspectionFence("untrusted-receipt", {}, [], null,
             "Restore original recovery source receipts; never replay an uncertain writer.") }) };
     }
+    if (prior.recoveryLifecycle.inspectionFences.length)
+      return { status: "blocked", reason: state.reason ?? "Original recovery requires inspection.", recoveryLifecycle: prior.recoveryLifecycle };
+    if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop") {
+      const active = prior.recoveryLifecycle.active;
+      try {
+        const job = await openJob(state);
+        const thread = config.configurable?.thread_id;
+        if (!active || typeof thread !== "string" ||
+            await trustedHead(job) !== active.origin.sourceHeadSha ||
+            !await authenticateRecoveryOrigin(job, state.request, thread,
+              active.origin, active.evidence) ||
+            !await authenticateSealedDiagnosticStop(job, state as State, prior.recoveryLifecycle))
+          throw Error("Original diagnostic or invocation receipt is no longer authenticated.");
+        return { status: "blocked", reason: state.reason ?? "Original read-only diagnosis requires operator intervention.",
+          recoveryLifecycle: prior.recoveryLifecycle };
+      } catch {
+        return { status: "blocked", reason: "Sealed original diagnostic or its invocation cannot be authenticated.",
+          recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+            fence: inspectionFence("untrusted-receipt", active?.origin ?? {}, active?.evidence ?? [],
+              active ? { store: active.origin.failureAnchor.store,
+                ref: active.origin.failureAnchor.ref } : null,
+              "Inspect the original Pi session, protocol result and recovery decision before restart.") }) };
+      }
+    }
+    // Resuming via START must reconcile a checkpointed action before schedule
+    // can select more work (including after an uncheckpointed adapter return).
+    if (node === "schedule" && prior.recoveryLifecycle.assessorPending && !prior.recoveryLifecycle.inspectionFences.length)
+      return { status: "running", recoveryLifecycle: prior.recoveryLifecycle };
+    // A cancelled Turn is final: a new START cannot reinterpret a checkpointed
+    // cancellation as a recoverable graph error or dispatch another agent.
+    if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
+        prior.recoveryLifecycle.decision?.action === "pause" &&
+        prior.recoveryLifecycle.decision.reason === "cancelled")
+      return { status: "cancelled", recoveryLifecycle: prior.recoveryLifecycle };
     // A genuine author pause is not an integrity failure and cannot be
     // silently cleared. Resuming the same case requires current author control
     // and the same original authenticated source/Thread; cancellation is final.
     if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
         prior.recoveryLifecycle.decision?.action === "pause" &&
-        prior.recoveryLifecycle.decision.reason === "author-pause" &&
+        ["author-pause", "budget", "author-choice"].includes(prior.recoveryLifecycle.decision.reason) &&
         prior.recoveryLifecycle.active) {
       try {
         const job = await openJob(state);
@@ -1280,7 +1316,10 @@ export function recoveryNode(
         if (typeof graphThread !== "string" || await trustedHead(job) !== active.origin.sourceHeadSha ||
             !await authenticateRecoveryOrigin(job, state.request, graphThread, active.origin, active.evidence))
           throw Error("Original failure source no longer matches the selected Turn and current HEAD.");
-        return { recoveryLifecycle: { ...decideExistingRecovery(prior), assessorPending: true },
+        const strategy = prior.recoverySources.some(x => x.caseId === active.id && x.channel === "operationRecovery") &&
+          await withStoryJobLock(job, "assess-source-bound-operation", () => selectOperationStrategy(job, state, active));
+        const selected = strategy ? decideRecovery(prior.recoveryLifecycle, strategy) : decideExistingRecovery(prior);
+        return { recoveryLifecycle: { ...selected, assessorPending: true },
           status: "running" };
       } catch {
         return { status: "blocked", reason: "The original failure cannot admit a recovery decision.",
@@ -1290,6 +1329,24 @@ export function recoveryNode(
               { store: "graph-checkpoint", ref: prior.recoveryLifecycle.active.origin.failureAnchor.ref },
               "Authenticate the exact original failed-check and domain receipt.") }) };
       }
+    }
+    // A known response-contract correction executes inside the original
+    // adaptive planner/session on author_update_intake, not inside the old
+    // assessor callback. The C02 decision is already checkpointed; invoking
+    // the legacy assessment again would reject its own "authorized" projection
+    // as an unknown new decision and permanently fence a valid correction.
+    if (node === "assess_recovery" && prior.recoveryLifecycle.assessorPending &&
+        prior.recoveryLifecycle.decision?.action === "known-correction" &&
+        prior.recoveryLifecycle.decision.adapter === "response-contract" &&
+        prior.recoverySources.some(x => x.caseId === prior.recoveryLifecycle.active?.id && x.channel === "recovery"))
+      return { status: "running", reason: null,
+        recoveryLifecycle: { ...prior.recoveryLifecycle, assessorPending: false } };
+    if (node === "assess_recovery" && prior.recoveryLifecycle.assessorPending &&
+        ["diagnostic", "plan-amendment"].includes(prior.recoveryLifecycle.decision?.action ?? "") &&
+        prior.recoverySources.some(x => x.caseId === prior.recoveryLifecycle.active?.id && x.channel === "operationRecovery")) {
+      const job = await openJob(state);
+      const action = await executeOperationStrategy(job, state, prior.recoveryLifecycle);
+      if (action) return action;
     }
     const local = { ...state, ...projectRecovery(prior) } as State;
     const outcome = await observeNodeOutcome(node, local, config, execute);
@@ -1868,6 +1925,9 @@ export function createGenerationGraph(
                   "bounded prerequisite amendment. Do not dispatch Composition or fabricate fulfillment." },
             };
             if (decision.kind === "repair") return { ...next,
+              ...await operationFailure({ ...s, ...next }, job, "dependency-amendment", "Verified Composition prerequisite requires its source-bound owner.",
+                { reference: "dependency-plan", assignmentId: next.active.id, closeout: {
+                  milestoneId: next.active.milestone, proposalDigest: decision.proposal.digest, repairId: decision.repairId } }, "returned-failure"),
               crossDomainCloseout: { milestoneId: next.active.milestone,
                 planVersion: next.planVersion, sourceSha: decision.proposal.sourceSha,
                 proposalDigest: decision.proposal.digest, repairId: decision.repairId },
@@ -2012,35 +2072,7 @@ export function createGenerationGraph(
       });
     }))
     .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async s => {
-      if (s.crossDomainCloseout) {
-        try {
-          const pending = s.crossDomainCloseout;
-          if (!s.active || s.active.stage !== "composition" ||
-              s.active.milestone !== pending.milestoneId ||
-              s.planVersion !== pending.planVersion || s.result)
-            throw Error("Prerequisite correction lost its pinned Composition source.");
-          const job = await openJob(s);
-          const stopped = await withStoryJobLock(job, "cross-domain-author-boundary",
-            () => authorBoundary(job, s));
-          if (stopped) return stopped;
-          const result = await advanceCrossDomainCloseout({ ...s.request,
-            originalInventory: s.inventory ?? undefined,
-            milestoneId: pending.milestoneId, planVersion: pending.planVersion,
-            expected: { sourceSha: pending.sourceSha,
-              proposalDigest: pending.proposalDigest, repairId: pending.repairId } });
-          if (result.status !== "verified")
-            throw Error("Prerequisite lacks independent correction review.");
-          // No separate recovery graph: re-enter the original controller
-          // inventory and recheck native Milestone readiness before Composition.
-          return { crossDomainCloseout: null, active: null, result: null,
-            reason: null, escalation: null };
-        } catch (error) {
-          const stop = blocked(error);
-          if (stop.status !== "blocked") return stop;
-          return operationFailure(s, await openJob(s), "dependency-amendment", error,
-            { reference: "dependency-plan", assignmentId: s.active?.id });
-        }
-      }
+      if (s.crossDomainCloseout) throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
       // A saved dispatch result means the external stage completed before a parent
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
       // including a commit published before its receipt; never invent a new writer.

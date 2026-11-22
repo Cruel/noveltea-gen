@@ -37,6 +37,7 @@ export interface GenerationOperationRecovery {
       "specialist-receipt" | "dependency-plan" | "review-checkpoints" |
       "completion-report" | "generation-checkpoints";
     assignmentId?: string; resultStatus?: string;
+    closeout?: { milestoneId: string; proposalDigest: string; repairId: string };
     /** Controller-captured verifier input; its source and correction baseline are not model claims. */
     verifier?: { assignmentId: string; stage: string; resultStatus: string;
       resultHeadSha: string; failureHeadSha: string;

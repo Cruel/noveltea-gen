@@ -29,6 +29,23 @@ export interface UnknownRecoveryCase extends UnknownCompletionEvidence {
   operation: "completion-verification"; phase: "post-verification";
   check: "generation-fulfillment"; checkVersion: 1; signature: string;
 }
+// Operation diagnostics use the authenticated original failure, not a fabricated
+// completion report. The signature names one immutable source-bound invocation.
+export interface OperationDiagnosisCase {
+  schema: "noveltea-operation-diagnosis-case/v1";
+  signature: string; jobId: string; threadId: string; caseId: string;
+  sourceSha: string; turnDigest: string; operation: string; check: string;
+  assignmentId: string | null; proofRef: string;
+}
+type DiagnosticCase = UnknownRecoveryCase | OperationDiagnosisCase;
+export function operationDiagnosisCase(c: import("./generation-recovery-contract.js").RecoveryCase,
+  proofRef: string): OperationDiagnosisCase {
+  const body = { schema: "noveltea-operation-diagnosis-case/v1" as const,
+    jobId: c.origin.jobId, threadId: c.origin.jobThreadId, caseId: c.id,
+    sourceSha: c.origin.sourceHeadSha, turnDigest: c.origin.turnDigest,
+    operation: c.origin.operation, check: c.origin.check, assignmentId: c.origin.assignmentId, proofRef };
+  return { ...body, signature: sha(body) };
+}
 export interface UnknownDiagnosis {
   schema: "noveltea-unknown-recovery-diagnosis/v1";
   signature: string;
@@ -68,7 +85,7 @@ function exact(value: unknown, fields: string[]): value is Record<string, unknow
   return !!value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join("|") === fields.sort().join("|");
 }
-export function parseUnknownDiagnosis(raw: string, caseFile: UnknownRecoveryCase): UnknownDiagnosis {
+export function parseUnknownDiagnosis(raw: string, caseFile: DiagnosticCase): UnknownDiagnosis {
   if (Buffer.byteLength(raw) > 3000) throw Error("Oversized unknown-failure diagnosis.");
   let value: unknown;
   try { value = JSON.parse(raw.trim()); }
@@ -93,12 +110,19 @@ export function unknownDiagnosisDisposition(_diagnosis: UnknownDiagnosis): "oper
 const dirFor = (job: JobStartResult) => join(job.stateDir, "unknown-diagnostics");
 const protocolRoot = (job: JobStartResult, key: string) => join(dirFor(job), key);
 const sessionsRoot = (job: JobStartResult) => join(job.stateDir, "unknown-diagnostic-sessions");
-const validation = (caseFile: UnknownRecoveryCase) => (response: string): ResponseContractFailure[] => {
+const validation = (caseFile: DiagnosticCase) => (response: string): ResponseContractFailure[] => {
   try { parseUnknownDiagnosis(response, caseFile); return []; }
   catch { return [{ path: "$.diagnosis", expected: "strict advisory-only JSON bound to the original signature" }]; }
 };
 
-function assertCaseBoundToJob(job: JobStartResult, evidence: UnknownRecoveryCase): UnknownRecoveryCase {
+function assertCaseBoundToJob(job: JobStartResult, evidence: DiagnosticCase): DiagnosticCase {
+  if (evidence.schema === "noveltea-operation-diagnosis-case/v1") {
+    const { signature, ...body } = evidence;
+    if (job.jobId !== body.jobId || job.threadId !== body.threadId || !hex64.test(body.caseId) ||
+        !hex64.test(body.turnDigest) || !hex40.test(body.sourceSha) || signature !== sha(body))
+      throw Error("Diagnostic original operation identity or source changed.");
+    return evidence;
+  }
   const bound = unknownCompletionCase({
     jobId: job.jobId, threadId: job.threadId, turnDigest: evidence.turnDigest,
     planVersion: evidence.planVersion, sourceSha: evidence.sourceSha,
@@ -113,7 +137,7 @@ function assertCaseBoundToJob(job: JobStartResult, evidence: UnknownRecoveryCase
 /** Read the sealed ORIGINAL diagnostic admission and completed Pi protocol.
  * This is read-only: no model/session reentry or new invocation allowance. */
 export async function inspectOriginalUnknownDiagnosis(
-  job: JobStartResult, evidence: UnknownRecoveryCase,
+  job: JobStartResult, evidence: DiagnosticCase,
 ): Promise<UnknownDiagnosis> {
   const bound = assertCaseBoundToJob(job, evidence);
   const root = protocolRoot(job, evidence.signature);
@@ -127,6 +151,19 @@ export async function inspectOriginalUnknownDiagnosis(
     sessionRoots: [sessionsRoot(job)], validate: validation(evidence),
     parse: text => parseUnknownDiagnosis(text, evidence),
   });
+}
+
+/** Index the authenticated original invocation, not the checkpoint's selection
+ * or a model-supplied identity. A started marker alone is not a settled turn. */
+export async function inspectDiagnosticAttempt(job: JobStartResult, evidence: DiagnosticCase,
+  caseId: string): Promise<import("./generation-recovery-contract.js").RecoveryAttempt> {
+  await inspectOriginalUnknownDiagnosis(job, evidence);
+  const file = protocolRoot(job, evidence.signature) + ".started.json";
+  const marker = JSON.parse(await readFile(file, "utf8")) as { invocationId: string; sessionId: string };
+  return { caseId, id: marker.invocationId, invocationId: marker.invocationId,
+    mode: "read-only", purpose: "diagnosis", phase: "settled",
+    startedRef: { store: "pi-session", ref: marker.sessionId },
+    settledRef: { store: "response-contract", ref: evidence.signature } };
 }
 
 /** Read-only inspection never trusts a checkpointed model recommendation on
@@ -151,7 +188,7 @@ export async function inspectUnknownRecoveryStatus(job: JobStartResult,
 /** A same-case graph restart may READ an accepted prior response but can
  * NEVER call Pi again. The shared protocol gate authenticates original session
  * transcript, attempt count and exact accepted bytes before returning it. */
-export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: UnknownRecoveryCase,
+export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: DiagnosticCase,
   provider: string, modelId: string): Promise<UnknownDiagnosis> {
   const bound = assertCaseBoundToJob(job, evidence);
   const root = dirFor(job), receipt = protocolRoot(job, evidence.signature);
@@ -243,7 +280,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: U
       "INDEPENDENT READ-ONLY EXECUTION FAILURE DIAGNOSIS. No tools, Story edits, " +
       "approvals, verifier waivers, new scope, software patches, writer dispatch or " +
       "Author Questions. This operation has verified persisted source evidence but " +
-      "the deterministic completion assessor has no authorized automatic route. " +
+      "the controller has no deterministic correction for the authenticated failed check. " +
       "Report only the likely operator inspection target, not a repair grant. " +
       "Do not infer cause from rephrased exception prose or invent hidden logs. " +
       "Return ONLY JSON with exact keys schema,signature,category,action,summary. " +

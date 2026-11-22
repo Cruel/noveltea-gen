@@ -44,10 +44,10 @@ const siteNames = [
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:12",
   assess_recovery: "returns:20,status:8,blocked:3,throws:10",
-  author_update_intake: "returns:20,status:3,operationFailure:6,authorBoundary:1,reconcile:2,throws:1",
+  author_update_intake: "returns:20,status:3,operationFailure:7,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:17,status:1,blocked:2,operationFailure:4,authorBoundary:1,throws:4",
+  specialist_dispatch: "returns:13,status:1,blocked:1,operationFailure:3,throws:3",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
   independent_assignment_review: "returns:1",
   verify_committed_work: "returns:6,status:4,blocked:1,operationFailure:2,reconcile:2,throws:3",
@@ -60,7 +60,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
-  recoveryNode: "returns:13,status:8,throws:3",
+  recoveryNode: "returns:20,status:14,throws:4",
 };
 const operations = [
   "adaptive-admission",
@@ -378,7 +378,7 @@ test("shared routing helper cannot bypass assessments even when call sites are u
   const bypass = ts.createSourceFile(
     "generation.ts",
     text.replace(
-      'return s.recoveryLifecycle.phase === "assessing" && !!s.recoveryLifecycle.active\n    ? "assess_recovery" : normal;',
+      'return (s.recoveryLifecycle.phase === "assessing" || s.recoveryLifecycle.assessorPending) && !!s.recoveryLifecycle.active\n    ? "assess_recovery" : normal;',
       "return normal;",
     ),
     ts.ScriptTarget.Latest,

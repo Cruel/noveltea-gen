@@ -9,8 +9,6 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
 import { createGenerationGraph, runStoryGeneration } from "../src/generation.js";
 import { configurePiPolicy, inspectPiPolicy } from "../src/job-pi-policy.js";
-import { assessGenerationOperation } from "../src/generation-operation-recovery.js";
-import { inspectBlockedOriginalThreadCorrection } from "../src/original-thread-continuation.js";
 import { readAdaptiveState, saveAdaptiveState } from "../src/adaptive-state.js";
 import { setJobControl } from "../src/job-control.js";
 import { startStoryJob } from "../src/job.js";
@@ -94,18 +92,10 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       assert.equal(before.attempts.length, 1);
       assert.equal(before.attempts[0]?.phase, "unchanged");
       assert.equal(before.attempts[0]?.effect?.phase, "responded");
-      const settled = await assessGenerationOperation({ job, threadId: config.configurable.thread_id,
-        turnDigest: turn.digest, planVersion: 1, operation: "adaptive-admission",
-        outcome: "exception", reason: "Parent checkpoint was interrupted after settling the response",
-        evidence: { reference: "generation-checkpoint" },
-      });
-      const originalState = (await graph.getState(config)).values;
-      const safe = await inspectBlockedOriginalThreadCorrection(job, config.configurable.thread_id,
-        { ...originalState, status: "blocked", active: null, result: null,
-          operationRecovery: { ...settled, phase: "fenced" },
-        });
-      assert.equal(safe.eligible, true, safe.reason);
-      assert.match(safe.reason, /no-change adaptive response/);
+      // C02 no longer accepts a caller-invented legacy operationRecovery
+      // disposition. The actual immutable adaptive attempt/response receipt is
+      // the only eligible original effect in this before-parent-checkpoint
+      // crash simulation. Replay is checked against that receipt below.
       const usage = (await inspectPiPolicy(job)).budget.modelCalls;
       // Deterministically simulate a crash AFTER the original Pi response
       // was checkpointed but BEFORE the parent admitted its disposition.
@@ -140,14 +130,19 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       const after = (await readAdaptiveState(job, turn.digest, 1))!;
       assert.equal(after.attempts.length, 1);
       if (input.tamperCompleted) {
-        assert.equal(resumed.operationRecovery?.operation, "adaptive-admission");
-        assert.equal(resumed.operationRecovery?.phase, "assessment",
+        assert.equal(resumed.recoveryLifecycle?.active?.origin.operation, "adaptive-admission");
+        assert.equal(resumed.recoveryLifecycle?.phase, "assessing",
           "tampered original evidence must reach the existing operation assessor first");
         assert.equal(after.attempts[0]?.phase, "planning");
+        const selected = await withJobModelRuntime(rt, () =>
+          graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
+        assert.equal(selected.recoveryLifecycle?.decision?.action, "reconcile-effects");
+        assert.equal(selected.recoveryLifecycle?.assessorPending, true,
+          "Selected no-replay reconciliation must checkpoint before inspecting external effects");
         const assessed = await withJobModelRuntime(rt, () =>
           graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
         assert.equal(assessed.status, "blocked", "tampered original Pi evidence must be fenced");
-        assert.equal(assessed.operationRecovery?.phase, "fenced");
+        assert.equal(assessed.recoveryLifecycle?.phase, "fenced");
         assert.equal(calls.length, 4, "assessing tampered evidence cannot create another Pi call");
       } else {
         assert.equal(resumed.status, "running", resumed.reason ?? undefined);
@@ -231,12 +226,16 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       return;
     }
     const assessed = await withJobModelRuntime(rt, () => graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
-    assert.equal(assessed.recovery?.phase, "authorized", assessed.reason ?? undefined);
-    assert.equal(assessed.recovery.sourceSha, point.commitSha);
+    assert.equal(assessed.recoveryLifecycle?.phase, "correcting", assessed.reason ?? undefined);
+    assert.equal(assessed.recoveryLifecycle?.decision?.action, "known-correction");
+    assert.equal(assessed.recoveryLifecycle?.active?.origin.sourceHeadSha, point.commitSha);
+    assert.equal(assessed.recoveryLifecycle?.assessorPending, true,
+      "The original same-session corrective adapter must remain scheduled after the decision checkpoint");
     assert.equal(calls.length, 4);
     saver.db.close(); saver = SqliteSaver.fromConnString(file); graph = createGenerationGraph(saver, "cli");
     const inspect = await runStoryGeneration({ action: "inspect", story, job: id });
-    assert.equal(inspect.recovery?.phase, "authorized", inspect.reason ?? undefined);
+    assert.equal(inspect.recoveryInspection?.phase, "correcting", inspect.reason ?? undefined);
+    assert.equal(inspect.recoveryInspection?.active?.operation, "adaptive-planner");
     assert.equal(calls.length, 4);
     // Hit a real job budget after the first unsuccessful correction. Raising
     // that budget on restart must not buy two more responses (or a new session).
@@ -250,20 +249,24 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       saver.db.close(); saver = SqliteSaver.fromConnString(file); graph = createGenerationGraph(saver, "cli");
       recovered = await withJobModelRuntime(rt, () => graph.invoke({ request }, { ...config, interruptAfter: ["author_update_intake"] }));
       assert.equal(recovered.status, "blocked");
-      assert.equal(recovered.recovery?.phase, "protocol-exhausted", recovered.reason ?? undefined);
+      assert.equal(recovered.recoveryLifecycle?.decision?.action, "exhausted", recovered.reason ?? undefined);
+      assert.equal(recovered.recoveryLifecycle?.phase, "fenced");
       for (const action of ["inspect", "resume", "resume"] as const) {
         const report = await withJobModelRuntime(rt, () => runStoryGeneration({ action, story, job: id }));
-        assert.equal(report.recovery?.phase, "protocol-exhausted");
+        assert.equal(report.recoveryInspection?.phase, "fenced");
+        assert.equal(report.recoveryInspection?.active?.operation, "adaptive-planner");
         assert.equal(report.status, "blocked");
         assert.equal(calls.length, 6, "restart cannot replenish a protocol allowance");
       }
       return;
     }
-    assert.equal(recovered.recovery?.phase, "completed", recovered.reason ?? undefined);
+    assert.equal(recovered.recoveryLifecycle?.phase, "idle", recovered.reason ?? undefined);
+    assert.equal(recovered.recoveryLifecycle?.active, null);
     assert.equal(recovered.status, "running");
     assert.ok(recovered.active, "normal scheduling continues");
     assert.equal(calls.length, 5);
-    assert.equal((await runStoryGeneration({ action: "inspect", story, job: id })).recovery?.phase, "completed");
+    assert.equal((await runStoryGeneration({ action: "inspect", story, job: id })).recoveryInspection, null,
+      "The settled same-session protocol must leave no active recovery case");
     assert.equal(calls.length, 5);
   } finally { saver.db.close(); if (previous === undefined) delete process.env.NT_ADAPTIVE_PLANNING;
     else process.env.NT_ADAPTIVE_PLANNING = previous; }

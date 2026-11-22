@@ -376,6 +376,9 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
       if (boundary.kind !== "repair")
         throw Error("No authenticated unmet cross-domain prerequisite: " +
           (boundary.kind === "ready" ? "Milestone is already complete" : boundary.reason));
+      if (request.expected && (request.expected.sourceSha !== boundary.proposal.sourceSha ||
+          request.expected.proposalDigest !== boundary.proposal.digest || request.expected.repairId !== boundary.repairId))
+        throw Error("Current prerequisite differs from the checkpointed controller decision.");
       if (request.originalInventory.headSha !== boundary.proposal.sourceSha ||
           request.originalInventory.planVersion !== request.planVersion ||
           !request.originalInventory.items.some(item =>

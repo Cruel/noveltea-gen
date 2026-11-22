@@ -26,7 +26,9 @@ import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { verifyPlanHistory } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from "./adaptive-protocol.js";
-import { inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
+import type { GenerationGraphState } from "./generation.js";
+import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy } from "./generation-operation-strategy.js";
+import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 
 const object = (x: unknown): x is Record<string, unknown> =>
@@ -285,9 +287,28 @@ export async function inspectModernGenerationRecovery(
           return source.channel === "operationRecovery" && d.originalRef?.ref === active.evidence[0]?.ref;
         case "known-correction":
           return source.channel === "recovery" && d.adapter === "response-contract";
+        case "plan-amendment": {
+          const graphState = values as GenerationGraphState;
+          const pending = graphState.crossDomainCloseout;
+          return d.adapter === "cross-domain-closeout" && d.owner === "event" && !!pending &&
+            matchesOriginalCloseout(graphState, active, pending) && d.scopeRef.store === "repair-ledger" &&
+            d.scopeRef.ref === pending.repairId && d.scopeRef.digest === pending.proposalDigest;
+        }
         case "diagnostic":
+          if (source.channel === "operationRecovery") return isDeepStrictEqual(d,
+            await selectOperationStrategy(job, values as GenerationGraphState, active));
           return source.channel === "unknownRecovery" && d.mode === "read-only" && d.attemptRef === null;
         case "diagnostic-stop":
+          if (source.channel === "operationRecovery") {
+            try {
+              const target = diagnosticCaseForDecision(active, d);
+              const sealed = await inspectOriginalUnknownDiagnosis(job, target);
+              return !!original.attempt && await authenticateOperationDiagnosticProof(job,
+                values as GenerationGraphState, active, d) &&
+                d.receipt.ref === target.signature && d.recommendation === sealed.action &&
+                d.advisoryCategory === sealed.category && d.disposition === "operator-intervention";
+            } catch { return false; }
+          }
           return authenticateDiagnosticStop(job, source, d);
         case "continue-independent":
           return source.channel === "operationRecovery" &&
@@ -311,7 +332,16 @@ export async function inspectModernGenerationRecovery(
     // attestor. No such invocation is re-admitted based on a saved graph
     // counter. The existing specialist's immutable external protocol remains
     // inspectable without calling Pi again.
-    authenticateAttempt: async () => false,
+    authenticateAttempt: async attempt => {
+      const { active, decision } = original;
+      if (!active || !decision || decision.action !== "diagnostic-stop" || attempt.caseId !== active.id) return false;
+      const source = sourceFor(active.id);
+      const target = source?.channel === "operationRecovery" ? diagnosticCaseForDecision(active, decision) :
+        source?.channel === "unknownRecovery" ? source.input.case as UnknownRecoveryCase : null;
+      if (!target) return false;
+      try { return isDeepStrictEqual(attempt, await inspectDiagnosticAttempt(job, target, active.id)); }
+      catch { return false; }
+    },
     authenticateDischarge: async discharge => {
       const source = sourceFor(discharge.case.id);
       if (!inputsValid || !source) return false;

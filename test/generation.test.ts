@@ -1197,7 +1197,9 @@ test("one authorized Choice assignment can certify multiple meaningful Choices w
  * This is a routing regression, not a substitute for a live Pi certification.
  */
 async function runFixtureRecoveryGraph(
-  name: string, refused: boolean | "exception",
+  name: string, refused: boolean | "exception" | "diagnostic",
+  controlAfterSelection?: "paused" | "cancelled" | "budget",
+  corruptCompletedAttempt: false | "invocation" | "original-proof" = false,
 ) {
   const f = setup(name);
   saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
@@ -1275,7 +1277,13 @@ async function runFixtureRecoveryGraph(
       return { result: state.result };
     });
     const config = { configurable: { thread_id: paused.threadId } };
+    const transport = refused === "diagnostic" ? await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel() : null;
+    const initial = (await graph.getState(config)).values;
+    if (transport) await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
+      profile: { provider: transport.model.provider, model: transport.model.id }, limits: { modelCalls: 2 } });
     await graph.updateState(config, {
+      ...(transport ? { request: { ...initial.request, fixture: false, provider: transport.model.provider, model: transport.model.id,
+        turnPlanDigest: JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest } } : {}),
       active: foundation, result: { status: "committed", headSha: before },
       status: "running", reason: null, completedStages: [], pauseAfter: "architecture",
     }, "specialist_dispatch");
@@ -1289,9 +1297,70 @@ async function runFixtureRecoveryGraph(
       assert.equal(selected.recoveryLifecycle.decision?.caseId, admitted.recoveryLifecycle.active?.id);
       assert.equal(selected.recoveryLifecycle.decision?.checkedSourceHeadSha, before);
       assert.equal(selected.recoveryLifecycle.assessorPending, true);
+      if (transport) assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic");
+      if (controlAfterSelection === "budget") {
+        await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
+          profile: { provider: transport!.model.provider, model: transport!.model.id },
+          limits: { modelCalls: 0 } });
+      } else if (controlAfterSelection) await setJobControl(f.job, controlAfterSelection);
       assert.deepEqual(log, [refused === "exception" ? "review-transport-failed" : "refuse-other-owner-write"]);
     }
-    const next = await graph.invoke(null, config);
+    let next = transport ? await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
+      () => createGenerationGraph(saver, "cli").invoke(null, config)) : await graph.invoke(null, config);
+    if (controlAfterSelection && transport) {
+      assert.equal(next.status, controlAfterSelection === "budget" ? "paused" : controlAfterSelection);
+      assert.equal(next.recoveryLifecycle.decision?.action, "pause");
+      assert.equal(next.recoveryLifecycle.decision?.reason, controlAfterSelection === "budget" ? "budget" :
+        controlAfterSelection === "paused" ? "author-pause" : "cancelled");
+      assert.equal(next.recoveryLifecycle.attempt, null);
+      assert.equal(transport.calls.length, 0, "Author control prevents dispatch of the selected model action");
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), next.recoveryLifecycle);
+      if (controlAfterSelection === "paused" || controlAfterSelection === "budget") {
+        if (controlAfterSelection === "budget") {
+          await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
+            profile: { provider: transport.model.provider, model: transport.model.id },
+            limits: { modelCalls: 2 } });
+        } else await setJobControl(f.job, "running");
+        next = await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
+          () => createGenerationGraph(saver, "cli").invoke({ request: next.request }, config));
+      } else {
+        const restart = await createGenerationGraph(saver, "cli").invoke({ request: next.request }, config);
+        assert.equal(restart.status, "cancelled");
+        assert.equal(transport.calls.length, 0);
+      }
+    }
+    if (transport && controlAfterSelection !== "cancelled") {
+      assert.equal(next.recoveryLifecycle.decision?.action, "diagnostic-stop", next.reason ?? undefined);
+      assert.equal(next.recoveryLifecycle.attempt?.phase, "settled");
+      assert.equal(next.recoveryLifecycle.attempt?.caseId, next.recoveryLifecycle.active?.id);
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), next.recoveryLifecycle);
+      if (corruptCompletedAttempt) {
+        const signature = next.recoveryLifecycle.attempt?.settledRef?.ref;
+        assert.ok(signature);
+        if (corruptCompletedAttempt === "invocation") {
+          const marker = join(f.job.stateDir, "unknown-diagnostics", signature + ".started.json");
+          const stored = JSON.parse(readFileSync(marker, "utf8"));
+          writeFileSync(marker, JSON.stringify({ ...stored, invocationId: "forged-invocation" }) + "\n");
+        } else {
+          const sourceProof = next.recoveryLifecycle.decision?.evidence.at(-1);
+          assert.equal(sourceProof?.store, "review-checkpoint",
+            "Original diagnostic used the reviewed committed Foundation proof");
+          const originalProof = join(f.job.stateDir, "foundation.json");
+          const saved = JSON.parse(readFileSync(originalProof, "utf8"));
+          writeFileSync(originalProof, JSON.stringify({ ...saved, authoredSha256: "0".repeat(64) }));
+        }
+        assert.equal((await inspectModernGenerationRecovery(f.job, saver, paused.threadId))?.inspectionFences.length, 1,
+          "Read-only inspection rejects a forged invocation receipt");
+        const restart = await createGenerationGraph(saver, "cli").invoke({ request: next.request }, config);
+        assert.equal(restart.status, "blocked");
+        assert.ok(restart.recoveryLifecycle.inspectionFences.length,
+          "Direct production graph reentry must independently authenticate the sealed attempt");
+      } else {
+        const restart = await createGenerationGraph(saver, "cli").invoke({ request: next.request }, config);
+        assert.deepEqual(restart.recoveryLifecycle.attempt, next.recoveryLifecycle.attempt);
+      }
+      assert.equal(transport.calls.length, 1); assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 1);
+    }
     assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial,
       "The author's original Story repository must not be rewritten");
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
@@ -1400,6 +1469,35 @@ test("production generation graph refuses another owner's recovery without advan
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before,
     "No unauthorized source mutation or downstream dispatch is allowed");
   assert.deepEqual(next.completedStages, []);
+});
+
+test("authenticated owner refusal executes a read-only diagnostic once across assessor restart", { skip: !available }, async () => {
+  const { f, next, before, log } = await runFixtureRecoveryGraph("owner-refusal-diagnostic", "diagnostic");
+  assert.equal(next.status, "blocked");
+  assert.deepEqual(log, ["refuse-other-owner-write"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
+});
+
+test("author control after selected diagnostic is durable and cannot start an unapproved model", { skip: !available }, async () => {
+  const paused = await runFixtureRecoveryGraph("diagnostic-paused-after-selection", "diagnostic", "paused");
+  assert.equal(paused.next.recoveryLifecycle.decision?.action, "diagnostic-stop",
+    "After author resumes, the original selected diagnosis runs exactly once");
+  const cancelled = await runFixtureRecoveryGraph("diagnostic-cancelled-after-selection", "diagnostic", "cancelled");
+  assert.equal(cancelled.next.status, "cancelled");
+  assert.equal(cancelled.next.recoveryLifecycle.decision?.reason, "cancelled");
+});
+
+test("tampered settled diagnostic cannot pass direct production-graph restart", { skip: !available }, async () => {
+  await runFixtureRecoveryGraph("tampered-diagnostic-restart", "diagnostic", undefined, "invocation");
+});
+
+test("saved diagnostic stop refuses altered original review proof without new Pi invocation", { skip: !available }, async () => {
+  await runFixtureRecoveryGraph("tampered-diagnostic-proof", "diagnostic", undefined, "original-proof");
+});
+
+test("saved diagnostic selection obeys budget pause and same-case resume", { skip: !available }, async () => {
+  const resumed = await runFixtureRecoveryGraph("budget-before-diagnostic", "diagnostic", "budget");
+  assert.equal(resumed.next.recoveryLifecycle.decision?.action, "diagnostic-stop");
 });
 
 test("review transport exception reaches the same assessor without retrying the writer", { skip: !available }, async () => {
