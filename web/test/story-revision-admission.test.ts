@@ -31,6 +31,9 @@ const config = { baseURL: 'http://localhost:3000',
   github: { clientId: 'test', clientSecret: 'test' }, gitlab: { clientId: 'test', clientSecret: 'test' } }
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
+// Isolated implementation worktrees may not have an adjacent skills checkout.
+const skillsCheckout = resolve(process.env.NT_SKILLS_CHECKOUT ??
+  resolve(import.meta.dirname, '../../../noveltea-skills'))
 const catalog = [
   { path: 'creative-direction/direction.md', metadata: {
     type: 'creative-direction', id: 'creative-direction.direction', title: 'Direction', status: 'draft' } },
@@ -142,8 +145,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         // boundary settles, it can schedule Architecture; that always requires
         // a pinned skills checkout, even with a fixture author. The other
         // admission cases intentionally remain independent of skills.
-        process.env.NT_STUDIO_SKILLS_SOURCE = savedEnv.NT_STUDIO_SKILLS_SOURCE ??
-          resolve(import.meta.dirname, '../../../noveltea-skills')
+        process.env.NT_STUDIO_SKILLS_SOURCE = savedEnv.NT_STUDIO_SKILLS_SOURCE ?? skillsCheckout
         process.env.NT_SKILL_CACHE_DIR = join(root, 'skills-cache')
       }
       const firstJobId = randomUUID()
@@ -784,7 +786,7 @@ test('protected steering pauses before any Story writer and retains a review fen
 test('unreachable steering source cannot replan a running Story',
   { timeout: 90_000 }, () => exerciseRevisionAdmission('steering-stale'))
 test('authenticated Turn dispatches a discovered dependency and fences another owner across restart',
-  { timeout: 90_000, skip: !existsSync(resolve(import.meta.dirname, '../../../noveltea-skills/src/cli.ts')) },
+  { timeout: 90_000, skip: !existsSync(join(skillsCheckout, 'src/cli.ts')) },
   () => exerciseRevisionAdmission('dependency'))
 test('conversation revision in the same authenticated Thread grants only authored-content',
   { timeout: 60_000 }, () => exerciseRevisionAdmission('conversation'))

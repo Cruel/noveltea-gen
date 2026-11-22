@@ -15,8 +15,8 @@ import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readIndependentReview } from "./checkpoint-assurance.js";
 import { historicalMilestoneHandoff, reviewedMilestoneHandoff, type MilestoneEventSource } from "./milestone-obligation-handoff.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
-import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, parseMilestoneBlueprint, type MilestoneBlueprint } from "./milestone-blueprint.js";
-import { inspectRepairLedger, recordBlueprintRepair, type BlueprintRepair } from "./repair-ledger.js";
+import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint, milestoneBlueprintApprovalProvenance, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, parseMilestoneBlueprint, type MilestoneBlueprint } from "./milestone-blueprint.js";
+import { classifyApprovalRevisionCause, approvalRevisionSeverity, inspectRepairLedger, recordBlueprintRepair, type BlueprintRepair } from "./repair-ledger.js";
 import { execFileSync } from "./git-read-cache.js";
 
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -115,12 +115,30 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   // Different JSON key ordering (or an identical suggestion) changes no
   // obligation. Deterministically retain the original approval, no Pi turn.
   if (equal(candidate, old.design)) return;
+  const evidenceDigest = sha([input.omission, findings, sha(candidate)]);
+  // Both paths have already authenticated the immutable Event and independent
+  // review above. A later Event-only omission is a newly discovered constraint;
+  // a reviewer claim with no PREapproval contradiction proof stays unclassified.
+  const cause = classifyApprovalRevisionCause({
+    kind: input.omission && !findings.length ? "later-constraint" : "unknown",
+    originalSourceSha: old.pin.sourceSha, verifiedSourceSha: head,
+  });
   const grant: BlueprintRepair = { owner: "nt-event-design", original: old.pin, eventHead: old.eventHead,
     originalReviewDigest: await originalBlueprintReviewDigest(job, old.pin),
-    sourceSha: head, planDigest: sha(plan), evidenceDigest: sha([input.omission, findings, sha(candidate)]) };
+    sourceSha: head, planDigest: sha(plan), evidenceDigest,
+    incident: { id: sha({ jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest,
+        original: old.pin, evidenceDigest }), cause, severity: approvalRevisionSeverity(cause),
+      trigger: { kind: findings.length ? input.omission ? "combined" : "independent-event-review" : "event-only",
+        fields: [...(ownerConflict ? ["downstream/interactive"] : []),
+          ...findings.map(f => (f.blueprintChallenge as BlueprintChallenge).field)].sort(),
+        sourcePaths: [...sources].sort(), reviewDigest: findings.length ? sha(review?.result) : null },
+      affectedWork: ["interactive:" + event.milestoneId, "composition:" + event.milestoneId],
+      originalApproval: await milestoneBlueprintApprovalProvenance(job, old.pin, event.assignment) } };
   const prior = (await inspectRepairLedger(job, turn.digest)).blueprintRepairs?.find(r => r.original.milestoneId === event.milestoneId);
   if (prior?.successor) {
-    await recordBlueprintRepair(job, turn.digest, { ...grant, successor: prior.successor });
+    await recordBlueprintRepair(job, turn.digest, { ...grant, successor: prior.successor,
+      incident: grant.incident && { ...grant.incident,
+        successorApproval: await milestoneBlueprintApprovalProvenance(job, prior.successor, event.assignment) } });
     await reviewedMilestoneHandoff(job, event);
     return;
   }
@@ -149,5 +167,7 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   if (await originalBlueprintReviewDigest(job, old.pin) !== grant.originalReviewDigest)
     throw Error("Historical Blueprint approval changed during correction.");
   if (!accepts(approved)) throw Error("Reviewed correction exceeds the approved material patch.");
-  await recordBlueprintRepair(job, turn.digest, { ...grant, successor: next.pin });
+  await recordBlueprintRepair(job, turn.digest, { ...grant, successor: next.pin,
+    incident: grant.incident && { ...grant.incident,
+      successorApproval: await milestoneBlueprintApprovalProvenance(job, next.pin, event.assignment) } });
 }

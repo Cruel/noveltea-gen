@@ -47,6 +47,10 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
       steps.push({ id: event.id, kind: 'report', stage: 'review', milestone: null,
         state: 'proposed', files: [], outcome: null, at: event.createdAt,
         detail: event.detail })
+    } else if (event.kind === 'working' && event.detail?.approvalRevision) {
+      // Administrative warnings remain queryable in the controller journal;
+      // routine successful self-corrections do not create ordinary author Chat.
+      continue
     } else if (event.kind === 'working' && event.detail?.reviewPhase) {
       // Controller phase transitions are neither model prose nor a review
       // verdict. Surface them without manufacturing a verified Story stage.

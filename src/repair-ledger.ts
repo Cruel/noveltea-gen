@@ -8,7 +8,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { IndependentReviewResult } from "./checkpoint-assurance.js";
@@ -85,10 +85,47 @@ export interface PrerequisiteRepair {
   attempts: Array<{ sourceSha: string; submittedSha: string; paths: string[];
     reviewDigest?: string; verdict?: "passed" | "failed" }>;
 }
+export type ApprovalRevisionCause = "approval-escape" | "newly-discovered-constraint" |
+  "author-directed" | "unclassified";
+export type ApprovalRevisionSeverity = "warning" | "info";
+export const approvalRevisionSeverity = (cause: ApprovalRevisionCause): ApprovalRevisionSeverity =>
+  cause === "approval-escape" || cause === "unclassified" ? "warning" : "info";
+/** Classification is an assertion about CONTROLLER-AUTHENTICATED evidence,
+ * never about a reviewer's suggested cause. A postapproval Event is not proof
+ * that an earlier independent review overlooked a then-visible defect. */
+export function classifyApprovalRevisionCause(proof: {
+  kind: "historical-contradiction" | "later-constraint" | "author-change" | "unknown";
+  originalSourceSha: string;
+  verifiedSourceSha?: string;
+  authorizedAuthorChange?: boolean;
+}): ApprovalRevisionCause {
+  if (!SHA.test(proof.originalSourceSha) || proof.verifiedSourceSha && !SHA.test(proof.verifiedSourceSha))
+    throw Error("Unverifiable post-approval revision origin.");
+  if (proof.kind === "historical-contradiction" && proof.verifiedSourceSha === proof.originalSourceSha)
+    return "approval-escape";
+  if (proof.kind === "later-constraint" && proof.verifiedSourceSha &&
+      proof.verifiedSourceSha !== proof.originalSourceSha) return "newly-discovered-constraint";
+  if (proof.kind === "author-change" && proof.authorizedAuthorChange === true)
+    return "author-directed";
+  return "unclassified";
+}
+export interface BlueprintApprovalProvenance {
+  provider: string; model: string; reviewerId: string | null; reviewCycleId: string;
+}
+export interface BlueprintRevisionIncident {
+  id: string; cause: ApprovalRevisionCause; severity: ApprovalRevisionSeverity;
+  /** Immutable references only; raw transcripts, quoted prose and credentials stay private. */
+  trigger: { kind: "event-only" | "independent-event-review" | "combined";
+    fields: string[]; sourcePaths: string[]; reviewDigest: string | null };
+  affectedWork: string[];
+  originalApproval: BlueprintApprovalProvenance;
+  successorApproval?: BlueprintApprovalProvenance;
+}
 export interface BlueprintRepair {
   owner: "nt-event-design";
   original: import("./milestone-blueprint.js").MilestoneBlueprintPin;
   eventHead: string; sourceSha: string; planDigest: string; evidenceDigest: string; originalReviewDigest: string;
+  incident?: BlueprintRevisionIncident;
   successor?: import("./milestone-blueprint.js").MilestoneBlueprintPin;
 }
 export interface RepairLedger {
@@ -149,6 +186,34 @@ function shape(finding: RepairFindingInput) {
   return { category: finding.kind ?? "other" as Category,
     targets: [...new Set(finding.affectedPaths ?? [finding.path])].sort() };
 }
+const provenanceValid = (p: BlueprintApprovalProvenance | undefined, cycle: string) =>
+  !!p && p.reviewCycleId === cycle && DIGEST.test(p.reviewCycleId) &&
+  typeof p.provider === "string" && p.provider.length > 0 && p.provider.length <= 100 &&
+  typeof p.model === "string" && p.model.length > 0 && p.model.length <= 120 &&
+  (p.reviewerId === null || typeof p.reviewerId === "string" &&
+    p.reviewerId.length > 0 && p.reviewerId.length <= 200);
+function incidentValid(r: BlueprintRepair, job: JobStartResult, turnDigest: string) {
+  const i = r.incident;
+  if (!i) return true; // Historic #229 repairs remain readable.
+  return i.id === digest({ jobId: job.jobId, threadId: job.threadId, turnDigest,
+    original: r.original, evidenceDigest: r.evidenceDigest }) &&
+    ["approval-escape", "newly-discovered-constraint", "author-directed", "unclassified"].includes(i.cause) &&
+    i.severity === approvalRevisionSeverity(i.cause) &&
+    provenanceValid(i.originalApproval, r.original.cycleId) &&
+    (!i.successorApproval || !!r.successor && provenanceValid(i.successorApproval, r.successor.cycleId)) &&
+    (!!r.successor === !!i.successorApproval) &&
+    !!i.trigger && ["event-only", "independent-event-review", "combined"].includes(i.trigger.kind) &&
+    Array.isArray(i.trigger.fields) && i.trigger.fields.length <= 12 &&
+    i.trigger.fields.every(f => typeof f === "string" && f.length <= 100 &&
+      /^(events|downstream)\/[a-z0-9/-]+$/.test(f)) &&
+    Array.isArray(i.trigger.sourcePaths) && i.trigger.sourcePaths.length > 0 &&
+    i.trigger.sourcePaths.length <= 24 && new Set(i.trigger.sourcePaths).size === i.trigger.sourcePaths.length &&
+    i.trigger.sourcePaths.every(p => typeof p === "string" && PATH.test(p)) &&
+    (i.trigger.reviewDigest === null || DIGEST.test(i.trigger.reviewDigest)) &&
+    Array.isArray(i.affectedWork) && i.affectedWork.length > 0 &&
+    i.affectedWork.length <= 12 && new Set(i.affectedWork).size === i.affectedWork.length &&
+    i.affectedWork.every(v => typeof v === "string" && /^[-a-z0-9:.]{1,120}$/.test(v));
+}
 function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedger) {
   if (raw.version !== 1 || raw.jobId !== job.jobId || raw.threadId !== job.threadId ||
       raw.turnDigest !== turnDigest || !Array.isArray(raw.findings) ||
@@ -159,6 +224,7 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
           !SHA.test(r.sourceSha) || !DIGEST.test(r.planDigest) || !DIGEST.test(r.evidenceDigest) || !DIGEST.test(r.originalReviewDigest) ||
           !/^milestone\.[a-z][a-z0-9-]*$/.test(r.original.milestoneId) ||
           !SHA.test(r.original.sourceSha) || !DIGEST.test(r.original.digest) || !DIGEST.test(r.original.cycleId) ||
+          !incidentValid(r, job, turnDigest) ||
           r.successor && (r.successor.milestoneId !== r.original.milestoneId || r.successor.sourceSha !== r.sourceSha ||
             !DIGEST.test(r.successor.digest) || !DIGEST.test(r.successor.cycleId) || r.successor.digest === r.original.digest ||
             r.successor.cycleId === r.original.cycleId)))) ||
@@ -245,17 +311,112 @@ export async function recordBlueprintRepair(job: JobStartResult, turn: string, g
   const repairs = ledger.blueprintRepairs ??= [];
   const prior = repairs.find(r => r.original.milestoneId === grant.original.milestoneId);
   if (prior) {
-    if (JSON.stringify({ ...prior, successor: undefined }) !== JSON.stringify({ ...grant, successor: undefined }) ||
-        prior.successor && JSON.stringify(prior.successor) !== JSON.stringify(grant.successor))
+    // The original grant and any existing incident are immutable. Historical
+    // #229 records can acquire their FIRST warning on authenticated replay;
+    // never replace or reclassify an already recorded incident.
+    const core = (value: BlueprintRepair) => ({ ...value, successor: undefined, incident: undefined });
+    const initialIncident = (value?: BlueprintRevisionIncident) => value &&
+      ({ ...value, successorApproval: undefined });
+    if (JSON.stringify(core(prior)) !== JSON.stringify(core(grant)) ||
+        prior.successor && JSON.stringify(prior.successor) !== JSON.stringify(grant.successor) ||
+        prior.incident && JSON.stringify(initialIncident(prior.incident)) !==
+          JSON.stringify(initialIncident(grant.incident)) ||
+        prior.incident?.successorApproval &&
+          JSON.stringify(prior.incident.successorApproval) !== JSON.stringify(grant.incident?.successorApproval) ||
+        !prior.incident && prior.successor && grant.incident && !grant.incident.successorApproval)
       throw Error("Conflicting Milestone Blueprint repair authority.");
-    if (!grant.successor || prior.successor) return;
+    const enriched = !prior.incident && !!grant.incident;
+    if (enriched) prior.incident = grant.incident;
+    if (!grant.successor || prior.successor) {
+      if (enriched) await save(job, ledger);
+      return;
+    }
     prior.successor = grant.successor;
+    if (grant.incident?.successorApproval) prior.incident!.successorApproval = grant.incident.successorApproval;
   } else {
     if (grant.successor) throw Error("Unadmitted Milestone Blueprint supersession.");
     repairs.push(grant);
   }
   await save(job, ledger);
 }
+/** Read-only operator projection of the SAME controller Repair ledger. The
+ * original Event approval and independently reviewed successor are rechecked
+ * before returning metadata. No quoted source, private transcripts or model
+ * narrative is exported, and warnings are never scheduling gates. */
+export async function inspectApprovalRevisionIncidents(job: JobStartResult, filter: {
+  cause?: ApprovalRevisionCause; severity?: ApprovalRevisionSeverity;
+  milestoneId?: string; id?: string; limit?: number; offset?: number;
+} = {}) {
+  if (filter.limit !== undefined && (!Number.isSafeInteger(filter.limit) || filter.limit < 1 || filter.limit > 100) ||
+      filter.offset !== undefined && (!Number.isSafeInteger(filter.offset) || filter.offset < 0 || filter.offset > 100_000) ||
+      filter.cause !== undefined && !["approval-escape", "newly-discovered-constraint", "author-directed", "unclassified"].includes(filter.cause) ||
+      filter.severity !== undefined && !["warning", "info"].includes(filter.severity) ||
+      filter.milestoneId !== undefined && !/^milestone\.[a-z][a-z0-9-]*$/.test(filter.milestoneId) ||
+      filter.id !== undefined && !DIGEST.test(filter.id)) throw Error("Invalid approval-revision inspection filter.");
+  const dir = join(job.stateDir, "repair-ledgers");
+  let files: string[];
+  try { files = (await readdir(dir)).filter(name => DIGEST.test(name.slice(0, -5)) && name.endsWith(".json")).sort(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") files = [];
+    else throw error;
+  }
+  if (files.length > 1000) throw Error("Too many Repair ledgers for bounded operator inspection.");
+  const records: Array<{ id: string; turnDigest: string; jobId: string; threadId: string;
+    original: BlueprintRepair["original"]; originalReviewDigest: string;
+    eventHead: string; triggeringSourceSha: string; cause: ApprovalRevisionCause;
+    severity: ApprovalRevisionSeverity; trigger: BlueprintRevisionIncident["trigger"];
+    originalApproval: BlueprintApprovalProvenance; successor: BlueprintRepair["successor"] | null;
+    successorApproval: BlueprintApprovalProvenance | null;
+    affectedWork: string[]; disposition: "corrected" | "awaiting-review" }> = [];
+  for (const file of files) {
+    const turnDigest = file.slice(0, -5);
+    const ledger = await inspectRepairLedger(job, turnDigest);
+    for (const repair of ledger.blueprintRepairs ?? []) {
+      const incident = repair.incident;
+      if (!incident || filter.cause && incident.cause !== filter.cause ||
+          filter.severity && incident.severity !== filter.severity ||
+          filter.milestoneId && repair.original.milestoneId !== filter.milestoneId ||
+          filter.id && incident.id !== filter.id) continue;
+      const eventPath = join(job.stateDir, "event-items", repair.original.milestoneId.slice(10) + ".json");
+      const stat = await lstat(eventPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256_000)
+        throw Error("Unverifiable Event approval link for post-approval incident.");
+      const event = JSON.parse(await readFile(eventPath, "utf8")) as {
+        jobId: string; threadId?: string; milestoneId: string; commitSha: string;
+        expectedHead: string; blueprintPin: BlueprintRepair["original"];
+        assignment: import("./event-specialist.js").EventAssignment;
+      };
+      if (event.jobId !== job.jobId || event.threadId && event.threadId !== job.threadId ||
+          event.milestoneId !== repair.original.milestoneId || event.commitSha !== repair.eventHead ||
+          event.expectedHead !== repair.original.sourceSha ||
+          JSON.stringify(event.blueprintPin) !== JSON.stringify(repair.original) || !event.assignment)
+        throw Error("Post-approval incident Event/approval proof mismatch.");
+      const { milestoneBlueprintApprovalProvenance, originalBlueprintReviewDigest } =
+        await import("./milestone-blueprint.js");
+      const before = await milestoneBlueprintApprovalProvenance(job, repair.original, event.assignment);
+      if (JSON.stringify(before) !== JSON.stringify(incident.originalApproval) ||
+          await originalBlueprintReviewDigest(job, repair.original) !== repair.originalReviewDigest)
+        throw Error("Post-approval incident original review proof mismatch.");
+      if (repair.successor) {
+        const after = await milestoneBlueprintApprovalProvenance(job, repair.successor, event.assignment);
+        if (JSON.stringify(after) !== JSON.stringify(incident.successorApproval))
+          throw Error("Post-approval incident successor review proof mismatch.");
+      }
+      records.push({ id: incident.id, turnDigest, jobId: job.jobId, threadId: job.threadId,
+        original: repair.original, originalReviewDigest: repair.originalReviewDigest,
+        eventHead: repair.eventHead, triggeringSourceSha: repair.sourceSha,
+        cause: incident.cause, severity: incident.severity, trigger: incident.trigger,
+        originalApproval: incident.originalApproval, successor: repair.successor ?? null,
+        successorApproval: incident.successorApproval ?? null,
+        affectedWork: incident.affectedWork,
+        disposition: repair.successor ? "corrected" : "awaiting-review" });
+    }
+  }
+  records.sort((a, b) => a.id.localeCompare(b.id));
+  return { total: records.length, offset: filter.offset ?? 0,
+    records: records.slice(filter.offset ?? 0, (filter.offset ?? 0) + (filter.limit ?? 50)) };
+}
+
 /** Only the authenticated Studio control adapter may request post-stop
  * guidance under the job writer lease. Historic allowance metadata is kept
  * for compatibility, never used to gate ordinary semantic progress. */

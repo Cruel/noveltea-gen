@@ -20,7 +20,7 @@ import { parseJobLimits } from '../../src/job-limits'
 import { withJobModelRuntime } from '../../src/model-runtime'
 import { SandboxClient } from '../../src/sandbox-client'
 import { assertUserPiSelection, createUserPiRuntime, validPiSelection, type PiSelection } from './lib/pi-credentials.server'
-import { appendGenerationEvent, committedStoryFiles } from './lib/generation-progress.server'
+import { appendGenerationEvent, committedStoryFiles, syncApprovalRevisionActivity } from './lib/generation-progress.server'
 import { queueRecord, type QueueRecord } from './lib/generation-queue.server'
 import { selectedJob, restoreJob, pinnedRequest, verifyTrustedRevision, verifyWebExecution } from './lib/fixture-jobs.server'
 import { attributeSteeringCheckpoint, attributeApprovedReplanCheckpoint } from './lib/thread-steering-replan.server'
@@ -226,6 +226,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       const diagnosticOutcome = diagnosticStatus &&
         ['assessment', 'resource-limit', 'operator-intervention', 'unsafe-evidence'].includes(diagnosticStatus)
         ? 'unknown-failure-' + diagnosticStatus : undefined
+      await syncApprovalRevisionActivity(store, item.ownerId, row.id, job, turnId)
       await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'finished',
         status: state as 'paused' | 'blocked' | 'completed' | 'cancelled',
         ...(diagnosticOutcome ? { outcome: diagnosticOutcome } : {}), turnId })

@@ -384,6 +384,20 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       kind: 'verified', stage: 'foundation',
       piStatus: { summary: 'I validated everything', proposedPaths: ['events/test.md'] },
     }), /Model status cannot claim controller evidence/)
+    const approvalRevision = { id: 'a'.repeat(64), milestoneId: 'milestone.disclosure',
+      cause: 'unclassified' as const, severity: 'warning' as const,
+      disposition: 'corrected' as const }
+    await appendGenerationEvent(store, alice.id, jobId, { kind: 'working', stage: 'review',
+      approvalRevision })
+    const operatorActivity = await listGenerationEvents(store, alice.id, jobId, sanitized[0]!.id)
+    assert.deepEqual(operatorActivity[0]?.detail?.approvalRevision, approvalRevision)
+    await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'working', stage: 'review', approvalRevision: { ...approvalRevision, severity: 'info' },
+    }), /Invalid trusted post-approval activity/)
+    await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'working', stage: 'review', piStatus: { summary: 'I approve this source', proposedPaths: [] },
+      approvalRevision,
+    }), /Model status cannot claim controller evidence/)
     const pinnedRequest = JSON.parse((await store.testing.records.first<{ generationRequestJson: string }>(
       'studio_sessions', { id: jobId }))!.generationRequestJson)
     assert.equal(pinnedRequest.fixture, true)
@@ -516,6 +530,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(conflict.status, 409, 'tampered server thread must fail closed')
     // Initial history is bounded; older pages do not require replaying every
     // event over SSE and never include a different user's event records.
+    const earlierCount = (await listGenerationEvents(store, alice.id, jobId, 0)).length
     for (let index = 0; index < 105; index++) await appendGenerationEvent(store, alice.id, jobId,
       { kind: 'working', stage: 'foundation' })
     const newest = (await recentGenerationEvents(store, alice.id, jobId))
@@ -525,7 +540,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       [...new Set(newest.events.map(event => event.id))].sort((left, right) => left - right))
     const older = (await recentGenerationEvents(store, alice.id, jobId, newest.events[0]!.id))
     assert.equal(older.hasMore, false)
-    assert.equal(older.events.length, 10)
+    assert.equal(older.events.length, earlierCount + 5)
     assert.ok(older.events.at(-1)!.id < newest.events[0]!.id)
     // Pi status uses the same durable owner-scoped cursor but cannot fabricate
     // a checkpoint, diagnostic, canonical change or independent review.

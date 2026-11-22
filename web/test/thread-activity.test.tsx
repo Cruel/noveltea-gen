@@ -28,6 +28,18 @@ test('progress history decodes legacy and provenance-bearing rows without granti
   assert.throws(() => decodeProgressFiles('{"files":"bad"}'), /Invalid persisted progress files/)
 })
 
+test('operator approval warnings are durable metadata, not ordinary author Chat activity', () => {
+  const revision: ProgressEvent = { ...event(7, 'working', 'review'), detail: {
+    source: 'controller', approvalRevision: { id: 'a'.repeat(64),
+      milestoneId: 'milestone.disclosure', cause: 'unclassified', severity: 'warning',
+      disposition: 'corrected',
+    },
+  } }
+  assert.deepEqual(projectActivity([revision], 'completed'), [])
+  assert.deepEqual(decodeProgressFiles(JSON.stringify({ files: [], detail: revision.detail }))
+    .detail?.approvalRevision, revision.detail!.approvalRevision)
+})
+
 test('Pi status remains distinct from controller working and verified checkpoints', () => {
   const working = event(1, 'working', 'event')
   const pi = { ...event(2, 'working'), detail: {

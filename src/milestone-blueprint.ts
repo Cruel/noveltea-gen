@@ -1157,6 +1157,18 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   return record.draft!;
 }
 
+/** Bounded provenance from the authenticated private approval, never the
+ * transcript path, raw verdict or any model-produced free text. */
+export async function milestoneBlueprintApprovalProvenance(job: JobStartResult,
+  pin: MilestoneBlueprintPin, assignment: EventAssignment) {
+  await readReviewedMilestoneBlueprint(job, pin, assignment);
+  const path = existsSync(historicalFileFor(job, pin)) ? historicalFileFor(job, pin) : fileFor(job, pin.milestoneId);
+  const record = JSON.parse(await readFile(path, "utf8")) as Receipt;
+  return { provider: record.lineage.provider, model: record.lineage.model,
+    reviewerId: record.reviewer?.id ?? (record.lineage.provider === "fixture" ? "fixture" : null),
+    reviewCycleId: record.lineage.reviewCycleId };
+}
+
 /** Hash the whole original cycle, not just the material draft in the Git
  * trailer. The caller has authenticated its rounds, source and Pi seals. */
 export async function originalBlueprintReviewDigest(job: JobStartResult, pin: MilestoneBlueprintPin) {

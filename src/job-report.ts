@@ -10,6 +10,7 @@ import { runAuthorAction } from "./author-updates.js";
 import { previewStoryMerge } from "./merge-preview.js";
 import { prepareTurnFulfillment, readTurnFulfillment } from "./turn-fulfillment.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
+import { inspectApprovalRevisionIncidents } from "./repair-ledger.js";
 
 type Outcome = "completed" | "paused" | "blocked" | "failed";
 type IntegrationStatus = "mergeable" | "conflicts" | "not assessed";
@@ -168,6 +169,7 @@ export async function inspectJobReport(input: JobReportOptions) {
   const review = await receipt(join(root, "narrative-review.json"), job);
   const audit = obj(review?.audit) as unknown as ScopeAudit | undefined;
   const author = await authorEvidence(job);
+  const approvalRevisions = await inspectApprovalRevisionIncidents(job, { limit: 50 });
   const statuses = await workItems(job, plan, arch);
   if (review) statuses.push(item("review-scope", "narrative-review", review.phase,
     plan?.contract.scope.targets ?? [], "narrative-review.json", review.headSha, review.failure));
@@ -287,6 +289,9 @@ export async function inspectJobReport(input: JobReportOptions) {
       evidence: list(obj(review.editorial)?.evidence),
     } : { verdict: "unverified", findings: [], evidence: [] },
     deferredIdeas: { ...ideas, scopedOutstanding: scopedIdeaIds },
+    // Durable read-only controller incident activity; no private transcripts,
+    // quoted reviewer prose, author inbox or raw approvals enter this report.
+    approvalRevisions,
     authorApprovals: { executionControl: author.executionControl, budgetPause: author.budgetPause,
       pending: author.pending, required: author.pending.length > 0 || scopedIdeaIds.length > 0 ||
         statuses.some(x => x.kind === "revision" && x.status === "proposed") ||
@@ -353,6 +358,11 @@ export function formatJobReport(report: JobReport): string {
     "## Work items", "",
     ...report.workItems.map(x => "- " + x.id + " [" + x.kind + "]: " + x.status +
       (x.commitSha ? " @ " + x.commitSha : "") + (x.reason ? " — " + x.reason : "")), "",
+    "## Post-approval revision activity (operator inspection)", "",
+    "Incidents: " + report.evidence.approvalRevisions.total,
+    ...report.evidence.approvalRevisions.records.map(x => "- " + x.severity + " " + x.id +
+      " [" + x.cause + "]: " + x.original.milestoneId + " " + x.disposition +
+      " (original " + x.original.digest + "; successor " + (x.successor?.digest ?? "none") + ")"), "",
     "## Git commits", "",
     ...report.commits.map(x => "- " + x.sha + " " + x.subject), "",
     "## Verification", "",

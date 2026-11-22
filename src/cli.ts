@@ -50,6 +50,7 @@ Usage:
   pnpm dev job review inspect --story /path/to/story --job draft-1
   pnpm dev job repair run --story /path/to/story --job draft-1 --commit <rejected-commit-sha> --skills-source /path/to/noveltea-skills
   pnpm dev job repair inspect --story /path/to/story --job draft-1 --commit <rejected-commit-sha>
+  pnpm dev job approval-revisions inspect --story /path/to/story --job draft-1 [--severity warning] [--cause unclassified] [--milestone milestone.disclosure] [--limit 50] [--offset 0]
   pnpm dev job report --story /path/to/story --job draft-1 [--format markdown] [--output /outside/report.md]
   pnpm dev job report --story /path/to/story --job draft-1 --preview [--fixture]
   pnpm dev job merge preview --story /path/to/story --job draft-1 --fixture
@@ -537,6 +538,29 @@ async function main(): Promise<void> {
         action: action as "capture" | "inspect" | "eligibility" | "context" | "placement-context",
         file: values.get("--file"), target: values.get("--target") });
     }
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return;
+  }
+  if (process.argv[2] === "job" && process.argv[3] === "approval-revisions") {
+    const args = process.argv.slice(4);
+    const action = args.shift();
+    if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
+    if (action !== "inspect") throw Error("Expected job approval-revisions inspect.");
+    const values = parseJobOptions(args, "approval-revisions", ["--story", "--job",
+      "--severity", "--cause", "--milestone", "--id", "--limit", "--offset"], []);
+    const story = values.get("--story"), id = values.get("--job");
+    if (!story || !id) throw Error("Approval revision inspection requires --story and --job.");
+    disableJobCloudTracing();
+    const { startStoryJob } = await import("./job.js");
+    const { inspectApprovalRevisionIncidents } = await import("./repair-ledger.js");
+    const job = await startStoryJob({ story, job: id }, false);
+    const result = await inspectApprovalRevisionIncidents(job, {
+      cause: values.get("--cause") as import("./repair-ledger.js").ApprovalRevisionCause | undefined,
+      severity: values.get("--severity") as import("./repair-ledger.js").ApprovalRevisionSeverity | undefined,
+      milestoneId: values.get("--milestone"), id: values.get("--id"),
+      limit: values.has("--limit") ? Number(values.get("--limit")) : undefined,
+      offset: values.has("--offset") ? Number(values.get("--offset")) : undefined,
+    });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return;
   }

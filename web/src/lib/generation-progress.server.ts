@@ -9,6 +9,8 @@ import { generationStages } from '../../../src/generation'
 import type { GenerationStage } from '../../../src/generation-plan'
 import type { PiWorkStatus } from '../../../src/pi-work-status'
 import type { ControllerReviewPhase } from '../../../src/controller-review-phase'
+import { approvalRevisionSeverity, inspectApprovalRevisionIncidents,
+  type ApprovalRevisionCause, type ApprovalRevisionSeverity } from '../../../src/repair-ledger'
 
 export type ProgressKind = 'started' | 'working' | 'verified' | 'finished' | 'interrupted'
 export type ProgressStatus = 'paused' | 'blocked' | 'completed' | 'cancelled'
@@ -27,6 +29,9 @@ export type ProgressDetail = {
   summary?: string
   proposedPaths?: string[]
   reviewPhase?: ControllerReviewPhase
+  /** Authenticated operator metadata, never Pi-authored Chat text. */
+  approvalRevision?: { id: string; milestoneId: string; cause: ApprovalRevisionCause;
+    severity: ApprovalRevisionSeverity; disposition: 'awaiting-review' | 'corrected' }
 }
 export type ProgressEvent = {
   id: number; kind: ProgressKind; stage: GenerationStage | null; milestone: string | null
@@ -40,6 +45,7 @@ type EventInput = {
   changedRecordIds?: string[]; validation?: ProgressDetail['validation']; diagnostics?: number
   piStatus?: PiWorkStatus
   reviewPhase?: ControllerReviewPhase
+  approvalRevision?: ProgressDetail['approvalRevision']
 }
 
 const stageSet = new Set<string>(generationStages)
@@ -55,11 +61,19 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
   if (input.milestone && !canonicalMilestone(input.milestone)) throw new Error('Invalid progress milestone')
   if (input.piStatus && (input.kind !== 'working' || input.files?.length || input.headSha ||
       input.outcome || input.specialist || input.status || input.changedRecordIds?.length ||
-      input.validation || input.diagnostics !== undefined || input.reviewPhase))
+      input.validation || input.diagnostics !== undefined || input.reviewPhase || input.approvalRevision))
     throw new Error('Model status cannot claim controller evidence')
   if (input.reviewPhase && (input.kind !== 'working' || input.stage !== 'review' ||
       !['diagnosing', 'correcting'].includes(input.reviewPhase)))
     throw new Error('Invalid trusted review phase')
+  if (input.approvalRevision && (input.kind !== 'working' || input.stage !== 'review' ||
+      input.piStatus || input.reviewPhase || input.outcome || input.files?.length ||
+      !/^[a-f0-9]{64}$/.test(input.approvalRevision.id) ||
+      !canonicalMilestone(input.approvalRevision.milestoneId) ||
+      !['approval-escape', 'newly-discovered-constraint', 'author-directed', 'unclassified'].includes(input.approvalRevision.cause) ||
+      input.approvalRevision.severity !== approvalRevisionSeverity(input.approvalRevision.cause) ||
+      !['awaiting-review', 'corrected'].includes(input.approvalRevision.disposition)))
+    throw new Error('Invalid trusted post-approval activity')
   if (input.headSha && !/^[a-f0-9]{40}$/i.test(input.headSha))
     throw new Error('Invalid verified progress SHA')
   if (input.diagnostics !== undefined && (!Number.isSafeInteger(input.diagnostics) ||
@@ -82,6 +96,7 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
     ...(input.headSha ? { headSha: input.headSha } : {}),
     ...(input.outcome ? { outcome: input.outcome.slice(0, 160) } : {}),
     ...(input.reviewPhase ? { reviewPhase: input.reviewPhase } : {}),
+    ...(input.approvalRevision ? { approvalRevision: input.approvalRevision } : {}),
     ...(input.kind === 'verified' && input.stage === 'review' &&
       (input.outcome === 'complete-in-scope' || input.outcome === 'incomplete' ||
         input.outcome === 'blocked') ? { review: input.outcome } : {}),
@@ -128,6 +143,40 @@ export async function recentGenerationEvents(store: StudioDatabase, owner: strin
     ...row, stage: row.stage as GenerationStage | null, status: row.status as ProgressStatus | null,
     ...decodeProgressFiles(filesJson),
   })), hasMore }
+}
+
+/** Mirror a bounded controller-verified incident summary into existing durable
+ * activity. Read the ledger as the authority, and reconcile already-published
+ * identities across worker restart rather than creating another incident store.
+ * Activity is private to the authorized job and intentionally not Story Chat. */
+export async function syncApprovalRevisionActivity(store: StudioDatabase, owner: string,
+  jobId: string, job: JobStartResult, turnId?: string) {
+  const incidents = await inspectApprovalRevisionIncidents(job, { limit: 100 })
+  if (incidents.total > 100) return // Operator inspection remains paginated; avoid flooding activity.
+  if (!incidents.total) return
+  const seen = new Set<string>()
+  let after = 0
+  // Refuse to append an uncertain duplicate when the existing activity journal
+  // is too large to reconcile under a bounded scan.
+  for (let pages = 0; pages < 100; pages++) {
+    const page = await listGenerationEvents(store, owner, jobId, after, 100)
+    for (const item of page) {
+      const proof = item.detail?.source === 'controller' ? item.detail.approvalRevision : undefined
+      if (proof) seen.add(proof.id + ':' + proof.disposition)
+    }
+    if (page.length < 100) {
+      for (const record of incidents.records) {
+        const signature = record.id + ':' + record.disposition
+        if (seen.has(signature)) continue
+        await appendGenerationEvent(store, owner, jobId, { kind: 'working', stage: 'review', turnId,
+          approvalRevision: { id: record.id, milestoneId: record.original.milestoneId,
+            cause: record.cause, severity: record.severity, disposition: record.disposition } })
+        seen.add(signature)
+      }
+      return
+    }
+    after = page.at(-1)!.id
+  }
 }
 
 /** Filenames are canonical Story-relative paths between committed revisions,

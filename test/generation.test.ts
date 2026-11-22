@@ -11,6 +11,7 @@ import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
+import { inspectRepairLedger, recordBlueprintRepair } from "../src/repair-ledger.js";
 import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
@@ -481,6 +482,16 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
     assert.match(interrupted.reason, /interruption after original Blueprint archival/);
     assert.equal(existsSync(activeFile), false);
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+    const pending = f.cli(["approval-revisions", "inspect"]);
+    assert.equal(pending.total, 1, "the incident is durable before semantic correction resumes");
+    assert.equal(pending.records[0].disposition, "awaiting-review");
+    assert.equal(pending.records[0].severity, "info");
+    const pendingPath = join(f.job.stateDir, "repair-ledgers", pending.records[0].turnDigest + ".json");
+    const historical = JSON.parse(readFileSync(pendingPath, "utf8"));
+    delete historical.blueprintRepairs[0].incident;
+    writeFileSync(pendingPath, JSON.stringify(historical));
+    assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0,
+      "pre-#233 admitted repairs remain readable after upgrading");
     delete f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT;
   }
   const resumed = f.cli(["generate", "resume", "--pause-after", "composition"]);
@@ -493,6 +504,8 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
     assert.equal(existsSync(join(f.job.stateDir, "interactive-items/disclosure.json")), false);
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
     assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
+    assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0,
+      "unverified model challenges must not forge admin warnings");
     return;
   }
   if (defect === "rejected") {
@@ -505,6 +518,10 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
     assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
     assert.equal(f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]).milestoneBlueprint.digest, original.approvedDigest);
+    const pendingIncident = f.cli(["approval-revisions", "inspect", "--severity", "info"]);
+    assert.equal(pendingIncident.total, 1);
+    assert.equal(pendingIncident.records[0].disposition, "awaiting-review",
+      "negative review must not falsely settle the incident");
     return;
   }
   assert.equal(resumed.status, "paused", JSON.stringify(resumed));
@@ -519,6 +536,58 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered"]) test(
   else assert.equal(corrected.draft.events[0].knowledge, "Ada sees the original ledger and checks it against the daily register.");
   assert.equal(corrected.draft.downstream.some((entry: any) => entry.owner === "interactive"), false);
   assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
+  const revisions = f.cli(["approval-revisions", "inspect"]);
+  assert.equal(revisions.total, 1);
+  const incident = revisions.records[0];
+  assert.equal(incident.disposition, "corrected");
+  assert.equal(incident.cause, defect === "interactive" ? "newly-discovered-constraint" : "unclassified");
+  assert.equal(incident.severity, defect === "interactive" ? "info" : "warning");
+  assert.equal(incident.originalApproval.model, "fixture");
+  assert.equal(incident.originalApproval.reviewerId, "fixture");
+  assert.equal(incident.successorApproval.reviewerId, "fixture");
+  assert.equal(incident.original.digest, original.approvedDigest);
+  assert.equal(incident.successor.digest, corrected.approvedDigest);
+  const ledger = await inspectRepairLedger(f.job, incident.turnDigest);
+  const repair = ledger.blueprintRepairs![0]!;
+  await recordBlueprintRepair(f.job, incident.turnDigest, repair);
+  if (defect === "knowledge") {
+    const old = { ...ledger, blueprintRepairs: ledger.blueprintRepairs!.map(value =>
+      ({ ...value, incident: undefined })) };
+    writeFileSync(join(f.job.stateDir, "repair-ledgers", incident.turnDigest + ".json"), JSON.stringify(old));
+    assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0);
+    await recordBlueprintRepair(f.job, incident.turnDigest, repair);
+    assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id,
+      "historical completed repairs can be enriched without changing the correction authority");
+  }
+  assert.equal((await inspectRepairLedger(f.job, incident.turnDigest)).blueprintRepairs?.length, 1,
+    "repeated reconciliation never appends another incident");
+  await assert.rejects(recordBlueprintRepair(f.job, incident.turnDigest, { ...repair,
+    incident: { ...repair.incident!, cause: "approval-escape", severity: "warning" } }),
+  /Conflicting Milestone Blueprint repair authority/);
+  assert.deepEqual(incident.affectedWork,
+    ["interactive:milestone.disclosure", "composition:milestone.disclosure"]);
+  assert.equal(f.cli(["approval-revisions", "inspect", "--id", incident.id]).total, 1);
+  assert.equal(f.cli(["approval-revisions", "inspect", "--severity",
+    incident.severity === "warning" ? "info" : "warning"]).total, 0);
+  const report = f.cli(["report"]);
+  assert.equal(report.evidence.approvalRevisions.total, 1,
+    "read-only operator activity must survive into a later report");
+  assert.equal(report.evidence.approvalRevisions.records[0].id, incident.id);
+  if (defect === "knowledge") {
+    const linked = JSON.parse(originalEvent);
+    linked.expectedHead = "0".repeat(40);
+    writeFileSync(eventFile, JSON.stringify(linked));
+    assert.match(f.cli(["approval-revisions", "inspect"], false), /Event\/approval proof mismatch/);
+    writeFileSync(eventFile, originalEvent);
+    assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id);
+    const historyFile = join(f.job.stateDir, "milestone-blueprint-history",
+      "disclosure-" + original.lineage.reviewCycleId + ".json");
+    const archived = readFileSync(historyFile, "utf8");
+    unlinkSync(historyFile);
+    assert.match(f.cli(["approval-revisions", "inspect"], false), /Missing reviewed historical Milestone Blueprint/);
+    writeFileSync(historyFile, archived);
+    assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id);
+  }
   assert.ok(git(f.job.worktreeRoot, "log", "-1", "--format=%B", eventHead)
     .includes("NovelTea-Milestone-Blueprint: " + original.approvedDigest));
   const omission = JSON.parse(readFileSync(join(f.job.stateDir,
