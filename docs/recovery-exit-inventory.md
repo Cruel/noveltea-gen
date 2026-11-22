@@ -1,5 +1,7 @@
 # Production Story-generation recovery exit inventory (#225)
 
+> Historical #225 audit snapshot. The **single normative recovery contract** for the C02–C08 consolidation is [generation-recovery-contract.md](generation-recovery-contract.md) (#238). The older descriptions of independent fencing and advisory-only diagnosis document the pre-consolidation implementation; they must not be mistaken for the target recovery behavior.
+
 This inventory covers the **single** production `createGenerationGraph` in
 `src/generation.ts` and the public CLI `runStoryGeneration` start, resume,
 and inspect entrypoints. It implements the exit audit of spec #216; ADR 0005

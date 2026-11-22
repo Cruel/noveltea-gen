@@ -1,5 +1,7 @@
 # Spec: Unified bounded correction and graph-wide protocol recovery for Story Turns
 
+> Historical design for the earlier recovery implementation. **ADR 0006 supersedes its hard 2/3/12 semantic correction limits, mandatory fresh reviewer sessions and ordinary creative-finding identity rules.** For C02–C08, [generation-recovery-contract.md](generation-recovery-contract.md) (#238) is the sole normative technical contract; this document is preserved for historical context, not as a competing implementation specification.
+
 ## Problem Statement
 
 Authors expect NovelTea to complete an approved Story objective without a manual restart whenever an agent makes a correctable mistake. The current production generation graph can repair certain negative specialist reviews, but recovery depends on the particular specialist and failure path. A malformed JSON response may get same-session retry in one specialist and immediately fail in another. A missing cross-domain prerequisite may be identified without a general way to authorize supporting work. Earlier reviewed results can later need correction, yet downstream acceptance is difficult to reconsider selectively. Many recoverable states become generic `blocked` outcomes, wasting usage and requiring author intervention.
