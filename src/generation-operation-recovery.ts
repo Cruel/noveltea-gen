@@ -52,6 +52,20 @@ export interface GenerationOperationRecovery {
   nextAction: string;
 }
 
+/** The failed operation when a node has no more specific specialist receipt.
+ * Returning blocked never certifies a read-only reconciliation or a no-write. */
+export const nodeFailureSource = {
+  schedule: ["scheduling", "generation-checkpoint"],
+  author_update_intake: ["author-update-intake", "author-updates"],
+  idea_integration: ["idea-integration", "generation-idea-dispatch"],
+  verify_idea_integration: ["idea-verification", "generation-idea-dispatch"],
+  specialist_dispatch: ["specialist-dispatch", "specialist-receipt"],
+  dependency_amendment: ["dependency-amendment", "dependency-plan"],
+  independent_assignment_review: ["independent-review", "review-checkpoints"],
+  verify_committed_work: ["commit-verification", "review-checkpoints"],
+  completion_decision: ["completion-verification", "completion-report"],
+} as const satisfies Record<string, readonly [Operation, GenerationOperationRecovery["evidence"]["reference"]]>;
+
 export async function assessGenerationOperation(input: {
   job: JobStartResult; threadId: string; turnDigest?: string;
   planVersion?: number | null; operation: Operation;

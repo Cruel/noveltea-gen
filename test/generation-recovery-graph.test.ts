@@ -334,7 +334,7 @@ test("C02 production recovery wrapper prevents completion with an active or defe
     "a missing status patch must not preserve an earlier completed flag with pending recovery");
 });
 
-test("C02 production assessor checkpoints a typed dispatch flag instead of routing by reason", async () => {
+test("assessor without the original job cannot checkpoint a checked-HEAD decision", async () => {
   const admitted = await admit();
   let calls = 0;
   const assess = recoveryNode("assess_recovery", async () => {
@@ -342,14 +342,10 @@ test("C02 production assessor checkpoints a typed dispatch flag instead of routi
     return { status: "running" };
   });
   const first = await assess(admitted as never, {} as never);
-  assert.equal(first.recoveryLifecycle?.assessorPending, true);
+  assert.equal(first.status, "blocked");
+  assert.equal(first.recoveryLifecycle?.decision, null);
+  assert.equal(first.recoveryLifecycle?.inspectionFences.length, 1);
   assert.equal(calls, 0);
-  const second = await assess({
-    ...admitted, recoveryLifecycle: first.recoveryLifecycle!,
-  } as never, {} as never);
-  assert.equal(second.recoveryLifecycle?.assessorPending, false);
-  assert.equal(second.status, "running");
-  assert.equal(calls, 1);
 });
 test("C02 wrapped node responses remove all retired writable graph fields", () => {
   const patch = extractDomainPatch(

@@ -1275,6 +1275,17 @@ async function runFixtureRecoveryGraph(
       active: foundation, result: { status: "committed", headSha: before },
       status: "running", reason: null, completedStages: [], pauseAfter: "architecture",
     }, "specialist_dispatch");
+    if (refused) {
+      const admitted = await graph.invoke(null, { ...config, interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "independent-review");
+      assert.equal(admitted.recoveryLifecycle.active?.observation, "returned-failure");
+      assert.equal(admitted.recoveryLifecycle.attempt, null, "A refusal is not a correction attempt");
+      const selected = await graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
+      assert.equal(selected.recoveryLifecycle.decision?.caseId, admitted.recoveryLifecycle.active?.id);
+      assert.equal(selected.recoveryLifecycle.decision?.checkedSourceHeadSha, before);
+      assert.equal(selected.recoveryLifecycle.assessorPending, true);
+      assert.deepEqual(log, ["refuse-other-owner-write"]);
+    }
     const next = await graph.invoke(null, config);
     assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial,
       "The author's original Story repository must not be rewritten");

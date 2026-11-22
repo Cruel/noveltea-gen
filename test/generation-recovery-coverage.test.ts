@@ -35,6 +35,7 @@ const siteNames = [
   "operationFailure",
   "blocked",
   "runStoryGeneration",
+  "observeNodeOutcome",
   "recoveryNode",
 ] as const;
 
@@ -58,7 +59,8 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
-  recoveryNode: "returns:12,status:7,throws:2",
+  observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
+  recoveryNode: "returns:13,status:8,throws:3",
 };
 const operations = [
   "adaptive-admission",
@@ -172,15 +174,15 @@ function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
 /** Baseline from the current C01 source: any changed route must be audited. */
 const approvedEdgeSignatures: Record<string, string> = {
   assess_recovery: "68e31ce4e43b0258f559658405c3e616af916e4aba65c0d4d54aee575e12558c",
-  author_update_intake: "42c83cc765e4c73fccfa23f7b41d430cd24289ba1d206c6e2d03bd02e9de6623",
-  completion_decision: "bfd624a3c649168730ee8ab989cfd4da251bc961904368f218cdd0f524130f0d",
+  author_update_intake: "0ca4965adcd4a316dad45ac3981b23e8a21b25b2bdab2ffa7c636a31be15a12a",
+  completion_decision: "75726d85064f0f9b1eb31b89fad2856bbcdfc7f02748f590116cb30fd2148df5",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   idea_integration: "2a18b888743ce1be5a7c8e570b8c1e903874e38bec4fd2c9531d7826bb930235",
   independent_assignment_review: "31df641ec3ac30f6ced3f0a9584607eae707dec055b280620f5e0f500a259262",
   schedule: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   specialist_dispatch: "fb238e11658e9aec770037118d2a8a2e08bed03d1c5e822d993125e9337a9286",
-  verify_committed_work: "c9e06e8e57be3071c6ab2c9b959f7f905f023fbccade47f695d7bdcd83f89453",
-  verify_idea_integration: "c9e06e8e57be3071c6ab2c9b959f7f905f023fbccade47f695d7bdcd83f89453",
+  verify_committed_work: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
+  verify_idea_integration: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
 };
 
 function helpers(source: ts.SourceFile = file): Map<string, ts.Node> {

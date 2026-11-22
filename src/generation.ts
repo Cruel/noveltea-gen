@@ -10,7 +10,7 @@ import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, inspectOriginalUnknownDiagnosis, unknownCompletionCase,
   unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
-import { assessGenerationOperation, operationChecks, type GenerationOperationRecovery,
+import { assessGenerationOperation, nodeFailureSource, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { projectRecoveryInspection, authenticateOriginalFailure,
@@ -26,7 +26,8 @@ import type { RunnableConfig } from "@langchain/core/runnables";
 import { captureVerificationFailure, verifyCorrectedOriginalResult, verifiableResultStatus } from "./commit-verification-continuation.js";
 import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
 import { ProtocolExhaustedError, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
-import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
+import { Annotation, END, START, StateGraph, isGraphBubbleUp } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
@@ -1154,8 +1155,45 @@ async function authenticateRecoveryOrigin(
   }
   return authenticateOriginalFailure(job, request, graphThreadId, origin, evidence);
 }
+type GenerationNode = keyof typeof nodeFailureSource | "assess_recovery";
+
+async function observeNodeOutcome(node: GenerationNode, s: State, config: RunnableConfig,
+  execute: (s: State, config: RunnableConfig) => Promise<Partial<State>>): Promise<Partial<State>> {
+  let result: Partial<State>;
+  let observation: GenerationOperationRecovery["outcome"] = "returned-failure";
+  try { result = await execute(s, config); }
+  catch (error) {
+    if ((error != null && isGraphBubbleUp(error)) || config.signal?.aborted) throw error;
+    observation = "exception";
+    const stop = blocked(error ?? Error("Graph operation threw without an error value"));
+    result = { status: stop.status, reason: stop.reason };
+  }
+  if (result.status !== "blocked" || result.operationRecovery || result.unknownRecovery || result.recovery ||
+      s.recoveryLifecycle.phase === "fenced" || s.recoveryLifecycle.phase === "paused") return result;
+  const source = node === "assess_recovery" ? null : nodeFailureSource[node];
+  const graphThreadId = config.configurable?.thread_id;
+  if (source && !s.recoveryLifecycle.active) {
+    const job = await openJob(s).catch(() => null);
+    if (job) {
+      const [operation, reference] = source;
+      const assessed = await operationFailure(s, job, operation, result.reason ?? "Unresolved graph operation",
+        { reference, assignmentId: s.active?.id }, observation, undefined, graphThreadId);
+      return { ...result, ...assessed, status: "running" };
+    }
+  }
+  // No source can be admitted, or the adapter itself failed while reconciling
+  // an active case. Preserve both the original obligation and the failed task.
+  const operation = source?.[0] ?? s.recoveryLifecycle.active?.origin.operation;
+  const check = source ? operationChecks[source[0]] : s.recoveryLifecycle.active?.origin.check;
+  const anchor = check && originalGraphFailureAnchor(config, check);
+  return { ...result, recoveryLifecycle: admitRecovery(s.recoveryLifecycle, { outcome: "fenced",
+    fence: inspectionFence("untrusted-source", { jobId: s.request?.job, graphThreadId, operation, check }, [],
+      anchor ? { store: anchor.store, ref: anchor.ref } : null,
+      "Inspect the original graph task, Story source and unresolved effects before resuming.") }) };
+}
+
 export function recoveryNode(
-  node: string,
+  node: GenerationNode,
   execute: (s: State, config: RunnableConfig) => Promise<Partial<State>>,
 ) {
   return async (state: CoreState, config: RunnableConfig): Promise<Partial<CoreState>> => {
@@ -1234,6 +1272,12 @@ export function recoveryNode(
     if (node === "assess_recovery" && prior.recoveryLifecycle.phase === "assessing" &&
         prior.recoveryLifecycle.active && !prior.recoveryLifecycle.decision) {
       try {
+        const active = prior.recoveryLifecycle.active;
+        const job = await openJob(state);
+        const graphThread = config.configurable?.thread_id;
+        if (typeof graphThread !== "string" || await trustedHead(job) !== active.origin.sourceHeadSha ||
+            !await authenticateRecoveryOrigin(job, state.request, graphThread, active.origin, active.evidence))
+          throw Error("Original failure source no longer matches the selected Turn and current HEAD.");
         return { recoveryLifecycle: { ...decideExistingRecovery(prior), assessorPending: true },
           status: "running" };
       } catch {
@@ -1246,7 +1290,10 @@ export function recoveryNode(
       }
     }
     const local = { ...state, ...projectRecovery(prior) } as State;
-    const outcome = await execute(local, config);
+    const outcome = await observeNodeOutcome(node, local, config, execute);
+    if (outcome.recoveryLifecycle?.inspectionFences.length) return {
+      status: "blocked", reason: outcome.reason, recoveryLifecycle: outcome.recoveryLifecycle,
+    };
     const { domain, rest } = extractDomainPatch(projectRecovery(prior), outcome as Record<string, unknown>);
     if (node === "assess_recovery" && !Object.hasOwn(rest, "reason")) rest.reason = null;
     if (!Object.keys(domain).length) {
@@ -1367,10 +1414,10 @@ export function createGenerationGraph(
         // Read-only scheduling/intake may be rechecked against reconciled
         // receipts. An uncertain idea writer remains permanently fenced until
         // its original dispatch is explicitly reconciled.
-        return op.safeAction === "reconcile-original-operation" &&
+        return op.outcome === "exception" &&
           (op.operation === "scheduling" || op.operation === "author-update-intake") ?
           { status: "running" as const, operationRecovery: { ...op, phase: "assessment" as const } } :
-          op.operation === "specialist-dispatch" && s.active &&
+          op.operation === "specialist-dispatch" && op.outcome === "exception" && s.active &&
             (s.active.stage === "foundation" || s.active.stage === "foundations") &&
             !s.result ?
           await (async () => {
@@ -1585,7 +1632,7 @@ export function createGenerationGraph(
         } catch (error) {
           return fence("Author control is unavailable or untrusted: " + String(error));
         }
-        if (op.safeAction === "reconcile-original-operation" &&
+        if (s.recoveryLifecycle.decision?.action === "reconcile-effects" && op.outcome === "exception" &&
             (op.operation === "scheduling" || op.operation === "author-update-intake")) {
           try {
             await withStoryJobLock(job, "generation-read-only-reconciliation", async () => {
@@ -1622,7 +1669,7 @@ export function createGenerationGraph(
           }
         }
         if (op.operation === "specialist-dispatch" &&
-            op.safeAction === "reconcile-original-operation") {
+            s.recoveryLifecycle.decision?.action === "reconcile-effects" && op.outcome === "exception") {
           try {
             if (await inspectOriginalSpecialistCommitForResume(s, job))
               return { status: "running" as const, reason: null,
@@ -1632,7 +1679,7 @@ export function createGenerationGraph(
               (error instanceof Error ? error.message : String(error)));
           }
         }
-        if (op.safeAction !== "continue-independent") {
+        if (s.recoveryLifecycle.decision?.action !== "continue-independent") {
           const head = await trustedHead(job).catch(() => null);
           if (!head || op.source.headSha !== head)
             return fence("Original Story HEAD is missing or changed; execution is not authorized.");
@@ -2333,7 +2380,6 @@ export function createGenerationGraph(
       [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
-      s.recoveryLifecycle.phase === "assessing" && s.recoveryLifecycle.active ? "assess_recovery" :
       s.ideaTask ? "idea_integration" :
       s.active && s.result && s.recoveryLifecycle.active?.origin.operation === "commit-verification" &&
         s.recoveryLifecycle.phase === "verifying" ? "verify_committed_work" :
@@ -2342,9 +2388,7 @@ export function createGenerationGraph(
     .addConditionalEdges("idea_integration", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "verify_idea_integration"), [END, "assess_recovery", "verify_idea_integration"])
     .addConditionalEdges("verify_idea_integration", s => routeAfterOperationAssessment(s,
-      s.status !== "running" ? END :
-      s.recoveryLifecycle.phase === "assessing" && s.recoveryLifecycle.active ?
-        "assess_recovery" : "author_update_intake"))
+      s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("specialist_dispatch", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.result?.status === "dependency-required" ? "dependency_amendment" :
@@ -2356,12 +2400,8 @@ export function createGenerationGraph(
       s.reason === REPAIR_STEERING_BOUNDARY ? "author_update_intake" :
       s.result ? "verify_committed_work" : "specialist_dispatch"), [END, "assess_recovery", "author_update_intake", "verify_committed_work", "specialist_dispatch"])
     .addConditionalEdges("verify_committed_work", s => routeAfterOperationAssessment(s,
-      s.status !== "running" ? END :
-      s.recoveryLifecycle.phase === "assessing" && s.recoveryLifecycle.active ?
-        "assess_recovery" : "author_update_intake"))
-    .addConditionalEdges("completion_decision", s => routeAfterOperationAssessment(s,
-      s.status === "running" && s.recoveryLifecycle.phase === "assessing" &&
-        !!s.recoveryLifecycle.active ? "assess_recovery" : END),
+      s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
+    .addConditionalEdges("completion_decision", s => routeAfterOperationAssessment(s, END),
       ["assess_recovery", END])
     .compile({ checkpointer });
 }
