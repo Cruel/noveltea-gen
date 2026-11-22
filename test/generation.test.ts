@@ -438,13 +438,16 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
 }
 
 for (const defect of ["interactive", "knowledge", "rejected", "tampered", "specialist", "specialist-tampered", "specialist-disputed",
-  "specialist-restart", "specialist-wrong-path"]) test("actual generation graph resumes Event-only Composition after historical " + defect + " correction (#229/#231 fixture)", { skip: !available }, async () => {
+  "specialist-restart", "specialist-wrong-path", "specialist-receipt-tamper",
+  "specialist-model-tamper"]) test("actual generation graph resumes Event-only Composition after historical " + defect + " correction (#229/#231 fixture)", { skip: !available }, async () => {
   const f = setup("generation-event-only-no-write-" + defect);
   f.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE = "historical-" + (defect === "rejected" ? "interactive" :
     ["tampered", "specialist", "specialist-tampered", "specialist-disputed",
-      "specialist-restart", "specialist-wrong-path"].includes(defect) ? "knowledge" : defect);
+      "specialist-restart", "specialist-wrong-path", "specialist-receipt-tamper",
+      "specialist-model-tamper"].includes(defect) ? "knowledge" : defect);
   if (defect.startsWith("specialist"))
-    f.env.NT_BLUEPRINT_SPECIALIST_FIXTURE = ["specialist", "specialist-restart"].includes(defect)
+    f.env.NT_BLUEPRINT_SPECIALIST_FIXTURE = ["specialist", "specialist-restart",
+      "specialist-receipt-tamper", "specialist-model-tamper"].includes(defect)
       ? "knowledge" : defect === "specialist-disputed" ? "disagree" :
       defect === "specialist-wrong-path" ? "wrong-path" : "wrong-pin";
   if (defect === "specialist-disputed") f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT = "revise";
@@ -490,6 +493,22 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   const originalEvent = readFileSync(eventFile, "utf8");
   const activeFile = join(f.job.stateDir, "milestone-blueprints/disclosure.json");
   const original = JSON.parse(readFileSync(activeFile, "utf8"));
+  if (defect === "specialist-receipt-tamper" || defect === "specialist-model-tamper") {
+    const edited = JSON.parse(originalEvent);
+    if (defect === "specialist-receipt-tamper")
+      edited.blueprintChallenge.proposed = "An unrelated and unapproved new claim.";
+    else edited.model = "tampered-model";
+    writeFileSync(eventFile, JSON.stringify(edited, null, 2) + "\n");
+    const blocked = f.cli(["generate", "resume", "--pause-after", "composition"]);
+    assert.equal(blocked.status, "blocked");
+    assert.match(blocked.reason, /Blueprint|model|provenance|identity|review/i);
+    assert.deepEqual(JSON.parse(readFileSync(activeFile, "utf8")), original);
+    assert.equal(existsSync(join(f.job.stateDir, "milestone-blueprint-history",
+      "disclosure-" + original.lineage.reviewCycleId + ".json")), false);
+    assert.equal(existsSync(join(f.job.stateDir, "interactive-items/disclosure.json")), false);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead);
+    return;
+  }
   if (defect === "interactive" || defect === "specialist-restart") {
     if (defect === "interactive") assert.ok(original.draft.downstream.some((entry: any) => entry.owner === "interactive"));
     if (defect === "interactive") {
