@@ -50,7 +50,7 @@ export interface GenerationQueueStore {
   dequeue(owner: string, jobId: string): Promise<boolean>
   reconcileAndEnqueue(owner: string, jobId: string, intent: QueueIntent,
     saved: { status: string; request: string; thread: string },
-    interrupted: boolean, now: string): Promise<void>
+    interrupted: boolean, now: string, verifiedBlocked?: boolean): Promise<void>
 }
 export type FinalizedTranscriptCandidate = {
   owner: string; jobId: string; threadId: string; completedAt: string;

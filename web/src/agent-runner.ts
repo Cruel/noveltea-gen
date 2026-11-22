@@ -29,6 +29,7 @@ import { deployedVerifierFixes, withKnownFixDispatch } from '../../src/known-ver
 import { verifyKnownFixProof } from './lib/known-fix-pickup.server'
 import { sameGenerationRequest } from '../../src/generation-owner'
 import type { AdaptiveRecovery } from '../../src/adaptive-protocol'
+import { inspectBlockedOriginalThreadCorrection } from '../../src/original-thread-continuation'
 
 /** Verify the queued identity and resume the pinned graph, never browser inputs. */
 export async function runPersistedGeneration(store: StudioDatabase, item: QueueRecord): Promise<void> {
@@ -85,6 +86,21 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     }, verify)
   }
   const threadId = row.threadId!
+  // A blocked execution can be atomically moved to the existing queue's
+  // paused admission state. Its ORIGINAL blocked graph disposition must still
+  // match the reviewed source at dispatch, not merely when HTTP admitted it.
+  if (item.intent === 'resume') {
+    const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
+    try {
+      const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
+      if ((snapshot.values as { status?: string }).status === 'blocked') {
+        const check = await inspectBlockedOriginalThreadCorrection(job, threadId,
+          snapshot.values as Parameters<typeof inspectBlockedOriginalThreadCorrection>[2])
+        if (!check.eligible || snapshot.next.length)
+          throw Error('Blocked original-Thread recovery is no longer eligible: ' + check.reason)
+      }
+    } finally { saver.db.close() }
+  }
   // Resolve the durable Turn->execution association once, owner-scoped, so
   // replayed controller events identify the exact author request.
   const ownerThreadId = await store.persistence.continuation.runThread(item.ownerId, row.id)

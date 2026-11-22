@@ -38,6 +38,7 @@ export type JobOverview = {
 export type BudgetLimits = { steps?: number; modelCalls?: number; costUsd?: number; activeSeconds?: number }
 export type JobControls = {
   control: string; queue: string | null
+  originalThreadResume: { eligible: boolean; reason: string }
   limits: BudgetLimits
   budget: { steps: number; modelCalls: number; costUsd: number; activeSeconds: number; unpricedCalls: number
     unknownTokenCalls: number; tokens: { input: number; output: number;

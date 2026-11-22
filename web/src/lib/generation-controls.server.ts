@@ -23,6 +23,7 @@ import { inspectRecoveryCheckpoints, type RecoveryInspection } from '../../../sr
 import { inspectCheckpointReview } from '../../../src/checkpoint-assurance'
 import { inspectPiPolicy, configurePiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
 import { parseJobLimits } from '../../../src/job-limits'
+import { inspectBlockedOriginalThreadCorrection } from '../../../src/original-thread-continuation'
 
 async function readSmallCommand(request: Request, maximum = 256): Promise<string> {
   const reader = request.body?.getReader()
@@ -213,7 +214,7 @@ export function matchesRepairSteeringReviewBoundary(
 
 /** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
 export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
-  threadId: string, pinned: string, retry: boolean): Promise<'start' | 'resume'> {
+  threadId: string, pinned: string, retry: boolean, originalStatus?: string): Promise<'start' | 'resume'> {
   return withStoryJobLock(job, 'studio-control-recovery', async () => {
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
@@ -226,7 +227,8 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
     await trustedHead(job)
     const checkpoint = join(job.stateDir, 'web-generation.sqlite')
     if (!existsSync(checkpoint)) {
-      if (retry || existsSync(join(job.stateDir, 'generation-server-owner.json')))
+      if (retry || existsSync(join(job.stateDir, 'generation-server-owner.json')) ||
+          originalStatus === 'blocked')
         throw new Error('An unfinished writer claim has no checkpoint; operator recovery is required.')
       return 'start'
     }
@@ -234,6 +236,10 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
     try {
       const state = await graph.getState({ configurable: { thread_id: threadId } })
       const saved = state.values as PendingReviewChoiceState & { request?: unknown }
+      if (originalStatus === 'blocked' && saved.status !== 'blocked')
+        throw new Error('Blocked Studio status differs from its original graph checkpoint.')
+      if (originalStatus === 'blocked' && await readJobControl(job) === 'cancelled')
+        throw new Error('Cancelled original generation cannot be resumed.')
       const policy = await inspectPiPolicy(job)
       const conflict = await authorizedFoundationException(job)
       const authorBoundary = !!conflict && !conflict.retryUsed &&
@@ -305,8 +311,14 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
         if (validation.status !== 'passed')
           throw new Error('Pinned native validator did not pass the unchanged Story. Restore the exact original validator before resuming.')
       }
-      if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && saved.status !== 'paused') ||
-          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary) ||
+      const approvedWork = saved.status === 'blocked'
+        ? await inspectBlockedOriginalThreadCorrection(job, threadId, saved as Parameters<typeof inspectBlockedOriginalThreadCorrection>[2])
+        : null
+      if (approvedWork && !approvedWork.eligible && !guidedRepairBoundary && !authorBoundary)
+        throw new Error(approvedWork.reason)
+      const correctedBoundary = approvedWork?.eligible === true
+      if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !correctedBoundary && saved.status !== 'paused') ||
+          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) ||
           (saved.result && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary) || saved.ideaTask || saved.ideaResult ||
           (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
             JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
@@ -314,6 +326,41 @@ export async function safeToResume(job: Awaited<ReturnType<typeof authorizedStor
       return 'resume'
     } finally { saver.db.close() }
   })
+}
+
+/** Read-only original-Thread eligibility for owner-scoped Studio inspection.
+ * An unavailable or altered proof is a visible denial, never a wake-up action. */
+async function inspectOriginalThreadResume(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
+  saved: { status: string; thread: string | null; request: string | null },
+  queue: string | null) {
+  const refused = (reason: string) => ({ eligible: false, reason })
+  if (saved.status !== 'blocked' || !saved.thread || !saved.request)
+    return refused('Only a pinned blocked original Thread can request corrected-work continuation.')
+  if (queue === 'running' || queue === 'queued' || queue === 'interrupted')
+    return refused('A queued or interrupted writer must be reconciled separately.')
+  if (await readJobControl(job) === 'cancelled')
+    return refused('This Story execution was cancelled.')
+  const checkpoint = join(job.stateDir, 'web-generation.sqlite')
+  if (!existsSync(checkpoint)) return refused('The original graph checkpoint is missing.')
+  try {
+    const env = { ...process.env }
+    for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
+    if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+      cwd: job.worktreeRoot, env, encoding: 'utf8',
+    }).trim()) return refused('The Story writer left uncommitted changes; reconcile them first.')
+    const { graph, saver } = openWebGenerationGraph(checkpoint)
+    try {
+      const snapshot = await graph.getState({ configurable: { thread_id: saved.thread } })
+      const state = snapshot.values as PendingReviewChoiceState & { request?: GenerationRequest }
+      if (snapshot.next.length || !state.request ||
+          !sameGenerationRequest(state.request, JSON.parse(saved.request) as GenerationRequest))
+        return refused('The saved graph is not idle at the original pinned request.')
+      return await inspectBlockedOriginalThreadCorrection(job, saved.thread,
+        state as Parameters<typeof inspectBlockedOriginalThreadCorrection>[2])
+    } finally { saver.db.close() }
+  } catch (error) {
+    return refused(error instanceof Error ? error.message : 'Controller recovery proof is unavailable.')
+  }
 }
 
 /** Resume an answered specialist only through the same pinned checkpoint gates as
@@ -390,8 +437,9 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
               g.rootFailureSha === failed.rootFailureSha).length)),
         } } : {}),
       } : null
+      const originalThreadResume = await inspectOriginalThreadResume(job, saved, queued?.phase ?? null)
       return reply({ control: await readJobControl(job), queue: queued?.phase ?? null,
-        budget: pi.budget, limits: pi.policy.limits, repair })
+        budget: pi.budget, limits: pi.policy.limits, repair, originalThreadResume })
     }
     if (Number(request.headers.get('content-length') ?? 0) > 2048)
       return reply({ error: 'Control command too large' }, 413)
@@ -523,22 +571,23 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
         pendingBoundary: !removed && queued?.phase === 'running' }, 202)
     }
     if (!saved.request || !saved.thread ||
-        (saved.status !== 'paused' && !(action === 'retry' && saved.status === 'running' && queued?.phase === 'interrupted')))
-      return reply({ error: 'Only paused, pinned generation can resume. Inspect the saved state.' }, 409)
+        (saved.status !== 'paused' && !(action === 'resume' && saved.status === 'blocked') &&
+          !(action === 'retry' && saved.status === 'running' && queued?.phase === 'interrupted')))
+      return reply({ error: 'Only paused or specifically recovered blocked generation can resume. Inspect the saved state.' }, 409)
     if (queued?.phase === 'running' || queued?.phase === 'queued')
       return reply({ error: 'Generation is already queued or running' }, 409)
     if (queued?.phase === 'interrupted' && action !== 'retry')
       return reply({ error: 'Interrupted writers need explicit recovery inspection, not Resume.' }, 409)
     if (action === 'retry' && queued?.phase !== 'interrupted')
       return reply({ error: 'Retry is reserved for a reconciled interrupted attempt.' }, 409)
-    const intent = await safeToResume(job, saved.thread, saved.request, action === 'retry')
+    const intent = await safeToResume(job, saved.thread, saved.request, action === 'retry', saved.status)
     // Persist one exact transition; a second attempt never races this queue
     // claim into a changed request or alternate thread.
     await setJobControl(job, 'running')
     await store.persistence.generation.queue.reconcileAndEnqueue(
       user.id, id, intent, {
         status: saved.status, request: saved.request, thread: saved.thread,
-      }, queued?.phase === 'interrupted', new Date().toISOString())
+      }, queued?.phase === 'interrupted', new Date().toISOString(), saved.status === 'blocked' && action === 'resume')
     // The agent polls this durable queue. No HTTP request owns execution.
     return reply({ control: 'running', queue: 'queued', intent }, 202)
   } catch (error) {

@@ -121,8 +121,10 @@ function JobDetailsForId({ jobId }: { jobId: string }) {
           <p className="m-0 mt-1 text-xs text-muted-foreground">Execution <code>{jobId.slice(0, 8)}</code></p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {job.status === 'paused' && job.threadId &&
-            <Button size="sm" disabled={busy} onClick={() => void act('resume')}>Resume</Button>}
+          {(job.status === 'paused' || job.status === 'blocked' && controls?.originalThreadResume?.eligible) && job.threadId &&
+            <Button size="sm" disabled={busy} onClick={() => void act('resume')}>
+              {job.status === 'blocked' ? 'Continue original execution' : 'Resume'}
+            </Button>}
           {activeStatuses.has(job.status) &&
             <Button size="sm" variant="outline" disabled={busy} onClick={() => void act('pause')}>Pause</Button>}
           {job.status === 'interrupted' &&

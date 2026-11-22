@@ -346,6 +346,51 @@ for (const backend of ['sqlite', 'postgres'] as const) {
     assert.equal((await f.generation.jobs.state(x.owner, id))?.status, 'paused')
   })
 
+  test(backend + ': reviewed blocked recovery requeues the original Thread exactly once', {
+    skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
+    timeout: 90_000,
+  }, async t => {
+    const f = await openKyselyFeatureFixture(backend)
+    t.after(() => f.close())
+    const x = await setup(f)
+    const original = await prepare(f, x, 'Original approved correction')
+    const queue = f.generation.queue
+    const jobs = f.generation.jobs
+    assert.equal((await queue.claim('original-worker', 1, later))?.jobId, original.id)
+    assert.equal(await jobs.start(x.owner, original.id, original.threadId,
+      original.request, 'original-worker', later), true)
+    assert.equal(await jobs.finish(x.owner, original.id, original.threadId,
+      'blocked', false, 'original-worker', later), true)
+    assert.equal(await queue.finish(original.id, 'original-worker', true, later), true)
+    const saved = { status: 'blocked', request: original.request, thread: original.threadId }
+    assert.equal((await queue.record(original.id))?.phase, 'finished')
+    await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
+      saved, false, later), /lacks verified original-Thread recovery/)
+    await assert.rejects(queue.reconcileAndEnqueue(x.stranger, original.id, 'resume',
+      saved, false, later, true), /verified checkpoint/)
+    await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'start',
+      saved, false, later, true), /authenticated blocked original Thread/)
+    await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
+      { ...saved, thread: 'substitute' }, false, later, true), /verified checkpoint/)
+    assert.equal((await jobs.state(x.owner, original.id))?.status, 'blocked')
+    assert.equal((await queue.record(original.id))?.phase, 'finished')
+    await queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
+      saved, false, later, true)
+    assert.equal((await jobs.state(x.owner, original.id))?.status, 'paused')
+    assert.equal((await queue.record(original.id))?.phase, 'queued')
+    assert.equal((await queue.record(original.id))?.intent, 'resume')
+    await assert.rejects(queue.reconcileAndEnqueue(x.owner, original.id, 'resume',
+      saved, false, later, true), /verified checkpoint/)
+    assert.equal((await queue.record(original.id))?.phase, 'queued')
+    assert.equal((await queue.claim('continued-worker', 1, later))?.jobId, original.id)
+    assert.equal(await jobs.start(x.owner, original.id, original.threadId,
+      original.request, 'continued-worker', later), true)
+    assert.equal(await jobs.finish(x.owner, original.id, original.threadId,
+      'completed', false, 'continued-worker', later), true)
+    assert.equal(await queue.finish(original.id, 'continued-worker', true, later), true)
+    assert.equal((await jobs.state(x.owner, original.id))?.status, 'completed')
+  })
+
   test(backend + ': independent processes enforce capacity and do not reclaim exited workers', {
     skip: backend === 'postgres' && !pg && 'Set NT_TEST_PG_URL',
     timeout: 90_000,

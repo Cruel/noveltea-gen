@@ -12,6 +12,7 @@ import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, unknownComplet
   unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import { assessGenerationOperation, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
+import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
 import { ProtocolExhaustedError, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -1108,6 +1109,26 @@ export function createGenerationGraph(
 ) {
   return new StateGraph(Channels, { input: GenerationInputSchema })
     .addNode("schedule", async (s, config) => {
+      // A blocked original Thread may resume only when its CURRENT controller
+      // proof verifies the specific unfinished operation. Recheck at graph
+      // entry: an HTTP admission never grants an independent writer.
+      if (executionOwner === "server" && s.status === "blocked" &&
+          (s.operationRecovery?.phase === "fenced" ||
+           s.operationRecovery?.phase === "continued")) {
+        const job = await openJob(s).catch(() => null);
+        const threadId = config.configurable?.thread_id as string | undefined;
+        if (job && threadId) {
+          const verified = await inspectBlockedOriginalThreadCorrection(job, threadId, s)
+            .catch(() => null);
+          if (verified?.eligible) {
+            const failures = { ...s.failures };
+            if (verified.assignmentId) delete failures[verified.assignmentId];
+            return { status: "running" as const, reason: null, failures,
+              ...(verified.assignmentId ? { active: null, result: null } : {}),
+              operationRecovery: { ...s.operationRecovery, phase: "continued" as const } };
+          }
+        }
+      }
       // A new graph invocation must not re-enter a fenced or not-yet-assessed
       // external operation. The original checkpoint remains inspectable.
       if (s.operationRecovery?.phase === "fenced") {

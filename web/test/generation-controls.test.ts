@@ -131,8 +131,13 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
     assert.equal((await control('POST', strangerCookie, unauthorizedGuidance)).status, 404)
     assert.equal((await control('POST', authorCookie, unauthorizedGuidance)).status, 409,
       'An ordinary paused run cannot mint a repair grant without an exhausted sealed review.')
-    assert.equal((await control('GET', authorCookie)).body.repair, null)
-    assert.equal((await control('GET', authorCookie)).body.queue, 'queued')
+    const inspectedBefore = (await control('GET', authorCookie)).body
+    assert.equal(inspectedBefore.repair, null)
+    assert.equal(inspectedBefore.queue, 'queued')
+    assert.equal(inspectedBefore.originalThreadResume.eligible, false)
+    assert.match(inspectedBefore.originalThreadResume.reason, /pinned blocked original Thread/)
+    assert.equal((await queueRecord(store, id))?.phase, 'queued',
+      'read-only inspection must not requeue an existing run')
     assert.equal((await control('POST', authorCookie, { action: 'pause' })).status, 202)
     assert.equal((await queueRecord(store, id)), undefined)
     assert.equal(await readJobControl(job), 'paused')

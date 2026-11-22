@@ -145,6 +145,8 @@ export function ThreadRunAttention({ run }: { run: Run }) {
         <p>{job.recovery.guidance}</p>
       </div>}
       {job.reason && <p className="whitespace-pre-wrap break-words">Saved failure: {publicRuntimeText(job.reason)}</p>}
+      {controls?.originalThreadResume && <p>Original-Thread recovery: {controls.originalThreadResume.eligible
+        ? 'Verified for continuation' : publicRuntimeText(controls.originalThreadResume.reason)}</p>}
     </section>}
     {job.recovery && <div className="space-y-2 text-sm">
       <p>Unverified specialist files require manual reconciliation. They cannot be automatically retried or published.</p>
@@ -181,7 +183,14 @@ export function ThreadRunAttention({ run }: { run: Run }) {
       onClick={() => void action('resume')}>
       {busy ? 'Continuing…' : 'Continue generation'}
     </Button>}
-    {blocked && point && <div className="space-y-1">
+    {job.status === 'blocked' && controls?.originalThreadResume?.eligible &&
+      <div className="space-y-2">
+        <p className="text-xs text-muted-foreground">A source-bound reviewed correction is ready.
+          Continue this original execution without creating a child Job or replaying the Event.</p>
+        <Button size="sm" disabled={busy || !!pendingDecision}
+          onClick={() => void action('resume')}>{busy ? 'Continuing…' : 'Continue original execution'}</Button>
+      </div>}
+    {blocked && point && !controls?.originalThreadResume?.eligible && <div className="space-y-1">
       <p className="text-xs text-muted-foreground">
         A verified checkpoint is available after {point.workItem.replaceAll('-', ' ')}.
         The completed work stays intact; recovery starts a new isolated run in this same Thread.
@@ -195,7 +204,7 @@ export function ThreadRunAttention({ run }: { run: Run }) {
             'ask the author instead of silently completing the stage without file changes.'
           : ''} />
     </div>}
-    {retryableContinuation && <CheckpointContinueAction job={sourceJob} point={sourcePoint}
+    {retryableContinuation && !controls?.originalThreadResume?.eligible && <CheckpointContinueAction job={sourceJob} point={sourcePoint}
       expectedLatestJobId={job.id} suggestedGuidance={retryGuidance} />}
     {blocked && !point && !sourcePoint && <p className="text-xs text-muted-foreground">
       {job.forkSource && sourcePending

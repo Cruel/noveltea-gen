@@ -296,7 +296,7 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
             .where('ownerUserId', '=', owner).where('jobId', '=', jobId)
             .where('phase', '=', 'queued').executeTakeFirst()))
       },
-      async reconcileAndEnqueue(owner, jobId, intent, saved, interrupted, now) {
+      async reconcileAndEnqueue(owner, jobId, intent, saved, interrupted, now, verifiedBlocked = false) {
         ownerRequired(owner)
         await db.withWriteTransaction([job(jobId)], async tx => {
           await assertNotDeleted(tx, owner, jobId)
@@ -314,7 +314,17 @@ export function createKyselyGenerationPersistence(db: SharedDatabase<StudioDb>):
           } else if (existing?.phase === 'interrupted') {
             throw new Error('Interrupted attempt requires operator reconciliation before retry.')
           }
-          if (saved.status === 'running') {
+          if (verifiedBlocked && (saved.status !== 'blocked' || interrupted || intent !== 'resume'))
+            throw new Error('Only an authenticated blocked original Thread may be readmitted.')
+          if (saved.status === 'blocked') {
+            if (!verifiedBlocked || !changed(await tx.updateTable('studioSessions')
+              .set({ status: 'paused', updatedAt: now })
+              .where('id', '=', jobId).where('ownerUserId', '=', owner)
+              .where('status', '=', 'blocked')
+              .where('generationRequestJson', '=', saved.request)
+              .where('generationThreadId', '=', saved.thread).executeTakeFirst()))
+              throw new Error('Blocked generation lacks verified original-Thread recovery.')
+          } else if (saved.status === 'running') {
             if (!interrupted || !changed(await tx.updateTable('studioSessions')
               .set({ status: 'paused', updatedAt: now })
               .where('id', '=', jobId).where('ownerUserId', '=', owner)
