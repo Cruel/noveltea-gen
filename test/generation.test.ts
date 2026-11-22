@@ -1445,9 +1445,12 @@ test("#225 dirty in-flight specialist cannot be redispatched on resume", {
   try {
     const graph = createGenerationGraph(saver, "cli");
     const config = { configurable: { thread_id: paused.threadId } };
+    // Resume at the actual specialist-dispatch boundary. Scheduling has
+    // already authenticated the selected work item; a dirty writer must
+    // fail inside its own original operation, never be redispatched.
     await graph.updateState(config, {
       status: "running", active: foundation, result: null, pauseAfter: null,
-    }, "schedule");
+    }, "author_update_intake");
     result = await graph.invoke(null, config);
   } finally {
     saver.db.close();

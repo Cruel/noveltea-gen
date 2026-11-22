@@ -41,6 +41,7 @@ function setup(name: string) {
 function startSlowWorker(x: ReturnType<typeof setup>, mode: "cancel" | "pause" | "unavailable") {
   const code = `
 import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { startStoryJob } from "./src/job.ts";
 import { withStoryJobLock } from "./src/job-lock.ts";
@@ -56,7 +57,10 @@ await withStoryJobLock(job, "slow-${mode}-fixture", async () => {
     sessionManager: { getSessionFile: () => join(job.worktreeRoot, "../fixture-session.jsonl") },
     get isStreaming() { return !settled; },
     abort: async () => {
-      if (${JSON.stringify(mode)} === "unavailable") throw new Error("provider cannot abort");
+      if (${JSON.stringify(mode)} === "unavailable") {
+        await writeFile(join(job.worktreeRoot, "../unavailable-abort-attempted"), "attempted");
+        throw new Error("provider cannot abort");
+      }
       await new Promise(r => setTimeout(r, 350));
       settled = true;
       session.messages.push({ role: "assistant", stopReason: "aborted" });
@@ -73,8 +77,19 @@ await withStoryJobLock(job, "slow-${mode}-fixture", async () => {
       process.stdout.write("ACTIVE\\n");
       await new Promise((resolve, reject) => {
         rejectTurn = reject;
-        turnTimer = setTimeout(() => { settled = true; resolve(true); },
-          ${mode === "cancel" ? 10000 : 2600});
+        turnTimer = setTimeout(async () => {
+          const mode = ${JSON.stringify(mode)};
+          if (mode === "pause" || mode === "unavailable") {
+            // Parent releases the fixture only after its interruption command
+            // has completed. Fixed delays can settle early on loaded runners.
+            const release = mode === "pause" ?
+              "pause-fixture-release" : "unavailable-fixture-release";
+            while (!existsSync(join(job.worktreeRoot, "../" + release)))
+              await new Promise(r => setTimeout(r, 20));
+          }
+          settled = true;
+          resolve(true);
+        }, ${mode === "cancel" ? 60000 : 20});
       });
     });
     if (${JSON.stringify(mode)} === "pause") {
@@ -164,6 +179,11 @@ test("unavailable abort retains the writer lock and reports a non-successful int
   try {
     await worker.ready;
     assert.equal(json(x.run("author", "control", "--state", "cancelled")).status, "cancelled");
+    const attempted = join(x.job.worktreeRoot, "../unavailable-abort-attempted");
+    for (let n = 0; n < 300 && !existsSync(attempted); n++)
+      await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(existsSync(attempted), true, "the original provider must attempt cancellation");
+    writeFileSync(join(x.job.worktreeRoot, "../unavailable-fixture-release"), "continue");
     const end = await settle(worker);
     assert.equal(end.code, 0, end.errors);
     assert.match(end.output, /STOP:Error/);
@@ -264,6 +284,8 @@ test("paused control finishes the active turn and prevents the next work item at
   try {
     await worker.ready;
     assert.equal(json(x.run("author", "control", "--state", "paused")).status, "paused");
+    // Acknowledged control, not elapsed wall time, releases this fixture turn.
+    writeFileSync(join(x.job.worktreeRoot, "../pause-fixture-release"), "continue");
     const end = await settle(worker);
     assert.equal(end.code, 0, end.errors);
     assert.match(end.output, /PAUSED-AT-BOUNDARY/);
