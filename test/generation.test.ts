@@ -2056,6 +2056,39 @@ test("#233: authenticated author-directed Architecture change is visible in oper
   assert.equal(incident.successorApproval, null);
   assert.equal(f.cli(["approval-revisions", "inspect", "--cause", "author-directed"]).total, 1);
   assert.equal(f.cli(["approval-revisions", "inspect", "--severity", "warning"]).total, 0);
+  const secondContract = join(root, "approved-author-incident-v3.json");
+  const v2Contract = JSON.parse(readFileSync(revisedFile, "utf8"));
+  writeFileSync(secondContract, JSON.stringify({
+    ...v2Contract,
+    constraints: [...v2Contract.constraints,
+      "The author additionally requires a witnessed reconciliation before the final reveal"],
+  }));
+  const secondProposal = f.cli(["architecture", "propose", "--contract", secondContract]);
+  const secondSignature = authorApproval(f.story, "single", f.env, root, {
+    ...secondProposal.authorSigningRequest,
+    reason: "I separately authorize the witnessed reconciliation in the revised completion contract.",
+  });
+  const secondApproval = f.cli(["architecture", "approve", "--proposal", secondProposal.proposal.digest,
+    "--approval", secondSignature.file]);
+  assert.equal(secondApproval.plan.version, 3);
+  const both = f.cli(["approval-revisions", "inspect"]);
+  assert.equal(both.total, 2, JSON.stringify(both));
+  assert.equal(new Set(both.records.map((record: any) => record.id)).size, 2,
+    "each separately signed replan must retain a unique incident ID");
+  const second = both.records.find((record: any) => record.original.version === 2);
+  assert.ok(second, "second signed replan must retain its own distinct incident ID");
+  assert.notEqual(second.id, incident.id);
+  assert.equal(second.disposition, "awaiting-review",
+    "a new pending v3 Architecture is not an independently reviewed successor");
+  assert.equal(second.successor, null);
+  assert.equal(second.cause, "author-directed");
+  assert.equal(second.original.sourceSha, architecture.inventory.headSha);
+  assert.deepEqual(second.originalApproval, incident.originalApproval,
+    "signed carry-forward must retain the original v1 independent review, not invent a v2 approval");
+  assert.deepEqual(both.records.find((record: any) => record.id === incident.id), incident,
+    "later signed replans must not alter the first historical incident");
+  assert.equal(f.cli(["approval-revisions", "inspect", "--id", incident.id]).total, 1);
+  assert.equal(f.cli(["approval-revisions", "inspect", "--id", second.id]).total, 1);
   // Exercise the REAL Studio incident-sync boundary, including event payload
   // validation, duplicate replay and the subsequent finished activity. An
   // owner-scoped in-memory events port avoids creating unrelated auth state.
@@ -2071,16 +2104,23 @@ test("#233: authenticated author-directed Architecture change is visible in oper
   } } } } as unknown as StudioStore;
   await syncApprovalRevisionActivity(store, "author-fixture", f.job.jobId, f.job);
   const activity = await listGenerationEvents(store, "author-fixture", f.job.jobId, 0);
-  assert.equal(activity.length, 1);
-  assert.deepEqual(activity[0]?.detail?.approvalRevision, {
+  assert.equal(activity.length, 2);
+  const firstActivity = activity.find(row => row.detail?.approvalRevision?.id === incident.id);
+  const secondActivity = activity.find(row => row.detail?.approvalRevision?.id === second.id);
+  assert.ok(secondActivity, "Studio must publish both signed replans");
+  assert.deepEqual(firstActivity?.detail?.approvalRevision, {
     id: incident.id, scope: "story", milestoneId: null,
     cause: "author-directed", severity: "info", disposition: "carried-forward",
   }, "Studio must represent signed Story-wide Architecture without inventing a Milestone");
+  assert.deepEqual(secondActivity?.detail?.approvalRevision, {
+    id: second.id, scope: "story", milestoneId: null,
+    cause: "author-directed", severity: "info", disposition: "awaiting-review",
+  });
   await syncApprovalRevisionActivity(store, "author-fixture", f.job.jobId, f.job);
-  assert.equal(journal.length, 1, "restart must not append a duplicate incident");
+  assert.equal(journal.length, 2, "restart must not append duplicate incidents");
   await appendGenerationEvent(store, "author-fixture", f.job.jobId,
     { kind: "finished", status: "completed" });
-  assert.equal((await listGenerationEvents(store, "author-fixture", f.job.jobId, 0))[1]?.kind,
+  assert.equal((await listGenerationEvents(store, "author-fixture", f.job.jobId, 0))[2]?.kind,
     "finished", "incident syncing cannot prevent generation from finishing");
 });
 

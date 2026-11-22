@@ -124,6 +124,33 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
     return { reviewerId: review.result.reviewer, reviewDigest: hash(review.result),
       commitSha: commit, turnDigest: point.assurance.turnDigest };
   };
+  /** A non-causal author replan may carry a verified Architecture commit
+   * through multiple plan versions. Its independent review belongs to the
+   * ORIGINAL checkpoint version, never an invented review under the current
+   * plan. Authenticate every intervening signed carry-forward, not merely
+   * the matching commit SHA. */
+  const carriedReviewVersion = (commit: string, currentVersion: number) => {
+    const source = checkpoints.find(p => p.commitSha === commit &&
+      p.workItem === "global-architecture");
+    if (!source || source.planVersion === null ||
+        !Number.isSafeInteger(source.planVersion) ||
+        source.planVersion > currentVersion)
+      throw Error("Architecture incident lacks the source version of its approved review.");
+    for (let version = source.planVersion; version < currentVersion; version++) {
+      const transition = entries.find(item => item.plan.version === version);
+      const next = (entries.find(item => item.plan.version === version + 1)?.plan ??
+        receipt.plan) as Plan | undefined;
+      const before = transition?.plan.items.find(item => item.id === "global-architecture");
+      const after = next?.items.find(item => item.id === "global-architecture");
+      if (!transition || !next || next.version !== version + 1 ||
+          transition.causalAmendment ||
+          JSON.stringify(transition.plan.contract) === JSON.stringify(transition.approvedContract) ||
+          before?.status !== "verified" || before.verifiedSha !== commit ||
+          after?.status !== "verified" || after.verifiedSha !== commit)
+        throw Error("Architecture incident lost its authenticated signed carry-forward review chain.");
+    }
+    return source.planVersion;
+  };
   const result: ArchitectureApprovalRevision[] = [];
   for (const [index, entry] of entries.entries()) {
     const proposal = entry.causalAmendment;
@@ -134,7 +161,8 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
     if (!originalCommit || !sha.test(originalCommit) ||
         !checkpoints.some(p => p.commitSha === originalCommit && p.workItem === "global-architecture"))
       throw Error("Architecture post-approval incident lost its historical approved checkpoint.");
-    const originalReview = await reviewed(originalCommit, entry.plan.version);
+    const originalReview = await reviewed(originalCommit,
+      carriedReviewVersion(originalCommit, entry.plan.version));
     // An unreviewed Architecture is not a second *reviewed* artifact. Never
     // present a purported historical approval based on a model assertion.
     if (!originalReview) continue;
