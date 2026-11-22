@@ -1897,6 +1897,13 @@ test("#212: certified predecessor is carried across approval, corrected source g
   assert.match(f.cli(["approval-revisions", "inspect"], false),
     /history lacks matching controller authorization|approved plan revision|identity/i);
   writeFileSync(signedArchitecture, authentic);
+  const missingHistory = JSON.parse(authentic);
+  delete missingHistory.history;
+  writeFileSync(signedArchitecture, JSON.stringify(missingHistory));
+  assert.match(f.cli(["approval-revisions", "inspect"], false),
+    /lost its historical signed plan evidence/i,
+    "A committed correction cannot discard its signed revision history.");
+  writeFileSync(signedArchitecture, authentic);
   assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id);
   const originalReviewFile = join(f.job.stateDir, "independent-reviews",
     incident.original.sourceSha + ".json");

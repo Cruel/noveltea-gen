@@ -92,8 +92,16 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
   const path = join(job.stateDir, "architecture.json");
   if (!existsSync(path)) return [];
   const receipt = await safeJson(path);
-  if (receipt.jobId !== job.jobId || receipt.threadId && receipt.threadId !== job.threadId ||
-      !Array.isArray(receipt.history)) throw Error("Architecture incident has wrong job/Thread identity.");
+  if (receipt.jobId !== job.jobId || receipt.threadId && receipt.threadId !== job.threadId)
+    throw Error("Architecture incident has wrong job/Thread identity.");
+  if (!Array.isArray(receipt.history)) {
+    // An interrupted initial writer can leave an incomplete Architecture
+    // receipt. It has no signed revision or approved-work incident, and must
+    // remain inspectable as a recovery blocker.
+    if (receipt.phase === "writing" && receipt.plan === undefined &&
+        receipt.proposal === undefined) return [];
+    throw Error("Architecture incident lost its historical signed plan evidence.");
+  }
   const entries = receipt.history as ArchitectureHistory[];
   // Ordinary job reporting must not rescan review checkpoints or load the
   // Architecture verifier unless this job actually has a signed challenge.
