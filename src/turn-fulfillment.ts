@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { JobReport } from "./job-report.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
-import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { type TurnEvidence } from "./turn-plan-evidence.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
@@ -15,6 +15,7 @@ import { projectAdaptiveFinal } from "./adaptive-final-review.js";
 import { reviewedMilestoneHandoff, consumedCorrection,
   assertMilestoneInteractiveDisposition, assertMilestoneCanonicalClosure } from "./milestone-obligation-handoff.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
+import { readPuzzleNoWrite, type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { validateStoryJob } from "./validator.js";
 import type { MilestoneEventSource, ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 
@@ -101,9 +102,17 @@ function receiptPath(job: JobStartResult, packet: TurnFulfillmentPacket) {
 /** A closed inventory is not proof that downstream work consumed the current
  * reviewed obligations. Check original stage receipts here, before issuing the
  * final semantic-review packet. No replay, writer or substitute commit. */
-async function assertMilestoneStageClosure(job: JobStartResult, handoff: ReviewedMilestoneHandoff,
-  depth: Plan["contract"]["scope"]["depth"]) {
+export async function assertMilestoneStageClosure(job: JobStartResult, handoff: ReviewedMilestoneHandoff,
+  depth: Plan["contract"]["scope"]["depth"], checkpoints: readonly RecoveryInspection[]) {
   const slug = handoff.pin.milestoneId.slice("milestone.".length);
+  const reviewedCommit = (workItem: string, sha: unknown) => {
+    if (typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha) ||
+        !checkpoints.some(point => point.eligible && point.workItem === workItem &&
+          point.commitSha === sha && ["passed", "not-required"].includes(point.semanticReview)))
+      throw Error("Final Milestone stage has no eligible independently reviewed checkpoint: " + workItem);
+    git(job, "merge-base", "--is-ancestor", handoff.eventHead, sha);
+    git(job, "merge-base", "--is-ancestor", sha, job.headSha);
+  };
   const read = async (kind: "interactive" | "composition") => {
     const path = join(job.stateDir, kind + "-items", slug + ".json");
     if (!existsSync(path)) throw Error("Final Story is missing the " + kind + " Milestone disposition.");
@@ -119,7 +128,8 @@ async function assertMilestoneStageClosure(job: JobStartResult, handoff: Reviewe
       interactive.units?.length !== 2)
     throw Error("Final Interactive work did not consume the current reviewed Milestone Blueprint.");
   const [choice, puzzle] = interactive.units as Array<{ phase: string; commitSha?: string;
-    beforeHead?: string; eventOnly?: EventOnlyRef; noWrite?: unknown; paths?: string[] }>;
+    beforeHead?: string; eventOnly?: EventOnlyRef; noWrite?: PuzzleNoWriteRef;
+    paths?: string[]; validation?: { status?: string } }>;
   const eventOnly = choice!.phase === "not-applicable";
   assertMilestoneInteractiveDisposition(handoff, eventOnly);
   if (eventOnly) {
@@ -132,10 +142,22 @@ async function assertMilestoneStageClosure(job: JobStartResult, handoff: Reviewe
     if (proof.eventHead !== handoff.eventHead || proof.reviewHead !== choice!.beforeHead ||
         JSON.stringify(proof.eventIds) !== JSON.stringify(handoff.eventIds))
       throw Error("Final Event-only omission no longer authenticates against the reviewed Event.");
-  } else if (choice!.phase !== "committed" || !choice!.commitSha ||
-      !(puzzle!.phase === "committed" && puzzle!.commitSha ||
-        puzzle!.phase === "not-applicable" && puzzle!.beforeHead && puzzle!.noWrite)) {
-    throw Error("Final Milestone has outstanding required Choice or Puzzle work.");
+  } else {
+    if (choice!.phase !== "committed" || choice!.validation?.status !== "passed" ||
+        !["committed", "not-applicable"].includes(puzzle!.phase))
+      throw Error("Final Milestone has outstanding required Choice or Puzzle work.");
+    reviewedCommit("interactive-choice-" + slug, choice!.commitSha);
+    if (puzzle!.phase === "committed") {
+      if (puzzle!.validation?.status !== "passed")
+        throw Error("Final Puzzle lacks native-validated output.");
+      reviewedCommit("interactive-puzzle-" + slug, puzzle!.commitSha);
+    } else {
+      const proof = await readPuzzleNoWrite(job, handoff.pin.milestoneId, puzzle!.noWrite);
+      if (proof.unitId !== "interactive-puzzle-" + slug || proof.eventHead !== handoff.eventHead ||
+          proof.choiceHead !== choice!.commitSha || proof.verifiedHead !== puzzle!.beforeHead ||
+          puzzle!.commitSha || puzzle!.paths?.length)
+        throw Error("Final optional Puzzle lacks its authenticated original no-write disposition.");
+    }
   }
   if (depth !== "composition") return;
   const composition = await read("composition");
@@ -143,14 +165,14 @@ async function assertMilestoneStageClosure(job: JobStartResult, handoff: Reviewe
       composition.phase !== "committed" || !composition.commitSha ||
       JSON.stringify(composition.correctedBlueprintPin) !== JSON.stringify(consumedCorrection(handoff)))
     throw Error("Final Composition has not consumed the current reviewed Milestone obligations.");
-  git(job, "merge-base", "--is-ancestor", handoff.eventHead, composition.commitSha);
-  git(job, "merge-base", "--is-ancestor", composition.commitSha, job.headSha);
+  reviewedCommit("composition-" + slug, composition.commitSha);
 }
 
 /** Only Event commits that descend into the final verified Story may bring a
  * local private plan to the final independent reviewer. The plan is a set of
  * questions to verify, never an automatic completion receipt. */
-async function reviewedMilestoneObjectives(job: JobStartResult, plan: Plan): Promise<{
+async function reviewedMilestoneObjectives(job: JobStartResult, plan: Plan,
+  checkpoints: readonly RecoveryInspection[]): Promise<{
   objectives: TurnObjective[];
   pins: NonNullable<TurnFulfillmentPacket["source"]["milestonePlans"]>;
   paths: string[];
@@ -191,7 +213,7 @@ async function reviewedMilestoneObjectives(job: JobStartResult, plan: Plan): Pro
     catch { throw Error("Final Story lost the reviewed Milestone Event source ancestry."); }
     // A later inventory replan cannot discharge already committed Milestone
     // work by dropping its target from the pending assignment list.
-    await assertMilestoneStageClosure(job, handoff, plan.contract.scope.depth);
+    await assertMilestoneStageClosure(job, handoff, plan.contract.scope.depth, checkpoints);
     handoffs.push(handoff);
     pins.push({ milestoneId, digest: handoff.pin.digest, eventHead: handoff.eventHead,
       ...(handoff.supersedes ? { historicalDigest: handoff.supersedes.digest,
@@ -294,7 +316,7 @@ export async function prepareTurnFulfillment(job: JobStartResult,
     .map(path => path.slice(prefix.length));
   if (adaptive && turn.kind === "full-story" && !directionPaths.length)
     throw Error("Amended whole-Story completion lacks an approved Creative Direction source.");
-  const milestonePlans = await reviewedMilestoneObjectives(job, arch.plan);
+  const milestonePlans = await reviewedMilestoneObjectives(job, arch.plan, inspected);
   const paths = [...new Set([
     ...milestonePlans.paths,
     ...directionPaths,

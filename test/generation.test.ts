@@ -10,6 +10,8 @@ import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
+import { reviewedMilestoneHandoff } from "../src/milestone-obligation-handoff.js";
+import { assertMilestoneStageClosure } from "../src/turn-fulfillment.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { inspectRepairLedger, recordBlueprintRepair } from "../src/repair-ledger.js";
 import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
@@ -674,6 +676,22 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   const composed = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD^"), eventHead,
     "Composition is the next Git commit, with no Choice or Puzzle writer commit");
+  // Final fulfillment cannot rely on a claimed Composition commit alone.
+  // The actual recovery checkpoint needs its separate semantic verdict.
+  const atComposition = { ...f.job, headSha: composed };
+  const handoff = await reviewedMilestoneHandoff(atComposition, JSON.parse(originalEvent));
+  assert.ok(handoff?.supersedes);
+  const checkpoints = await inspectRecoveryCheckpoints(atComposition);
+  await assert.doesNotReject(assertMilestoneStageClosure(atComposition, handoff, "composition", checkpoints));
+  await assert.rejects(assertMilestoneStageClosure(atComposition, handoff, "composition",
+    checkpoints.filter(point => point.workItem !== "composition-disclosure")),
+  /eligible independently reviewed checkpoint/,
+  "A forged Composition receipt without its real checkpoint cannot complete the Turn");
+  await assert.rejects(assertMilestoneStageClosure(atComposition, handoff, "composition",
+    checkpoints.map(point => point.workItem === "composition-disclosure"
+      ? { ...point, semanticReview: "required-pending" } as typeof point : point)),
+  /eligible independently reviewed checkpoint/,
+  "An outstanding independent stage review cannot be treated as completed");
   const inspected = f.cli(["generate", "inspect"]);
   assert.equal(inspected.status, "paused");
   assert.equal(inspected.inventory.items.find((item: any) =>
@@ -742,7 +760,7 @@ test("#213 narrative-led full-Story handoff keeps omitted mechanics distinct fro
 
 test("#230 genuinely Interactive production fixture preserves required Choices, native routes and review", {
   skip: !available,
-}, () => {
+}, async () => {
   const f = setup("cert-213-choices");
   f.env.NT_EVENT_FIXTURE_CASE = "alternative-routes";
   f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
@@ -770,6 +788,21 @@ test("#230 genuinely Interactive production fixture preserves required Choices, 
   assert.ok(routes.every((r: any) => r.status === "reachable"),
     "diverging routes must have native-reachable evidence");
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const atInteractive = { ...f.job, headSha: head };
+  const sourceReceipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  const handoff = await reviewedMilestoneHandoff(atInteractive, sourceReceipt);
+  assert.ok(handoff);
+  const checkpoints = await inspectRecoveryCheckpoints(atInteractive);
+  await assert.rejects(assertMilestoneStageClosure(atInteractive, handoff, "interactive", checkpoints),
+    /eligible independently reviewed checkpoint/,
+    "Required Choice work cannot be carried forward with pending semantic review");
+  assert.equal(checkpoints.some(point => point.workItem === "interactive-choice-disclosure" &&
+    point.eligible && ["passed", "not-required"].includes(point.semanticReview)), false,
+  "This legacy structural fixture has no independently reviewed Choice checkpoint; no synthetic approval is allowed");
+  await assert.rejects(assertMilestoneStageClosure(atInteractive, handoff, "interactive",
+    checkpoints.filter(point => point.workItem !== "interactive-choice-disclosure")),
+  /eligible independently reviewed checkpoint/,
+  "The final gate cannot accept fabricated Choice work after a genuine interactive Blueprint");
   const inspect = f.cli(["generate", "inspect"]);
   assert.equal(inspect.status, "paused");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
