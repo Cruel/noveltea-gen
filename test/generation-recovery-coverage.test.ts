@@ -34,22 +34,23 @@ const siteNames = [
 /** Explicitly reviewed counts. Changes require a source-linked matrix review
  * in docs/generation-recovery-contract.md rather than silent test regeneration. */
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
-  schedule: "status:1,blocked:3,operationFailure:1,throws:12",
-  assess_recovery: "status:5,blocked:3,throws:10",
-  author_update_intake: "status:2,operationFailure:6,authorBoundary:1,reconcile:2,throws:1",
-  idea_integration: "operationFailure:1,throws:5",
-  verify_idea_integration: "operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "blocked:2,operationFailure:4,authorBoundary:1,throws:4",
-  dependency_amendment: "blocked:1,operationFailure:1,authorBoundary:1,throws:2",
-  independent_assignment_review: "blocked:1,operationFailure:1",
-  verify_committed_work: "status:2,blocked:1,operationFailure:2,reconcile:2,throws:3",
-  completion_decision: "status:3,blocked:1,operationFailure:2,authorBoundary:2,reconcile:1,throws:2",
-  reconcile: "status:4,operationFailure:2,throws:9",
-  authorBoundary: "status:1,blocked:1,operationFailure:1",
-  independentAssignmentBoundary: "status:8,operationFailure:1,throws:9",
-  operationFailure: "status:1,blocked:1",
-  blocked: "status:1",
-  runStoryGeneration: "status:2,blocked:5,operationFailure:1,reconcile:1,throws:14",
+  schedule: "returns:8,status:6,blocked:3,operationFailure:1,throws:12",
+  assess_recovery: "returns:20,status:8,blocked:3,throws:10",
+  author_update_intake: "returns:19,status:2,operationFailure:6,authorBoundary:1,reconcile:2,throws:1",
+  idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
+  verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
+  specialist_dispatch: "returns:17,status:1,blocked:2,operationFailure:4,authorBoundary:1,throws:4",
+  dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
+  independent_assignment_review: "returns:3,blocked:1,operationFailure:1",
+  verify_committed_work: "returns:6,status:4,blocked:1,operationFailure:2,reconcile:2,throws:3",
+  completion_decision:
+    "returns:11,status:5,blocked:1,operationFailure:2,authorBoundary:2,reconcile:1,throws:2",
+  reconcile: "returns:13,status:6,operationFailure:2,throws:9",
+  authorBoundary: "returns:4,status:1,blocked:1,operationFailure:1",
+  independentAssignmentBoundary: "returns:18,status:8,operationFailure:1,throws:9",
+  operationFailure: "returns:3,status:1,blocked:1",
+  blocked: "returns:1,status:1",
+  runStoryGeneration: "returns:5,status:5,blocked:5,operationFailure:1,reconcile:1,throws:14",
 };
 const operations = [
   "adaptive-admission",
@@ -153,16 +154,22 @@ function helpers(): Map<string, ts.Node> {
   return functions;
 }
 function exitShape(node: ts.Node): string {
-  const counts = { status: 0, blocked: 0, operationFailure: 0, authorBoundary: 0, reconcile: 0, throws: 0 };
+  const counts = {
+    returns: 0,
+    status: 0,
+    blocked: 0,
+    operationFailure: 0,
+    authorBoundary: 0,
+    reconcile: 0,
+    throws: 0,
+  };
   const observed: string[] = [];
   function visit(item: ts.Node): void {
     if (ts.isThrowStatement(item)) counts.throws++;
-    if (
-      ts.isPropertyAssignment(item) &&
-      item.name.getText(file) === "status" &&
-      /(?:blocked|paused|cancelled|completed)/.test(item.initializer.getText(file))
-    )
-      counts.status++;
+    if (ts.isReturnStatement(item)) counts.returns++;
+    // Track all explicit status assignments, including computed statuses and
+    // newly invented terminal spellings, not only the current four constants.
+    if (ts.isPropertyAssignment(item) && item.name.getText(file) === "status") counts.status++;
     if (ts.isCallExpression(item)) {
       const name = item.expression.getText(file);
       if (name === "blocked") counts.blocked++;
