@@ -294,8 +294,18 @@ test("C02 authenticated operator intervention is a diagnostic stop, not evidence
   }), phase: "assessment" as const };
   const admitted = await applyDomainRecovery(empty(), { unknownRecovery: unknown }, cfg(one), id, trusted);
   const diagnosed = { ...admitted, recoveryLifecycle: decideExistingRecovery(admitted) };
+  const claim = { ...unknown, phase: "operator-intervention" as const,
+    recommendation: "inspect-existing-receipt" as const,
+    advisoryCategory: "unclassified" as const };
+  const unproved = await applyDomainRecovery(diagnosed,
+    { unknownRecovery: claim }, cfg(one), id, trusted);
+  assert.equal(unproved.recoveryLifecycle.inspectionFences.length, 1,
+    "a claimed diagnostic disposition without the sealed original receipt fails closed");
   const stopped = await applyDomainRecovery(diagnosed,
-    { unknownRecovery: { ...unknown, phase: "operator-intervention" } }, cfg(one), id, trusted);
+    { unknownRecovery: claim }, cfg(one), id, trusted, { diagnosis: {
+      receipt: { store: "response-contract", ref: unknown.case.signature },
+      recommendation: claim.recommendation, advisoryCategory: claim.advisoryCategory,
+    } });
   assert.equal(stopped.recoveryLifecycle.decision?.action, "diagnostic-stop");
   assert.equal(stopped.recoveryLifecycle.phase, "fenced");
   assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 0);

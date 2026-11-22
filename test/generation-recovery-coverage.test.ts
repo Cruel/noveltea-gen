@@ -58,7 +58,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
-  recoveryNode: "returns:8,status:5",
+  recoveryNode: "returns:12,status:7,throws:2",
 };
 const operations = [
   "adaptive-admission",

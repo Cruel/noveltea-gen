@@ -4,10 +4,16 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { Annotation, START, END, StateGraph } from '@langchain/langgraph';
+import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
+import type { RecoveryLifecycle } from '../src/generation-recovery-contract.js';
 import { createAssistantMessageEventStream, type Model, type Provider, type AssistantMessage } from '@earendil-works/pi-ai';
 import { withJobModelRuntime } from '../src/model-runtime.js';
 import { configurePiPolicy, inspectPiPolicy } from '../src/job-pi-policy.js';
 import { withStoryJobLock } from '../src/job-lock.js';
+import { authenticateDiagnosticStop } from '../src/generation-recovery-inspection.js';
+import { admitRecovery, decideRecovery, emptyRecoveryLifecycle,
+  recoveryAdmission, verifyRecoveryCheckpoint } from '../src/generation-recovery-lifecycle.js';
 import type { JobStartResult } from '../src/job.js';
 import {
   unknownCompletionCase, parseUnknownDiagnosis, unknownDiagnosisDisposition,
@@ -137,16 +143,74 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
       recommendation: first.action, advisoryCategory: first.category };
     assert.deepEqual(await inspectUnknownRecoveryStatus(job, savedStatus), savedStatus);
     assert.equal(calls, 1, 'read-only inspection cannot issue model requests');
+    const graphThreadId = job.threadId + ':generation';
+    const anchor = { store: 'graph-checkpoint' as const,
+      ref: graphThreadId + ':original-failed-check',
+      failedCheckInstanceId: 'completion-unknown' };
+    const origin = { jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
+      turnDigest: evidence.turnDigest, planVersion: evidence.planVersion,
+      sourceHeadSha: evidence.sourceSha, assignmentId: null,
+      operation: caseFile.operation, check: caseFile.check, checkVersion: caseFile.checkVersion,
+      failureAnchor: anchor };
+    const evidenceRef = { store: 'graph-checkpoint' as const, ref: anchor.ref };
+    const admission = await recoveryAdmission({ origin, kind: 'integrity',
+      observation: 'incomplete-inventory', effect: 'read-only',
+      evidence: [evidenceRef], authenticate: async () => true });
+    assert.equal(admission.outcome, 'admitted');
+    if (admission.outcome !== 'admitted') throw Error('missing original test case');
+    const controller = admitRecovery(emptyRecoveryLifecycle(), admission);
+    const decision = { schema: 'noveltea-generation-recovery-decision/v1' as const,
+      caseId: admission.case.id, checkedSourceHeadSha: evidence.sourceSha,
+      evidence: [evidenceRef], action: 'diagnostic-stop' as const,
+      disposition: 'operator-intervention' as const,
+      receipt: { store: 'response-contract' as const, ref: caseFile.signature },
+      recommendation: first.action, advisoryCategory: first.category };
+    const source = { channel: 'unknownRecovery' as const, caseId: admission.case.id,
+      input: { case: caseFile } };
+    const stopped = decideRecovery(controller, decision);
+    const saver = SqliteSaver.fromConnString(join(stateDir, 'diagnostic-restart.sqlite'));
+    const channels = Annotation.Root({
+      recoveryLifecycle: Annotation<RecoveryLifecycle>({ reducer: (_, next) => next,
+        default: emptyRecoveryLifecycle }),
+    });
+    const graph = new StateGraph(channels)
+      .addNode('persist_diagnostic_stop', async state =>
+        ({ recoveryLifecycle: state.recoveryLifecycle }))
+      .addEdge(START, 'persist_diagnostic_stop')
+      .addEdge('persist_diagnostic_stop', END).compile({ checkpointer: saver });
+    const config = { configurable: { thread_id: graphThreadId } };
+    await graph.invoke({ recoveryLifecycle: stopped }, config);
+    const persisted = (await graph.getState(config)).values.recoveryLifecycle;
+    saver.db.close();
+    assert.deepEqual(persisted, stopped, 'LangGraph must persist the original typed diagnostic stop');
+    const saved = { current: persisted,
+      request: { jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
+        turnDigest: evidence.turnDigest },
+      checkpointRef: evidenceRef, authenticate: async () => true,
+      authenticateDecision: async (next: typeof decision) =>
+        next.action === 'diagnostic-stop' &&
+        authenticateDiagnosticStop(job, source, next) };
+    assert.equal((await verifyRecoveryCheckpoint(saved)).phase, 'fenced');
+    assert.equal((await verifyRecoveryCheckpoint(saved)).decision?.action, 'diagnostic-stop');
+    assert.equal(calls, 1, 'restarting a saved diagnostic cannot call Pi');
+    const forged = { ...stopped, decision: { ...decision,
+      recommendation: 'operator-intervention' as const } };
+    assert.equal((await verifyRecoveryCheckpoint({ ...saved, current: forged })).active, null,
+      'a forged saved recommendation is not the actual diagnostic result');
     const receipt = join(stateDir, 'unknown-diagnostics', caseFile.signature + '.initial.json');
     const sealed = readFileSync(receipt, 'utf8');
     writeFileSync(receipt, sealed.replace('"responseHash":"', '"responseHash":"bad-'));
     const unsafe = await inspectUnknownRecoveryStatus(job, savedStatus);
+    assert.equal((await verifyRecoveryCheckpoint(saved)).active, null,
+      'a tampered original protocol receipt invalidates the saved stop on restart');
     assert.equal(unsafe?.phase, 'unsafe-evidence');
     assert.equal(unsafe?.recommendation, undefined, 'tampered transcript proof loses all advisory claims');
     writeFileSync(receipt, sealed);
     assert.deepEqual(await inspectUnknownRecoveryStatus(job, savedStatus), savedStatus);
     const file = join(stateDir, 'unknown-diagnostics', caseFile.signature + '.admission.json');
     writeFileSync(file, readFileSync(file, 'utf8').replace('"sourceSha":"b', '"sourceSha":"c'));
+    assert.equal((await verifyRecoveryCheckpoint(saved)).active, null,
+      'a corrupted original admission cannot authenticate a previously saved diagnostic stop');
     await assert.rejects(run(), /untrustworthy|missing/i);
     assert.equal(calls, 1, 'tampered admission never grants model replay');
 

@@ -14,6 +14,7 @@ import type {
   RecoveryEvidence,
   RecoveryInspectionFence,
   RecoveryLifecycle,
+  RecoveryDischarge,
   RecoveryOrigin,
 } from "./generation-recovery-contract.js";
 
@@ -176,7 +177,10 @@ function validDecision(value: unknown): value is RecoveryDecision {
     case "continue-independent":
       return validEvidence(d.inventoryRef) && populated(d.blockedAssignmentId);
     case "diagnostic-stop":
-      return d.disposition === "operator-intervention";
+      return d.disposition === "operator-intervention" &&
+        d.receipt?.store === "response-contract" && validEvidence(d.receipt) &&
+        ["operator-intervention", "inspect-existing-receipt"].includes(d.recommendation) &&
+        ["software", "unclassified", "resources", "integrity"].includes(d.advisoryCategory);
     case "pause":
       return (
         [
@@ -225,6 +229,7 @@ export function emptyRecoveryLifecycle(): RecoveryLifecycle {
     schema,
     active: null,
     pending: [],
+    discharged: [],
     inspectionFences: [],
     phase: "idle",
     decision: null,
@@ -512,6 +517,25 @@ export function deferRecoveryForIndependentWork(state: RecoveryLifecycle): Recov
   };
 }
 
+/** A later independently verified specialist/idea correction discharges the
+ * original deferred case without selecting, reassessing or replaying its
+ * failed operation. Authentication belongs to the original receipt owners. */
+export function dischargePendingRecovery(
+  state: RecoveryLifecycle, discharge: RecoveryDischarge, authenticated: boolean,
+): RecoveryLifecycle {
+  if (!authenticated || state.active || state.phase !== "idle" ||
+      state.inspectionFences.length || state.attempt || state.decision ||
+      !validCase(discharge.case) || !validEvidence(discharge.correction) ||
+      !hex40.test(discharge.correctedHeadSha))
+    throw Error("Deferred resolution requires independently verified original and correction receipts");
+  const pending = state.pending.find(c => c.id === discharge.case.id);
+  if (!pending || !isDeepStrictEqual(pending, discharge.case) ||
+      state.discharged.some(entry => entry.case.id === discharge.case.id))
+    throw Error("A deferred resolution cannot replace an unrelated or discharged obligation");
+  return { ...state, pending: state.pending.filter(c => c.id !== pending.id),
+    discharged: [...state.discharged, discharge] };
+}
+
 /** The scheduler supplies a current-source eligibility predicate. Merely
  * observing a new HEAD never licenses retrying an old failed specialist. */
 export function selectPendingRecovery(
@@ -603,6 +627,7 @@ type CurrentRecoveryReader = {
   authenticateDecision?: (decision: RecoveryDecision) => Promise<boolean>;
   authenticateVerification?: (lifecycle: RecoveryLifecycle) => Promise<boolean>;
   authenticateCompletion?: (lifecycle: RecoveryLifecycle) => Promise<boolean>;
+  authenticateDischarge?: (discharge: RecoveryDischarge) => Promise<boolean>;
 };
 /** Checkpointed routing phases must agree with the single selected
  * disposition. A forged phase can never turn a fence or pause into an
@@ -632,7 +657,7 @@ function validLifecyclePhase(value: RecoveryLifecycle): boolean {
     case "resolved":
       return (
         !!decision &&
-        !["pause", "exhausted", "integrity-fence", "continue-independent"].includes(decision.action)
+        !["pause", "exhausted", "integrity-fence", "continue-independent", "diagnostic-stop"].includes(decision.action)
       );
     case "paused":
       return decision?.action === "pause";
@@ -648,12 +673,14 @@ function validLifecyclePhase(value: RecoveryLifecycle): boolean {
 export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Promise<RecoveryLifecycle> {
   let state = emptyRecoveryLifecycle();
   const value = input.current as RecoveryLifecycle;
-  const cases = [value?.active, ...(Array.isArray(value?.pending) ? value.pending : [])].filter(
+  const cases = [value?.active, ...(Array.isArray(value?.pending) ? value.pending : []),
+    ...(Array.isArray(value?.discharged) ? value.discharged.map(entry => entry?.case) : [])].filter(
     (c): c is RecoveryCase => !!c,
   );
   const structural =
     value?.schema === schema &&
     Array.isArray(value.pending) &&
+    Array.isArray(value.discharged) &&
     Array.isArray(value.inspectionFences) &&
     value.active !== undefined &&
     (value.assessorPending === undefined || typeof value.assessorPending === "boolean") &&
@@ -663,6 +690,14 @@ export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Pr
     value.decision !== undefined &&
     value.attempt !== undefined &&
     value.pending.every(validCase) &&
+    value.discharged.every(entry => entry && validCase(entry.case) &&
+      validEvidence(entry.correction) && hex40.test(entry.correctedHeadSha)) &&
+    new Set([...value.pending, ...(value.active ? [value.active] : []),
+      ...value.discharged.map(entry => entry.case)].map(c => c.id)).size ===
+      value.pending.length + (value.active ? 1 : 0) + value.discharged.length &&
+    [...value.pending, ...(value.active ? [value.active] : []),
+      ...value.discharged.map(entry => entry.case)].every((c, i, all) =>
+        all.findIndex(other => sameAnchor(other, c)) === i) &&
     (value.active === null || validCase(value.active)) &&
     value.inspectionFences.every(
       (f) =>
@@ -712,6 +747,8 @@ export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Pr
     )
       authenticated = false;
     if (value.decision && !(await input.authenticateDecision?.(value.decision))) authenticated = false;
+    for (const discharge of value.discharged)
+      if (!(await input.authenticateDischarge?.(discharge))) authenticated = false;
     if (value.phase === "verifying" && !(await input.authenticateVerification?.(value)))
       authenticated = false;
     if (value.phase === "resolved" && !(await input.authenticateCompletion?.(value))) authenticated = false;

@@ -43,7 +43,7 @@ export const reviewedReturnExits = {
   runStoryGeneration:
     "43a2198a880e0449:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B b00891ce57d109ec:V",
   recoveryNode:
-    "65ded00512a9e44c:F 1b2bfd3978e6627c:R 1e00488edc815471:G 8fc5b95682e90025:G d4adb7d663aeba40:G ae4b8b3ed4e09466:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
+    "c3ad1b226646c656:F 1b2bfd3978e6627c:R 1e00488edc815471:G 7e5396dcc912a986:U b30aaa267d235346:U 4d083c13dcc1e236:G 54818287e8077341:G 48472d6f8dc29579:F d4adb7d663aeba40:G ae4b8b3ed4e09466:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
 } as const;
 
 export const reviewedThrowExits = {
@@ -68,7 +68,7 @@ export const reviewedThrowExits = {
   blocked: "",
   runStoryGeneration:
     "360d5873992ab308 1f073098fec5b883 81328ed5be7b3037 92a11bc28aa574d0 6d650ac07ddbbb11 1ef54c75bb3f63d1 1584a040886ce2c1 0d6a3899cce3ad54 8c468a57ba68bc74 864da9fe60badee0 8fbc3551aaf81e59 362c25579a3d70fb ec97d854a242f0ab a0aa48577281543a",
-  recoveryNode: "",
+  recoveryNode: "9bade762daaba516 b3c0274d7dab621b",
 } as const;
 
 /** Status-property exits also cover concise-arrow helpers (such as the
@@ -96,7 +96,7 @@ export const reviewedStatusExits = {
   blocked: "097627765dc0b25c:B",
   runStoryGeneration:
     "4b91bbe4dcd1d136:G 28b465f0a9b56ebd:U 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F aa0aa6c25fa8d276:S",
-  recoveryNode: "2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 4b91bbe4dcd1d136:G 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F",
+  recoveryNode: "2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 088baada343b4451:U 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F",
 } as const;
 
 export const reviewedSharedRouteHelper = "662b9ad5f20965e86fd41675b9a57e7d2eb9640dfbe7460f322fd9e6a1883a1d";

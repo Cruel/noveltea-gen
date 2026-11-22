@@ -144,7 +144,9 @@ export type RecoveryDecision = RecoveryDecisionBase &
         originalRef: RecoveryEvidence;
       }
     | { action: "continue-independent"; inventoryRef: RecoveryEvidence; blockedAssignmentId: string }
-    | { action: "diagnostic-stop"; disposition: "operator-intervention" }
+    | { action: "diagnostic-stop"; disposition: "operator-intervention";
+        receipt: RecoveryEvidence; recommendation: "operator-intervention" | "inspect-existing-receipt";
+        advisoryCategory: "software" | "unclassified" | "resources" | "integrity" }
     | {
         action: "pause";
         reason:
@@ -193,12 +195,23 @@ export type RecoveryAdapterOutcome =
   | Readonly<{ status: "verified"; caseId: string; sourceHeadSha: string; assurance: RecoveryEvidence }>
   | Readonly<{ status: "stopped"; caseId: string; decision: RecoveryDecision }>;
 
+/** Historical no-write obligation discharged by a LATER, independently
+ * authenticated correction. Only links to existing Git/Review/Idea receipts
+ * are stored; original case identity is retained for restart verification. */
+export type RecoveryDischarge = Readonly<{
+  case: RecoveryCase;
+  correction: RecoveryEvidence;
+  correctedHeadSha: string;
+}>;
+
 /** Checkpoint data for C02, not a second side-effect or semantic issue ledger. */
 export type RecoveryLifecycle = Readonly<{
   schema: "noveltea-generation-recovery/v1";
   /** Oldest eligible case owns the mutation lane; other cases stay pending. */
   active: RecoveryCase | null;
   pending: readonly RecoveryCase[];
+  /** Append-only resolved pending obligations, with source-grounded later proof. */
+  discharged: readonly RecoveryDischarge[];
   /** No caseId or decision exists for an unauthenticated admission. These
    * inspection-only fences block mutation and survive resume independently. */
   inspectionFences: readonly RecoveryInspectionFence[];

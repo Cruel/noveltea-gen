@@ -6,6 +6,7 @@ import {
   emptyRecoveryLifecycle,
   finishRecovery,
   deferRecoveryForIndependentWork,
+  dischargePendingRecovery,
   selectPendingRecovery,
   resumePausedRecovery,
   recoveryAdmission,
@@ -335,6 +336,40 @@ test("C02 independently verified no-write work keeps unresolved obligation pendi
   state = selectPendingRecovery(state, (item) => item.id === second.id);
   assert.equal(state.active?.id, second.id);
   assert.equal(state.pending[0]?.id, first.id);
+});
+
+test("C02 later verified correction discharges only its original deferred case and restart authenticates the receipt", async () => {
+  const first = caseOf(await admitted());
+  const other = caseOf(await admitted({ ...origin, assignmentId: "event-2",
+    failureAnchor: { ...origin.failureAnchor, failedCheckInstanceId: "other-original-check" } }));
+  let state = admitRecovery(emptyRecoveryLifecycle(), { outcome: "admitted", case: first });
+  state = admitRecovery(state, { outcome: "admitted", case: other });
+  state = decideRecovery(state, {
+    schema: "noveltea-generation-recovery-decision/v1",
+    caseId: first.id, checkedSourceHeadSha: source, evidence: [evidence],
+    action: "continue-independent", inventoryRef: evidence, blockedAssignmentId: "event-1",
+  });
+  state = deferRecoveryForIndependentWork(state);
+  const discharge = { case: first,
+    correction: { store: "review-checkpoint" as const, ref: "c".repeat(40) },
+    correctedHeadSha: "c".repeat(40) };
+  assert.throws(() => dischargePendingRecovery(state, discharge, false), /independently verified/);
+  const resolved = dischargePendingRecovery(state, discharge, true);
+  assert.deepEqual(resolved.pending.map(c => c.id), [other.id]);
+  assert.equal(resolved.discharged[0]?.case.id, first.id);
+  assert.throws(() => dischargePendingRecovery(resolved, discharge, true), /discharged obligation/);
+  const request = { jobId: origin.jobId, jobThreadId: origin.jobThreadId,
+    graphThreadId: origin.graphThreadId, turnDigest: origin.turnDigest };
+  const proof = { current: resolved, request, checkpointRef: evidence,
+    authenticate: trusted, authenticateDischarge: async () => true };
+  const authenticated = await verifyRecoveryCheckpoint(proof);
+  assert.equal(authenticated.phase, "idle");
+  assert.equal(authenticated.pending.length, 1);
+  const forged = await verifyRecoveryCheckpoint({ ...proof,
+    authenticateDischarge: async () => false });
+  assert.equal(forged.phase, "fenced");
+  assert.equal(forged.active, null);
+  assert.equal(forged.inspectionFences.length, 1);
 });
 
 test("C02 paused author control requires authenticated resume and cannot be overwritten by a new decision", async () => {

@@ -110,6 +110,25 @@ function assertCaseBoundToJob(job: JobStartResult, evidence: UnknownRecoveryCase
   return bound;
 }
 
+/** Read the sealed ORIGINAL diagnostic admission and completed Pi protocol.
+ * This is read-only: no model/session reentry or new invocation allowance. */
+export async function inspectOriginalUnknownDiagnosis(
+  job: JobStartResult, evidence: UnknownRecoveryCase,
+): Promise<UnknownDiagnosis> {
+  const bound = assertCaseBoundToJob(job, evidence);
+  const root = protocolRoot(job, evidence.signature);
+  const admission = root + ".admission.json";
+  const stat = await lstat(admission);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000 ||
+      await readFile(admission, "utf8") !== JSON.stringify(bound) + "\n")
+    throw Error("Missing or altered original diagnostic admission.");
+  return inspectCompletedProtocolResponse({
+    receiptFile: root, sourceDigest: evidence.signature, contract,
+    sessionRoots: [sessionsRoot(job)], validate: validation(evidence),
+    parse: text => parseUnknownDiagnosis(text, evidence),
+  });
+}
+
 /** Read-only inspection never trusts a checkpointed model recommendation on
  * its own: the accepted Pi transcript and original case admission must still
  * agree. A tampered or missing receipt becomes unsafe evidence, not advice. */
@@ -118,20 +137,8 @@ export async function inspectUnknownRecoveryStatus(job: JobStartResult,
   if (!status) return null;
   if (status.phase !== "operator-intervention" || !status.recommendation) return status;
   try {
-    const evidence = status.case;
-    if (!evidence) throw Error("Missing original case.");
-    const bound = assertCaseBoundToJob(job, evidence);
-    const root = protocolRoot(job, evidence.signature);
-    const admission = root + ".admission.json";
-    const stat = await lstat(admission);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000 ||
-        await readFile(admission, "utf8") !== JSON.stringify(bound) + "\n")
-      throw Error("Missing or altered original admission.");
-    const diagnosis = await inspectCompletedProtocolResponse({
-      receiptFile: root, sourceDigest: evidence.signature, contract,
-      sessionRoots: [sessionsRoot(job)], validate: validation(evidence),
-      parse: text => parseUnknownDiagnosis(text, evidence),
-    });
+    if (!status.case) throw Error("Missing original case.");
+    const diagnosis = await inspectOriginalUnknownDiagnosis(job, status.case);
     if (diagnosis.action !== status.recommendation ||
         diagnosis.category !== status.advisoryCategory)
       throw Error("Checkpointed recommendation differs from authenticated transcript.");

@@ -122,6 +122,8 @@ export function projectRecovery(state: RecoveryState): DomainRecoveryStatus {
       ...s.input,
       phase: d?.action === "diagnostic-stop" ? "operator-intervention" :
         phase === "paused" ? "resource-limit" : phase === "fenced" ? "unsafe-evidence" : "assessment",
+      ...(d?.action === "diagnostic-stop"
+        ? { recommendation: d.recommendation, advisoryCategory: d.advisoryCategory } : {}),
     } as unknown as UnknownRecoveryStatus;
   return p;
 }
@@ -200,7 +202,8 @@ function originalMatchesCase(s: RecoverySource, c: RecoveryCase): boolean {
   }
 }
 export function assertRecoverySources(state: RecoveryState): void {
-  const cases = [state.recoveryLifecycle.active, ...state.recoveryLifecycle.pending].filter(
+  const cases = [state.recoveryLifecycle.active, ...state.recoveryLifecycle.pending,
+    ...state.recoveryLifecycle.discharged.map(entry => entry.case)].filter(
     (c): c is RecoveryCase => !!c,
   );
   const ids = new Set<string>();
@@ -431,6 +434,8 @@ export async function applyDomainRecovery(
     verifiedHead?: string;
     verifiedReceipt?: RecoveryEvidence;
     authorControl?: "paused" | "cancelled";
+    diagnosis?: { recommendation: "operator-intervention" | "inspect-existing-receipt";
+      advisoryCategory: "software" | "unclassified" | "resources" | "integrity"; receipt: RecoveryEvidence };
   } = {},
 ): Promise<RecoveryState> {
   let l = state.recoveryLifecycle ?? emptyRecoveryLifecycle();
@@ -604,7 +609,7 @@ export async function applyDomainRecovery(
             )
           : fence(l, "Author control was not checked before recovery admission");
       } else if (raw.phase === "operator-intervention") {
-        l = l.decision
+        l = l.decision && assurance.diagnosis
           ? safelyTransition(l, () => decideRecovery(l, {
               schema: "noveltea-generation-recovery-decision/v1",
               caseId: c.id,
@@ -612,8 +617,9 @@ export async function applyDomainRecovery(
               evidence: c.evidence,
               action: "diagnostic-stop",
               disposition: "operator-intervention",
+              ...assurance.diagnosis!,
             }))
-          : fence(l, "A diagnostic stop has no authenticated decision");
+          : fence(l, "A diagnostic stop has no authenticated original Pi diagnosis receipt");
       } else if (raw.phase === "fenced" || raw.phase === "unsafe-evidence") {
         l = l.decision
           ? safelyTransition(l, () =>

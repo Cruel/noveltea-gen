@@ -8,8 +8,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { JobStartResult } from "./job.js";
-import type { GenerationRequest } from "./generation.js";
-import type { RecoveryEvidence, RecoveryLifecycle, RecoveryOrigin } from "./generation-recovery-contract.js";
+import type { GenerationRequest, IdeaHistoryEntry } from "./generation.js";
+import type { GenerationInventory } from "./generation-plan.js";
+import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
+import { git as jobGit } from "./ideas.js";
+import type { RecoveryDecision, RecoveryEvidence, RecoveryLifecycle, RecoveryOrigin } from "./generation-recovery-contract.js";
 import { verifyRecoveryCheckpoint } from "./generation-recovery-lifecycle.js";
 import {
   fixtureTurnIdentity,
@@ -23,6 +26,7 @@ import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { verifyPlanHistory } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from "./adaptive-protocol.js";
+import { inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 
 const object = (x: unknown): x is Record<string, unknown> =>
@@ -129,6 +133,25 @@ export async function authenticateOriginalFailure(
   }
 }
 
+/** Restart gate for the original sealed unknown-failure diagnosis. A
+ * controller's checked disposition is never accepted as its own Pi receipt. */
+export async function authenticateDiagnosticStop(
+  job: JobStartResult, source: RecoverySource,
+  decision: Extract<RecoveryDecision, { action: "diagnostic-stop" }>,
+): Promise<boolean> {
+  if (source.channel !== "unknownRecovery" ||
+      decision.disposition !== "operator-intervention" ||
+      decision.receipt?.store !== "response-contract")
+    return false;
+  const originalCase = (source.input as { case?: UnknownRecoveryCase }).case;
+  if (!originalCase || decision.receipt.ref !== originalCase.signature) return false;
+  try {
+    const sealed = await inspectOriginalUnknownDiagnosis(job, originalCase);
+    return sealed.action === decision.recommendation &&
+      sealed.category === decision.advisoryCategory;
+  } catch { return false; }
+}
+
 export async function inspectModernGenerationRecovery(
   job: JobStartResult,
   saver: SqliteSaver,
@@ -179,7 +202,8 @@ export async function inspectModernGenerationRecovery(
       !origin.failureAnchor.ref.startsWith(threadId + ":")
     )
       return false;
-    const caseFile = [original.active, ...(original.pending ?? [])].find(
+    const caseFile = [original.active, ...(original.pending ?? []),
+      ...original.discharged.map(entry => entry.case)].find(
       (c) =>
         c?.origin?.failureAnchor?.ref === origin.failureAnchor.ref &&
         c.origin.failureAnchor.failedCheckInstanceId === origin.failureAnchor.failedCheckInstanceId,
@@ -224,8 +248,15 @@ export async function inspectModernGenerationRecovery(
         return false;
       }
     }
-    if (!request.turnPlanDigest && request.fixture)
-      return origin.turnDigest === expectedTurn && (await trustedHead(job)) === origin.sourceHeadSha;
+    if (!request.turnPlanDigest && request.fixture) {
+      if (origin.turnDigest !== expectedTurn) return false;
+      const head = await trustedHead(job);
+      if (original.discharged.some(entry => entry.case.id === caseFile.id)) {
+        try { jobGit(job, "merge-base", "--is-ancestor", origin.sourceHeadSha, head); return true; }
+        catch { return false; }
+      }
+      return head === origin.sourceHeadSha;
+    }
     return authenticateOriginalFailure(job, request, threadId, origin, evidence);
   };
   const checked = await verifyRecoveryCheckpoint({
@@ -257,7 +288,7 @@ export async function inspectModernGenerationRecovery(
         case "diagnostic":
           return source.channel === "unknownRecovery" && d.mode === "read-only" && d.attemptRef === null;
         case "diagnostic-stop":
-          return source.channel === "unknownRecovery" && d.disposition === "operator-intervention";
+          return authenticateDiagnosticStop(job, source, d);
         case "continue-independent":
           return source.channel === "operationRecovery" &&
             source.input.safeAction === "continue-independent" &&
@@ -281,6 +312,17 @@ export async function inspectModernGenerationRecovery(
     // counter. The existing specialist's immutable external protocol remains
     // inspectable without calling Pi again.
     authenticateAttempt: async () => false,
+    authenticateDischarge: async discharge => {
+      const source = sourceFor(discharge.case.id);
+      if (!inputsValid || !source) return false;
+      try {
+        return !!await inspectDeferredCorrection(job, discharge.case, source, {
+          inventory: (values.inventory as GenerationInventory | null) ?? null,
+          ideaHistory: (values.ideaHistory as IdeaHistoryEntry[] | undefined) ?? [],
+          fixture: request.fixture,
+        }, discharge);
+      } catch { return false; }
+    },
     authenticateVerification: async (l) => {
       const c = l.active;
       if (!c || !inputsValid || !sourceFor(c.id)) return false;

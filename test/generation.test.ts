@@ -26,13 +26,15 @@ import { appendGenerationEvent, syncApprovalRevisionActivity,
 import type { StudioStore } from "../web/src/persistence/store.js";
 import { openKyselyFeatureFixture } from "../web/test/support/studio-database.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
-import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
+import { createGenerationGraph, dispatchGenerationAssignment, recoveryNode } from "../src/generation.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
 import { reconcileInventory, nextExecutionItem, withCausalEventPriority } from "../src/generation-plan.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { projectRecovery } from "../src/generation-recovery-graph.js";
 import { inspectModernGenerationRecovery } from "../src/generation-recovery-inspection.js";
+import { inspectDeferredCorrection } from "../src/generation-recovery-resolution.js";
+import { recoveryAdmission } from "../src/generation-recovery-lifecycle.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
 after(() => {
@@ -266,6 +268,111 @@ function captureRecoveryIdea(f: ReturnType<typeof setup>, id: string) {
   }));
   f.cli(["ideas", "capture", "--file", file]);
 }
+
+
+
+test("C02 later native-verified foundation commit discharges an original no-write assignment without redispatch", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("c02-later-specialist-correction");
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const item = paused.inventory.items.find((work: any) => work.id === "foundation");
+  assert.equal(item?.status, "verified");
+  const correctedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const original = {
+    jobId: f.job.jobId, jobThreadId: f.job.threadId, graphThreadId: paused.threadId,
+    turnDigest: "b".repeat(64), planVersion: null, sourceHeadSha: f.initial,
+    assignmentId: "foundation", operation: "specialist-dispatch",
+    check: "specialist-dispatch.v1", checkVersion: 1,
+    failureAnchor: { store: "graph-checkpoint" as const,
+      ref: paused.threadId + ":original-no-write", failedCheckInstanceId: "original-dispatch" },
+  };
+  const admission = await recoveryAdmission({
+    origin: original, kind: "semantic", observation: "returned-failure",
+    effect: "settled-no-write", evidence: [{ store: "graph-checkpoint",
+      ref: original.failureAnchor.ref }], authenticate: async () => true,
+  });
+  assert.equal(admission.outcome, "admitted");
+  if (admission.outcome !== "admitted") throw Error("missing original fixture case");
+  const sourceRecord = { channel: "operationRecovery" as const, caseId: admission.case.id,
+    input: { operation: "specialist-dispatch", safeAction: "continue-independent",
+      evidence: { assignmentId: "foundation" } } };
+  const verified = await inspectDeferredCorrection(f.job, admission.case, sourceRecord, {
+    inventory: paused.inventory, ideaHistory: [], fixture: true,
+  });
+  assert.equal(verified?.correction.store, "review-checkpoint",
+    JSON.stringify({ item, points: (await inspectRecoveryCheckpoints(f.job)).map(p =>
+      ({ workItem: p.workItem, sha: p.commitSha, review: p.semanticReview, eligible: p.eligible })) }));
+  assert.equal(verified?.correctedHeadSha, correctedHead);
+  const withheld = await inspectDeferredCorrection(f.job, admission.case, sourceRecord, {
+    inventory: { ...paused.inventory, items: paused.inventory.items.map((work: any) =>
+      work.id === "foundation" ? { ...work, status: "blocked" } : work) },
+    ideaHistory: [], fixture: true,
+  });
+  assert.equal(withheld, null, "an unverified assignment cannot satisfy the original failure");
+  const tampered = await inspectDeferredCorrection(f.job, admission.case, sourceRecord, {
+    inventory: paused.inventory, ideaHistory: [], fixture: true,
+  }, { ...verified!, correctedHeadSha: "f".repeat(40) });
+  assert.equal(tampered, null, "restart cannot accept a forged correction SHA");
+});
+
+test("C02 production deferred idea later placement discharges its original case across graph restart", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("c02-deferred-later-idea");
+  captureRecoveryIdea(f, "later-bell");
+  f.env.NT_IDEA_FIXTURE_REJECT = "later-bell";
+  const deferred = f.cli(f.start);
+  assert.equal(deferred.status, "blocked");
+  assert.equal(deferred.recoveryInspection?.pending.length, 1);
+  const originalCase = deferred.recoveryInspection.pending[0].caseId;
+  const originalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  delete f.env.NT_IDEA_FIXTURE_REJECT;
+  const plan = f.cli(["ideas", "plan"]);
+  const task = plan.tasks.find((entry: any) => entry.id === "later-bell");
+  assert.ok(task?.candidates?.length, "later correction requires a real eligible placement target");
+  const placed = f.cli(["ideas", "place", "--fixture", "--id", "later-bell",
+    "--target", task.candidates[0].id, "--skills-source", source]);
+  assert.match(placed.status, /integrated/);
+  const correctedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.notEqual(correctedHead, originalHead);
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(deferred.checkpointPath);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: deferred.threadId } };
+    const saved = await graph.getState(cfg);
+    const step = recoveryNode("schedule", async () => {
+      throw Error("Later placement must not rerun the original failed specialist");
+    });
+    const resolved = await step(saved.values as never, cfg as never);
+    assert.equal(resolved.status, "running");
+    assert.equal(resolved.recoveryLifecycle?.pending.length, 0);
+    assert.equal(resolved.recoveryLifecycle?.discharged.length, 1);
+    assert.equal(resolved.recoveryLifecycle?.discharged[0]?.case.id, originalCase);
+    assert.equal(resolved.recoveryLifecycle?.discharged[0]?.correctedHeadSha, correctedHead);
+    await graph.updateState(cfg, resolved, "schedule");
+    const restarted = await inspectModernGenerationRecovery(f.job, saver, deferred.threadId);
+    assert.deepEqual(restarted, resolved.recoveryLifecycle,
+      "the persisted original case and later placement must both reauthenticate on restart");
+    await graph.updateState(cfg, { recoveryLifecycle: {
+      ...resolved.recoveryLifecycle!,
+      discharged: [{ ...resolved.recoveryLifecycle!.discharged[0]!,
+        correctedHeadSha: "f".repeat(40) }],
+    } }, "schedule");
+    const tampered = await inspectModernGenerationRecovery(f.job, saver, deferred.threadId);
+    assert.equal(tampered?.phase, "fenced", "an invented later correction cannot clear completion");
+    assert.equal(tampered?.active, null);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("production start assesses thrown author-update intake and restart cannot replay it", { skip: !available }, () => {
   const f = setup("recovery-author-intake");

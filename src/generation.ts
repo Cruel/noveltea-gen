@@ -5,18 +5,19 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { load, persist } from "./ideas.js";
+import { git as jobGit, load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
-import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, unknownCompletionCase,
+import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, inspectOriginalUnknownDiagnosis, unknownCompletionCase,
   unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import { assessGenerationOperation, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
-import { admitRecovery, emptyRecoveryLifecycle, inspectionFence,
-  resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
+import { admitRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
+  resumePausedRecovery } from "./generation-recovery-lifecycle.js";
+import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
   type DomainRecoveryStatus, type RecoverySource, type RecoveryState } from "./generation-recovery-graph.js";
@@ -1134,6 +1135,7 @@ export function gateRecoveryOutput(
 async function authenticateRecoveryOrigin(
   job: JobStartResult, request: GenerationRequest, graphThreadId: string,
   origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[],
+  historicalSource = false,
 ): Promise<boolean> {
   if (origin.jobId !== job.jobId || origin.graphThreadId !== graphThreadId ||
       origin.jobThreadId !== job.threadId) return false;
@@ -1143,7 +1145,12 @@ async function authenticateRecoveryOrigin(
     return origin.turnDigest === fixtureTurnIdentity(identity) &&
       evidence.length === 1 && evidence[0]?.store === "graph-checkpoint" &&
       evidence[0].ref === origin.failureAnchor.ref &&
-      await trustedHead(job) === origin.sourceHeadSha;
+      await (async () => {
+        const head = await trustedHead(job);
+        if (!historicalSource) return head === origin.sourceHeadSha;
+        try { jobGit(job, "merge-base", "--is-ancestor", origin.sourceHeadSha, head); return true; }
+        catch { return false; }
+      })();
   }
   return authenticateOriginalFailure(job, request, graphThreadId, origin, evidence);
 }
@@ -1183,33 +1190,45 @@ export function recoveryNode(
         }
       } catch { /* Preserve the original paused case on untrusted source. */ }
     }
-    // Only reselect an independently deferred case when the original
-    // assignment now has an authenticated, reviewed Git result. An idle
-    // pending case alone never permits redispatch or model invocation.
+    // An original no-write operation stays unresolved during independent
+    // work. LATER verified specialist/idea receipts discharge its same case
+    // directly; selecting it for the original assessor would repeat the
+    // blocked-HEAD check and could never succeed after correction.
     if ((node === "schedule" || node === "author_update_intake") &&
         prior.recoveryLifecycle.phase === "idle" && !prior.recoveryLifecycle.active &&
-        prior.recoveryLifecycle.pending.length && state.inventory) {
+        prior.recoveryLifecycle.pending.length) {
       try {
         const job = await openJob(state);
-        const head = await trustedHead(job);
+        const control = await readJobControl(job);
+        if (control === "paused" || control === "cancelled")
+          return { status: control, reason: "Author execution control precedes deferred resolution." };
         const graphThreadId = config.configurable?.thread_id as string | undefined;
-        const eligible = new Set<string>();
-        for (const item of prior.recoveryLifecycle.pending) {
-          if (!graphThreadId || !item.origin.assignmentId ||
-              !state.inventory.items.some(work =>
-                work.id === item.origin.assignmentId &&
-                work.status === "verified" && work.verifiedSha === head))
-            continue;
-          if (await authenticateRecoveryOrigin(job, state.request, graphThreadId,
-            item.origin, item.evidence)) eligible.add(item.id);
-        }
-        const selected = selectPendingRecovery(prior.recoveryLifecycle, item =>
-          eligible.has(item.id));
-        if (selected !== prior.recoveryLifecycle) {
-          return { recoveryLifecycle: selected, status: "running" };
-        }
+        if (!graphThreadId) throw Error("Missing original graph Thread");
+        const lifecycle = await withStoryJobLock(job, "generation-deferred-recovery-proof", async () => {
+          if (await readJobControl(job) !== "running")
+            return prior.recoveryLifecycle;
+          let next = prior.recoveryLifecycle;
+          for (const pending of prior.recoveryLifecycle.pending) {
+            const source = prior.recoverySources.find(item => item.caseId === pending.id);
+            if (!source || !await authenticateRecoveryOrigin(job, state.request, graphThreadId,
+              pending.origin, pending.evidence, true))
+              throw Error("Original deferred failure provenance cannot be authenticated");
+            const correction = await inspectDeferredCorrection(job, pending, source, {
+              inventory: state.inventory, ideaHistory: state.ideaHistory,
+              fixture: state.request.fixture,
+            });
+            if (correction) next = dischargePendingRecovery(next, correction, true);
+          }
+          return next;
+        });
+        if (lifecycle !== prior.recoveryLifecycle)
+          return { recoveryLifecycle: lifecycle, status: "running", reason: null };
       } catch {
-        // An unverified HEAD does not license selection or mutation.
+        return { status: "blocked",
+          reason: "Deferred recovery source or correction evidence cannot be authenticated.",
+          recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+            fence: inspectionFence("untrusted-receipt", {}, [], null,
+              "Inspect original failed operation and later correction receipts.") }) };
       }
     }
     if (node === "assess_recovery" && prior.recoveryLifecycle.phase === "assessing" &&
@@ -1248,7 +1267,25 @@ export function recoveryNode(
     const current = prior.recoveryLifecycle.active;
     const assurance: { originalEffect?: RecoveryEvidence;
       verifiedHead?: string; verifiedReceipt?: RecoveryEvidence;
-      authorControl?: "paused" | "cancelled" } = {};
+      authorControl?: "paused" | "cancelled";
+      diagnosis?: { recommendation: "operator-intervention" | "inspect-existing-receipt";
+        advisoryCategory: "software" | "unclassified" | "resources" | "integrity";
+        receipt: RecoveryEvidence } } = {};
+    if (current && domain.unknownRecovery?.phase === "operator-intervention") {
+      try {
+        const previous = projectRecovery(prior).unknownRecovery?.case;
+        const claimed = domain.unknownRecovery.case;
+        if (previous && claimed && isDeepStrictEqual(previous, claimed) &&
+            await authenticate(current.origin, current.evidence)) {
+          const diagnosis = await inspectOriginalUnknownDiagnosis(job, previous);
+          if (domain.unknownRecovery.recommendation === diagnosis.action &&
+              domain.unknownRecovery.advisoryCategory === diagnosis.category) {
+            assurance.diagnosis = { receipt: { store: "response-contract", ref: previous.signature },
+              recommendation: diagnosis.action, advisoryCategory: diagnosis.category };
+          }
+        }
+      } catch { /* Unproven original diagnosis is an inspection fence, never a saved stop. */ }
+    }
     if (current && domain.operationRecovery?.phase === "fenced" &&
         (rest.status === "paused" || rest.status === "cancelled") &&
         await authenticate(current.origin, current.evidence) &&
