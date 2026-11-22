@@ -22,6 +22,7 @@ import { inspectRepairLedger, recordBlueprintRepair } from "../src/repair-ledger
 import { appendGenerationEvent, syncApprovalRevisionActivity,
   listGenerationEvents } from "../web/src/lib/generation-progress.server.js";
 import type { StudioStore } from "../web/src/persistence/store.js";
+import { openKyselyFeatureFixture } from "../web/test/support/studio-database.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
 import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
@@ -448,6 +449,23 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
     }
 }
 
+function certificationActivityJournal(): { store: StudioStore; journal: Array<{
+  id: number; kind: string; stage: string | null; milestone: string | null;
+  filesJson: string; status: string | null; createdAt: string
+}> } {
+  const journal: Array<{ id: number; kind: string; stage: string | null;
+    milestone: string | null; filesJson: string; status: string | null;
+    createdAt: string }> = [];
+  const store = { persistence: { generation: { events: {
+    after: async (_owner: string, _job: string, after: number, limit: number) =>
+      journal.filter(row => row.id > after).slice(0, limit),
+    append: async (_owner: string, _job: string, row: Omit<typeof journal[number], "id">) => {
+      journal.push({ ...row, id: journal.length + 1 });
+    },
+  } } } } as unknown as StudioStore;
+  return { store, journal };
+}
+
 for (const defect of ["interactive", "knowledge", "rejected", "tampered", "specialist", "specialist-tampered", "specialist-disputed",
   "specialist-restart", "specialist-wrong-path", "specialist-receipt-tamper",
   "specialist-model-tamper"]) test("actual generation graph resumes Event-only Composition after historical " + defect + " correction (#229/#231 fixture)", { skip: !available }, async () => {
@@ -644,20 +662,72 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
         "Studio must admit only the exact stopped original graph and request");
       assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
         "admission must not invoke Pi or charge model usage");
-      const running = await webGraph.invoke({ request: blockedGraphState.request }, {
-        ...config, interruptAfter: ["author_update_intake"] });
-      assert.equal(running.status, "running", running.reason ?? undefined);
-      assert.equal(running.failures[active], undefined,
-        "the current checked source, not the prior failed writer, clears the exact failure");
-      assert.equal(running.operationRecovery.phase, "continued");
-      assert.equal(running.graphThreadId, webThreadId);
-      const persisted = await webGraph.getState(config);
-      assert.equal(persisted.values.graphThreadId, webThreadId);
-      assert.notEqual((persisted.values as any).status, "completed");
-      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead,
-        "original-Thread scheduling/intake must not duplicate any Git commit");
-      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
-        "continuing the original sealed no-write assignment cannot replay a model call");
+      // #235: exercise the production Kysely Studio queue with this SAME
+      // pinned, already blocked LangGraph Thread (not a synthetic second
+      // controller). Approved-work is a precise blocked-to-queued CAS reason.
+      const q = await openKyselyFeatureFixture("sqlite");
+      try {
+        const owner = await q.owner();
+        const repo = "certification-repo", story = "certification-story";
+        const at = "2026-11-21T12:00:00Z", later = "2026-11-21T13:00:00Z";
+        const request = JSON.stringify(blockedGraphState.request);
+        await q.records.insert("repositories", { id: repo, ownerUserId: owner,
+          provider: "github", providerRepositoryId: repo, name: "Cert/Story", createdAt: at });
+        await q.records.insert("stories", { id: story, ownerUserId: owner,
+          repositoryId: repo, directory: "story", title: "Certification",
+          sourceCommitSha: f.initial, createdAt: at });
+        assert.equal(await q.generation.jobs.register(owner, f.job.jobId,
+          story, "Approved-work recovery", f.initial, at), true);
+        await q.generation.queue.enqueue(owner, f.job.jobId, "start", "prepared",
+          at, request, webThreadId);
+        assert.equal((await q.generation.queue.claim("original-worker", 1, at))?.jobId, f.job.jobId);
+        assert.equal(await q.generation.jobs.start(owner, f.job.jobId,
+          webThreadId, request, "original-worker", at), true);
+        assert.equal(await q.generation.jobs.finish(owner, f.job.jobId,
+          webThreadId, "blocked", false, "original-worker", later), true);
+        assert.equal(await q.generation.queue.finish(f.job.jobId, "original-worker",
+          true, later), true);
+        const saved = { status: "blocked", request, thread: webThreadId };
+        await assert.rejects(q.generation.queue.reconcileAndEnqueue(owner,
+          f.job.jobId, "resume", saved, false, later),
+        /lacks verified original-Thread recovery/);
+        await assert.rejects(q.generation.queue.reconcileAndEnqueue(owner,
+          f.job.jobId, "resume", { ...saved, thread: webThreadId + ":substitute" },
+          false, later, true, "approved-work"),
+        /verified checkpoint/, "a substitute Thread cannot consume the approval");
+        await q.generation.queue.reconcileAndEnqueue(owner, f.job.jobId,
+          "resume", saved, false, later, true, "approved-work");
+        assert.equal((await q.generation.queue.record(f.job.jobId))?.resumeKind,
+          "approved-work");
+        await assert.rejects(q.generation.queue.reconcileAndEnqueue(owner,
+          f.job.jobId, "resume", saved, false, later, true, "approved-work"),
+        /verified checkpoint/, "a duplicate resume cannot enqueue another worker");
+        const claimed = await q.generation.queue.claim("recovery-worker", 1, later);
+        assert.equal((await q.generation.jobs.state(owner, f.job.jobId))?.threadId,
+          webThreadId, "the queued recovery still owns the original checked Thread");
+        assert.equal(claimed?.resumeKind, "approved-work");
+        assert.equal(await q.generation.jobs.start(owner, f.job.jobId,
+          webThreadId, request, "recovery-worker", later), true);
+        const running = await webGraph.invoke({ request: blockedGraphState.request }, {
+          ...config, interruptAfter: ["author_update_intake"] });
+        assert.equal(running.status, "running", running.reason ?? undefined);
+        assert.equal(running.failures[active], undefined,
+          "the current checked source, not the prior failed writer, clears the exact failure");
+        assert.equal(running.operationRecovery.phase, "continued");
+        assert.equal(running.graphThreadId, webThreadId);
+        const persisted = await webGraph.getState(config);
+        assert.equal(persisted.values.graphThreadId, webThreadId);
+        assert.notEqual((persisted.values as any).status, "completed");
+        assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), eventHead,
+          "original-Thread scheduling/intake must not duplicate any Git commit");
+        assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
+          "continuing the original sealed no-write assignment cannot replay a model call");
+        assert.equal(await q.generation.jobs.finish(owner, f.job.jobId,
+          webThreadId, "paused", false, "recovery-worker", later), true);
+        assert.equal(await q.generation.queue.finish(f.job.jobId,
+          "recovery-worker", true, later), true);
+        assert.equal((await q.generation.queue.record(f.job.jobId))?.phase, "finished");
+      } finally { await q.close(); }
     } finally {
       webSaver.db.close();
       writeFileSync(selectionPath, savedSelection);
@@ -763,6 +833,21 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   assert.equal(incident.successorApproval.reviewerId, "fixture");
   assert.equal(incident.original.digest, original.approvedDigest);
   assert.equal(incident.successor.digest, corrected.approvedDigest);
+  if (["interactive", "knowledge", "specialist"].includes(defect)) {
+    // #235: Actual graph-produced approval correction reaches the same trusted
+    // Studio activity boundary used for author-directed Architecture changes.
+    // Neither its model challenge nor an ordinary rerun can mint a second ID.
+    const { store, journal } = certificationActivityJournal();
+    await syncApprovalRevisionActivity(store, "certification-owner", f.job.jobId, f.job);
+    const activity = await listGenerationEvents(store, "certification-owner", f.job.jobId, 0);
+    assert.equal(activity.length, 1);
+    assert.deepEqual(activity[0]?.detail?.approvalRevision, {
+      id: incident.id, scope: "milestone", milestoneId: "milestone.disclosure",
+      cause: incident.cause, severity: incident.severity, disposition: "corrected",
+    }, "historical post-approval cause/severity must reach operator activity, not Chat");
+    await syncApprovalRevisionActivity(store, "certification-owner", f.job.jobId, f.job);
+    assert.equal(journal.length, 1, "restart must not duplicate an already corrected incident");
+  }
   const ledger = await inspectRepairLedger(f.job, incident.turnDigest);
   const repair = ledger.blueprintRepairs![0]!;
   await recordBlueprintRepair(f.job, incident.turnDigest, repair);
@@ -2092,16 +2177,7 @@ test("#233: authenticated author-directed Architecture change is visible in oper
   // Exercise the REAL Studio incident-sync boundary, including event payload
   // validation, duplicate replay and the subsequent finished activity. An
   // owner-scoped in-memory events port avoids creating unrelated auth state.
-  const journal: Array<{ id: number; kind: string; stage: string | null;
-    milestone: string | null; filesJson: string; status: string | null;
-    createdAt: string }> = [];
-  const store = { persistence: { generation: { events: {
-    after: async (_owner: string, _job: string, after: number, limit: number) =>
-      journal.filter(row => row.id > after).slice(0, limit),
-    append: async (_owner: string, _job: string, row: Omit<typeof journal[number], "id">) => {
-      journal.push({ ...row, id: journal.length + 1 });
-    },
-  } } } } as unknown as StudioStore;
+  const { store, journal } = certificationActivityJournal();
   await syncApprovalRevisionActivity(store, "author-fixture", f.job.jobId, f.job);
   const activity = await listGenerationEvents(store, "author-fixture", f.job.jobId, 0);
   assert.equal(activity.length, 2);

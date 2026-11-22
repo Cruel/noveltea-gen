@@ -21,7 +21,7 @@ import { ensureMilestoneBlueprint, inspectMilestoneBlueprint,
   readReviewedMilestoneBlueprint, type MilestoneBlueprint } from "../src/milestone-blueprint.js";
 import { startStoryJob } from "../src/job.js";
 import { withStoryJobLock } from "../src/job-lock.js";
-import { configurePiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
+import { configurePiPolicy, inspectPiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import type { Plan } from "../src/architecture.js";
@@ -622,7 +622,9 @@ The guard finds a dated register, but no evidence of a prior visit.
       await configurePiPolicy(downstreamJob, {
         version: 1,
         profile: { provider: model.provider, model: model.id },
-        limits: { modelCalls: 12 },
+        // Two source-reading turns each for the initial writer and independent
+        // reviewer. Stop after the first negative verdict, before correction.
+        limits: { modelCalls: 4 },
       });
       const downstreamRun = () =>
         withJobModelRuntime(downstreamRuntime, () =>
@@ -640,7 +642,36 @@ The guard finds a dated register, but no evidence of a prior visit.
             ),
           ),
         );
+      await assert.rejects(downstreamRun(), (error: unknown) =>
+        error instanceof PiBudgetPause && error.reason === "modelCalls");
+      const rejected = await inspectMilestoneBlueprint(downstreamJob, milestoneId);
+      assert.equal(rejected?.phase, "revision");
+      assert.equal(rejected?.rounds, 1);
+      assert.equal(rejected?.lastVerdict, "revise",
+        "the original false Interactive owner must not pass initial independent review");
+      const deniedFile = join(downstreamJob.stateDir, "milestone-blueprints", "sample.json");
+      const deniedReceipt = JSON.parse(readFileSync(deniedFile, "utf8")) as {
+        writer: { id: string }; reviewer: { id: string }; rounds: Array<{
+          draft: MilestoneBlueprint; review: { findings: unknown[] };
+        }>;
+      };
+      assert.notEqual(deniedReceipt.writer.id, deniedReceipt.reviewer.id);
+      assert.equal(deniedReceipt.rounds[0]?.draft.downstream[0]?.owner, "interactive");
+      assert.equal(deniedReceipt.rounds[0]?.review.findings.length, 1);
+      const callsBeforeRestart = downstreamCalls.length;
+      assert.equal((await inspectPiPolicy(downstreamJob)).budget.modelCalls, 4);
+      assert.equal(execFileSync("git", ["status", "--porcelain"], {
+        cwd: downstreamJob.worktreeRoot, encoding: "utf8",
+      }).trim(), "", "initial rejected plan cannot authorize a canonical Event writer");
+      await configurePiPolicy(downstreamJob, {
+        version: 1, profile: { provider: model.provider, model: model.id },
+        limits: { modelCalls: 12 },
+      });
       const downstreamApproved = await downstreamRun();
+      assert.equal(downstreamCalls.length - callsBeforeRestart, 4,
+        "resume performs one source-reading correction and one rereview, not a replacement operation");
+      assert.equal((await inspectPiPolicy(downstreamJob)).budget.modelCalls, 8,
+        "raising a budget preserves all four original model responses");
       assert.deepEqual(downstreamApproved.blueprint.downstream, draft.downstream);
       assert.deepEqual(
         (await readReviewedMilestoneBlueprint(downstreamJob, downstreamApproved.pin, assignment)).downstream,
@@ -681,6 +712,10 @@ The guard finds a dated register, but no evidence of a prior visit.
         },
       });
       assert.equal(record.reviewerHistory, undefined, "reviewer never replaced");
+      assert.equal(record.reviewer.id, deniedReceipt.reviewer.id,
+        "post-pause correction retains the initial independent reviewer");
+      assert.equal(JSON.parse(downstreamSealed).writer.id, deniedReceipt.writer.id,
+        "post-pause correction retains the original planner");
       assert.equal(
         downstreamCalls.filter(
           (call) =>
