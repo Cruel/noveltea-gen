@@ -361,7 +361,7 @@ export function formatJobReport(report: JobReport): string {
     "## Post-approval revision activity (operator inspection)", "",
     "Incidents: " + report.evidence.approvalRevisions.total,
     ...report.evidence.approvalRevisions.records.map(x => "- " + x.severity + " " + x.id +
-      " [" + x.cause + "]: " + x.original.milestoneId + " " + x.disposition +
+      " [" + x.cause + ", " + x.kind + "]: " + x.original.milestoneId + " " + x.disposition +
       " (original " + x.original.digest + "; successor " + (x.successor?.digest ?? "none") + ")"), "",
     "## Git commits", "",
     ...report.commits.map(x => "- " + x.sha + " " + x.subject), "",

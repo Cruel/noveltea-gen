@@ -1831,6 +1831,8 @@ test("#212: certified predecessor is carried across approval, corrected source g
   const candidate = blocked.causalAmendment;
   assert.equal(blocked.status, "paused", blocked.reason);
   assert.ok(candidate?.carryForward.includes("foundations"), JSON.stringify(candidate));
+  assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0,
+    "A proposed model challenge without controller approval is not a revision.");
   const carry = join(root, "causal-reviewed-carry.json");
   writeFileSync(carry, JSON.stringify(candidate.carryForward));
   const proposed = f.cli(["architecture", "propose", "--contract", f.contract,
@@ -1841,9 +1843,30 @@ test("#212: certified predecessor is carried across approval, corrected source g
     "--approval", signature.file]);
   assert.equal(authorized.plan.version, 2);
   assert.deepEqual(authorized.history.at(-1).carryForward, ["foundations"]);
+  const pending = f.cli(["approval-revisions", "inspect", "--milestone", "milestone.disclosure"]);
+  assert.equal(pending.total, 1, JSON.stringify(pending));
+  const incident = pending.records[0];
+  assert.equal(incident.kind, "architecture-causal-amendment");
+  assert.equal(incident.cause, "unclassified", "Later evidence does not prove a historical approval escape.");
+  assert.equal(incident.severity, "warning");
+  assert.equal(incident.disposition, "awaiting-review");
+  assert.deepEqual(incident.affectedWork, candidate.affected);
+  assert.equal(incident.original.version, 1);
+  assert.equal(incident.originalApproval.commitSha, architecture.inventory.headSha);
+  assert.equal(incident.successorApproval, null);
+  assert.equal(f.cli(["approval-revisions", "inspect", "--id", incident.id]).total, 1);
   const corrected = f.cli(["generate", "resume", "--pause-after", "architecture"]);
   assert.equal(corrected.status, "paused", JSON.stringify(corrected));
+  assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].disposition, "awaiting-review",
+    "A corrected canonical commit is not independent approval.");
   await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const reviewedRevision = f.cli(["approval-revisions", "inspect"]);
+  assert.equal(reviewedRevision.total, 1, JSON.stringify(reviewedRevision));
+  assert.equal(reviewedRevision.records[0].id, incident.id);
+  assert.equal(reviewedRevision.records[0].disposition, "corrected");
+  assert.equal(reviewedRevision.records[0].originalReviewDigest, incident.originalReviewDigest,
+    "Historical reviewer evidence remains immutable.");
+  assert.notEqual(reviewedRevision.records[0].successor.sourceSha, incident.original.sourceSha);
   const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
   assert.equal(resumed.status, "paused", JSON.stringify(resumed));
   assert.equal(resumed.inventory.items.find((item: any) =>
@@ -1855,6 +1878,45 @@ test("#212: certified predecessor is carried across approval, corrected source g
   assert.equal(event.phase, "committed");
   assert.equal(event.planVersion, 2);
   assert.notEqual(event.expectedHead, candidate.source.sha);
+  assert.deepEqual(f.cli(["approval-revisions", "inspect"]).records[0], reviewedRevision.records[0],
+    "Restart and dependent Event work must not rewrite a settled Architecture incident.");
+  const historicalEventPath = join(f.job.stateDir, "event-causal-history",
+    "disclosure-" + candidate.source.reportDigest + ".json");
+  const historicalEvent = readFileSync(historicalEventPath, "utf8");
+  const forged = JSON.parse(historicalEvent);
+  forged.causalDiscovery.proposedCorrection = "Invent a new ending";
+  writeFileSync(historicalEventPath, JSON.stringify(forged));
+  assert.match(f.cli(["approval-revisions", "inspect"], false),
+    /altered or stale Event causal evidence|no-write report changed/i);
+  writeFileSync(historicalEventPath, historicalEvent);
+  const signedArchitecture = join(f.job.stateDir, "architecture.json");
+  const authentic = readFileSync(signedArchitecture, "utf8");
+  const mismatched = JSON.parse(authentic);
+  mismatched.history[0].causalAmendment.source.sha = "0".repeat(40);
+  writeFileSync(signedArchitecture, JSON.stringify(mismatched));
+  assert.match(f.cli(["approval-revisions", "inspect"], false),
+    /history lacks matching controller authorization|approved plan revision|identity/i);
+  writeFileSync(signedArchitecture, authentic);
+  assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id);
+  const originalReviewFile = join(f.job.stateDir, "independent-reviews",
+    incident.original.sourceSha + ".json");
+  const sealedOriginalReview = readFileSync(originalReviewFile, "utf8");
+  const corruptedReview = JSON.parse(sealedOriginalReview);
+  corruptedReview.status = "failed";
+  writeFileSync(originalReviewFile, JSON.stringify(corruptedReview));
+  assert.match(f.cli(["approval-revisions", "inspect"], false),
+    /untrustworthy historical checkpoint|lost its historical approved checkpoint/i,
+    "A tampered original review must not silently remove a historical warning.");
+  writeFileSync(originalReviewFile, sealedOriginalReview);
+  const originalCheckpointFile = join(f.job.stateDir, "recovery-checkpoints",
+    incident.original.sourceSha + ".json");
+  const originalCheckpoint = readFileSync(originalCheckpointFile, "utf8");
+  unlinkSync(originalCheckpointFile);
+  assert.match(f.cli(["approval-revisions", "inspect"], false),
+    /lost its historical approved checkpoint/i,
+    "Deleting original approval evidence must not silently hide the warning.");
+  writeFileSync(originalCheckpointFile, originalCheckpoint);
+  assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id);
   const originalPlan = join(f.job.stateDir, "milestone-blueprint-history");
   assert.equal(existsSync(originalPlan), true);
 
@@ -1875,6 +1937,8 @@ test("#212: certified predecessor is carried across approval, corrected source g
     step.carryForward.includes("foundations")));
   f.cli(["architecture", "run", "--fixture", "--skills-source", source]);
   const reused = f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id,
+    "Later approved plan versions cannot erase the settled incident.");
   assert.equal(reused.status, "foundations-committed");
   assert.equal(reused.planVersion, 1, "The original v1 receipt remains historically authoritative.");
   assert.equal(readFileSync(foundationPath, "utf8"), foundationV1,

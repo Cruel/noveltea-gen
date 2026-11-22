@@ -370,7 +370,7 @@ export async function inspectApprovalRevisionIncidents(job: JobStartResult, filt
     else throw error;
   }
   if (files.length > 1000) throw Error("Too many Repair ledgers for bounded operator inspection.");
-  const records: Array<{ id: string; turnDigest: string; jobId: string; threadId: string;
+  const records: Array<{ kind: "milestone-blueprint"; id: string; turnDigest: string; jobId: string; threadId: string;
     original: BlueprintRepair["original"]; originalReviewDigest: string;
     eventHead: string; triggeringSourceSha: string; cause: ApprovalRevisionCause;
     severity: ApprovalRevisionSeverity; trigger: BlueprintRevisionIncident["trigger"];
@@ -411,7 +411,7 @@ export async function inspectApprovalRevisionIncidents(job: JobStartResult, filt
         if (JSON.stringify(after) !== JSON.stringify(incident.successorApproval))
           throw Error("Post-approval incident successor review proof mismatch.");
       }
-      records.push({ id: incident.id, turnDigest, jobId: job.jobId, threadId: job.threadId,
+      records.push({ kind: "milestone-blueprint", id: incident.id, turnDigest, jobId: job.jobId, threadId: job.threadId,
         original: repair.original, originalReviewDigest: repair.originalReviewDigest,
         eventHead: repair.eventHead, triggeringSourceSha: repair.sourceSha,
         cause: incident.cause, severity: incident.severity, trigger: incident.trigger,
@@ -421,9 +421,18 @@ export async function inspectApprovalRevisionIncidents(job: JobStartResult, filt
         disposition: repair.successor ? "corrected" : "awaiting-review" });
     }
   }
-  records.sort((a, b) => a.id.localeCompare(b.id));
-  return { total: records.length, offset: filter.offset ?? 0,
-    records: records.slice(filter.offset ?? 0, (filter.offset ?? 0) + (filter.limit ?? 50)) };
+  // Architecture amendments reuse the exact same admin inspection policy.
+  // Their source is the signed Architecture history and independently reviewed
+  // checkpoint lineage, not an additional mutable approval or Repair ledger.
+  const { inspectArchitectureApprovalRevisions } = await import("./architecture-approval-revisions.js");
+  const architecture = (await inspectArchitectureApprovalRevisions(job)).filter(record =>
+    (!filter.cause || record.cause === filter.cause) &&
+    (!filter.severity || record.severity === filter.severity) &&
+    (!filter.milestoneId || record.original.milestoneId === filter.milestoneId) &&
+    (!filter.id || record.id === filter.id));
+  const all = [...records, ...architecture].sort((a, b) => a.id.localeCompare(b.id));
+  return { total: all.length, offset: filter.offset ?? 0,
+    records: all.slice(filter.offset ?? 0, (filter.offset ?? 0) + (filter.limit ?? 50)) };
 }
 
 /** Only the authenticated Studio control adapter may request post-stop
