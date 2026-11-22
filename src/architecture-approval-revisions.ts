@@ -41,16 +41,16 @@ type ArchitectureHistory = {
 export interface ArchitectureApprovalRevision {
   kind: "architecture-causal-amendment" | "architecture-author-revision";
   id: string; turnDigest: string; jobId: string; threadId: string;
-  original: { milestoneId: string; digest: string; version: number; sourceSha: string };
+  original: { milestoneId: string | null; digest: string; version: number; sourceSha: string };
   originalReviewDigest: string;
   eventHead: string; triggeringSourceSha: string;
   cause: ApprovalRevisionCause; severity: ApprovalRevisionSeverity;
   trigger: { kind: "event-causal-amendment" | "author-plan-revision"; fields: string[];
     sourcePaths: string[]; reviewDigest: string };
   originalApproval: { reviewerId: string; reviewDigest: string; commitSha: string };
-  successor: { milestoneId: string; digest: string; version: number; sourceSha: string } | null;
+  successor: { milestoneId: string | null; digest: string; version: number; sourceSha: string } | null;
   successorApproval: { reviewerId: string; reviewDigest: string; commitSha: string } | null;
-  affectedWork: string[]; disposition: "corrected" | "awaiting-review";
+  affectedWork: string[]; disposition: "corrected" | "awaiting-review" | "carried-forward";
 }
 /** Recheck the original complete no-write finding even after the generation
  * graph archives it. Stale/forged copies cannot be turned into incident
@@ -161,10 +161,19 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
         JSON.stringify(later.causalAmendment ?? null) !== JSON.stringify(proposal ?? null) ||
         JSON.stringify(later.contract) !== JSON.stringify(entry.approvedContract))
       throw Error("Architecture revision lost its exact signed successor plan.");
-    const updatedCommit = later.items.find(i => i.id === "global-architecture")?.verifiedSha;
-    const approvedReview = updatedCommit && sha.test(updatedCommit)
+    const successorItem = later.items.find(i => i.id === "global-architecture");
+    const updatedCommit = successorItem?.verifiedSha;
+    // For an author-only contract revision Architecture is explicitly carried
+    // forward from the previously approved commit. That commit is an ANCESTOR
+    // of the author-signed HEAD, not a newly authored descendant of it. Do not
+    // fabricate a second independent review for the new plan version.
+    const carriedForward = authorChange && updatedCommit === originalCommit &&
+      successorItem?.status === "verified";
+    if (authorChange && updatedCommit === originalCommit && !carriedForward)
+      throw Error("Author-directed Architecture carry-forward lost its approved completion.");
+    const approvedReview = updatedCommit && sha.test(updatedCommit) && !carriedForward
       ? await reviewed(updatedCommit, later.version) : null;
-    if (updatedCommit) {
+    if (updatedCommit && !carriedForward) {
       git(job, "merge-base", "--is-ancestor", proposal?.source.sha ?? entry.verifiedHead, updatedCommit);
       if (proposal) {
         const changed = git(job, "diff", "--name-only", proposal.source.sha, updatedCommit);
@@ -182,7 +191,7 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
     result.push({
       kind: proposal ? "architecture-causal-amendment" : "architecture-author-revision", id: hash(base),
       turnDigest: originalReview.turnDigest, jobId: job.jobId, threadId: job.threadId,
-      original: { milestoneId: proposal?.source.milestoneId ?? "global-architecture",
+      original: { milestoneId: proposal?.source.milestoneId ?? null,
         digest: hash(entry.plan), version: entry.plan.version, sourceSha: originalCommit! },
       originalReviewDigest: originalReview.reviewDigest,
       eventHead: proposal?.source.sha ?? entry.verifiedHead,
@@ -195,12 +204,12 @@ export async function inspectArchitectureApprovalRevisions(job: JobStartResult):
           reviewDigest: entry.proposal },
       originalApproval: { reviewerId: originalReview.reviewerId,
         reviewDigest: originalReview.reviewDigest, commitSha: originalCommit! },
-      successor: approvedReview ? { milestoneId: proposal?.source.milestoneId ?? "global-architecture",
+      successor: approvedReview ? { milestoneId: proposal?.source.milestoneId ?? null,
         digest: hash(later), version: later.version, sourceSha: updatedCommit! } : null,
       successorApproval: approvedReview ? { reviewerId: approvedReview.reviewerId,
         reviewDigest: approvedReview.reviewDigest, commitSha: updatedCommit! } : null,
       affectedWork: proposal ? [...proposal.affected] : ["global-architecture"],
-      disposition: approvedReview ? "corrected" : "awaiting-review",
+      disposition: carriedForward ? "carried-forward" : approvedReview ? "corrected" : "awaiting-review",
     });
   }
   return result;

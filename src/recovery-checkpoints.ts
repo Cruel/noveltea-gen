@@ -10,7 +10,8 @@ import { readApprovedBlueprint } from "./architecture-blueprint.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { readPuzzleNoWrite, type PuzzleNoWriteRef } from "./puzzle-obligation.js";
-import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
+import { readEventOnlyOmission, readHistoricalEventOnlyOmission,
+  type EventOnlyRef } from "./interactive-event-only.js";
 import { checkpointAssurance, inspectCheckpointReview, readRepairCommitProof,
   type CheckpointAssurance, type SemanticReviewStatus } from "./checkpoint-assurance.js";
 
@@ -337,7 +338,8 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
 }
 /** No-write decisions remain independently proven and never become completed Git work. */
 async function verifyOmissions(job: JobStartResult,
-  entries: RecoveryCheckpoint["omittedWorkItems"], head: string): Promise<Set<string>> {
+  entries: RecoveryCheckpoint["omittedWorkItems"], head: string,
+  sourceMode: "live" | "historical" = "live"): Promise<Set<string>> {
   const omissions = new Set<string>();
   const eventOnlyPairs = new Set<string>();
   if (entries === undefined) return omissions;
@@ -357,7 +359,9 @@ async function verifyOmissions(job: JobStartResult,
     const choice = source.units?.[0], puzzle = source.units?.[1];
     if (choice?.eventOnly || puzzle?.eventOnly) {
       const seal = choice?.eventOnly;
-      const proof = await readEventOnlyOmission(job, milestone, seal);
+      const proof = await (sourceMode === "historical"
+        ? readHistoricalEventOnlyOmission(job, milestone, seal)
+        : readEventOnlyOmission(job, milestone, seal));
       const event = JSON.parse(await readFile(join(job.stateDir,
         "event-items", match[2] + ".json"), "utf8")) as {
         commitSha?: string; snapshot?: { id?: string };
@@ -444,7 +448,7 @@ async function readFinal(job: JobStartResult, sha: string): Promise<RecoveryChec
   return JSON.parse(await readFile(path, "utf8")) as RecoveryCheckpoint;
 }
 async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
-  inspectionHead?: string) {
+  inspectionHead?: string, sourceMode: "live" | "historical" = "live") {
   const parentGraphThread = await graphThread(job);
   // The exact-approved Chat Foundation is committed before the parent's first
   // generation queue admission. Its checkpoint was sealed with the original
@@ -483,7 +487,7 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
   const planned = workPlan(point.plan as Awaited<ReturnType<typeof planFor>>, point.workItem,
     point.completedWorkItems.filter(id => id.startsWith("repair-")));
   const completed = point.completedWorkItems;
-  const omissions = await verifyOmissions(job, point.omittedWorkItems, point.commitSha);
+  const omissions = await verifyOmissions(job, point.omittedWorkItems, point.commitSha, sourceMode);
   const remaining = planned.order.filter(id => !completed.includes(id) && !omissions.has(id));
   const next = remaining.find(id => (planned.dependencies[id] ?? []).every(
     dep => completed.includes(dep) || omissions.has(dep))) ?? null;
@@ -588,6 +592,23 @@ function nonBranchable(job: JobStartResult, sha: string, reason: string): Recove
     provenance: { authorApprovals: "source-bound-not-reusable", authorMessages: "source-bound-not-reusable" },
     eligible: false, reason, semanticReview: "untracked" };
 }
+/** Audit-only reconstruction of one independently sealed historical checkpoint.
+ * Unlike scheduling/fork inspection, it verifies historical omission bytes at
+ * their reviewed Git revision, not against the current working tree. NEVER
+ * use this function as authority to skip pending work or dispatch a writer. */
+export async function inspectHistoricalRecoveryCheckpoint(job: JobStartResult,
+  commitSha: string): Promise<{ workItem: string; assurance?: CheckpointAssurance }> {
+  if (!SHA.test(commitSha)) throw Error("Invalid historical recovery checkpoint identity.");
+  const point = await readFinal(job, commitSha);
+  if (point.commitSha !== commitSha || !isAncestor(job, commitSha, git(job, "rev-parse", "HEAD")) ||
+      git(job, "symbolic-ref", "--short", "HEAD") !== job.branch)
+    throw Error("Historical recovery checkpoint is outside the original job branch.");
+  await verifyFinal(job, point, commitSha, "historical");
+  // Return only the authenticated audit projection. Do not expose eligible,
+  // dependency inventory or any branchable checkpoint to a writer caller.
+  return { workItem: point.workItem, assurance: point.assurance ?? undefined };
+}
+
 export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<RecoveryInspection[]> {
   if (!existsSync(dir(job))) return [];
   const files = (await readdir(dir(job))).filter(name => /^[a-f0-9]{40}\.json$/.test(name)).sort();

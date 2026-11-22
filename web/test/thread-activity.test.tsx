@@ -31,7 +31,7 @@ test('progress history decodes legacy and provenance-bearing rows without granti
 test('operator approval warnings are durable metadata, not ordinary author Chat activity', () => {
   const revision: ProgressEvent = { ...event(7, 'working', 'review'), detail: {
     source: 'controller', approvalRevision: { id: 'a'.repeat(64),
-      milestoneId: 'milestone.disclosure', cause: 'unclassified', severity: 'warning',
+      scope: 'milestone', milestoneId: 'milestone.disclosure', cause: 'unclassified', severity: 'warning',
       disposition: 'corrected',
     },
   } }

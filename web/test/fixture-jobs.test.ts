@@ -384,7 +384,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       kind: 'verified', stage: 'foundation',
       piStatus: { summary: 'I validated everything', proposedPaths: ['events/test.md'] },
     }), /Model status cannot claim controller evidence/)
-    const approvalRevision = { id: 'a'.repeat(64), milestoneId: 'milestone.disclosure',
+    const approvalRevision = { id: 'a'.repeat(64), scope: 'milestone' as const,
+      milestoneId: 'milestone.disclosure',
       cause: 'unclassified' as const, severity: 'warning' as const,
       disposition: 'corrected' as const }
     await appendGenerationEvent(store, alice.id, jobId, { kind: 'working', stage: 'review',
@@ -398,6 +399,27 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       kind: 'working', stage: 'review', piStatus: { summary: 'I approve this source', proposedPaths: [] },
       approvalRevision,
     }), /Model status cannot claim controller evidence/)
+    const storyWideRevision = { id: 'b'.repeat(64),
+      scope: 'story' as const, milestoneId: null,
+      cause: 'author-directed' as const, severity: 'info' as const,
+      disposition: 'carried-forward' as const };
+    await appendGenerationEvent(store, alice.id, jobId, { kind: "working", stage: "review",
+      approvalRevision: storyWideRevision });
+    await appendGenerationEvent(store, alice.id, jobId, { kind: "finished", status: "completed" });
+    const storyEvents = await listGenerationEvents(store, alice.id, jobId, operatorActivity[0]!.id);
+    assert.deepEqual(storyEvents[0]?.detail?.approvalRevision, storyWideRevision);
+    assert.equal(storyEvents[0]?.milestone, null,
+      "a Story-wide Architecture incident must not masquerade as a Milestone");
+    assert.equal(storyEvents[1]?.kind, 'finished',
+      'incident publication must not prevent the terminal activity event');
+    await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'working', stage: 'review',
+      approvalRevision: { ...storyWideRevision, milestoneId: 'milestone.fake' },
+    }), /Invalid trusted post-approval activity/);
+    await assert.rejects(() => appendGenerationEvent(store, alice.id, jobId, {
+      kind: 'working', stage: 'review',
+      approvalRevision: { ...approvalRevision, scope: 'story' },
+    }), /Invalid trusted post-approval activity/);
     const pinnedRequest = JSON.parse((await store.testing.records.first<{ generationRequestJson: string }>(
       'studio_sessions', { id: jobId }))!.generationRequestJson)
     assert.equal(pinnedRequest.fixture, true)

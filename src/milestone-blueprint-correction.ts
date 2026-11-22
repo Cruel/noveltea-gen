@@ -12,10 +12,12 @@ import { PiBudgetPause, inspectPiPolicy } from "./job-pi-policy.js";
 import { trustedHead } from "./revision.js";
 import { selectedAssignment } from "./event-work.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
-import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { inspectRecoveryCheckpoints,
+  inspectHistoricalRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { readIndependentReview } from "./checkpoint-assurance.js";
 import { historicalMilestoneHandoff, reviewedMilestoneHandoff, milestoneRevisionImpact, type MilestoneEventSource } from "./milestone-obligation-handoff.js";
-import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
+import { readEventOnlyOmission, readHistoricalEventOnlyOmission,
+  type EventOnlyRef } from "./interactive-event-only.js";
 import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint, milestoneBlueprintApprovalProvenance, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, parseMilestoneBlueprint, type MilestoneBlueprint } from "./milestone-blueprint.js";
 import { classifyApprovalRevisionCause, approvalRevisionSeverity, inspectRepairLedger, recordBlueprintRepair, type BlueprintRepair } from "./repair-ledger.js";
 import { execFileSync } from "./git-read-cache.js";
@@ -271,10 +273,9 @@ export async function verifyBlueprintRevisionEvidence(job: JobStartResult,
   if (!historical || !equal(historical.pin, repair.original) ||
       historical.eventHead !== repair.eventHead)
     throw Error("Post-approval incident lost its authenticated historical Blueprint.");
-  const points = await inspectRecoveryCheckpoints(job);
-  const point = points.find(p => p.eligible && p.commitSha === repair.eventHead &&
-    p.workItem === "event-" + event.milestoneId.slice(10) &&
-    p.semanticReview === "passed" && p.assurance);
+  const point = await inspectHistoricalRecoveryCheckpoint(job, repair.eventHead);
+  if (point.workItem !== "event-" + event.milestoneId.slice(10))
+    throw Error("Post-approval incident original Event checkpoint identity changed.");
   if (!point?.assurance) throw Error("Post-approval incident lost independent Event review.");
   const review = await readIndependentReview(job, point.assurance);
   if (review.status !== "passed" || !review.result)
@@ -297,7 +298,7 @@ export async function verifyBlueprintRevisionEvidence(job: JobStartResult,
       phase?: string; nonce?: string; digest?: string };
     if (seal.phase !== "sealed" || !seal.nonce || !seal.digest || !event.snapshot?.id)
       throw Error("Post-approval incident Event-only omission is not sealed.");
-    const checked = await readEventOnlyOmission(job, event.milestoneId,
+    const checked = await readHistoricalEventOnlyOmission(job, event.milestoneId,
       { nonce: seal.nonce, digest: seal.digest }, {
         eventHead: repair.eventHead, planDigest: repair.planDigest,
         eventSnapshotId: event.snapshot.id, validatorVersion: job.validatorVersion,

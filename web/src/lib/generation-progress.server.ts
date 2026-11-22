@@ -30,8 +30,10 @@ export type ProgressDetail = {
   proposedPaths?: string[]
   reviewPhase?: ControllerReviewPhase
   /** Authenticated operator metadata, never Pi-authored Chat text. */
-  approvalRevision?: { id: string; milestoneId: string; cause: ApprovalRevisionCause;
-    severity: ApprovalRevisionSeverity; disposition: 'awaiting-review' | 'corrected' }
+  approvalRevision?: { id: string;
+    /** Story-wide Architecture changes are not Milestone IDs. */
+    scope: 'story' | 'milestone'; milestoneId: string | null; cause: ApprovalRevisionCause;
+    severity: ApprovalRevisionSeverity; disposition: 'awaiting-review' | 'corrected' | 'carried-forward' }
 }
 export type ProgressEvent = {
   id: number; kind: ProgressKind; stage: GenerationStage | null; milestone: string | null
@@ -69,10 +71,13 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
   if (input.approvalRevision && (input.kind !== 'working' || input.stage !== 'review' ||
       input.piStatus || input.reviewPhase || input.outcome || input.files?.length ||
       !/^[a-f0-9]{64}$/.test(input.approvalRevision.id) ||
-      !canonicalMilestone(input.approvalRevision.milestoneId) ||
+      !(input.approvalRevision.scope === 'story' && input.approvalRevision.milestoneId === null ||
+        input.approvalRevision.scope === 'milestone' &&
+          typeof input.approvalRevision.milestoneId === 'string' &&
+          canonicalMilestone(input.approvalRevision.milestoneId)) ||
       !['approval-escape', 'newly-discovered-constraint', 'author-directed', 'unclassified'].includes(input.approvalRevision.cause) ||
       input.approvalRevision.severity !== approvalRevisionSeverity(input.approvalRevision.cause) ||
-      !['awaiting-review', 'corrected'].includes(input.approvalRevision.disposition)))
+      !['awaiting-review', 'corrected', 'carried-forward'].includes(input.approvalRevision.disposition)))
     throw new Error('Invalid trusted post-approval activity')
   if (input.headSha && !/^[a-f0-9]{40}$/i.test(input.headSha))
     throw new Error('Invalid verified progress SHA')
@@ -169,7 +174,10 @@ export async function syncApprovalRevisionActivity(store: StudioDatabase, owner:
         const signature = record.id + ':' + record.disposition
         if (seen.has(signature)) continue
         await appendGenerationEvent(store, owner, jobId, { kind: 'working', stage: 'review', turnId,
-          approvalRevision: { id: record.id, milestoneId: record.original.milestoneId,
+          approvalRevision: { id: record.id,
+            scope: record.kind === 'architecture-author-revision' ? 'story' : 'milestone',
+            milestoneId: record.kind === 'architecture-author-revision'
+              ? null : record.original.milestoneId,
             cause: record.cause, severity: record.severity, disposition: record.disposition } })
         seen.add(signature)
       }

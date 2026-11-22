@@ -144,9 +144,10 @@ async function sessionDigest(job: JobStartResult, file: string) {
     throw Error("Event-only reviewer transcript is unsafe.");
   return sha256(await readFile(file));
 }
-export async function readEventOnlyOmission(job: JobStartResult, milestone: string,
-  ref: EventOnlyRef | undefined, expected?: { eventHead: string; planDigest: string;
-    eventSnapshotId: string; validatorVersion: string }): Promise<EventOnlyPayload> {
+async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
+  ref: EventOnlyRef | undefined, expected: { eventHead: string; planDigest: string;
+    eventSnapshotId: string; validatorVersion: string } | undefined,
+  sourceMode: "live" | "historical"): Promise<EventOnlyPayload> {
   const path = pathFor(job, milestone), stat = await lstat(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128 * 1024)
     throw Error("Invalid Event-only controller proof file.");
@@ -211,9 +212,25 @@ export async function readEventOnlyOmission(job: JobStartResult, milestone: stri
   for (const [source, hash] of Object.entries(p.sourceHashes)) {
     if (!HASH.test(hash) || !/^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(source))
       throw Error("Event-only source inventory was altered.");
-    const path = join(job.worktreeStoryRoot, source);
-    if (await realpath(path) !== path || sha256(await readFile(path)) !== hash)
-      throw Error("Event-only canonical evidence changed after review.");
+    if (sourceMode === "historical") {
+      const path = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + source;
+      const entry = git(job, "ls-tree", p.reviewHead, "--", path);
+      if (!/^100(?:644|755) blob [a-f0-9]{40}\t/.test(entry) ||
+          entry.split("\t")[1] !== path)
+        throw Error("Historical Event-only source is not a regular canonical Git blob.");
+      const env = { ...process.env };
+      for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"])
+        delete env[key];
+      const bytes = execFileSync("git", ["show", p.reviewHead + ":" + path], {
+        cwd: job.worktreeRoot, env, maxBuffer: 4 * 1024 * 1024,
+      });
+      if (sha256(bytes) !== hash)
+        throw Error("Historical Event-only source bytes differ from the original review.");
+    } else {
+      const path = join(job.worktreeStoryRoot, source);
+      if (await realpath(path) !== path || sha256(await readFile(path)) !== hash)
+        throw Error("Event-only canonical evidence changed after review.");
+    }
   }
   if (!Object.keys(p.sourceHashes).some(path => path.startsWith("milestones/")) ||
       !p.eventIds.every(id => Object.keys(p.sourceHashes).some(path => path.startsWith("events/"))))
@@ -221,6 +238,20 @@ export async function readEventOnlyOmission(job: JobStartResult, milestone: stri
   git(job, "merge-base", "--is-ancestor", p.eventHead, p.reviewHead);
   git(job, "merge-base", "--is-ancestor", p.reviewHead, "HEAD");
   return p;
+}
+/** Live authority: current source bytes must still match the reviewed
+ * omission before any pending Choice/Puzzle or Composition may be skipped. */
+export async function readEventOnlyOmission(job: JobStartResult, milestone: string,
+  ref: EventOnlyRef | undefined, expected?: { eventHead: string; planDigest: string;
+    eventSnapshotId: string; validatorVersion: string }): Promise<EventOnlyPayload> {
+  return verifyEventOnlyOmission(job, milestone, ref, expected, "live");
+}
+/** Historical audit only: authenticate the same sealed decision, reviewer,
+ * Turn and source hashes at the pinned review commit. NOT a writer grant. */
+export async function readHistoricalEventOnlyOmission(job: JobStartResult, milestone: string,
+  ref: EventOnlyRef | undefined, expected?: { eventHead: string; planDigest: string;
+    eventSnapshotId: string; validatorVersion: string }): Promise<EventOnlyPayload> {
+  return verifyEventOnlyOmission(job, milestone, ref, expected, "historical");
 }
 export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   report: NativeReport, milestone: string, eventHead: string, eventIds: string[],

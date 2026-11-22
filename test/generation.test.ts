@@ -9,6 +9,7 @@ import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { startStoryJob } from "../src/job.js";
+import { validateStoryJob } from "../src/validator.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { reviewedMilestoneHandoff } from "../src/milestone-obligation-handoff.js";
 import { inspectBlockedOriginalThreadCorrection } from "../src/original-thread-continuation.js";
@@ -18,6 +19,10 @@ import { inspectPiPolicy } from "../src/job-pi-policy.js";
 import { assertMilestoneStageClosure } from "../src/turn-fulfillment.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
 import { inspectRepairLedger, recordBlueprintRepair } from "../src/repair-ledger.js";
+import { appendGenerationEvent, syncApprovalRevisionActivity,
+  listGenerationEvents } from "../web/src/lib/generation-progress.server.js";
+import type { StudioStore } from "../web/src/persistence/store.js";
+import { readEventOnlyOmission } from "../src/interactive-event-only.js";
 import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
@@ -862,6 +867,32 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   ["interactive-choice-disclosure", "interactive-puzzle-disclosure"]);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
   if (defect === "interactive") {
+    const historicalIncident = f.cli(["approval-revisions", "inspect"]).records[0];
+    const eventSource = join(f.job.worktreeStoryRoot, "events/disclose-ledger.md");
+    writeFileSync(eventSource, readFileSync(eventSource, "utf8") +
+      "\nAn independently authorized future revision adds a new clue.\n");
+    git(f.job.worktreeRoot, "add", "story/events/disclose-ledger.md");
+    git(f.job.worktreeRoot, "commit", "-qm", "Later source revision after original omission review");
+    const laterHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(laterHead, composed);
+    assert.equal((await validateStoryJob(f.job)).status, "passed",
+      "the later committed Story edit must remain native-valid");
+    // This fixture simulates the trusted controller publication of the newly
+    // validated later revision without giving the new commit a false specialist
+    // checkpoint or independent reviewer approval.
+    const publishedHead = join(f.job.stateDir, "revisions/verified-head.json");
+    const priorHead = JSON.parse(readFileSync(publishedHead, "utf8"));
+    assert.equal(priorHead.headSha, composed);
+    writeFileSync(publishedHead, JSON.stringify({ ...priorHead, headSha: laterHead,
+      workItemId: "fixture-later-source-revision" }));
+    const omissionSeal = JSON.parse(readFileSync(join(f.job.stateDir,
+      "interactive-event-only/disclosure.json"), "utf8"));
+    await assert.rejects(readEventOnlyOmission(f.job, "milestone.disclosure", {
+      nonce: omissionSeal.nonce, digest: omissionSeal.digest,
+    }), /canonical evidence changed/,
+    "live omission admission still refuses changed Story files");
+    assert.deepEqual(f.cli(["approval-revisions", "inspect"]).records[0], historicalIncident,
+      "historical warning must remain inspectable after later committed source edits");
     unlinkSync(activeFile);
     assert.match(f.cli(["composition", "inspect", "--milestone", "milestone.disclosure"], false), /active controller-approved Blueprint/);
     assert.equal(f.cli(["event", "inspect", "--milestone", "milestone.disclosure"]).milestoneBlueprint.digest, original.approvedDigest);
@@ -1986,6 +2017,18 @@ test("#233: authenticated author-directed Architecture change is visible in oper
   await sealFixtureGenerationCheckpoint(f, "global-architecture");
   assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0,
     "an approved Architecture with no later revision is not an incident");
+  for (const key of ["NT_ARCHITECTURE_FIXTURE_CASE", "NT_EVENT_FIXTURE_CASE",
+    "NT_INTERACTIVE_FIXTURE_CASE", "NT_COMPOSITION_FIXTURE_CASE"]) f.env[key] = "event-only";
+  f.cli(["foundations", "run", "--fixture", "--skills-source", source], false);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const realized = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(realized.status, "paused", JSON.stringify(realized));
+  await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+  const authoredEventHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.notEqual(authoredEventHead, architecture.inventory.headSha,
+    "a real authored Event must follow the originally approved Architecture");
   const revisedFile = join(root, "approved-author-incident-v2.json");
   writeFileSync(revisedFile, JSON.stringify({
     ...original,
@@ -2005,8 +2048,40 @@ test("#233: authenticated author-directed Architecture change is visible in oper
   assert.equal(incident.cause, "author-directed");
   assert.equal(incident.severity, "info");
   assert.equal(incident.trigger.kind, "author-plan-revision");
+  assert.equal(incident.triggeringSourceSha, authoredEventHead);
+  assert.equal(incident.disposition, "carried-forward");
+  assert.equal(incident.original.sourceSha, architecture.inventory.headSha);
+  assert.equal(incident.successor, null,
+    "a carried-forward Architecture commit is not an independently reviewed new successor");
+  assert.equal(incident.successorApproval, null);
   assert.equal(f.cli(["approval-revisions", "inspect", "--cause", "author-directed"]).total, 1);
   assert.equal(f.cli(["approval-revisions", "inspect", "--severity", "warning"]).total, 0);
+  // Exercise the REAL Studio incident-sync boundary, including event payload
+  // validation, duplicate replay and the subsequent finished activity. An
+  // owner-scoped in-memory events port avoids creating unrelated auth state.
+  const journal: Array<{ id: number; kind: string; stage: string | null;
+    milestone: string | null; filesJson: string; status: string | null;
+    createdAt: string }> = [];
+  const store = { persistence: { generation: { events: {
+    after: async (_owner: string, _job: string, after: number, limit: number) =>
+      journal.filter(row => row.id > after).slice(0, limit),
+    append: async (_owner: string, _job: string, row: Omit<typeof journal[number], "id">) => {
+      journal.push({ ...row, id: journal.length + 1 });
+    },
+  } } } } as unknown as StudioStore;
+  await syncApprovalRevisionActivity(store, "author-fixture", f.job.jobId, f.job);
+  const activity = await listGenerationEvents(store, "author-fixture", f.job.jobId, 0);
+  assert.equal(activity.length, 1);
+  assert.deepEqual(activity[0]?.detail?.approvalRevision, {
+    id: incident.id, scope: "story", milestoneId: null,
+    cause: "author-directed", severity: "info", disposition: "carried-forward",
+  }, "Studio must represent signed Story-wide Architecture without inventing a Milestone");
+  await syncApprovalRevisionActivity(store, "author-fixture", f.job.jobId, f.job);
+  assert.equal(journal.length, 1, "restart must not append a duplicate incident");
+  await appendGenerationEvent(store, "author-fixture", f.job.jobId,
+    { kind: "finished", status: "completed" });
+  assert.equal((await listGenerationEvents(store, "author-fixture", f.job.jobId, 0))[1]?.kind,
+    "finished", "incident syncing cannot prevent generation from finishing");
 });
 
 test("#212: certified predecessor is carried across approval, corrected source gets a fresh Event and Blueprint", { skip: !available }, async () => {
