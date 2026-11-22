@@ -15,7 +15,8 @@ import { assessGenerationOperation, operationChecks, type GenerationOperationRec
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
-import { admitRecovery, emptyRecoveryLifecycle, inspectionFence } from "./generation-recovery-lifecycle.js";
+import { admitRecovery, emptyRecoveryLifecycle, inspectionFence,
+  resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
   type DomainRecoveryStatus, type RecoverySource, type RecoveryState } from "./generation-recovery-graph.js";
@@ -1112,13 +1113,46 @@ function routeAfterOperationAssessment(s: CoreState, normal: string): string {
 /** Execute existing ownership/receipt logic with local domain projections.
  * No old recovery status is checkpointed: only the C01 lifecycle and
  * phase-free original inputs are returned to LangGraph. */
-const RECOVERY_DECISION_ADMITTED = "Recovery decision checkpointed before the original adapter";
-function recoveryNode(
+/** Every node exit (including unchanged domain recovery) must uphold this gate.
+ * Typed lifecycle state, not a reason string, owns the completion decision. */
+export function gateRecoveryOutput(
+  rest: Record<string, unknown>,
+  lifecycle: RecoveryLifecycle,
+  priorStatus?: string,
+  priorReason?: string | null,
+): Record<string, unknown> {
+  if (lifecycle.phase === "fenced" || lifecycle.inspectionFences.length) {
+    rest.status = "blocked";
+    rest.reason ??= priorReason ?? "Original recovery is fenced; source-linked inspection required.";
+  } else if ((rest.status ?? priorStatus) === "completed" &&
+      (lifecycle.active || lifecycle.pending.length)) {
+    rest.status = "blocked";
+    rest.reason = "Unresolved recovery cases prevent completion.";
+  }
+  return rest;
+}
+async function authenticateRecoveryOrigin(
+  job: JobStartResult, request: GenerationRequest, graphThreadId: string,
+  origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[],
+): Promise<boolean> {
+  if (origin.jobId !== job.jobId || origin.graphThreadId !== graphThreadId ||
+      origin.jobThreadId !== job.threadId) return false;
+  if (request.fixture && request.turnPlanDigest == null) {
+    const identity = { jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
+      turnDigest: null, fixture: true, task: request.task, contract: request.contract };
+    return origin.turnDigest === fixtureTurnIdentity(identity) &&
+      evidence.length === 1 && evidence[0]?.store === "graph-checkpoint" &&
+      evidence[0].ref === origin.failureAnchor.ref &&
+      await trustedHead(job) === origin.sourceHeadSha;
+  }
+  return authenticateOriginalFailure(job, request, graphThreadId, origin, evidence);
+}
+export function recoveryNode(
   node: string,
   execute: (s: State, config: RunnableConfig) => Promise<Partial<State>>,
 ) {
   return async (state: CoreState, config: RunnableConfig): Promise<Partial<CoreState>> => {
-    const prior: RecoveryState = {
+    let prior: RecoveryState = {
       recoveryLifecycle: state.recoveryLifecycle ?? emptyRecoveryLifecycle(),
       recoverySources: state.recoverySources ?? [],
     };
@@ -1129,11 +1163,60 @@ function recoveryNode(
           fence: inspectionFence("untrusted-receipt", {}, [], null,
             "Restore original recovery source receipts; never replay an uncertain writer.") }) };
     }
-    if (node === "assess_recovery" && prior.recoveryLifecycle.phase === "assessing" &&
+    // A genuine author pause is not an integrity failure and cannot be
+    // silently cleared. Resuming the same case requires current author control
+    // and the same original authenticated source/Thread; cancellation is final.
+    if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
+        prior.recoveryLifecycle.decision?.action === "pause" &&
+        prior.recoveryLifecycle.decision.reason === "author-pause" &&
         prior.recoveryLifecycle.active) {
       try {
-        return { recoveryLifecycle: decideExistingRecovery(prior), status: "running",
-          reason: RECOVERY_DECISION_ADMITTED };
+        const job = await openJob(state);
+        const graphThreadId = config.configurable?.thread_id as string | undefined;
+        const active = prior.recoveryLifecycle.active;
+        if (graphThreadId && await readJobControl(job) === "running" &&
+            await trustedHead(job) === active.origin.sourceHeadSha &&
+            await authenticateRecoveryOrigin(job, state.request, graphThreadId,
+              active.origin, active.evidence)) {
+          return { status: "running", reason: null,
+            recoveryLifecycle: resumePausedRecovery(prior.recoveryLifecycle, true) };
+        }
+      } catch { /* Preserve the original paused case on untrusted source. */ }
+    }
+    // Only reselect an independently deferred case when the original
+    // assignment now has an authenticated, reviewed Git result. An idle
+    // pending case alone never permits redispatch or model invocation.
+    if ((node === "schedule" || node === "author_update_intake") &&
+        prior.recoveryLifecycle.phase === "idle" && !prior.recoveryLifecycle.active &&
+        prior.recoveryLifecycle.pending.length && state.inventory) {
+      try {
+        const job = await openJob(state);
+        const head = await trustedHead(job);
+        const graphThreadId = config.configurable?.thread_id as string | undefined;
+        const eligible = new Set<string>();
+        for (const item of prior.recoveryLifecycle.pending) {
+          if (!graphThreadId || !item.origin.assignmentId ||
+              !state.inventory.items.some(work =>
+                work.id === item.origin.assignmentId &&
+                work.status === "verified" && work.verifiedSha === head))
+            continue;
+          if (await authenticateRecoveryOrigin(job, state.request, graphThreadId,
+            item.origin, item.evidence)) eligible.add(item.id);
+        }
+        const selected = selectPendingRecovery(prior.recoveryLifecycle, item =>
+          eligible.has(item.id));
+        if (selected !== prior.recoveryLifecycle) {
+          return { recoveryLifecycle: selected, status: "running" };
+        }
+      } catch {
+        // An unverified HEAD does not license selection or mutation.
+      }
+    }
+    if (node === "assess_recovery" && prior.recoveryLifecycle.phase === "assessing" &&
+        prior.recoveryLifecycle.active && !prior.recoveryLifecycle.decision) {
+      try {
+        return { recoveryLifecycle: { ...decideExistingRecovery(prior), assessorPending: true },
+          status: "running" };
       } catch {
         return { status: "blocked", reason: "The original failure cannot admit a recovery decision.",
           recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
@@ -1147,29 +1230,30 @@ function recoveryNode(
     const outcome = await execute(local, config);
     const { domain, rest } = extractDomainPatch(projectRecovery(prior), outcome as Record<string, unknown>);
     if (node === "assess_recovery" && !Object.hasOwn(rest, "reason")) rest.reason = null;
-    if (!Object.keys(domain).length) return rest as Partial<CoreState>;
+    if (!Object.keys(domain).length) {
+      const next = node === "assess_recovery" && prior.recoveryLifecycle.assessorPending
+        ? { ...prior.recoveryLifecycle, assessorPending: false } : prior.recoveryLifecycle;
+      return { ...gateRecoveryOutput(rest, next, state.status,
+        state.causalAmendment ? "Original source-bound causal amendment receipt requires validation." :
+          state.reason), recoveryLifecycle: next } as Partial<CoreState>;
+    }
     const job = await openJob(local);
     const graphThreadId = config.configurable?.thread_id as string | undefined ??
       local.graphThreadId ?? job.threadId + ":generation";
     const identity = { jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
       turnDigest: local.request.turnPlanDigest ?? null,
       fixture: local.request.fixture, task: local.request.task, contract: local.request.contract };
-    const authenticate = async (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) => {
-      if (origin.jobId !== job.jobId || origin.graphThreadId !== graphThreadId ||
-          origin.jobThreadId !== job.threadId) return false;
-      if (local.request.fixture && local.request.turnPlanDigest == null) {
-        // Fixtures have no external Pi or approved Turn; original *fixture*
-        // request and current immutable Git source still must match.
-        return origin.turnDigest === fixtureTurnIdentity(identity) &&
-          evidence.length === 1 && evidence[0]?.store === "graph-checkpoint" &&
-          evidence[0].ref === origin.failureAnchor.ref &&
-          await trustedHead(job) === origin.sourceHeadSha;
-      }
-      return authenticateOriginalFailure(job, local.request, graphThreadId, origin, evidence);
-    };
+    const authenticate = (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) =>
+      authenticateRecoveryOrigin(job, local.request, graphThreadId, origin, evidence);
     const current = prior.recoveryLifecycle.active;
     const assurance: { originalEffect?: RecoveryEvidence;
-      verifiedHead?: string; verifiedReceipt?: RecoveryEvidence } = {};
+      verifiedHead?: string; verifiedReceipt?: RecoveryEvidence;
+      authorControl?: "paused" | "cancelled" } = {};
+    if (current && domain.operationRecovery?.phase === "fenced" &&
+        (rest.status === "paused" || rest.status === "cancelled") &&
+        await authenticate(current.origin, current.evidence) &&
+        await readJobControl(job) === rest.status)
+      assurance.authorControl = rest.status;
     // Existing assessor performs the *original* receipt check under the job
     // lock. Read-only reconciliation is not new writer/admission authority.
     if (current && (node === "assess_recovery" || node === "schedule") &&
@@ -1201,17 +1285,11 @@ function recoveryNode(
     }
     const mapped = await applyDomainRecovery(prior, domain, config as never,
       identity, authenticate, assurance);
-    // An unresolved/fenced case cannot become completion from a copied status.
-    if (mapped.recoveryLifecycle.phase === "fenced" ||
-        mapped.recoveryLifecycle.inspectionFences.length) {
-      rest.status = "blocked";
-      rest.reason ??= "Original recovery is fenced; source-linked inspection required.";
-    } else if (rest.status === "completed" &&
-        (mapped.recoveryLifecycle.active || mapped.recoveryLifecycle.pending.length)) {
-      rest.status = "blocked";
-      rest.reason = "Unresolved recovery cases prevent completion.";
-    }
-    return { ...rest, recoveryLifecycle: mapped.recoveryLifecycle,
+    const lifecycle = node === "assess_recovery" && prior.recoveryLifecycle.assessorPending
+      ? { ...mapped.recoveryLifecycle, assessorPending: false } : mapped.recoveryLifecycle;
+    return { ...gateRecoveryOutput(rest, lifecycle, state.status,
+      state.causalAmendment ? "Original source-bound causal amendment receipt requires validation." :
+        state.reason), recoveryLifecycle: lifecycle,
       recoverySources: mapped.recoverySources } as Partial<CoreState>;
   };
 }
@@ -1258,8 +1336,16 @@ export function createGenerationGraph(
           op.operation === "specialist-dispatch" && s.active &&
             (s.active.stage === "foundation" || s.active.stage === "foundations") &&
             !s.result ?
-          { status: "running" as const,
-            operationRecovery: { ...op, phase: "assessment" as const } } :
+          await (async () => {
+            const job = await openJob(s);
+            // A specialist may have committed before publishing its parent
+            // checkpoint. Reconcile that same original receipt before any
+            // further scheduling; never manufacture a fresh writer lease.
+            const settled = await inspectOriginalSpecialistCommitForResume(s, job)
+              .catch(() => false);
+            return { status: "running" as const,
+              operationRecovery: { ...op, phase: settled ? "continued" as const : "assessment" as const } };
+          })() :
           { status: "blocked" as const, reason: op.reason + " " + op.nextAction };
       }
       if (s.operationRecovery?.phase === "assessment") return { status: "running" as const };
@@ -1639,6 +1725,15 @@ export function createGenerationGraph(
               }
               return s.reason === REPAIR_STEERING_BOUNDARY ? { reason: null } : {};
             }
+            // A Foundation may have committed its exact authored bytes
+            // before publishing the final receipt. The ORIGINAL Foundation
+            // worker can reauthenticate and finalize that commit; generic
+            // trustedHead deliberately refuses incomplete receipts, so do
+            // not misclassify this narrow crash window as an untrusted source
+            // or start a replacement writer.
+            if (s.active.stage === "foundation" &&
+                await inspectOriginalSpecialistCommitForResume(s, job))
+              return { status: "running" as const, reason: null };
             try { clean(job); await trustedHead(job); }
             catch (error) {
               return operationFailure(s, job, "specialist-dispatch", error,
@@ -2197,7 +2292,7 @@ export function createGenerationGraph(
     .addConditionalEdges("schedule", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("assess_recovery", s => s.status !== "running" ? END :
-      s.reason === RECOVERY_DECISION_ADMITTED ? "assess_recovery" : "author_update_intake",
+      s.recoveryLifecycle.assessorPending ? "assess_recovery" : "author_update_intake",
       [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :

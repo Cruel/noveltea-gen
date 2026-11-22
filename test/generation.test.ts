@@ -31,6 +31,7 @@ import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adapt
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
 import { reconcileInventory, nextExecutionItem, withCausalEventPriority } from "../src/generation-plan.js";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { projectRecovery } from "../src/generation-recovery-graph.js";
 import { inspectModernGenerationRecovery } from "../src/generation-recovery-inspection.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
@@ -42,6 +43,14 @@ after(() => {
 });
 const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
 const available = existsSync(join(source, "src/cli.ts"));
+/** Read the current graph's nonpersisted domain projection for assertions.
+ * CLI inspect projects it for display, but LangGraph never stores old channels. */
+function currentOperationRecovery(output: any) {
+  if (output.operationRecovery !== undefined) return output.operationRecovery;
+  if (!output.recoveryLifecycle || !output.recoverySources) return null;
+  return projectRecovery({ recoveryLifecycle: output.recoveryLifecycle,
+    recoverySources: output.recoverySources }).operationRecovery;
+}
 function git(cwd: string, ...args: string[]) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
@@ -193,7 +202,7 @@ test("later canonical development triggers a bounded persisted idea reassessment
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
 
-test("rejected placement remains dormant, blocks binding completion, and is not blindly retried", { skip: !available }, () => {
+test("rejected placement remains dormant, blocks binding completion, and is not blindly retried", { skip: !available }, async () => {
   const f = setup("ideas-rejected");
   f.env.NT_IDEA_FIXTURE_REJECT = "rejected-concept";
   const file = join(root, "ideas-rejected.json");
@@ -212,15 +221,27 @@ test("rejected placement remains dormant, blocks binding completion, and is not 
   assert.equal(result.status, "blocked", JSON.stringify(result));
   assert.ok(result.ideaHistory.some((h: any) => h.id === "rejected-concept" &&
     h.status === "deferred"));
-  assert.equal(result.operationRecovery?.operation, "idea-integration");
-  assert.equal(result.operationRecovery?.phase, "continued");
-  assert.equal(result.operationRecovery?.outcome, "returned-failure");
-  assert.equal(result.operationRecovery?.check, "idea-dispatch.v1");
-  assert.equal(result.operationRecovery?.checkVersion, 1);
-  assert.equal(result.operationRecovery?.safeAction, "continue-independent");
-  assert.equal(result.operationRecovery?.source?.jobId, "single");
-  assert.equal(result.operationRecovery?.evidence?.ideaId, "rejected-concept");
-  assert.equal(result.operationRecovery?.evidence?.resultStatus, "deferred");
+  const deferred = result.recoveryInspection;
+  assert.equal(deferred?.phase, "idle");
+  assert.equal(deferred?.active, null);
+  assert.equal(deferred?.pending.length, 1,
+    "the original unresolved idea must remain queued rather than being marked verified");
+  assert.equal(deferred.pending[0].operation, "idea-integration");
+  const saver = SqliteSaver.fromConnString(result.checkpointPath);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const state = (await graph.getState({ configurable: { thread_id: result.threadId } })).values;
+    const source = state.recoverySources.find((item: any) => item.caseId === deferred.pending[0].caseId);
+    assert.ok(source, "the pending case retains its original evidence");
+    assert.equal(source.input.operation, "idea-integration");
+    assert.equal(source.input.outcome, "returned-failure");
+    assert.equal(source.input.check, "idea-dispatch.v1");
+    assert.equal(source.input.checkVersion, 1);
+    assert.equal(source.input.safeAction, "continue-independent");
+    assert.equal(source.input.source.jobId, "single");
+    assert.equal(source.input.evidence.ideaId, "rejected-concept");
+    assert.equal(source.input.evidence.resultStatus, "deferred");
+  } finally { saver.db.close() }
   const inbox = JSON.parse(readFileSync(join(f.job.worktreeRoot, ".story-inbox/ideas/rejected-concept.yaml"), "utf8"));
   assert.equal(inbox.lifecycle.status, "dormant");
   assert.deepEqual(inbox.lifecycle.placements, []);
@@ -1258,6 +1279,59 @@ test("production generation graph refuses another owner's recovery without advan
   assert.deepEqual(next.completedStages, []);
 });
 
+test("C02 production graph preserves authenticated author controls and same-case resumption", {
+  skip: !available,
+}, async () => {
+  for (const control of ["paused", "cancelled"] as const) {
+    const f = setup("c02-original-author-" + control);
+    const initial = f.cli([...f.start, "--pause-after", "foundation"]);
+    assert.equal(initial.status, "paused");
+    const foundation = initial.inventory.items.find((item: { id: string }) => item.id === "foundation");
+    assert.ok(foundation);
+    const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const prior = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, f.env);
+    const saver = SqliteSaver.fromConnString(initial.checkpointPath);
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const cfg = { configurable: { thread_id: initial.threadId } };
+      await graph.updateState(cfg, {
+        status: "running", active: foundation,
+        result: { status: "in-progress", headSha: head }, pauseAfter: null,
+      }, "independent_assignment_review");
+      const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.phase, "assessing");
+      const originalCase = admitted.recoveryLifecycle.active?.id;
+      assert.ok(originalCase);
+      await setJobControl(f.job, control);
+      const stopped = await graph.invoke(null, cfg);
+      assert.equal(stopped.status, control);
+      assert.equal(stopped.recoveryLifecycle.phase, "paused");
+      assert.equal(stopped.recoveryLifecycle.decision?.action, "pause");
+      assert.equal(stopped.recoveryLifecycle.decision?.reason,
+        control === "cancelled" ? "cancelled" : "author-pause");
+      assert.equal(stopped.recoveryLifecycle.active?.id, originalCase);
+      assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 0,
+        "an authenticated author control is never source-integrity corruption");
+      if (control === "paused") {
+        await setJobControl(f.job, "running");
+        const resumed = await graph.invoke({ request: stopped.request },
+          { ...cfg, interruptBefore: ["assess_recovery"] });
+        assert.equal(resumed.status, "running");
+        assert.equal(resumed.recoveryLifecycle.phase, "assessing");
+        assert.equal(resumed.recoveryLifecycle.active?.id, originalCase);
+      }
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    } finally {
+      saver.db.close();
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("#225 unaccepted specialist result reaches assessment and remains fenced across inspect/resume", {
   skip: !available,
 }, async () => {
@@ -1290,18 +1364,18 @@ test("#225 unaccepted specialist result reaches assessment and remains fenced ac
     }
   }
   assert.equal(result.status, "blocked");
-  assert.equal(result.operationRecovery?.operation, "specialist-result");
-  assert.equal(result.operationRecovery?.outcome, "returned-failure");
-  assert.equal(result.operationRecovery?.phase, "fenced");
-  assert.equal(result.operationRecovery?.evidence.assignmentId, "foundation");
+  assert.equal(currentOperationRecovery(result)?.operation, "specialist-result");
+  assert.equal(currentOperationRecovery(result)?.outcome, "returned-failure");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
+  assert.equal(currentOperationRecovery(result)?.evidence.assignmentId, "foundation");
   assert.equal(result.completedStages.length, paused.completedStages.length,
     "an unaccepted worker result must not become a verified checkpoint");
   const inspected = f.cli(["generate", "inspect"]);
-  assert.deepEqual(inspected.operationRecovery, result.operationRecovery);
+  assert.deepEqual(inspected.operationRecovery, currentOperationRecovery(result));
   for (let attempt = 0; attempt < 2; attempt++) {
     const resumed = f.cli(["generate", "resume"]);
     assert.equal(resumed.status, "blocked");
-    assert.deepEqual(resumed.operationRecovery, result.operationRecovery);
+    assert.deepEqual(resumed.operationRecovery, currentOperationRecovery(result));
   }
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
@@ -1335,9 +1409,9 @@ test("#225 thrown independent reviewer fails closed without another specialist o
     result = await graph.invoke(null, config);
     assert.equal(reviewerCalls, 1, "the assessment must not retry a read-only review without an original receipt");
     assert.equal(result.status, "blocked");
-    assert.equal(result.operationRecovery?.operation, "independent-review");
-    assert.equal(result.operationRecovery?.phase, "fenced");
-    assert.match(result.operationRecovery?.reason ?? "", /reviewer transport failure/);
+    assert.equal(currentOperationRecovery(result)?.operation, "independent-review");
+    assert.equal(currentOperationRecovery(result)?.phase, "fenced");
+    assert.match(currentOperationRecovery(result)?.reason ?? "", /reviewer transport failure/);
     const again = await graph.invoke(result, config);
     assert.equal(again.status, "blocked");
     assert.equal(reviewerCalls, 1, "repeated invocation may not start a new reviewer");
@@ -1348,7 +1422,7 @@ test("#225 thrown independent reviewer fails closed without another specialist o
       else process.env[key] = value;
     }
   }
-  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
   assert.equal(f.cli(["generate", "resume"]).status, "blocked");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
@@ -1383,13 +1457,13 @@ test("#225 dirty in-flight specialist cannot be redispatched on resume", {
     }
   }
   assert.equal(result.status, "blocked");
-  assert.equal(result.operationRecovery?.operation, "specialist-dispatch");
-  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(currentOperationRecovery(result)?.operation, "specialist-dispatch");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
   assert.equal(readFileSync(draft, "utf8"), "Preserve this ambiguous writer effect.");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   unlinkSync(draft);
-  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
-  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, currentOperationRecovery(result));
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
@@ -1423,11 +1497,11 @@ test("#225 untrusted completion preflight is assessed, not treated as complete o
     }
   }
   assert.equal(result.status, "blocked");
-  assert.equal(result.operationRecovery?.operation, "completion-verification");
-  assert.equal(result.operationRecovery?.phase, "fenced");
+  assert.equal(currentOperationRecovery(result)?.operation, "completion-verification");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
   assert.equal(result.completedStages.length, paused.completedStages.length);
-  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
-  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, currentOperationRecovery(result));
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
@@ -1459,11 +1533,11 @@ test("#225 failed dependency amendment is assessed without dispatching another w
     }
   }
   assert.equal(result.status, "blocked");
-  assert.equal(result.operationRecovery?.operation, "dependency-amendment");
-  assert.equal(result.operationRecovery?.phase, "fenced");
-  assert.equal(result.operationRecovery?.evidence.assignmentId, active.id);
-  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, result.operationRecovery);
-  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, result.operationRecovery);
+  assert.equal(currentOperationRecovery(result)?.operation, "dependency-amendment");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
+  assert.equal(currentOperationRecovery(result)?.evidence.assignmentId, active.id);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, currentOperationRecovery(result));
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
@@ -2214,7 +2288,10 @@ for (const stage of ["foundations", "event"] as const) test(
       "a signed plan-only revision must not invent a new Architecture Git commit");
     // The actual graph-owned verifier must capture the original result and
     // failure baseline itself. No test-originated assessment is injected.
-    const failed = await graph.invoke(null, config);
+    const checkpointedFailure = await graph.invoke(null, config);
+    const failed = { ...checkpointedFailure,
+      ...projectRecovery({ recoveryLifecycle: checkpointedFailure.recoveryLifecycle,
+        recoverySources: checkpointedFailure.recoverySources }) };
     assert.equal(failed.status, "blocked", failed.reason);
     assert.equal(failed.operationRecovery?.operation, "commit-verification");
     assert.equal(failed.operationRecovery?.phase, "fenced");
@@ -2267,9 +2344,13 @@ for (const stage of ["foundations", "event"] as const) test(
     await refuse({ ...failed, completedStages: [...failed.completedStages,
       { stage, milestone: failed.active.milestone, headSha: originalHead }] },
       "Already acknowledged work cannot be counted twice");
-    await refuse({ ...failed, operationRecovery: { ...failed.operationRecovery,
-      evidence: { ...failed.operationRecovery.evidence, verifier: {
-        ...failed.operationRecovery.evidence.verifier, checkpointDigest: "f".repeat(64) } } } },
+    await refuse({ ...failed, recoverySources: failed.recoverySources.map((source: any) =>
+      source.caseId !== failed.recoveryLifecycle.active?.id ? source : {
+        ...source, input: { ...source.input,
+          evidence: { ...source.input.evidence,
+            verifier: { ...source.input.evidence.verifier, checkpointDigest: "f".repeat(64) } },
+        },
+      }) },
     "Tampered checkpoint digest cannot grant recovery");
     const reviewFile = join(f.job.stateDir, "independent-reviews", originalHead + ".json");
     const savedReview = readFileSync(reviewFile, "utf8");
@@ -2355,7 +2436,7 @@ for (const stage of ["foundations", "event"] as const) test(
     const server = createGenerationGraph(saver, "server");
     const restored = await server.invoke({ request: failed.request }, {
       ...config, interruptAfter: ["verify_committed_work"] });
-    assert.equal(restored.operationRecovery, null, restored.reason ?? undefined);
+    assert.equal(currentOperationRecovery(restored), null, restored.reason ?? undefined);
     assert.equal(restored.completedStages.filter((entry: any) =>
       entry.stage === stage && entry.headSha === originalHead).length, 1);
     assert.equal(restored.result, null);
@@ -2484,74 +2565,9 @@ test("#212: certified predecessor is carried across approval, corrected source g
     originalFoundationsAssignment, originalFoundationsResult,
     { ...originalFoundationsProof, planVersion: 2 }, 1);
   assert.equal(forgedFoundations.eligible, false, "the original plan version cannot be reassigned");
-  // Reopen the actual CLI graph's verified state as a blocked web graph,
-  // retaining its historical Foundations result instead of replaying the
-  // writer. The v2 Architecture's new Git HEAD is signed carry-forward, not
-  // an excuse to discard the v1 Foundations receipt.
-  const sourceSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
-  let previous: any;
-  try {
-    previous = (await createGenerationGraph(sourceSaver, "cli").getState({
-      configurable: { thread_id: f.job.threadId + ":generation" },
-    })).values;
-  } finally { sourceSaver.db.close(); }
-  const foundationsItem = previous.inventory?.items?.find((item: any) =>
-    item.id === "foundations");
-  assert.ok(foundationsItem);
-  const signedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
-  const blockedOriginalVerifier = {
-    ...previous, graphThreadId: originalWebThread,
-    request: { ...previous.request, turnPlanDigest: originalTurn.digest },
-    status: "blocked", reason: originalVerifierAssessment.reason,
-    planVersion: 1, operationRecovery: { ...originalVerifierAssessment, phase: "fenced" },
-    active: { ...foundationsItem, status: "pending" }, result: originalFoundationsResult,
-    completedStages: previous.completedStages.filter((stage: any) =>
-      stage.stage !== "foundations" && stage.stage !== "event"),
-    inventory: { ...previous.inventory, items: previous.inventory.items.map((item: any) =>
-      item.id === "foundations"
-        ? { ...item, status: "pending", verifiedSha: undefined } : item) },
-    pauseAfter: "foundations",
-  };
-  const envKeys = ["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR"];
-  const priorEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
-  for (const key of envKeys) if (f.env[key]) process.env[key] = f.env[key];
-  const selectionPath = join(f.job.stateDir, "orchestrator-selection.json");
-  const oldSelection = readFileSync(selectionPath, "utf8");
-  writeFileSync(selectionPath, JSON.stringify({ ...JSON.parse(oldSelection),
-    graphThreadId: originalWebThread, turnPlanDigest: originalTurn.digest }));
-  const webSaver = SqliteSaver.fromConnString(join(f.job.stateDir, "web-generation.sqlite"));
-  try {
-    const graph = createGenerationGraph(webSaver, "server");
-    const config = { configurable: { thread_id: originalWebThread } };
-    await graph.updateState(config, blockedOriginalVerifier, "completion_decision");
-    assert.equal((await graph.getState(config)).next.length, 0);
-    const eligibility = await inspectBlockedOriginalThreadCorrection(f.job,
-      originalWebThread, blockedOriginalVerifier);
-    assert.equal(eligibility.eligible, true, eligibility.reason);
-    const beforeCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
-    assert.equal(await safeToResume(f.job, originalWebThread,
-      JSON.stringify(blockedOriginalVerifier.request), false, "blocked"), "resume");
-    const restored = await graph.invoke({ request: blockedOriginalVerifier.request }, {
-      ...config, interruptAfter: ["verify_committed_work"] });
-    assert.equal(restored.status, "paused", restored.reason ?? undefined);
-    assert.equal(restored.operationRecovery, null);
-    assert.equal(restored.active, null);
-    assert.equal(restored.completedStages.filter((stage: any) =>
-      stage.stage === "foundations").length, 1,
-      "only the original Foundations result can be acknowledged");
-    assert.equal(restored.completedStages.find((stage: any) =>
-      stage.stage === "foundations")?.headSha, originalFoundationsHead);
-    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls);
-    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), signedHead,
-      "a verifier retry must not rewrite the new Architecture or old Foundations");
-  } finally {
-    webSaver.db.close();
-    writeFileSync(selectionPath, oldSelection);
-    for (const key of envKeys) {
-      if (priorEnv[key] === undefined) delete process.env[key];
-      else process.env[key] = priorEnv[key];
-    }
-  }
+  // Current-format verifier recovery and signed carry-forward are certified
+  // through the actual graph in #237 above. Do not assemble a blocked graph
+  // by injecting the retired operationRecovery checkpoint channel here.
   const resumed = f.cli(["generate", "resume", "--pause-after", "event"]);
   assert.equal(resumed.status, "paused", JSON.stringify(resumed));
   assert.equal(resumed.inventory.items.find((item: any) =>

@@ -5,7 +5,9 @@ import { deployedVerifierFixes } from '../../../src/known-verifier-fix'
 import { readJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { trustedHead } from '../../../src/revision'
-import { verifyAdaptivePickupProof, type AdaptiveRecovery } from '../../../src/adaptive-protocol'
+import { verifyAdaptivePickupProof } from '../../../src/adaptive-protocol'
+import { assertRecoverySources, projectRecovery, type RecoverySource } from '../../../src/generation-recovery-graph'
+import type { RecoveryLifecycle } from '../../../src/generation-recovery-contract'
 import { readTurnEvidence } from '../../../src/turn-plan-evidence'
 import { sameGenerationRequest, assertServerClaimPermitted } from '../../../src/generation-owner'
 import type { GenerationRequest } from '../../../src/generation'
@@ -32,14 +34,22 @@ export async function verifyKnownFixProof(job: JobStartResult, request: Generati
   try {
     const saved = await graph.getState({ configurable: { thread_id: stop.threadId } })
     const state = saved.values as {
-      status?: string; request?: typeof request; recovery?: AdaptiveRecovery | null;
+      status?: string; request?: typeof request;
+      recoveryLifecycle?: RecoveryLifecycle; recoverySources?: readonly RecoverySource[];
       active?: unknown; result?: unknown; ideaTask?: unknown; ideaResult?: unknown;
       planVersion?: number;
       orchestratorOrder?: string[]; orchestratorPlanningDigest?: string;
       orchestratorSnapshotId?: string; graphThreadId?: string;
     }
-    const r = state.recovery
-    if (saved.next.length || state.status !== 'blocked' || state.active || state.result ||
+    const lifecycle = state.recoveryLifecycle
+    const sources = state.recoverySources ?? []
+    if (!lifecycle) throw Error('Known-fix pickup has no current-format recovery case')
+    assertRecoverySources({ recoveryLifecycle: lifecycle, recoverySources: sources })
+    const r = projectRecovery({ recoveryLifecycle: lifecycle, recoverySources: sources }).recovery
+    if (lifecycle.phase !== 'fenced' || lifecycle.decision?.action !== 'exhausted' ||
+        lifecycle.decision.reason !== 'protocol-exhausted' ||
+        lifecycle.pending.length || lifecycle.inspectionFences.length ||
+        saved.next.length || state.status !== 'blocked' || state.active || state.result ||
         state.ideaTask || state.ideaResult || !state.request ||
         !sameGenerationRequest(state.request, request) ||
         !state.orchestratorOrder || !state.orchestratorPlanningDigest ||

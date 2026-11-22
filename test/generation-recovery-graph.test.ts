@@ -8,9 +8,10 @@ import {
   projectRecovery,
   type RecoveryState,
 } from "../src/generation-recovery-graph.js";
-import { emptyRecoveryLifecycle } from "../src/generation-recovery-lifecycle.js";
+import { emptyRecoveryLifecycle, selectPendingRecovery } from "../src/generation-recovery-lifecycle.js";
 import { unknownCompletionCase } from "../src/unknown-recovery-diagnostic.js";
 import type { GenerationOperationRecovery } from "../src/generation-operation-recovery.js";
+import { recoveryNode } from "../src/generation.js";
 
 const graphThreadId = "job-thread-1:generation";
 const turn = "a".repeat(64);
@@ -225,6 +226,121 @@ test("C02 unknown completion case is queued without replacing a pending original
   assert.equal(second.recoverySources[1]?.channel, "unknownRecovery");
 });
 
+
+test("C02 authenticated author pause and cancellation retain their distinct lifecycle dispositions", async () => {
+  const admitted = await admit();
+  const controller = { ...admitted, recoveryLifecycle: decideExistingRecovery(admitted) };
+  for (const control of ["paused", "cancelled"] as const) {
+    const stopped = await applyDomainRecovery(controller, {
+      operationRecovery: { ...operation, phase: "fenced" },
+    }, cfg(one), id, trusted, { authorControl: control });
+    assert.equal(stopped.recoveryLifecycle.phase, "paused");
+    assert.equal(stopped.recoveryLifecycle.decision?.action, "pause");
+    if (stopped.recoveryLifecycle.decision?.action === "pause")
+      assert.equal(stopped.recoveryLifecycle.decision.reason,
+        control === "cancelled" ? "cancelled" : "author-pause");
+    assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 0);
+  }
+});
+
+test("C02 verified independent no-write progress keeps the failed obligation pending", async () => {
+  const noWrite = { ...operation, operation: "specialist-dispatch" as const,
+    check: "specialist-dispatch.v1", safeAction: "continue-independent" as const,
+    evidence: { reference: "specialist-receipt" as const, assignmentId: assignment, priorHead: head } };
+  const admitted = await applyDomainRecovery(empty(), { operationRecovery: noWrite }, cfg(one), id, trusted);
+  const decided = decideExistingRecovery(admitted);
+  assert.equal(decided.decision?.action, "continue-independent");
+  const continued = await applyDomainRecovery({ ...admitted, recoveryLifecycle: decided },
+    { operationRecovery: { ...noWrite, phase: "continued" } }, cfg(one), id, trusted,
+    { originalEffect: { store: "specialist-receipt", ref: "original-reviewed-no-write" } });
+  assert.equal(continued.recoveryLifecycle.active, null);
+  assert.equal(continued.recoveryLifecycle.pending.length, 1);
+  assert.equal(continued.recoveryLifecycle.phase, "idle");
+  assert.equal(selectPendingRecovery(continued.recoveryLifecycle, () => false).phase, "idle");
+  const selected = selectPendingRecovery(continued.recoveryLifecycle, () => true);
+  assert.equal(selected.phase, "assessing");
+  assert.equal(selected.active?.id, admitted.recoveryLifecycle.active?.id);
+  assert.equal(selected.pending.length, 0);
+});
+
+test("C02 deferred idea no-write stays unresolved without inventing an assignment", async () => {
+  const deferred = {
+    ...operation, operation: "idea-integration" as const,
+    check: "idea-dispatch.v1", outcome: "returned-failure" as const,
+    safeAction: "continue-independent" as const,
+    evidence: { reference: "generation-idea-dispatch" as const,
+      ideaId: "archive-bell", resultStatus: "deferred", priorHead: head },
+  };
+  const admitted = await applyDomainRecovery(empty(), { operationRecovery: deferred }, cfg(one), id, trusted);
+  assert.equal(admitted.recoveryLifecycle.active?.origin.assignmentId, null);
+  const decision = decideExistingRecovery(admitted);
+  assert.equal(decision.decision?.action, "continue-independent");
+  if (decision.decision?.action === "continue-independent")
+    assert.equal(decision.decision.blockedAssignmentId, "idea:archive-bell");
+  const continued = await applyDomainRecovery({ ...admitted, recoveryLifecycle: decision },
+    { operationRecovery: { ...deferred, phase: "continued" } }, cfg(one), id, trusted,
+    { originalEffect: { store: "specialist-receipt", ref: "original-deferred-idea" } });
+  assert.equal(continued.recoveryLifecycle.active, null);
+  assert.equal(continued.recoveryLifecycle.pending.length, 1);
+  assert.equal(continued.recoveryLifecycle.phase, "idle");
+  assertRecoverySources(continued);
+});
+
+test("C02 authenticated operator intervention is a diagnostic stop, not evidence corruption", async () => {
+  const unknown = { case: unknownCompletionCase({
+    jobId: id.jobId, threadId: id.jobThreadId, turnDigest: turn,
+    planVersion: 2, sourceSha: head, checkpoint: assignment,
+    reportStatus: "blocked", scopeStatus: "incomplete", planStatus: "incomplete",
+  }), phase: "assessment" as const };
+  const admitted = await applyDomainRecovery(empty(), { unknownRecovery: unknown }, cfg(one), id, trusted);
+  const diagnosed = { ...admitted, recoveryLifecycle: decideExistingRecovery(admitted) };
+  const stopped = await applyDomainRecovery(diagnosed,
+    { unknownRecovery: { ...unknown, phase: "operator-intervention" } }, cfg(one), id, trusted);
+  assert.equal(stopped.recoveryLifecycle.decision?.action, "diagnostic-stop");
+  assert.equal(stopped.recoveryLifecycle.phase, "fenced");
+  assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 0);
+  assert.equal(projectRecovery(stopped).unknownRecovery?.phase, "operator-intervention");
+});
+
+test("C02 production recovery wrapper prevents completion with an active or deferred case", async () => {
+  const admitted = await admit();
+  const complete = recoveryNode("completion_decision", async () => ({ status: "completed" }));
+  for (const state of [
+    admitted,
+    { ...admitted, recoveryLifecycle: {
+      ...admitted.recoveryLifecycle,
+      active: null,
+      pending: [admitted.recoveryLifecycle.active!],
+      phase: "idle" as const,
+    } },
+  ]) {
+    const outcome = await complete(state as never, {} as never);
+    assert.equal(outcome.status, "blocked");
+    assert.match(outcome.reason ?? "", /Unresolved recovery cases/);
+  }
+  const unchanged = recoveryNode("completion_decision", async () => ({}));
+  const inherited = await unchanged({ ...admitted, status: "completed" } as never, {} as never);
+  assert.equal(inherited.status, "blocked",
+    "a missing status patch must not preserve an earlier completed flag with pending recovery");
+});
+
+test("C02 production assessor checkpoints a typed dispatch flag instead of routing by reason", async () => {
+  const admitted = await admit();
+  let calls = 0;
+  const assess = recoveryNode("assess_recovery", async () => {
+    calls += 1;
+    return { status: "running" };
+  });
+  const first = await assess(admitted as never, {} as never);
+  assert.equal(first.recoveryLifecycle?.assessorPending, true);
+  assert.equal(calls, 0);
+  const second = await assess({
+    ...admitted, recoveryLifecycle: first.recoveryLifecycle!,
+  } as never, {} as never);
+  assert.equal(second.recoveryLifecycle?.assessorPending, false);
+  assert.equal(second.status, "running");
+  assert.equal(calls, 1);
+});
 test("C02 wrapped node responses remove all retired writable graph fields", () => {
   const patch = extractDomainPatch(
     {

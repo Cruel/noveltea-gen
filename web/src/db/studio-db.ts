@@ -40,11 +40,11 @@ export interface GenerationEvents {
 export interface GenerationRunQueue {
   createdAt: string
   fixId: string | null
-  resumeKind: string | null
   intent: string
   jobId: string
   ownerUserId: string
   phase: string
+  resumeKind: string | null
   sequence: Generated<number>
   updatedAt: string
   workerId: string | null

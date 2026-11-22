@@ -41,9 +41,9 @@ const siteNames = [
 /** Explicitly reviewed counts. Changes require a source-linked matrix review
  * in docs/generation-recovery-contract.md rather than silent test regeneration. */
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
-  schedule: "returns:8,status:6,blocked:3,operationFailure:1,throws:12",
+  schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:12",
   assess_recovery: "returns:20,status:8,blocked:3,throws:10",
-  author_update_intake: "returns:19,status:2,operationFailure:6,authorBoundary:1,reconcile:2,throws:1",
+  author_update_intake: "returns:20,status:3,operationFailure:6,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
   specialist_dispatch: "returns:17,status:1,blocked:2,operationFailure:4,authorBoundary:1,throws:4",
@@ -58,7 +58,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
-  recoveryNode: "returns:9,status:3",
+  recoveryNode: "returns:8,status:5",
 };
 const operations = [
   "adaptive-admission",
@@ -171,7 +171,7 @@ function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
 
 /** Baseline from the current C01 source: any changed route must be audited. */
 const approvedEdgeSignatures: Record<string, string> = {
-  assess_recovery: "a7e087431cb6115e49c2839f82ad6d29c5b2b537c0ee260d0596180d3902c6a2",
+  assess_recovery: "68e31ce4e43b0258f559658405c3e616af916e4aba65c0d4d54aee575e12558c",
   author_update_intake: "42c83cc765e4c73fccfa23f7b41d430cd24289ba1d206c6e2d03bd02e9de6623",
   completion_decision: "bfd624a3c649168730ee8ab989cfd4da251bc961904368f218cdd0f524130f0d",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",

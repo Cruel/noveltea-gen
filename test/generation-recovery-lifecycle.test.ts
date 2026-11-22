@@ -463,6 +463,36 @@ test("C02 persisted decisions reject invented action variants before controller 
   assert.equal(invalid.inspectionFences[0]?.reason, "untrusted-receipt");
 });
 
+test("C02 persisted assessor intent accepts a no-write decision without conferring completion", async () => {
+  const c = caseOf(await admitted());
+  const decision = {
+    schema: "noveltea-generation-recovery-decision/v1" as const,
+    caseId: c.id,
+    checkedSourceHeadSha: c.origin.sourceHeadSha,
+    evidence: c.evidence,
+    action: "continue-independent" as const,
+    inventoryRef: evidence,
+    blockedAssignmentId: c.origin.assignmentId!,
+  };
+  const pending = { ...emptyRecoveryLifecycle(), active: c, decision,
+    phase: "assessing" as const, assessorPending: true };
+  const request = { jobId: origin.jobId, jobThreadId: origin.jobThreadId,
+    graphThreadId: origin.graphThreadId, turnDigest: origin.turnDigest };
+  const verified = await verifyRecoveryCheckpoint({
+    current: pending, request, checkpointRef: evidence,
+    authenticate: trusted, authenticateDecision: trusted,
+  });
+  assert.equal(verified.assessorPending, true);
+  assert.equal(verified.phase, "assessing");
+  const invalid = await verifyRecoveryCheckpoint({
+    current: { ...pending, active: null },
+    request, checkpointRef: evidence, authenticate: trusted,
+    authenticateDecision: trusted,
+  });
+  assert.equal(invalid.phase, "fenced");
+  assert.equal(invalid.active, null);
+});
+
 test("C02 modern resolved state requires independently authenticated completion, not a saved phase", async () => {
   const c = caseOf(await admitted());
   const request = {

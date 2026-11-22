@@ -144,6 +144,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
         originalRef: RecoveryEvidence;
       }
     | { action: "continue-independent"; inventoryRef: RecoveryEvidence; blockedAssignmentId: string }
+    | { action: "diagnostic-stop"; disposition: "operator-intervention" }
     | {
         action: "pause";
         reason:
@@ -201,6 +202,9 @@ export type RecoveryLifecycle = Readonly<{
   /** No caseId or decision exists for an unauthenticated admission. These
    * inspection-only fences block mutation and survive resume independently. */
   inspectionFences: readonly RecoveryInspectionFence[];
+  /** The decision is durable before invoking the original assessor. Routing
+   * reads this flag, never a user-visible reason or a second graph channel. */
+  assessorPending?: boolean;
   phase:
     | "idle"
     | "assessing"

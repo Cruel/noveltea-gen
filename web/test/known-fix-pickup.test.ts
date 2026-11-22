@@ -9,6 +9,11 @@ import { claimServerGeneration } from '../../src/generation-owner'
 import { startStoryJob } from '../../src/job'
 import { planWholeStory } from '../src/lib/turn-plan'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
+import { Annotation, START, END, StateGraph } from '@langchain/langgraph'
+import { originalGraphFailureAnchor } from '../../src/generation-recovery-anchor'
+import { recoveryAdmission, admitRecovery, decideRecovery, emptyRecoveryLifecycle } from '../../src/generation-recovery-lifecycle'
+import type { RecoveryLifecycle } from '../../src/generation-recovery-contract'
+import type { RecoverySource } from '../../src/generation-recovery-graph'
 import { pickupKnownVerifierFixes, verifyKnownFixProof } from '../src/lib/known-fix-pickup.server'
 import { runPersistedGeneration } from '../src/agent-runner'
 import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.server'
@@ -135,15 +140,64 @@ test('#223 Studio startup picks only a source- and check-matched stopped Turn fr
         await claimServerGeneration(job, threadId, request)
         const saved = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
         try {
-          await saved.graph.updateState({ configurable: { thread_id: threadId } }, {
-            request, status: 'blocked', recovery, graphThreadId: threadId,
-            planVersion: 1, orchestratorOrder: ['foundation', 'architecture'],
+          // Execute an actual current-format LangGraph task. Its persisted
+          // task ID and parent checkpoint, not a synthetic legacy recovery
+          // channel or invented cursor, identify the exhausted response.
+          const channels = Annotation.Root({
+            request: Annotation<typeof request>(),
+            status: Annotation<string>(),
+            graphThreadId: Annotation<string>(),
+            planVersion: Annotation<number>(),
+            orchestratorOrder: Annotation<string[]>(),
+            orchestratorSnapshotId: Annotation<string>(),
+            orchestratorPlanningDigest: Annotation<string>(),
+            active: Annotation<null>(),
+            result: Annotation<null>(),
+            inventory: Annotation<null>(),
+            recoveryLifecycle: Annotation<RecoveryLifecycle>({
+              reducer: (_, next) => next, default: emptyRecoveryLifecycle,
+            }),
+            recoverySources: Annotation<readonly RecoverySource[]>({
+              reducer: (_, next) => next, default: () => [],
+            }),
+          })
+          const graph = new StateGraph(channels)
+            .addNode('completion_decision', async (_, config) => {
+              const anchor = originalGraphFailureAnchor(config as never, 'adaptive-plan.v1')
+              assert.ok(anchor, 'the original failed LangGraph task must have durable identity')
+              const origin = {
+                jobId: id, jobThreadId: job.threadId, graphThreadId: threadId,
+                turnDigest: plan.digest, planVersion: 1, sourceHeadSha: sha,
+                assignmentId: null, operation: 'adaptive-planner',
+                check: 'adaptive-plan.v1', checkVersion: 1,
+                failureAnchor: anchor,
+              }
+              const evidence = [{ store: 'graph-checkpoint' as const, ref: anchor.ref }]
+              const admission = await recoveryAdmission({
+                origin, kind: 'protocol', observation: 'returned-failure',
+                effect: 'read-only', evidence, authenticate: async () => true,
+              })
+              assert.equal(admission.outcome, 'admitted')
+              if (admission.outcome !== 'admitted') throw Error('Original task authentication failed')
+              const lifecycle = decideRecovery(admitRecovery(emptyRecoveryLifecycle(), admission), {
+                schema: 'noveltea-generation-recovery-decision/v1',
+                caseId: admission.case.id, checkedSourceHeadSha: sha,
+                evidence, action: 'exhausted', reason: 'protocol-exhausted', attemptRefs: [],
+              })
+              const { phase: _phase, ...input } = recovery
+              return { status: 'blocked', recoveryLifecycle: lifecycle,
+                recoverySources: [{ channel: 'recovery' as const,
+                  caseId: admission.case.id, input }] }
+            })
+            .addEdge(START, 'completion_decision')
+            .addEdge('completion_decision', END).compile({ checkpointer: saved.saver })
+          await graph.invoke({
+            request, status: 'running', graphThreadId: threadId, planVersion: 1,
+            orchestratorOrder: ['foundation', 'architecture'],
             orchestratorSnapshotId: hash('snapshot'),
-            orchestratorPlanningDigest: hash('planner'), active: null, result: null,
-            // At a failed first planner attempt there is often no persisted
-            // inventory; source identity comes from authenticated HEAD/proof.
-            inventory: null,
-          }, 'completion_decision')
+            orchestratorPlanningDigest: hash('planner'),
+            active: null, result: null, inventory: null,
+          }, { configurable: { thread_id: threadId } })
         } finally { saved.saver.db.close() }
       }
       return { id, job, threadId }

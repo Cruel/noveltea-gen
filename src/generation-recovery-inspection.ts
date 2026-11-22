@@ -256,6 +256,17 @@ export async function inspectModernGenerationRecovery(
           return source.channel === "recovery" && d.adapter === "response-contract";
         case "diagnostic":
           return source.channel === "unknownRecovery" && d.mode === "read-only" && d.attemptRef === null;
+        case "diagnostic-stop":
+          return source.channel === "unknownRecovery" && d.disposition === "operator-intervention";
+        case "continue-independent":
+          return source.channel === "operationRecovery" &&
+            source.input.safeAction === "continue-independent" &&
+            d.blockedAssignmentId === (active.origin.assignmentId ??
+              (source.input.operation === "idea-integration" &&
+                typeof (source.input.evidence as { ideaId?: unknown } | undefined)?.ideaId === "string"
+                  ? "idea:" + (source.input.evidence as { ideaId: string }).ideaId
+                  : null)) &&
+            d.inventoryRef.ref === active.evidence[0]?.ref;
         case "integrity-fence":
         case "pause":
           return true; // Never a write permission.

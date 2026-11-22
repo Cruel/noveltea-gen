@@ -175,6 +175,8 @@ function validDecision(value: unknown): value is RecoveryDecision {
       );
     case "continue-independent":
       return validEvidence(d.inventoryRef) && populated(d.blockedAssignmentId);
+    case "diagnostic-stop":
+      return d.disposition === "operator-intervention";
     case "pause":
       return (
         [
@@ -363,6 +365,7 @@ function phaseForDecision(decision: RecoveryDecision): RecoveryLifecycle["phase"
       return "paused";
     case "exhausted":
     case "integrity-fence":
+    case "diagnostic-stop":
       return "fenced";
   }
 }
@@ -464,7 +467,8 @@ export function recordRecoveryOutcome(
       state.decision.action === "continue-independent" ||
       state.decision.action === "exhausted" ||
       state.decision.action === "pause" ||
-      state.decision.action === "integrity-fence"
+      state.decision.action === "integrity-fence" ||
+      state.decision.action === "diagnostic-stop"
     )
       throw Error("A stopped or independent action cannot discharge a source obligation");
     return { ...state, phase: "resolved" };
@@ -633,7 +637,8 @@ function validLifecyclePhase(value: RecoveryLifecycle): boolean {
     case "paused":
       return decision?.action === "pause";
     case "fenced":
-      return decision?.action === "integrity-fence" || decision?.action === "exhausted";
+      return decision?.action === "integrity-fence" || decision?.action === "exhausted" ||
+        decision?.action === "diagnostic-stop";
   }
 }
 /** Authenticate the current checkpoint, not an old schema.
@@ -651,6 +656,10 @@ export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Pr
     Array.isArray(value.pending) &&
     Array.isArray(value.inspectionFences) &&
     value.active !== undefined &&
+    (value.assessorPending === undefined || typeof value.assessorPending === "boolean") &&
+    (!value.assessorPending || (!!value.active && !!value.decision &&
+      (["reconciling", "diagnosing", "correcting"].includes(value.phase) ||
+        (value.phase === "assessing" && value.decision.action === "continue-independent")))) &&
     value.decision !== undefined &&
     value.attempt !== undefined &&
     value.pending.every(validCase) &&

@@ -1,6 +1,6 @@
 /** C02: one graph recovery authority, backed by immutable domain inputs.
  *
- * Domain domain status objects are reconstructed inside the existing node
+ * Domain status objects are reconstructed inside the existing node
  * handler only. They are NEVER graph channels and cannot control routing.
  * Their phase-free original parameters retain each adapter's receipt checks,
  * not a second decision/attempt/approval ledger.
@@ -25,6 +25,8 @@ import {
   recordRecoveryOutcome,
   reassessFencedReadOnlyRecovery,
   reassessFencedVerifiedOriginal,
+  deferRecoveryForIndependentWork,
+  selectPendingRecovery,
 } from "./generation-recovery-lifecycle.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
 import { operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
@@ -118,7 +120,8 @@ export function projectRecovery(state: RecoveryState): DomainRecoveryStatus {
   if (s.channel === "unknownRecovery")
     p.unknownRecovery = {
       ...s.input,
-      phase: phase === "paused" ? "resource-limit" : phase === "fenced" ? "unsafe-evidence" : "assessment",
+      phase: d?.action === "diagnostic-stop" ? "operator-intervention" :
+        phase === "paused" ? "resource-limit" : phase === "fenced" ? "unsafe-evidence" : "assessment",
     } as unknown as UnknownRecoveryStatus;
   return p;
 }
@@ -376,6 +379,13 @@ export function decideExistingRecovery(state: RecoveryState): RecoveryLifecycle 
       mode: "read-only",
       attemptRef: null,
     };
+  else if (source.input.safeAction === "continue-independent" &&
+      (c.origin.assignmentId || (source.input.operation === "idea-integration" &&
+        typeof (source.input.evidence as { ideaId?: unknown } | undefined)?.ideaId === "string")))
+    decision = { ...base, action: "continue-independent",
+      inventoryRef: c.evidence[0]!,
+      blockedAssignmentId: c.origin.assignmentId ??
+        "idea:" + (source.input.evidence as { ideaId: string }).ideaId };
   else
     decision = {
       ...base,
@@ -420,6 +430,7 @@ export async function applyDomainRecovery(
     originalEffect?: RecoveryEvidence;
     verifiedHead?: string;
     verifiedReceipt?: RecoveryEvidence;
+    authorControl?: "paused" | "cancelled";
   } = {},
 ): Promise<RecoveryState> {
   let l = state.recoveryLifecycle ?? emptyRecoveryLifecycle();
@@ -552,11 +563,13 @@ export async function applyDomainRecovery(
           }
           if (!l.inspectionFences.length && l.phase !== "fenced")
             l = safelyTransition(l, () =>
-              recordRecoveryOutcome(
-                l,
-                { status: "reconciled", caseId: c.id, originalEffect: assurance.originalEffect! },
-                true,
-              ),
+              l.decision?.action === "continue-independent"
+                ? deferRecoveryForIndependentWork(l)
+                : recordRecoveryOutcome(
+                    l,
+                    { status: "reconciled", caseId: c.id, originalEffect: assurance.originalEffect! },
+                    true,
+                  ),
             );
         }
       } else if (raw.phase === "completed") {
@@ -577,11 +590,31 @@ export async function applyDomainRecovery(
               ),
             ),
           );
-      } else if (
-        raw.phase === "fenced" ||
-        raw.phase === "unsafe-evidence" ||
-        raw.phase === "operator-intervention"
-      ) {
+      } else if (raw.phase === "fenced" && assurance.authorControl) {
+        l = l.decision
+          ? safelyTransition(l, () =>
+              decideRecovery(l, {
+                schema: "noveltea-generation-recovery-decision/v1",
+                caseId: c.id,
+                checkedSourceHeadSha: c.origin.sourceHeadSha,
+                evidence: c.evidence,
+                action: "pause",
+                reason: assurance.authorControl === "cancelled" ? "cancelled" : "author-pause",
+              }),
+            )
+          : fence(l, "Author control was not checked before recovery admission");
+      } else if (raw.phase === "operator-intervention") {
+        l = l.decision
+          ? safelyTransition(l, () => decideRecovery(l, {
+              schema: "noveltea-generation-recovery-decision/v1",
+              caseId: c.id,
+              checkedSourceHeadSha: c.origin.sourceHeadSha,
+              evidence: c.evidence,
+              action: "diagnostic-stop",
+              disposition: "operator-intervention",
+            }))
+          : fence(l, "A diagnostic stop has no authenticated decision");
+      } else if (raw.phase === "fenced" || raw.phase === "unsafe-evidence") {
         l = l.decision
           ? safelyTransition(l, () =>
               decideRecovery(l, {
