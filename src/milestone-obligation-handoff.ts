@@ -1,5 +1,6 @@
 /** Source-bound handoff of reviewed Milestone promises. Canonical Story records and
  * independent stage reviews, not this private plan, establish fulfillment. */
+import { isDeepStrictEqual } from "node:util";
 import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
 import type { EventAssignment } from "./event-specialist.js";
@@ -32,6 +33,34 @@ export interface ReviewedMilestoneHandoff {
   eventHead: string;
   eventIds: string[];
   milestoneState: "complete" | "partial-choice-pending";
+  /** Exact consumers whose prior semantic evidence must be reconsidered after supersession. */
+  affected?: MilestoneRevisionImpact;
+}
+
+export interface MilestoneRevisionImpact {
+  event: boolean;
+  interactive: boolean;
+  composition: boolean;
+  completion: boolean;
+}
+
+/** Conservative causal projection: an Event contract change propagates to
+ * gameplay and prose, whereas a prose-only promise does not invalidate an
+ * independently reviewed Event or Choice. No old checkpoint is rewritten. */
+export function milestoneRevisionImpact(before: MilestoneBlueprint,
+  after: MilestoneBlueprint): MilestoneRevisionImpact {
+  if (before.milestoneId !== after.milestoneId || before.schema !== after.schema)
+    throw Error("A Milestone correction cannot change its original identity.");
+  const owner = (design: MilestoneBlueprint, kind: "event" | "interactive" | "composition") =>
+    design.downstream.filter(item => item.owner === kind);
+  const event = !isDeepStrictEqual(before.events, after.events) ||
+    !isDeepStrictEqual(owner(before, "event"), owner(after, "event"));
+  const interactive = event ||
+    !isDeepStrictEqual(owner(before, "interactive"), owner(after, "interactive"));
+  const composition = interactive ||
+    !isDeepStrictEqual(owner(before, "composition"), owner(after, "composition"));
+  return { event, interactive, composition,
+    completion: !isDeepStrictEqual(before, after) };
 }
 
 function git(job: JobStartResult, ...args: string[]): string {
@@ -107,7 +136,10 @@ export async function reviewedMilestoneHandoff(job: JobStartResult, source: Mile
   await assertFutureBlueprintActive(job, repair.successor, { original: repair.original, eventHead: repair.eventHead,
     turnDigest: turn!.digest, evidenceDigest: repair.evidenceDigest, originalReviewDigest: repair.originalReviewDigest });
   const design = await readReviewedMilestoneBlueprint(job, repair.successor, source.assignment);
-  return { ...historical, design, pin: repair.successor, supersedes: historical.pin };
+  const affected = milestoneRevisionImpact(historical.design, design);
+  if (!affected.completion || repair.affected && JSON.stringify(repair.affected) !== JSON.stringify(affected))
+    throw Error("Blueprint supersession lost its authenticated selective dependent impact.");
+  return { ...historical, design, pin: repair.successor, supersedes: historical.pin, affected };
 }
 
 export function consumedCorrection(handoff?: ReviewedMilestoneHandoff) {

@@ -126,6 +126,8 @@ export interface BlueprintRepair {
   original: import("./milestone-blueprint.js").MilestoneBlueprintPin;
   eventHead: string; sourceSha: string; planDigest: string; evidenceDigest: string; originalReviewDigest: string;
   incident?: BlueprintRevisionIncident;
+  /** Controller-owned scope of required dependent revalidation. */
+  affected?: import("./milestone-obligation-handoff.js").MilestoneRevisionImpact;
   successor?: import("./milestone-blueprint.js").MilestoneBlueprintPin;
 }
 export interface RepairLedger {
@@ -225,6 +227,13 @@ function validateLedger(job: JobStartResult, turnDigest: string, raw: RepairLedg
           !/^milestone\.[a-z][a-z0-9-]*$/.test(r.original.milestoneId) ||
           !SHA.test(r.original.sourceSha) || !DIGEST.test(r.original.digest) || !DIGEST.test(r.original.cycleId) ||
           !incidentValid(r, job, turnDigest) ||
+          (r.affected !== undefined && (!r.affected || typeof r.affected !== "object" ||
+            Object.keys(r.affected).sort().join(",") !== "completion,composition,event,interactive" ||
+            ["event", "interactive", "composition", "completion"].some(key =>
+              typeof r.affected![key as keyof typeof r.affected] !== "boolean") ||
+            r.affected.completion !== true ||
+            (r.affected.event && (!r.affected.interactive || !r.affected.composition)) ||
+            (r.affected.interactive && !r.affected.composition))) ||
           r.successor && (r.successor.milestoneId !== r.original.milestoneId || r.successor.sourceSha !== r.sourceSha ||
             !DIGEST.test(r.successor.digest) || !DIGEST.test(r.successor.cycleId) || r.successor.digest === r.original.digest ||
             r.successor.cycleId === r.original.cycleId)))) ||

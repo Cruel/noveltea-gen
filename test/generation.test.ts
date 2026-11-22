@@ -577,6 +577,21 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   if (defect === "interactive") assert.deepEqual(corrected.draft.events, original.draft.events);
   else assert.equal(corrected.draft.events[0].knowledge, "Ada sees the original ledger and checks it against the daily register.");
   assert.equal(corrected.draft.downstream.some((entry: any) => entry.owner === "interactive"), false);
+  const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const ledgerFile = join(f.job.stateDir, "repair-ledgers", turn.digest + ".json");
+  const ledgerOriginal = readFileSync(ledgerFile, "utf8");
+  const repaired = JSON.parse(ledgerOriginal);
+  assert.deepEqual(repaired.blueprintRepairs[0].affected, {
+    event: defect === "knowledge", interactive: true, composition: true, completion: true,
+  }, "only the owners dependent on the corrected plan must be revalidated");
+  if (defect === "interactive") {
+    repaired.blueprintRepairs[0].affected.interactive = false;
+    writeFileSync(ledgerFile, JSON.stringify(repaired));
+    assert.match(f.cli(["composition", "inspect", "--milestone", "milestone.disclosure"], false),
+      /selective dependent impact|Blueprint supersession/,
+      "altered selective carry-forward must not bypass the authenticated successor");
+    writeFileSync(ledgerFile, ledgerOriginal);
+  }
   assert.equal(readFileSync(eventFile, "utf8"), originalEvent);
   const revisions = f.cli(["approval-revisions", "inspect"]);
   assert.equal(revisions.total, 1);
@@ -725,12 +740,13 @@ test("#213 narrative-led full-Story handoff keeps omitted mechanics distinct fro
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
 
-test("#213 Choice-heavy production fixture retains route evidence and never self-certifies", {
+test("#230 genuinely Interactive production fixture preserves required Choices, native routes and review", {
   skip: !available,
 }, () => {
   const f = setup("cert-213-choices");
   f.env.NT_EVENT_FIXTURE_CASE = "alternative-routes";
   f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
+  f.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE = "historical-interactive";
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
   contract.constraints.push("Two decisions must change later trust or disclosed knowledge; "
@@ -741,6 +757,10 @@ test("#213 Choice-heavy production fixture retains route evidence and never self
   const interactive = JSON.parse(readFileSync(join(f.job.stateDir,
     "interactive-items/disclosure.json"), "utf8"));
   assert.equal(interactive.units[0].phase, "committed");
+  assert.equal(interactive.correctedBlueprintPin, undefined,
+    "A genuine Interactive owner cannot be silently removed by an Event-only omission");
+  assert.ok(JSON.parse(readFileSync(join(f.job.stateDir, "milestone-blueprints/disclosure.json"), "utf8"))
+    .draft.downstream.some((entry: any) => entry.owner === "interactive"));
   assert.deepEqual(interactive.units[0].validation.choices.map((c: any) => c.id).sort(),
     ["choice-point.loyalty", "choice-point.testimony"]);
   assert.equal(interactive.units[1].phase, "committed");

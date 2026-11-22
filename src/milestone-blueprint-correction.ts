@@ -14,7 +14,7 @@ import { selectedAssignment } from "./event-work.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readIndependentReview } from "./checkpoint-assurance.js";
-import { historicalMilestoneHandoff, reviewedMilestoneHandoff, type MilestoneEventSource } from "./milestone-obligation-handoff.js";
+import { historicalMilestoneHandoff, reviewedMilestoneHandoff, milestoneRevisionImpact, type MilestoneEventSource } from "./milestone-obligation-handoff.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint, milestoneBlueprintApprovalProvenance, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, parseMilestoneBlueprint, type MilestoneBlueprint } from "./milestone-blueprint.js";
 import { classifyApprovalRevisionCause, approvalRevisionSeverity, inspectRepairLedger, recordBlueprintRepair, type BlueprintRepair } from "./repair-ledger.js";
@@ -153,6 +153,7 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   // Different JSON key ordering (or an identical suggestion) changes no
   // obligation. Deterministically retain the original approval, no Pi turn.
   if (equal(candidate, old.design)) return;
+  const prior = (await inspectRepairLedger(job, turn.digest)).blueprintRepairs?.find(r => r.original.milestoneId === event.milestoneId);
   const evidenceDigest = sha(specialist || disputed
     ? [input.omission, findings, specialist, disputed, sha(candidate)]
     : [input.omission, findings, sha(candidate)]);
@@ -165,6 +166,8 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   const grant: BlueprintRepair = { owner: "nt-event-design", original: old.pin, eventHead: old.eventHead,
     originalReviewDigest: await originalBlueprintReviewDigest(job, old.pin),
     sourceSha: head, planDigest: sha(plan), evidenceDigest,
+    // Pre-#230 interrupted grants retain their original identity on replay.
+    ...(prior && !prior.affected ? {} : { affected: milestoneRevisionImpact(old.design, candidate) }),
     incident: { id: sha({ jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest,
         original: old.pin, evidenceDigest }), cause, severity: approvalRevisionSeverity(cause),
       trigger: {
@@ -177,7 +180,6 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
         sourcePaths: [...sources].sort(), reviewDigest: findings.length ? sha(review?.result) : null },
       affectedWork: ["interactive:" + event.milestoneId, "composition:" + event.milestoneId],
       originalApproval: await milestoneBlueprintApprovalProvenance(job, old.pin, event.assignment) } };
-  const prior = (await inspectRepairLedger(job, turn.digest)).blueprintRepairs?.find(r => r.original.milestoneId === event.milestoneId);
   if (prior?.successor) {
     await recordBlueprintRepair(job, turn.digest, { ...grant, successor: prior.successor,
       incident: grant.incident && { ...grant.incident,
@@ -215,6 +217,10 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   if (await originalBlueprintReviewDigest(job, old.pin) !== grant.originalReviewDigest)
     throw Error("Historical Blueprint approval changed during correction.");
   if (!accepts(approved)) throw Error("Reviewed correction exceeds the approved material patch.");
+// The approved patch must have precisely the dependent impact admitted by
+  // the controller; this must be verified before recording the successor.
+  if (grant.affected && !equal(milestoneRevisionImpact(old.design, approved), grant.affected))
+    throw Error("Approved Blueprint changed dependent impact outside its authorized correction.");
   await recordBlueprintRepair(job, turn.digest, { ...grant, successor: next.pin,
     incident: grant.incident && { ...grant.incident,
       successorApproval: await milestoneBlueprintApprovalProvenance(job, next.pin, event.assignment) } });

@@ -12,8 +12,9 @@ import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
 import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
 import { projectAdaptiveFinal } from "./adaptive-final-review.js";
-import { reviewedMilestoneHandoff,
-  assertMilestoneCanonicalClosure } from "./milestone-obligation-handoff.js";
+import { reviewedMilestoneHandoff, consumedCorrection,
+  assertMilestoneInteractiveDisposition, assertMilestoneCanonicalClosure } from "./milestone-obligation-handoff.js";
+import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { validateStoryJob } from "./validator.js";
 import type { MilestoneEventSource, ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 
@@ -47,7 +48,8 @@ export interface TurnFulfillmentPacket {
   source: { jobId: string; baseSha: string; headSha: string; turnDigest: string;
     planVersion: number; planDigest: string; scopeReviewDigest: string;
     adaptive?: { version: number; digest: string; amendments: string[] };
-    milestonePlans?: Array<{ milestoneId: string; digest: string; eventHead: string }>;
+    milestonePlans?: Array<{ milestoneId: string; digest: string; eventHead: string;
+      historicalDigest?: string; affected?: import("./milestone-obligation-handoff.js").MilestoneRevisionImpact }>;
     checkpoints: Array<{ commitSha: string; assignmentId: string; proofDigest: string;
       review: string; assignmentDigest: string }> };
   goal: string;
@@ -96,6 +98,55 @@ function git(job: JobStartResult, ...args: string[]) {
 function receiptPath(job: JobStartResult, packet: TurnFulfillmentPacket) {
   return join(job.stateDir, "turn-fulfillment", packet.digest + ".json");
 }
+/** A closed inventory is not proof that downstream work consumed the current
+ * reviewed obligations. Check original stage receipts here, before issuing the
+ * final semantic-review packet. No replay, writer or substitute commit. */
+async function assertMilestoneStageClosure(job: JobStartResult, handoff: ReviewedMilestoneHandoff,
+  depth: Plan["contract"]["scope"]["depth"]) {
+  const slug = handoff.pin.milestoneId.slice("milestone.".length);
+  const read = async (kind: "interactive" | "composition") => {
+    const path = join(job.stateDir, kind + "-items", slug + ".json");
+    if (!existsSync(path)) throw Error("Final Story is missing the " + kind + " Milestone disposition.");
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256_000)
+      throw Error("Unsafe final " + kind + " Milestone receipt.");
+    return JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
+  };
+  const interactive = await read("interactive");
+  if (interactive.jobId !== job.jobId || interactive.milestoneId !== handoff.pin.milestoneId ||
+      interactive.eventHead !== handoff.eventHead ||
+      JSON.stringify(interactive.correctedBlueprintPin) !== JSON.stringify(consumedCorrection(handoff)) ||
+      interactive.units?.length !== 2)
+    throw Error("Final Interactive work did not consume the current reviewed Milestone Blueprint.");
+  const [choice, puzzle] = interactive.units as Array<{ phase: string; commitSha?: string;
+    beforeHead?: string; eventOnly?: EventOnlyRef; noWrite?: unknown; paths?: string[] }>;
+  const eventOnly = choice!.phase === "not-applicable";
+  assertMilestoneInteractiveDisposition(handoff, eventOnly);
+  if (eventOnly) {
+    if (puzzle!.phase !== "not-applicable" || !choice!.eventOnly ||
+        JSON.stringify(choice!.eventOnly) !== JSON.stringify(puzzle!.eventOnly) ||
+        choice!.commitSha || puzzle!.commitSha || choice!.paths?.length || puzzle!.paths?.length ||
+        choice!.beforeHead !== puzzle!.beforeHead)
+      throw Error("Final Event-only omission lacks its two sealed no-write units.");
+    const proof = await readEventOnlyOmission(job, handoff.pin.milestoneId, choice!.eventOnly);
+    if (proof.eventHead !== handoff.eventHead || proof.reviewHead !== choice!.beforeHead ||
+        JSON.stringify(proof.eventIds) !== JSON.stringify(handoff.eventIds))
+      throw Error("Final Event-only omission no longer authenticates against the reviewed Event.");
+  } else if (choice!.phase !== "committed" || !choice!.commitSha ||
+      !(puzzle!.phase === "committed" && puzzle!.commitSha ||
+        puzzle!.phase === "not-applicable" && puzzle!.beforeHead && puzzle!.noWrite)) {
+    throw Error("Final Milestone has outstanding required Choice or Puzzle work.");
+  }
+  if (depth !== "composition") return;
+  const composition = await read("composition");
+  if (composition.jobId !== job.jobId || composition.milestoneId !== handoff.pin.milestoneId ||
+      composition.phase !== "committed" || !composition.commitSha ||
+      JSON.stringify(composition.correctedBlueprintPin) !== JSON.stringify(consumedCorrection(handoff)))
+    throw Error("Final Composition has not consumed the current reviewed Milestone obligations.");
+  git(job, "merge-base", "--is-ancestor", handoff.eventHead, composition.commitSha);
+  git(job, "merge-base", "--is-ancestor", composition.commitSha, job.headSha);
+}
+
 /** Only Event commits that descend into the final verified Story may bring a
  * local private plan to the final independent reviewer. The plan is a set of
  * questions to verify, never an automatic completion receipt. */
@@ -138,8 +189,13 @@ async function reviewedMilestoneObjectives(job: JobStartResult, plan: Plan): Pro
       throw Error("Final Milestone review exceeds bounded Story scope.");
     try { git(job, "merge-base", "--is-ancestor", handoff.eventHead, job.headSha); }
     catch { throw Error("Final Story lost the reviewed Milestone Event source ancestry."); }
+    // A later inventory replan cannot discharge already committed Milestone
+    // work by dropping its target from the pending assignment list.
+    await assertMilestoneStageClosure(job, handoff, plan.contract.scope.depth);
     handoffs.push(handoff);
-    pins.push({ milestoneId, digest: handoff.pin.digest, eventHead: handoff.eventHead });
+    pins.push({ milestoneId, digest: handoff.pin.digest, eventHead: handoff.eventHead,
+      ...(handoff.supersedes ? { historicalDigest: handoff.supersedes.digest,
+        affected: handoff.affected } : {}) });
     paths.push(...new Set([
       ...(event.assignment?.milestonePath ? [event.assignment.milestonePath] : []),
       ...handoff.design.events.flatMap(local => local.evidence.map(e => e.anchorPath)),
