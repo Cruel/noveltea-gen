@@ -29,7 +29,7 @@ import {
   selectPendingRecovery,
 } from "./generation-recovery-lifecycle.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
-import { operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { independentObligation, operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 import { unknownCompletionCase, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import type { AdaptiveRecovery } from "./adaptive-protocol.js";
 
@@ -371,6 +371,8 @@ export function decideExistingRecovery(state: RecoveryState): RecoveryLifecycle 
     checkedSourceHeadSha: c.origin.sourceHeadSha,
     evidence: c.evidence,
   };
+  const independent = source.channel === "operationRecovery" &&
+    independentObligation(source.input as unknown as GenerationOperationRecovery, c.origin.sourceHeadSha);
   let decision: RecoveryDecision;
   if (source.channel === "recovery")
     decision = { ...base, action: "known-correction", adapter: "response-contract", receipt: c.evidence[0]! };
@@ -382,13 +384,9 @@ export function decideExistingRecovery(state: RecoveryState): RecoveryLifecycle 
       mode: "read-only",
       attemptRef: null,
     };
-  else if (source.input.safeAction === "continue-independent" &&
-      (c.origin.assignmentId || (source.input.operation === "idea-integration" &&
-        typeof (source.input.evidence as { ideaId?: unknown } | undefined)?.ideaId === "string")))
+  else if (independent)
     decision = { ...base, action: "continue-independent",
-      inventoryRef: c.evidence[0]!,
-      blockedAssignmentId: c.origin.assignmentId ??
-        "idea:" + (source.input.evidence as { ideaId: string }).ideaId };
+      inventoryRef: c.evidence[0]!, blockedAssignmentId: independent };
   else
     decision = {
       ...base,
@@ -465,7 +463,7 @@ export async function applyDomainRecovery(
       l.active?.id === priorInput.caseId &&
       l.phase === "fenced" &&
       !l.inspectionFences.length &&
-      (raw as unknown as GenerationOperationRecovery).safeAction === "reconcile-original-operation" &&
+      l.active.observation === "exception" &&
       ["scheduling", "author-update-intake"].includes(l.active.origin.operation)
     ) {
       let verified = false;

@@ -66,6 +66,19 @@ export const nodeFailureSource = {
   completion_decision: ["completion-verification", "completion-report"],
 } as const satisfies Record<string, readonly [Operation, GenerationOperationRecovery["evidence"]["reference"]]>;
 
+/** Candidate only. The assessor still checks the actual blocked inventory or
+ * verified idea receipt under lock before releasing any independent work. */
+export function independentObligation(op: Pick<GenerationOperationRecovery, "operation" | "outcome" | "evidence">,
+  head: string | null): string | null {
+  if (!head || head !== op.evidence?.priorHead) return null;
+  if (op.operation === "specialist-dispatch" && op.outcome === "exception" &&
+      op.evidence.reference === "specialist-receipt") return op.evidence.assignmentId || null;
+  if (op.operation === "idea-integration" && op.outcome === "returned-failure" &&
+      op.evidence.reference === "generation-idea-dispatch" && op.evidence.resultStatus === "deferred" &&
+      op.evidence.ideaId) return "idea:" + op.evidence.ideaId;
+  return null;
+}
+
 export async function assessGenerationOperation(input: {
   job: JobStartResult; threadId: string; turnDigest?: string;
   planVersion?: number | null; operation: Operation;
@@ -75,13 +88,7 @@ export async function assessGenerationOperation(input: {
 }): Promise<GenerationOperationRecovery> {
   // An unsafe Git head is evidence to fence, not an excuse to invent a base.
   const headSha = await trustedHead(input.job).catch(() => null);
-  const noWriteIdea = input.operation === "idea-integration" &&
-    input.evidence.resultStatus === "deferred";
-  const settledSpecialistFailure = input.operation === "specialist-dispatch" &&
-    input.outcome === "exception" && input.evidence.reference === "specialist-receipt" &&
-    !!input.evidence.assignmentId;
-  const safeAction = input.safeAction === "continue-independent" && headSha &&
-    headSha === input.evidence.priorHead && (noWriteIdea || settledSpecialistFailure)
+  const safeAction = input.safeAction === "continue-independent" && independentObligation(input, headSha)
     ? "continue-independent" : "reconcile-original-operation";
   return {
     version: 1, operation: input.operation,
@@ -91,7 +98,7 @@ export async function assessGenerationOperation(input: {
       turnDigest: input.turnDigest ?? null, planVersion: input.planVersion ?? null, headSha },
     evidence: input.evidence, reason: input.reason,
     nextAction: safeAction === "continue-independent"
-      ? noWriteIdea
+      ? input.operation === "idea-integration"
         ? "Keep the deferred idea outstanding. Continue only dependency-independent work from the same verified Story HEAD; reconsider placement when eligible source evidence changes."
         : "Keep the failed operation blocked. Continue only verified dependency-independent work at the same Story HEAD; never replay the original specialist or infer a successful review."
       : input.operation === "adaptive-admission"

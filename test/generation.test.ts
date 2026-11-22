@@ -398,7 +398,7 @@ test("production start assesses thrown author-update intake and restart cannot r
   unlinkSync(join(folder, "broken.json"));
   const repaired = f.cli(["generate", "resume"]);
   assert.equal(repaired.operationRecovery?.phase, "continued",
-    "reconciled intake resumes the same Turn rather than being permanently fenced");
+    JSON.stringify({ reason: repaired.reason, recovery: repaired.recoveryInspection }));
   assert.equal(repaired.operationRecovery?.operation, "author-update-intake");
 });
 
@@ -1197,7 +1197,7 @@ test("one authorized Choice assignment can certify multiple meaningful Choices w
  * This is a routing regression, not a substitute for a live Pi certification.
  */
 async function runFixtureRecoveryGraph(
-  name: string, refused: boolean,
+  name: string, refused: boolean | "exception",
 ) {
   const f = setup(name);
   saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
@@ -1227,6 +1227,10 @@ async function runFixtureRecoveryGraph(
       if (state.active?.id !== "foundation") return {}; // Later fixture stages require no Pi review.
       assert.equal(state.active?.id, "foundation");
       assert.equal(state.result?.headSha, before);
+      if (refused === "exception") {
+        log.push("review-transport-failed");
+        throw Error("Injected review transport failure");
+      }
       const { driveRejectedRepairCycle } = await import("../src/rejected-repair-controller.js");
       const outcome = await driveRejectedRepairCycle({
         begin: async () => repair,
@@ -1278,13 +1282,14 @@ async function runFixtureRecoveryGraph(
     if (refused) {
       const admitted = await graph.invoke(null, { ...config, interruptBefore: ["assess_recovery"] });
       assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "independent-review");
-      assert.equal(admitted.recoveryLifecycle.active?.observation, "returned-failure");
+      assert.equal(admitted.recoveryLifecycle.active?.observation,
+        refused === "exception" ? "exception" : "returned-failure");
       assert.equal(admitted.recoveryLifecycle.attempt, null, "A refusal is not a correction attempt");
       const selected = await graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
       assert.equal(selected.recoveryLifecycle.decision?.caseId, admitted.recoveryLifecycle.active?.id);
       assert.equal(selected.recoveryLifecycle.decision?.checkedSourceHeadSha, before);
       assert.equal(selected.recoveryLifecycle.assessorPending, true);
-      assert.deepEqual(log, ["refuse-other-owner-write"]);
+      assert.deepEqual(log, [refused === "exception" ? "review-transport-failed" : "refuse-other-owner-write"]);
     }
     const next = await graph.invoke(null, config);
     assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial,
@@ -1395,6 +1400,13 @@ test("production generation graph refuses another owner's recovery without advan
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before,
     "No unauthorized source mutation or downstream dispatch is allowed");
   assert.deepEqual(next.completedStages, []);
+});
+
+test("review transport exception reaches the same assessor without retrying the writer", { skip: !available }, async () => {
+  const { f, next, before, log } = await runFixtureRecoveryGraph("review-transport-exception", "exception");
+  assert.equal(next.status, "blocked");
+  assert.deepEqual(log, ["review-transport-failed"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
 });
 
 test("C02 production graph preserves authenticated author controls and same-case resumption", {

@@ -49,7 +49,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
   specialist_dispatch: "returns:17,status:1,blocked:2,operationFailure:4,authorBoundary:1,throws:4",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
-  independent_assignment_review: "returns:3,blocked:1,operationFailure:1",
+  independent_assignment_review: "returns:1",
   verify_committed_work: "returns:6,status:4,blocked:1,operationFailure:2,reconcile:2,throws:3",
   completion_decision:
     "returns:11,status:5,blocked:1,operationFailure:2,authorBoundary:2,reconcile:1,throws:2",

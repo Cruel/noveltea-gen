@@ -242,7 +242,8 @@ const Channels = Annotation.Root({
     sourceSha: string; proposalDigest: string; repairId: string } | null>(),
 });
 type CoreState = typeof Channels.State;
-type State = CoreState & DomainRecoveryStatus;
+// Local node observations only; never LangGraph channels or resume authority.
+type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict" };
 const openJob = async (s: Pick<State, "request">) => {
   const job = await startStoryJob({ story: s.request.story, job: s.request.job }, false);
   assertNativeVersion(job.validatorVersion);
@@ -741,7 +742,7 @@ async function authorBoundary(job: JobStartResult, s: State): Promise<Partial<St
       updates.error, { reference: "author-updates" });
   }
   if (updates.status === "ready") return null;
-  return { status: updates.status === "paused" ? "paused"
+  return { nonsemanticStop: "author-boundary", status: updates.status === "paused" ? "paused"
     : updates.status === "cancelled" ? "cancelled" : "blocked",
     reason: updates.blockers.join(", ") };
 }
@@ -1168,8 +1169,9 @@ async function observeNodeOutcome(node: GenerationNode, s: State, config: Runnab
     const stop = blocked(error ?? Error("Graph operation threw without an error value"));
     result = { status: stop.status, reason: stop.reason };
   }
-  if (result.status !== "blocked" || result.operationRecovery || result.unknownRecovery || result.recovery ||
-      s.recoveryLifecycle.phase === "fenced" || s.recoveryLifecycle.phase === "paused") return result;
+  const { nonsemanticStop, ...observed } = result;
+  if (result.status !== "blocked" || nonsemanticStop || result.operationRecovery || result.unknownRecovery || result.recovery ||
+      s.recoveryLifecycle.phase === "fenced" || s.recoveryLifecycle.phase === "paused") return observed;
   const source = node === "assess_recovery" ? null : nodeFailureSource[node];
   const graphThreadId = config.configurable?.thread_id;
   if (source && !s.recoveryLifecycle.active) {
@@ -2160,13 +2162,7 @@ export function createGenerationGraph(
       }
     }))
     .addNode("independent_assignment_review", recoveryNode("independent_assignment_review", async s => {
-      try { return await reviewBoundary(s); }
-      catch (error) {
-        const job = await openJob(s).catch(() => null);
-        if (!job) return blocked(error); // Unavailable job cannot grant recovery authority.
-        return operationFailure(s, job, "independent-review", error,
-          { reference: "review-checkpoints", assignmentId: s.active?.id });
-      }
+      return reviewBoundary(s);
     }))
     .addNode("verify_committed_work", recoveryNode("verify_committed_work", async s => {
       const job = await openJob(s);
@@ -2356,7 +2352,7 @@ export function createGenerationGraph(
             // Needing a *proposal* is blocked; only a real outstanding author
             // approval interrupt or execution control may report paused.
             status: complete ? "completed" as const : "blocked" as const,
-            ...(complete ? { unknownRecovery: null } : {}),
+            ...(complete ? { unknownRecovery: null } : s.request.fixture ? { nonsemanticStop: "fixture-verdict" as const } : {}),
             escalation,
             reason: complete ? null : [details || s.completedStages.at(-1)?.status ||
               "Scope remains unverified",

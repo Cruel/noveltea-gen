@@ -243,6 +243,12 @@ test("C02 authenticated author pause and cancellation retain their distinct life
   }
 });
 
+test("a continuation hint cannot turn an uncertain verifier result into independent work", async () => {
+  const hinted = { ...operation, safeAction: "continue-independent" as const };
+  const admitted = await applyDomainRecovery(empty(), { operationRecovery: hinted }, cfg(one), id, trusted);
+  assert.equal(decideExistingRecovery(admitted).decision?.action, "reconcile-effects");
+});
+
 test("C02 verified independent no-write progress keeps the failed obligation pending", async () => {
   const noWrite = { ...operation, operation: "specialist-dispatch" as const,
     check: "specialist-dispatch.v1", safeAction: "continue-independent" as const,
