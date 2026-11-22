@@ -3,7 +3,7 @@
  * The same proof is required by Studio admission and the LangGraph entrypoint. */
 import { createHash } from "node:crypto";
 import type { JobStartResult } from "./job.js";
-import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { inspectRecoveryCheckpoints, inspectHistoricalRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { executionId } from "./checkpoint-assurance.js";
 import { inspectRepairLedger, inspectApprovalRevisionIncidents } from "./repair-ledger.js";
 import { reviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
@@ -32,7 +32,7 @@ export const verifiableResultStatus: Record<GenerationStage, readonly string[]> 
  * Commitless/no-write results require their own specialist adapter and cannot
  * pretend to have a new Git checkpoint. */
 async function reviewedWork(job: JobStartResult, assignment: VerifierAssignment,
-  result: VerifiedResult) {
+  result: VerifiedResult, captureUncarriedHistory = false) {
   if (!assignment?.id || !result?.headSha ||
       !verifiableResultStatus[assignment.stage]?.includes(result.status ?? ""))
     throw Error("The original verifier has no accepted completed assignment/result.");
@@ -40,14 +40,20 @@ async function reviewedWork(job: JobStartResult, assignment: VerifierAssignment,
     p.eligible && p.commitSha === result.headSha &&
     executionId(p.workItem) === assignment.id &&
     (!p.assurance || ["passed", "not-required"].includes(p.semanticReview)));
-  if (checkpoints.length !== 1)
+  if (checkpoints.length > 1)
+    throw Error("Original result has duplicated, unauthenticated checkpoints.");
+  // Failure capture MUST recognize a real committed and reviewed original
+  // specialist even when the newly signed plan has revoked its current
+  // carry-forward eligibility. Historical inspection authenticates that
+  // immutable evidence but never authorizes reuse or dispatch by itself.
+  const point = checkpoints[0] ?? (captureUncarriedHistory
+    ? await inspectHistoricalRecoveryCheckpoint(job, result.headSha)
+    : null);
+  if (!point || executionId(point.workItem) !== assignment.id ||
+      (point.assurance && !["passed", "not-required"].includes(point.semanticReview)))
     throw Error("Original result lacks a unique, independently verified and reviewed checkpoint.");
-  const point = checkpoints[0]!;
-  if (point.assurance && point.semanticReview !== "passed" &&
-      point.semanticReview !== "not-required")
-    throw Error("The original specialist's independent review has not passed.");
   return { workItem: point.workItem, proofDigest: hash({
-    source: point.commitSha, workItem: point.workItem,
+    source: result.headSha, workItem: point.workItem,
     proofDigest: point.proofDigest, assurance: point.assurance,
     completedWorkItems: point.completedWorkItems,
   }) };
@@ -58,7 +64,8 @@ async function reviewedWork(job: JobStartResult, assignment: VerifierAssignment,
  * historical revisions; the existing Milestone handoff rechecks current
  * independent approval and supersession. */
 async function correctionDigest(job: JobStartResult, turnDigest: string,
-  assignment: VerifierAssignment, planVersion: number | null) {
+  assignment: VerifierAssignment, resultHeadSha: string,
+  planVersion: number | null, requireCurrentCorrection: boolean) {
   const ledger = await inspectRepairLedger(job, turnDigest);
   const revisions: unknown[] = [];
   let signedCarry = false;
@@ -105,20 +112,34 @@ async function correctionDigest(job: JobStartResult, turnDigest: string,
       const id = stage === "foundations" ? "foundations" :
         ["event", "interactive", "composition"].includes(stage ?? "") && assignment?.milestone
           ? stage + ":" + assignment.milestone : null;
-      if (!id || !hasPlanContinuity(job, architecture, id, planVersion))
-        throw Error("Signed Architecture revision does not carry forward the original reviewed assignment.");
-      // The corrected Architecture checkpoint itself must still be the
-      // current source. A later unrelated specialist commit makes an old
-      // blocked parent verifier stale, even when the carry-forward remains
-      // valid historical provenance.
+      if (!id || !hasPlanContinuity(job, architecture, id, planVersion)) {
+        if (requireCurrentCorrection)
+          throw Error("Signed Architecture revision does not carry forward the original reviewed assignment.");
+        // At failure capture an authenticated but *not yet corrected* plan,
+        // without granting it review or carried-work authority. Later signed
+        // history must be different and independently validate before retry.
+        revisions.push({ kind: "unresolved-signed-architecture", originalVersion: planVersion,
+          verifiedVersion: architecture.plan.version,
+          lineage: architecture.history?.map((step: { proposal: string; carryForward?: string[] }) =>
+            ({ proposal: step.proposal, carried: step.carryForward })) });
+        return { digest: hash(revisions), signedCarry };
+      }
+      // Signed author revisions may change only the future plan; the
+      // original Git HEAD and reviewed work can remain unchanged. In that
+      // case the immutable original checkpoint plus the signed carry-forward
+      // chain is sufficient. If HEAD moved, only a newly independently
+      // reviewed current Architecture checkpoint can authorize the transition.
+      // An unrelated later specialist commit cannot revive an old verifier.
       const head = await trustedHead(job);
-      const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
-        point.eligible && point.commitSha === head &&
-        point.workItem === "global-architecture" &&
-        point.planVersion === architecture.plan.version &&
-        (!point.assurance || ["passed", "not-required"].includes(point.semanticReview)));
-      if (!checkpoint)
-        throw Error("Signed carry-forward requires the current reviewed Architecture checkpoint; later work cannot revive an old verifier.");
+      if (head !== resultHeadSha) {
+        const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
+          point.eligible && point.commitSha === head &&
+          point.workItem === "global-architecture" &&
+          point.planVersion === architecture.plan.version &&
+          (!point.assurance || ["passed", "not-required"].includes(point.semanticReview)));
+        if (!checkpoint)
+          throw Error("Signed carry-forward requires the current reviewed Architecture checkpoint; later work cannot revive an old verifier.");
+      }
       signedCarry = true;
       revisions.push({ kind: "signed-architecture-carry", id,
         sourceVersion: planVersion, verifiedVersion: architecture.plan.version,
@@ -132,11 +153,13 @@ async function correctionDigest(job: JobStartResult, turnDigest: string,
 export async function captureVerificationFailure(job: JobStartResult, turnDigest: string,
   assignment: VerifierAssignment, result: VerifiedResult,
   planVersion: number | null): Promise<VerifierInput> {
-  const checkpoint = await reviewedWork(job, assignment, result);
+  const checkpoint = await reviewedWork(job, assignment, result, true);
   return { assignmentId: assignment!.id, stage: assignment!.stage,
     resultStatus: result!.status!, resultHeadSha: result!.headSha!,
+    failureHeadSha: await trustedHead(job),
     checkpointWorkItem: checkpoint.workItem, checkpointDigest: checkpoint.proofDigest,
-    planVersion, correctionDigest: (await correctionDigest(job, turnDigest, assignment, planVersion)).digest };
+    planVersion, correctionDigest: (await correctionDigest(job, turnDigest, assignment,
+      result!.headSha!, planVersion, false)).digest };
 }
 
 export async function verifyCorrectedOriginalResult(job: JobStartResult,
@@ -146,6 +169,7 @@ export async function verifyCorrectedOriginalResult(job: JobStartResult,
   if (!assignment || !result || evidence.assignmentId !== assignment.id ||
       evidence.stage !== assignment.stage || evidence.resultStatus !== result.status ||
       evidence.resultHeadSha !== result.headSha ||
+      !/^[0-9a-f]{40}$/.test(evidence.failureHeadSha) ||
       evidence.planVersion !== planVersion)
     return refuse("Checkpointed verifier input differs from the original completed specialist.");
   try {
@@ -153,7 +177,8 @@ export async function verifyCorrectedOriginalResult(job: JobStartResult,
     if (evidence.checkpointWorkItem !== checkpoint.workItem ||
         evidence.checkpointDigest !== checkpoint.proofDigest)
       throw Error("Original reviewed checkpoint or specialist receipt changed.");
-    const corrected = await correctionDigest(job, turnDigest, assignment, planVersion);
+    const corrected = await correctionDigest(job, turnDigest, assignment,
+      result.headSha!, planVersion, true);
     if (corrected.digest === evidence.correctionDigest)
       throw Error("The original failed verifier has no new authenticated corrective evidence.");
     if (await trustedHead(job) !== result.headSha && !corrected.signedCarry)

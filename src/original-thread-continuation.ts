@@ -111,7 +111,7 @@ export async function inspectBlockedOriginalThreadCorrection(
   // only the failed verifier's result/checkpoint may authenticate the new HEAD.
   if ((!commitVerifier && ((saved.inventory && saved.inventory.headSha !== head) ||
         op.source.headSha !== head)) ||
-      (commitVerifier && op.source.headSha !== saved.result?.headSha))
+      (commitVerifier && op.source.headSha !== op.evidence.verifier?.failureHeadSha))
     return refuse("The blocked source or controller recovery head changed.");
   const pi = await inspectPiPolicy(job);
   if (request.provider && request.provider !== pi.policy.profile.provider ||

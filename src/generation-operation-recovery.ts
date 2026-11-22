@@ -39,7 +39,8 @@ export interface GenerationOperationRecovery {
     assignmentId?: string; resultStatus?: string;
     /** Controller-captured verifier input; its source and correction baseline are not model claims. */
     verifier?: { assignmentId: string; stage: string; resultStatus: string;
-      resultHeadSha: string; checkpointWorkItem: string; checkpointDigest: string;
+      resultHeadSha: string; failureHeadSha: string;
+      checkpointWorkItem: string; checkpointDigest: string;
       planVersion: number | null; correctionDigest: string; };
     ideaId?: string; action?: "place" | "reassess"; signature?: string;
     priorHead?: string;

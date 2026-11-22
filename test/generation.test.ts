@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -2357,6 +2357,290 @@ test("#233: authenticated author-directed Architecture change is visible in oper
     { kind: "finished", status: "completed" });
   assert.equal((await listGenerationEvents(store, "author-fixture", f.job.jobId, 0))[2]?.kind,
     "finished", "incident syncing cannot prevent generation from finishing");
+});
+
+for (const stage of ["foundations", "event"] as const) test(
+  "#237: actual parent verifier fences an uncarried reviewed " + stage +
+  " result, then resumes only after signed reauthorization", { skip: !available }, async () => {
+  const f = setup("verifier-real-architecture-carry-" + stage);
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  saveFixtureTurn(f.job, contract, f.start[3]!,
+    ["The original Foundations must survive only an explicitly signed author carry-forward."]);
+  const first = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(first.status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const architecture = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  f.cli(["foundations", "run", "--fixture", "--skills-source", source], false);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  const completed = f.cli(["foundations", "run", "--fixture", "--skills-source", source]);
+  assert.equal(completed.status, "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  if (stage === "event") {
+    const foundationBoundary = f.cli(["generate", "resume", "--pause-after", "foundations"]);
+    assert.equal(foundationBoundary.status, "paused", foundationBoundary.reason ?? undefined);
+  }
+  let originalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const originalStatus = stage === "foundations" ? "foundations-committed" : "event-cluster-committed";
+  const carryForward = stage === "foundations" ? ["foundations"]
+    : ["foundations", "event:milestone.disclosure"];
+  const beforeCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+  // Continue an ACTUAL previously created parent Thread from a copied
+  // persisted checkpoint, not a manually assembled blocked graph state.
+  const webDb = join(f.job.stateDir, "web-generation.sqlite");
+  copyFileSync(join(f.job.stateDir, "generation.sqlite"), webDb);
+  const selectionPath = join(f.job.stateDir, "orchestrator-selection.json");
+  const originalSelection = readFileSync(selectionPath, "utf8");
+  const originalTurn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  // The CLI fixture predates source-bound Turn selection. Pin its existing
+  // disposable selection once before resuming the graph with that Turn.
+  const selectedTurn = JSON.stringify({ ...JSON.parse(originalSelection),
+    turnPlanDigest: originalTurn.digest });
+  writeFileSync(selectionPath, selectedTurn);
+  const resumeOriginalCliArchitecture = () => {
+    writeFileSync(selectionPath, originalSelection);
+    try { return f.cli(["generate", "resume", "--pause-after", "architecture"]); }
+    finally { writeFileSync(selectionPath, selectedTurn); }
+  };
+  const keys = ["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR"] as const;
+  const previousEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  for (const key of keys) if (f.env[key]) process.env[key] = f.env[key];
+  const threadId = f.job.threadId + ":generation";
+  const config = { configurable: { thread_id: threadId } };
+  const saver = SqliteSaver.fromConnString(webDb);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const prior = await graph.getState(config);
+    assert.equal(prior.values.status, "paused");
+    const originalRequest = { ...prior.values.request,
+      turnPlanDigest: originalTurn.digest };
+    if (stage === "event") {
+      // The parent itself must dispatch the Event; a direct CLI Event has a
+      // different signed task and is correctly rejected as a substitution.
+      const dispatched = await graph.invoke({ request: originalRequest }, {
+        ...config, interruptBefore: ["independent_assignment_review"] });
+      assert.equal(dispatched.active?.stage, "event", dispatched.reason ?? undefined);
+      await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+    }
+    const awaiting = await graph.invoke(stage === "event" ? null :
+      { request: originalRequest }, {
+      ...config, interruptBefore: ["verify_committed_work"] });
+    originalHead = awaiting.result?.headSha ?? originalHead;
+    assert.equal(awaiting.active?.stage, stage,
+      "this must stop after the real specialist has returned: " +
+        JSON.stringify({ status: awaiting.status, reason: awaiting.reason,
+          next: (await graph.getState(config)).next, operationRecovery: awaiting.operationRecovery }));
+    assert.equal(awaiting.result?.status, originalStatus);
+    assert.equal(awaiting.result?.headSha, originalHead);
+    assert.ok((await graph.getState(config)).next.includes("verify_committed_work"));
+
+    // A real author-signed v2 plan intentionally omits old Foundations from
+    // its carry-forward list. That is a genuine production verifier failure.
+    const v2Path = join(root, "verifier-real-architecture-v2.json");
+    writeFileSync(v2Path, JSON.stringify(contract));
+    const v2Proposal = f.cli(["architecture", "propose", "--contract", v2Path]);
+    const v2Signature = authorApproval(f.story, "single", f.env, root,
+      { ...v2Proposal.authorSigningRequest,
+        reason: "Approve a revised original-Turn Architecture without carrying prior Foundations." });
+    const v2 = f.cli(["architecture", "approve", "--proposal", v2Proposal.proposal.digest,
+      "--approval", v2Signature.file]);
+    assert.equal(v2.plan.version, 2);
+    assert.ok(!carryForward.some(id => v2.history.at(-1)?.carryForward?.includes(id)));
+    const revisedV2 = resumeOriginalCliArchitecture();
+    assert.equal(revisedV2.status, "paused", revisedV2.reason ?? undefined);
+    await sealFixtureGenerationCheckpoint(f, "global-architecture");
+    const sourceAtFailure = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.equal(sourceAtFailure, originalHead,
+      "a signed plan-only revision must not invent a new Architecture Git commit");
+    // The actual graph-owned verifier must capture the original result and
+    // failure baseline itself. No test-originated assessment is injected.
+    const failed = await graph.invoke(null, config);
+    assert.equal(failed.status, "blocked", failed.reason);
+    assert.equal(failed.operationRecovery?.operation, "commit-verification");
+    assert.equal(failed.operationRecovery?.phase, "fenced");
+    assert.equal(failed.operationRecovery?.evidence?.reference, "review-checkpoints");
+    assert.match(failed.operationRecovery?.reason ?? "", /original completed specialist.*not authorized/i,
+      "the real parent verifier must detect missing signed carry-forward, not a synthetic error");
+    assert.equal(failed.operationRecovery?.evidence?.verifier?.resultHeadSha, originalHead);
+    assert.equal(failed.operationRecovery?.evidence?.verifier?.failureHeadSha, sourceAtFailure);
+    assert.equal(failed.active?.stage, stage);
+    assert.equal(failed.result?.headSha, originalHead);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls);
+    assert.equal((await inspectBlockedOriginalThreadCorrection(f.job, threadId,
+      failed)).eligible, false, "unchanged invalid approval remains fenced");
+
+    // A second, independent signed author revision explicitly reauthorizes
+    // the unchanged historically reviewed Foundations work.
+    const carry = join(root, "verifier-real-foundations-carry.json");
+    writeFileSync(carry, JSON.stringify(carryForward));
+    const v3Path = join(root, "verifier-real-architecture-v3.json");
+    writeFileSync(v3Path, JSON.stringify(contract));
+    const v3Proposal = f.cli(["architecture", "propose", "--contract", v3Path,
+      "--carry-forward", carry]);
+    const v3Signature = authorApproval(f.story, "single", f.env, root,
+      { ...v3Proposal.authorSigningRequest, reason: "Restore exact reviewed Foundations under the unchanged original Turn." });
+    const v3 = f.cli(["architecture", "approve", "--proposal", v3Proposal.proposal.digest,
+      "--approval", v3Signature.file]);
+    assert.equal(v3.plan.version, 3);
+    assert.deepEqual(v3.history.at(-1).carryForward, carryForward);
+    const revisedV3 = resumeOriginalCliArchitecture();
+    assert.equal(revisedV3.status, "paused", revisedV3.reason ?? undefined);
+    await sealFixtureGenerationCheckpoint(f, "global-architecture");
+    const correctedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.equal(correctedHead, sourceAtFailure,
+      "the second signed plan-only revision must preserve the original reviewed work");
+    const expected = await inspectBlockedOriginalThreadCorrection(f.job, threadId, failed);
+    assert.equal(expected.eligible, true, expected.reason);
+    for (let restart = 0; restart < 2; restart++) {
+      assert.deepEqual(await inspectBlockedOriginalThreadCorrection(f.job, threadId, failed), expected,
+        "repeated read-only admission cannot mutate the original operation");
+    }
+    const refuse = async (altered: any, reason: string) =>
+      assert.equal((await inspectBlockedOriginalThreadCorrection(f.job,
+        threadId, altered)).eligible, false, reason);
+    await refuse({ ...failed, graphThreadId: threadId + ":other" }, "Wrong Thread cannot recover");
+    await refuse({ ...failed, result: null }, "Lost original completed result remains fenced");
+    await refuse({ ...failed, result: { ...failed.result, headSha: "f".repeat(40) } },
+      "Wrong original result HEAD cannot recover");
+    await refuse({ ...failed, request: { ...failed.request, model: "substituted-model" } },
+      "Changed selected model cannot recover");
+    await refuse({ ...failed, completedStages: [...failed.completedStages,
+      { stage, milestone: failed.active.milestone, headSha: originalHead }] },
+      "Already acknowledged work cannot be counted twice");
+    await refuse({ ...failed, operationRecovery: { ...failed.operationRecovery,
+      evidence: { ...failed.operationRecovery.evidence, verifier: {
+        ...failed.operationRecovery.evidence.verifier, checkpointDigest: "f".repeat(64) } } } },
+    "Tampered checkpoint digest cannot grant recovery");
+    const reviewFile = join(f.job.stateDir, "independent-reviews", originalHead + ".json");
+    const savedReview = readFileSync(reviewFile, "utf8");
+    try {
+      const damaged = JSON.parse(savedReview);
+      damaged.status = "failed";
+      writeFileSync(reviewFile, JSON.stringify(damaged));
+      await refuse(failed, "Tampered original independent review cannot recover");
+    } finally { writeFileSync(reviewFile, savedReview); }
+    const draft = join(f.job.worktreeRoot, "untracked-original-verifier.txt");
+    writeFileSync(draft, "An unreviewed writer draft");
+    try { await refuse(failed, "Dirty original Story cannot recover"); }
+    finally { unlinkSync(draft); }
+    await setJobControl(f.job, "paused");
+    try { await refuse(failed, "Author pause has priority over recovery"); }
+    finally { await setJobControl(f.job, "running"); }
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls);
+    assert.equal(await safeToResume(f.job, threadId, JSON.stringify(failed.request),
+      false, "blocked"), "resume");
+    // The real Studio SQLite queue must admit the SAME naturally blocked
+    // graph Thread exactly once through its owner-scoped compare-and-swap.
+    // Neither a fabricated request nor a second worker can consume this
+    // verified recovery. The graph resumes only after the worker claims it.
+    const queue = stage === "event" ? await openKyselyFeatureFixture("sqlite") : null;
+    let queueWorker: { owner: string; at: string; request: string } | null = null;
+    try {
+      if (queue) {
+        const owner = await queue.owner();
+        const repo = "verifier-repo", story = "verifier-story";
+        const at = "2026-11-22T12:00:00Z", later = "2026-11-22T13:00:00Z";
+        const request = JSON.stringify(failed.request);
+        await queue.records.insert("repositories", { id: repo, ownerUserId: owner,
+          provider: "github", providerRepositoryId: repo, name: "Cert/Verifier",
+          createdAt: at });
+        await queue.records.insert("stories", { id: story, ownerUserId: owner,
+          repositoryId: repo, directory: "story", title: "Verifier",
+          sourceCommitSha: f.initial, createdAt: at });
+        assert.equal(await queue.generation.jobs.register(owner, f.job.jobId,
+          story, "Original verifier recovery", f.initial, at), true);
+        await queue.generation.queue.enqueue(owner, f.job.jobId, "start", "prepared",
+          at, request, threadId);
+        assert.equal((await queue.generation.queue.claim("original-worker", 1, at))?.jobId, f.job.jobId);
+        assert.equal(await queue.generation.jobs.start(owner, f.job.jobId,
+          threadId, request, "original-worker", at), true);
+        assert.equal(await queue.generation.jobs.finish(owner, f.job.jobId,
+          threadId, "blocked", false, "original-worker", later), true);
+        assert.equal(await queue.generation.queue.finish(f.job.jobId, "original-worker",
+          true, later), true);
+        const saved = { status: "blocked", request, thread: threadId };
+        await assert.rejects(queue.generation.queue.reconcileAndEnqueue(owner,
+          f.job.jobId, "resume", saved, false, later),
+          /lacks verified original-Thread recovery/);
+        await assert.rejects(queue.generation.queue.reconcileAndEnqueue(owner,
+          f.job.jobId, "resume", { ...saved, thread: threadId + ":other" },
+          false, later, true, "approved-work"),
+          /verified checkpoint/);
+        await queue.generation.queue.reconcileAndEnqueue(owner, f.job.jobId,
+          "resume", saved, false, later, true, "approved-work");
+        assert.equal((await queue.generation.queue.record(f.job.jobId))?.resumeKind,
+          "approved-work");
+        await assert.rejects(queue.generation.queue.reconcileAndEnqueue(owner,
+          f.job.jobId, "resume", saved, false, later, true, "approved-work"),
+          /verified checkpoint/, "a duplicate resume cannot enqueue another worker");
+        const claimed = await queue.generation.queue.claim("recovery-worker", 1, later);
+        assert.equal(claimed?.resumeKind, "approved-work");
+        assert.equal((await queue.generation.jobs.state(owner, f.job.jobId))?.threadId,
+          threadId);
+        assert.equal(await queue.generation.jobs.start(owner, f.job.jobId,
+          threadId, request, "recovery-worker", later), true);
+        queueWorker = { owner, at: later, request };
+      }
+    // The very same persisted Thread is restarted in production server mode.
+    const architectureReceipt = JSON.parse(readFileSync(
+      join(f.job.stateDir, "architecture.json"), "utf8"));
+    assert.equal(JSON.stringify(architectureReceipt.history?.find((h: any) =>
+      h.plan.version === failed.planVersion)?.plan.contract),
+    JSON.stringify(failed.request.contract),
+    "the original request must equal its historical approved plan: " +
+      JSON.stringify({ request: failed.request.contract,
+        earlier: architectureReceipt.history?.find((h: any) =>
+          h.plan.version === failed.planVersion)?.plan.contract,
+        current: architectureReceipt.plan.contract }));
+    const server = createGenerationGraph(saver, "server");
+    const restored = await server.invoke({ request: failed.request }, {
+      ...config, interruptAfter: ["verify_committed_work"] });
+    assert.equal(restored.operationRecovery, null, restored.reason ?? undefined);
+    assert.equal(restored.completedStages.filter((entry: any) =>
+      entry.stage === stage && entry.headSha === originalHead).length, 1);
+    assert.equal(restored.result, null);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), correctedHead);
+    assert.equal((await server.getState(config)).values.graphThreadId, threadId);
+    // This disposable fixture was started by the CLI. After Studio has
+    // recovered the verifier, ordinary subsequent scheduling belongs to its
+    // original CLI owner; server takeover would correctly be prohibited.
+    const originalOwner = createGenerationGraph(saver, "cli");
+    const subsequent = await originalOwner.invoke({ request: restored.request }, {
+      ...config, interruptBefore: ["specialist_dispatch"] });
+    assert.equal(subsequent.status, "running",
+      "original verifier must continue to a normally authorized dependent, not re-dispatch itself: " +
+      String(subsequent.reason));
+    assert.ok(subsequent.active && subsequent.active.id !== failed.active.id,
+      "the controller must select subsequent authorized work, not repeat the original specialist");
+    assert.equal(subsequent.completedStages.filter((entry: any) =>
+      entry.stage === stage && entry.headSha === originalHead).length, 1);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeCalls,
+      "next safe boundary does not repeat a reviewer, writer or planner call");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), correctedHead);
+    if (queue && queueWorker) {
+      assert.equal(await queue.generation.jobs.finish(queueWorker.owner, f.job.jobId,
+        threadId, "paused", false, "recovery-worker", queueWorker.at), true);
+      assert.equal(await queue.generation.queue.finish(f.job.jobId,
+        "recovery-worker", true, queueWorker.at), true);
+      assert.equal((await queue.generation.queue.record(f.job.jobId))?.phase, "finished");
+    }
+    } finally { await queue?.close(); }
+    // A cancelled historical job never gains a second admission even after
+    // its earlier source/approval checks happened to pass.
+    await setJobControl(f.job, "cancelled");
+    await refuse(failed, "Cancellation remains terminal across repeated inspection");
+  } finally {
+    saver.db.close();
+    writeFileSync(selectionPath, originalSelection);
+    for (const key of keys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
 });
 
 test("#212: certified predecessor is carried across approval, corrected source gets a fresh Event and Blueprint", { skip: !available }, async () => {

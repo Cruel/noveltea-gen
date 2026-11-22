@@ -1884,15 +1884,19 @@ export function createGenerationGraph(
               "Missing or unaccepted specialist result: " + (s.result?.status ?? "absent"),
               { reference: "specialist-receipt", assignmentId: s.active!.id,
                 resultStatus: s.result?.status ?? "absent" }, "returned-failure");
+          // A result authored under v1 never inherits v2's permissions just
+          // because an author signed a new plan while verification was pending.
           const completedStages = [...s.completedStages, { stage, milestone: s.active?.milestone,
-            headSha: s.result.headSha ?? headSha, status: s.result.status, planVersion: planVersion ?? undefined }];
+            headSha: s.result.headSha ?? headSha, status: s.result.status,
+            planVersion: s.planVersion ?? planVersion ?? undefined }];
           if (s.operationRecovery?.operation === "commit-verification" &&
               s.operationRecovery.phase === "continued") {
             const proof = s.request.turnPlanDigest && s.operationRecovery.evidence.verifier &&
               await verifyCorrectedOriginalResult(job, s.request.turnPlanDigest,
                 s.active, s.result, s.operationRecovery.evidence.verifier, s.planVersion);
             if (!proof || !proof.eligible ||
-                s.operationRecovery.source.headSha !== s.result.headSha)
+                s.operationRecovery.source.headSha !==
+                  s.operationRecovery.evidence.verifier?.failureHeadSha)
               throw Error("Original verifier reconciliation changed after admission: " +
                 (proof ? proof.reason : "original input is unavailable"));
             // Recheck the *actual* verifier's dependency and plan invariants
@@ -1900,6 +1904,12 @@ export function createGenerationGraph(
             // new lease. A newly approved correction is not, by itself, proof
             // that the failed verifier's prerequisite was satisfied.
             const rechecked = await reconcile({ ...s, completedStages,
+              // The original request stays pinned until recovery succeeds.
+              // Inside the verifier use ONLY the newly author-signed current
+              // contract, not an unsanctioned substitute or the stale v1
+              // request paired with a v3 plan version.
+              request: { ...s.request,
+                contract: receipt?.plan?.contract ?? s.request.contract },
               active: null, result: null, planVersion }, job, false);
             const verified = rechecked.inventory?.items.find(item =>
               item.id === s.active!.id);
@@ -1914,13 +1924,24 @@ export function createGenerationGraph(
             // This step acknowledges only the original already-reviewed
             // result. New adaptive proposals or dependent reviewers run
             // later through the normal author-intake boundary.
-            return { completedStages, active: null, result: null, planVersion,
-              operationRecovery: null, cursor: s.cursor + 1,
+            return { request: rechecked.request, completedStages, active: null,
+              result: null, planVersion, operationRecovery: null, cursor: s.cursor + 1,
               ...(s.pauseAfter === stage
                 ? { status: "paused" as const, reason: "Requested safe-boundary pause" }
                 : { status: "running" as const, reason: null }) };
           }
           const next = await reconcile({ ...s, completedStages, active: null, result: null, planVersion }, job);
+          // A real verifier must never report successful completion when a
+          // signed plan change discarded the just-reviewed original work.
+          // This is detected at the normal production boundary, not solely
+          // when attempting an eventual recovery.
+          const retained = next.completedStages?.some(entry =>
+            entry.stage === stage && entry.milestone === s.active?.milestone &&
+            entry.headSha === (s.result?.headSha ?? headSha));
+          const verified = next.inventory?.items.find(item => item.id === s.active!.id);
+          if (verifiableResultStatus[stage].includes(s.result.status) &&
+              (!retained || verified?.status !== "verified"))
+            throw Error("The original completed specialist is not authorized by the current reviewed plan; revalidate or explicitly carry it forward.");
           // A newly verified specialist has just reached a safe boundary. The
           // next assignment must not become in-flight until author steering and
           // other boundary updates have been reconciled by author_update_intake.

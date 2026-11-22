@@ -597,16 +597,20 @@ function nonBranchable(job: JobStartResult, sha: string, reason: string): Recove
  * their reviewed Git revision, not against the current working tree. NEVER
  * use this function as authority to skip pending work or dispatch a writer. */
 export async function inspectHistoricalRecoveryCheckpoint(job: JobStartResult,
-  commitSha: string): Promise<{ workItem: string; assurance?: CheckpointAssurance }> {
+  commitSha: string): Promise<{ workItem: string; assurance?: CheckpointAssurance;
+    proofDigest: string; completedWorkItems: string[]; semanticReview: string }> {
   if (!SHA.test(commitSha)) throw Error("Invalid historical recovery checkpoint identity.");
   const point = await readFinal(job, commitSha);
   if (point.commitSha !== commitSha || !isAncestor(job, commitSha, git(job, "rev-parse", "HEAD")) ||
       git(job, "symbolic-ref", "--short", "HEAD") !== job.branch)
     throw Error("Historical recovery checkpoint is outside the original job branch.");
   await verifyFinal(job, point, commitSha, "historical");
-  // Return only the authenticated audit projection. Do not expose eligible,
-  // dependency inventory or any branchable checkpoint to a writer caller.
-  return { workItem: point.workItem, assurance: point.assurance ?? undefined };
+  const review = point.assurance ? await inspectCheckpointReview(job, point) : null;
+  // Return only authenticated historical evidence, never branchability,
+  // dependency inventory or a permission to dispatch another writer.
+  return { workItem: point.workItem, assurance: point.assurance ?? undefined,
+    proofDigest: point.proofDigest, completedWorkItems: point.completedWorkItems,
+    semanticReview: review?.status ?? "untracked" };
 }
 
 export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<RecoveryInspection[]> {
