@@ -8,6 +8,12 @@ import { resolve, dirname } from "node:path";
 import test from "node:test";
 import ts from "typescript";
 import { operationChecks } from "../src/generation-operation-recovery.js";
+import {
+  reviewedReturnExits,
+  reviewedThrowExits,
+  reviewedStatusExits,
+  reviewedSharedRouteHelper,
+} from "./generation-recovery-exit-baseline.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const text = readFileSync(resolve(root, "src/generation.ts"), "utf8");
@@ -75,7 +81,7 @@ function childNodes(node: ts.Node): ts.Node[] {
   return result;
 }
 
-function graphNodes(): Map<string, ts.Node> {
+function graphNodes(source: ts.SourceFile = file): Map<string, ts.Node> {
   const nodes = new Map<string, ts.Node>();
   function visit(node: ts.Node): void {
     if (
@@ -89,7 +95,7 @@ function graphNodes(): Map<string, ts.Node> {
     }
     ts.forEachChild(node, visit);
   }
-  visit(file);
+  visit(source);
   return nodes;
 }
 function graphEdges(): string[] {
@@ -107,9 +113,28 @@ function graphEdges(): string[] {
   visit(file);
   return nodes.sort();
 }
+/** Direct graph edges must not bypass assessment or change destinations silently. */
+function directEdgeSignatures(source: ts.SourceFile = file): string[] {
+  const edges: string[] = [];
+  function visit(node: ts.Node): void {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "addEdge"
+    ) {
+      assert.equal(node.arguments.length, 2, "Unexpected direct graph edge shape");
+      edges.push(node.arguments.map((arg) => arg.getText(source)).join(" => "));
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return edges.sort();
+}
+const approvedDirectEdges = ['START => "schedule"'];
+
 /** Account for changes to route predicates and target END/assess_recovery
  * destinations, not only newly added nodes or terminal returns. */
-function edgeSignatures(): Record<string, string> {
+function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
   const signatures: Record<string, string> = {};
   const printer = ts.createPrinter({ removeComments: true });
   function visit(node: ts.Node): void {
@@ -119,16 +144,16 @@ function edgeSignatures(): Record<string, string> {
       node.expression.name.text === "addConditionalEdges" &&
       ts.isStringLiteral(node.arguments[0]!)
     ) {
-      const source = (node.arguments[0] as ts.StringLiteral).text;
+      const edgeSource = (node.arguments[0] as ts.StringLiteral).text;
       const route = node.arguments
         .slice(1)
-        .map((arg) => printer.printNode(ts.EmitHint.Unspecified, arg, file))
+        .map((arg) => printer.printNode(ts.EmitHint.Unspecified, arg, source))
         .join("|");
-      signatures[source] = createHash("sha256").update(route).digest("hex");
+      signatures[edgeSource] = createHash("sha256").update(route).digest("hex");
     }
     ts.forEachChild(node, visit);
   }
-  visit(file);
+  visit(source);
   return Object.fromEntries(Object.entries(signatures).sort(([a], [b]) => a.localeCompare(b)));
 }
 
@@ -146,9 +171,9 @@ const approvedEdgeSignatures: Record<string, string> = {
   verify_idea_integration: "9fbefd5978a9b759ffe379eeee824ef6a9c2b22129825bf314a0474164aff134",
 };
 
-function helpers(): Map<string, ts.Node> {
+function helpers(source: ts.SourceFile = file): Map<string, ts.Node> {
   const functions = new Map<string, ts.Node>();
-  for (const child of childNodes(file)) {
+  for (const child of childNodes(source)) {
     if (ts.isFunctionDeclaration(child) && child.name) functions.set(child.name.text, child.body!);
   }
   return functions;
@@ -183,6 +208,113 @@ function exitShape(node: ts.Node): string {
   for (const [key, value] of Object.entries(counts)) if (value) observed.push(key + ":" + value);
   return observed.join(",");
 }
+/** An exit's stable ID is its owning graph callback/helper and ordinal within
+ * returns or throws of that owner. Unlike counts, its statement fingerprint
+ * detects edited returns, including swapped status and reused exit slots. */
+function exitSites(
+  source: ts.SourceFile = file,
+): Record<string, { id: string; fingerprint: string; source: string }[]> {
+  const printer = ts.createPrinter({ removeComments: true });
+  const nodes = graphNodes(source);
+  const funcs = helpers(source);
+  const sites: Record<string, { id: string; fingerprint: string; source: string }[]> = {};
+  for (const site of siteNames) {
+    const root = nodes.get(site) ?? funcs.get(site);
+    assert.ok(root, `Missing production exit owner ${site}`);
+    let returns = 0;
+    let throws = 0;
+    let statuses = 0;
+    const records: { id: string; fingerprint: string; source: string }[] = [];
+    function visit(node: ts.Node): void {
+      if (
+        ts.isReturnStatement(node) ||
+        ts.isThrowStatement(node) ||
+        (ts.isPropertyAssignment(node) && node.name.getText(source) === "status")
+      ) {
+        const kind = ts.isReturnStatement(node) ? "return" : ts.isThrowStatement(node) ? "throw" : "status";
+        const ordinal = kind === "return" ? ++returns : kind === "throw" ? ++throws : ++statuses;
+        const expression = printer
+          .printNode(ts.EmitHint.Unspecified, node, source)
+          .replace(/\s+/g, " ")
+          .trim();
+        records.push({
+          id: `${site}/${kind}#${ordinal}`,
+          fingerprint: createHash("sha256").update(expression).digest("hex").slice(0, 16),
+          source: expression,
+        });
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(root);
+    sites[site] = records;
+  }
+  return sites;
+}
+
+/** The *body* of every shared routing helper is a reviewed dispatch gate.
+ * Hashing only call expressions does not detect a changed helper definition. */
+function routeHelperSignature(source: ts.SourceFile = file): string {
+  const helper = helpers(source).get("routeAfterOperationAssessment");
+  assert.ok(helper, "Shared operation assessment route helper removed or renamed");
+  const printed = ts
+    .createPrinter({ removeComments: true })
+    .printNode(ts.EmitHint.Unspecified, helper, source);
+  return createHash("sha256").update(printed).digest("hex");
+}
+
+test("every individual return and throw has a stable source ID, reviewed disposition and fingerprint", () => {
+  const exits = exitSites();
+  assert.deepEqual(Object.keys(exits), [...siteNames]);
+  for (const site of siteNames) {
+    const observed = exits[site]!;
+    const expectedReturns = reviewedReturnExits[site].split(" ").filter(Boolean);
+    const expectedThrows = reviewedThrowExits[site].split(" ").filter(Boolean);
+    const expectedStatuses = reviewedStatusExits[site].split(" ").filter(Boolean);
+    const returned = observed.filter((r) => r.id.includes("/return#"));
+    const thrown = observed.filter((r) => r.id.includes("/throw#"));
+    const statuses = observed.filter((r) => r.id.includes("/status#"));
+    assert.equal(returned.length, expectedReturns.length, `${site}: return site count changed`);
+    assert.equal(thrown.length, expectedThrows.length, `${site}: throw site count changed`);
+    assert.equal(statuses.length, expectedStatuses.length, `${site}: status site count changed`);
+    expectedReturns.forEach((entry, i) => {
+      const [fingerprint, disposition] = entry.split(":");
+      assert.match(
+        disposition ?? "",
+        /^(G|R|O|F|U|B|S|V)$/,
+        `${site}/return#${i + 1}: missing reviewed disposition`,
+      );
+      assert.equal(returned[i]!.id, `${site}/return#${i + 1}`);
+      assert.equal(
+        returned[i]!.fingerprint,
+        fingerprint,
+        `${site}/return#${i + 1} [${disposition}] changed: ${returned[i]!.source}`,
+      );
+    });
+    expectedThrows.forEach((fingerprint, i) => {
+      assert.equal(thrown[i]!.id, `${site}/throw#${i + 1}`);
+      assert.equal(
+        thrown[i]!.fingerprint,
+        fingerprint,
+        `${site}/throw#${i + 1} [X] changed: ${thrown[i]!.source}`,
+      );
+    });
+    expectedStatuses.forEach((entry, i) => {
+      const [fingerprint, disposition] = entry.split(":");
+      assert.match(disposition ?? "", /^(G|F|U|B|S|V)$/, `${site}/status#${i + 1}: missing disposition`);
+      assert.equal(statuses[i]!.id, `${site}/status#${i + 1}`);
+      assert.equal(
+        statuses[i]!.fingerprint,
+        fingerprint,
+        `${site}/status#${i + 1} [${disposition}] changed: ${statuses[i]!.source}`,
+      );
+    });
+  }
+  assert.equal(
+    routeHelperSignature(),
+    reviewedSharedRouteHelper,
+    "Original assessment routing helper changed",
+  );
+});
 test("production graph nodes and conditional END gates are all in the recovery exit inventory", () => {
   const nodes = [...graphNodes().keys()].sort();
   assert.deepEqual(
@@ -193,6 +325,7 @@ test("production graph nodes and conditional END gates are all in the recovery e
       .filter((name) => name !== "runStoryGeneration"),
   );
   assert.deepEqual(graphEdges(), nodes);
+  assert.deepEqual(directEdgeSignatures(), approvedDirectEdges);
 });
 test("route predicates and END destinations cannot change without C01 inventory review", () => {
   assert.deepEqual(
@@ -200,6 +333,77 @@ test("route predicates and END destinations cannot change without C01 inventory 
     approvedEdgeSignatures,
     "A production routing predicate/END target changed; review the original graph transition in docs/generation-recovery-contract.md before updating this baseline.",
   );
+});
+test("shared routing helper cannot bypass assessments even when call sites are unchanged", () => {
+  const bypass = ts.createSourceFile(
+    "generation.ts",
+    text.replace(
+      'return s.operationRecovery?.phase === "assessment" ? "assess_recovery" : normal;',
+      "return normal;",
+    ),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  assert.notEqual(bypass.text, text, "Mutation fixture must change the real helper");
+  assert.deepEqual(edgeSignatures(bypass), edgeSignatures(), "Call sites were deliberately left untouched");
+  assert.notEqual(
+    routeHelperSignature(bypass),
+    routeHelperSignature(),
+    "Bypass must invalidate helper signature",
+  );
+});
+test("an existing blocked exit cannot change to running without changing its source-specific proof", () => {
+  const oldExit = 'return blocked(Error("Unrecognized or unbound adaptive recovery decision"));';
+  assert.ok(text.includes(oldExit), "Mutation must target actual current production code");
+  const bypass = ts.createSourceFile(
+    "generation.ts",
+    text.replace(oldExit, 'return { status: "running" as const };'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const original = exitSites().assess_recovery!.filter((r) => r.id.includes("/return#"));
+  const altered = exitSites(bypass).assess_recovery!.filter((r) => r.id.includes("/return#"));
+  assert.equal(altered.length, original.length, "Return count deliberately unchanged");
+  assert.notEqual(
+    altered[18]!.fingerprint,
+    original[18]!.fingerprint,
+    "Source-specific fingerprint catches bypass even with the same return count",
+  );
+});
+test("a concise-arrow fence cannot change to running while return sites and counts stay fixed", () => {
+  const oldStatus = 'status: "blocked", operationRecovery: { ...op, phase: "fenced" }';
+  assert.ok(text.includes(oldStatus), "Mutation must target the actual assessor fence helper");
+  const bypass = ts.createSourceFile(
+    "generation.ts",
+    text.replace(oldStatus, 'status: "running", operationRecovery: { ...op, phase: "fenced" }'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const before = exitSites().assess_recovery!;
+  const after = exitSites(bypass).assess_recovery!;
+  assert.deepEqual(
+    before.filter((r) => r.id.includes("/return#")).map((r) => r.fingerprint),
+    after.filter((r) => r.id.includes("/return#")).map((r) => r.fingerprint),
+    "No explicit return site changed",
+  );
+  assert.notDeepEqual(
+    before.filter((r) => r.id.includes("/status#")).map((r) => r.fingerprint),
+    after.filter((r) => r.id.includes("/status#")).map((r) => r.fingerprint),
+    "Status site fingerprint must detect the concealed bypass",
+  );
+});
+test("direct graph edges cannot silently skip controller dispatch", () => {
+  const bypass = ts.createSourceFile(
+    "generation.ts",
+    text.replace('.addEdge(START, "schedule")', '.addEdge(START, "completion_decision")'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  assert.notDeepEqual(directEdgeSignatures(bypass), directEdgeSignatures());
 });
 test("every typed failed operation is inventoried (new operations fail this gate)", () => {
   assert.deepEqual(Object.keys(operationChecks).sort(), operations);

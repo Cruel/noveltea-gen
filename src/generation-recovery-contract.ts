@@ -6,24 +6,26 @@
  * Git, Pi transcripts, Review cycles and the Repair ledger remain authoritative.
  * See docs/generation-recovery-contract.md (#238).
  */
-export type RecoveryOrigin = {
+export type RecoveryOrigin = Readonly<{
   jobId: string;
   /** The LangGraph Thread, not a replacement Thread created on recovery. */
   graphThreadId: string;
   /** Original job Thread identity, checked separately from the graph cursor. */
   jobThreadId: string;
-  turnDigest: string | null;
+  /** Trusted original Turn and source; missing proof belongs in an inspection fence. */
+  turnDigest: string;
   planVersion: number | null;
-  /** May be null only while evidence cannot establish a trustworthy HEAD. */
-  sourceHeadSha: string | null;
+  sourceHeadSha: string;
   assignmentId: string | null;
   /** Stable name of the original operation and its versioned failed check. */
   operation: string;
   check: string;
   checkVersion: number;
-};
+  /** Authenticated original failed-check execution, NOT a graph resume ordinal. */
+  failureAnchor: RecoveryFailureAnchor;
+}>;
 
-export type RecoveryEvidence = {
+export type RecoveryEvidence = Readonly<{
   /** Only an identifier: the authority lives in the existing receipt store. */
   store:
     | "graph-checkpoint"
@@ -39,12 +41,43 @@ export type RecoveryEvidence = {
     | "git";
   ref: string;
   digest?: string;
-};
+}>;
+
+/** Canonical identity anchor from the ORIGINAL failure receipt or task checkpoint.
+ * A later observation/response/changed HEAD never replaces this anchor. */
+export type RecoveryFailureAnchor = Readonly<{
+  store: RecoveryEvidence["store"];
+  ref: string;
+  /** Stable original operation/check invocation, authenticated by that store. */
+  failedCheckInstanceId: string;
+}>;
+
+/** Unsafe provenance is NOT an admitted case or a RecoveryDecision. Retain all
+ * available proof for read-only inspection without inventing a case ID. */
+export type RecoveryInspectionFence = Readonly<{
+  schema: "noveltea-generation-recovery-inspection-fence/v1";
+  reason:
+    | "untrusted-source"
+    | "untrusted-receipt"
+    | "ambiguous-writer"
+    | "conflicting-cases"
+    | "unsupported-legacy"
+    | "missing-original-failure";
+  observedOrigin: Readonly<Partial<RecoveryOrigin>>;
+  evidence: readonly RecoveryEvidence[];
+  /** May be null when the graph never admitted the original operation. */
+  checkpointRef: RecoveryEvidence | null;
+  requiredInspection: string;
+}>;
+
+export type RecoveryAdmission =
+  | Readonly<{ outcome: "admitted"; case: RecoveryCase }>
+  | Readonly<{ outcome: "fenced"; fence: RecoveryInspectionFence }>;
 
 export type RecoveryCase = Readonly<{
   schema: "noveltea-generation-recovery-case/v1";
-  /** Digest of canonical origin + failure-kind/check + ordered evidence refs.
-   * Error prose and graph attempt ordinal MUST NOT affect identity. */
+  /** Digest of canonical original-failure identity/anchor ONLY. Later evidence,
+   * classification, graph replay and revised source MUST NOT reset entitlement. */
   id: string;
   origin: RecoveryOrigin;
   kind:
@@ -64,6 +97,8 @@ export type RecoveryCase = Readonly<{
     | "incomplete-inventory"
     | "reconciliation";
   effect: "no-effects" | "read-only" | "settled-no-write" | "verified-commit" | "writer-effects-uncertain";
+  /** Admission proof, immutable; subsequent observations belong to linked
+   * receipts/decisions, never the canonical original-failure identity. */
   evidence: readonly RecoveryEvidence[];
   /** A related, earlier case is a link, not copied work history. */
   causedByCaseId?: string;
@@ -80,7 +115,7 @@ type RecoveryDecisionBase = Readonly<{
 /** Precisely one selected controller disposition; none of these is an
  * autonomous right to write or to count a model call as executed. */
 export type RecoveryDecision = RecoveryDecisionBase &
-  (
+  Readonly<
     | {
         action: "known-correction";
         adapter: "response-contract" | "review-cycle" | "known-verifier-fix" | "native-revalidation";
@@ -136,7 +171,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
           | "unsupported-legacy";
         requiredInspection: string;
       }
-  );
+  >;
 
 /** An invocation index, not a copy of Pi responses, call budget or repair history.
  * The first failed specialist, scheduled task, and assessment are never
@@ -169,6 +204,9 @@ export type RecoveryLifecycle = Readonly<{
   /** Oldest eligible case owns the mutation lane; other cases stay pending. */
   active: RecoveryCase | null;
   pending: readonly RecoveryCase[];
+  /** No caseId or decision exists for an unauthenticated admission. These
+   * inspection-only fences block mutation and survive resume independently. */
+  inspectionFences: readonly RecoveryInspectionFence[];
   phase:
     | "idle"
     | "assessing"
