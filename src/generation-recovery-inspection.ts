@@ -32,6 +32,7 @@ import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type Unknown
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
 import { originalInventorySnapshotDigest } from "./selective-revalidation.js";
+import { independentObligation, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 
 const object = (x: unknown): x is Record<string, unknown> =>
   !!x && typeof x === "object" && !Array.isArray(x);
@@ -344,7 +345,9 @@ export async function inspectModernGenerationRecovery(
           return authenticateDiagnosticStop(job, source, d);
         case "continue-independent":
           return source.channel === "operationRecovery" &&
-            source.input.safeAction === "continue-independent" &&
+            independentObligation(source.input as unknown as GenerationOperationRecovery,
+              active.origin.sourceHeadSha) ===
+              d.blockedAssignmentId &&
             d.blockedAssignmentId === (active.origin.assignmentId ??
               (source.input.operation === "idea-integration" &&
                 typeof (source.input.evidence as { ideaId?: unknown } | undefined)?.ideaId === "string"

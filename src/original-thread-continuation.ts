@@ -16,7 +16,8 @@ import { loadSelectedStoryOrchestrator } from "./orchestrator-selection.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { validateStoryJob } from "./validator.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
-import { operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { operationChecks, independentObligation,
+  type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 import { verifyCorrectedOriginalResult } from "./commit-verification-continuation.js";
 import { readJobControl } from "./job-control.js";
 import type { GenerationStage } from "./generation-plan.js";
@@ -154,7 +155,6 @@ export async function inspectBlockedOriginalThreadCorrection(
   // response must first be admitted and authenticated by readAdaptiveState.
   if (op.operation === "adaptive-admission") {
     if (!["fenced", "continued"].includes(op.phase) ||
-        op.safeAction !== "reconcile-original-operation" ||
         op.evidence.reference !== "generation-checkpoint" || active ||
         !adaptive || saved.planVersion == null)
       return refuse("Original adaptive operation lacks a settled recovery identity.");
@@ -166,7 +166,6 @@ export async function inspectBlockedOriginalThreadCorrection(
   if (commitVerifier) {
     if (!["fenced", "continued"].includes(op.phase) ||
         op.outcome !== "exception" ||
-        op.safeAction !== "reconcile-original-operation" ||
         op.evidence.reference !== "review-checkpoints" ||
         !op.evidence.verifier || !active || !saved.result ||
         !saved.result.headSha ||
@@ -198,7 +197,7 @@ export async function inspectBlockedOriginalThreadCorrection(
   const item = saved.inventory!.items.find(entry => entry.id === assignmentId);
   const milestone = item?.id.match(/^(?:interactive|composition):(milestone\.[a-z][a-z0-9-]*)$/)?.[1];
   const settledNoWriteFailure = op.operation === "specialist-dispatch" &&
-    op.phase === "continued" && op.safeAction === "continue-independent" &&
+    op.phase === "continued" && independentObligation(op, head) === assignmentId &&
     !active && !!item && item.status === "blocked" &&
     saved.failures?.[assignmentId!] === op.reason && op.evidence.priorHead === head;
   // A fenced reviewer/commit verifier with an active but unsettled writer

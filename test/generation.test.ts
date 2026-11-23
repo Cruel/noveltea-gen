@@ -302,8 +302,10 @@ test("C02 later native-verified foundation commit discharges an original no-writ
   assert.equal(admission.outcome, "admitted");
   if (admission.outcome !== "admitted") throw Error("missing original fixture case");
   const sourceRecord = { channel: "operationRecovery" as const, caseId: admission.case.id,
-    input: { operation: "specialist-dispatch", safeAction: "continue-independent",
-      evidence: { assignmentId: "foundation" } } };
+    input: { operation: "specialist-dispatch", outcome: "exception",
+      safeAction: "continue-independent",
+      evidence: { reference: "specialist-receipt", assignmentId: "foundation",
+        priorHead: f.initial } } };
   const verified = await inspectDeferredCorrection(f.job, admission.case, sourceRecord, {
     inventory: paused.inventory, ideaHistory: [], fixture: true,
   });
@@ -311,6 +313,11 @@ test("C02 later native-verified foundation commit discharges an original no-writ
     JSON.stringify({ item, points: (await inspectRecoveryCheckpoints(f.job)).map(p =>
       ({ workItem: p.workItem, sha: p.commitSha, review: p.semanticReview, eligible: p.eligible })) }));
   assert.equal(verified?.correctedHeadSha, correctedHead);
+  assert.equal(await inspectDeferredCorrection(f.job, admission.case, {
+    ...sourceRecord, input: { ...sourceRecord.input,
+      evidence: { reference: "specialist-receipt", assignmentId: "foundation" } },
+  }, { inventory: paused.inventory, ideaHistory: [], fixture: true }), null,
+  "The historical continue-independent hint cannot replace original no-write source proof");
   const withheld = await inspectDeferredCorrection(f.job, admission.case, sourceRecord, {
     inventory: { ...paused.inventory, items: paused.inventory.items.map((work: any) =>
       work.id === "foundation" ? { ...work, status: "blocked" } : work) },

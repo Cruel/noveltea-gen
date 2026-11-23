@@ -12,6 +12,7 @@ import type { IdeaHistoryEntry } from "./generation.js";
 import { git, load } from "./ideas.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { trustedHead } from "./revision.js";
+import { independentObligation, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 
 export interface DeferredResolutionState {
   inventory: GenerationInventory | null;
@@ -28,8 +29,9 @@ export async function inspectDeferredCorrection(
   expected?: RecoveryDischarge,
 ): Promise<RecoveryDischarge | null> {
   if (source.caseId !== original.id || source.channel !== "operationRecovery" ||
-      source.input.safeAction !== "continue-independent" ||
-      !["specialist-dispatch", "idea-integration"].includes(original.origin.operation))
+      !["specialist-dispatch", "idea-integration"].includes(original.origin.operation) ||
+      !independentObligation(source.input as unknown as GenerationOperationRecovery,
+        original.origin.sourceHeadSha))
     return null;
   const head = await trustedHead(job);
   // Original provenance remains immutable even when later work changes HEAD.
