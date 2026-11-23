@@ -324,6 +324,10 @@ export async function inspectModernGenerationRecovery(
             .authenticateOperationReviewProof(job, values as GenerationGraphState, active, d);
         case "plan-amendment": {
           const graphState = values as GenerationGraphState;
+          if (d.adapter === "dependency-work")
+            return source.channel === "operationRecovery" &&
+              await (await import("./generation-operation-strategy.js"))
+                .authenticateOperationOwnerProof(job, graphState, active, d);
           const pending = graphState.crossDomainCloseout;
           return d.adapter === "cross-domain-closeout" && d.owner === "event" && !!pending &&
             matchesOriginalCloseout(graphState, active, pending) && d.scopeRef.store === "repair-ledger" &&

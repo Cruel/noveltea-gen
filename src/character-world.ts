@@ -27,7 +27,7 @@ import { authorCharacterWorld, characterInitialKnowledgeCorrection,
   type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
   type SpecialistChoiceProposal } from "./character-world-specialist.js";
 
-type Phase = "pending" | "writing" | "awaiting-author" | "authored" | "committed";
+type Phase = "pending" | "writing" | "awaiting-author" | "authored" | "conflicted" | "committed";
 interface Unit {
   id: string;
   domain: FoundationDomain;
@@ -46,6 +46,8 @@ interface Unit {
   outstanding?: Obligation[];
   laterObligations?: string[];
   architecturalConflicts?: string[];
+  conflictDigest?: string;
+  piSessionSha256?: string;
   validation?: { status: "passed"; protectionBase: string; validatorVersion: string; records: string[] };
 }
 interface Receipt {
@@ -331,6 +333,11 @@ async function publishHead(job: JobStartResult, previous: string, commit: string
   await finalizeRecoveryCheckpoint(job, workItemId, previous, commit);
 }
 async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: FoundationAssignment): Promise<SpecialistEvidence> {
+  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === unit.domain + "-conflict") {
+    return { claimedPaths: [], skillReads: [], architecturalConflicts: [
+      "The approved architecture assigns a prerequisite to another specialist and cannot be fulfilled by " + unit.domain,
+    ], laterObligations: ["Controller must verify the original assigned owner before any new work"] };
+  }
   const write = async (folder: string, slug: string, type: string, fields: string, body: string) => {
     const file = join(job.worktreeStoryRoot, folder, slug + ".md");
     await mkdir(dirname(file), { recursive: true });
@@ -398,8 +405,92 @@ async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: Foundation
       ? ["A later Event must establish who learns the concealed evidence; objective truth remains initially true."]
       : ["Bind disclosure and any Relationship trust change to actual Event branches, not the initial state."] };
 }
+/** Immutable negative Foundation source identity; no approval or writer lease. */
+function foundationConflictDigest(receipt: Receipt, unit: Unit) {
+  return digest(JSON.stringify({
+    jobId: receipt.jobId, threadId: receipt.threadId, contractDigest: receipt.contractDigest,
+    planVersion: receipt.planVersion, architectureHead: receipt.architectureHead,
+    startHead: receipt.startHead, snapshotId: receipt.snapshot?.id,
+    worker: receipt.worker, provider: receipt.provider, model: receipt.model,
+    unitId: unit.id, domain: unit.domain, beforeHead: unit.beforeHead,
+    assignment: unit.assignment, paths: unit.claimedPaths, skillReads: unit.skillReads,
+    conflicts: unit.architecturalConflicts, obligations: unit.laterObligations,
+    sessionFile: unit.piSessionFile ?? null, sessionId: unit.piSessionId ?? null,
+    sessionSha256: unit.piSessionSha256 ?? null,
+  }));
+}
+/** Re-read the original settled Pi manifest and clean Story HEAD before the
+ * parent Recovery assessor can route a no-write World/Character contradiction.
+ * The next Foundation worker is never started or presumed complete. */
+export async function inspectFoundationConflict(job: JobStartResult, domain: FoundationDomain) {
+  const relative = "character-world.json";
+  const receipt = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as Receipt;
+  const index = domain === "world" ? 0 : 1;
+  const unit = receipt.units?.[index];
+  const other = receipt.units?.[1 - index];
+  const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as ArchitectureReceipt;
+  const head = await trustedHead(job);
+  if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId ||
+      receipt.baseSha !== job.baseSha || receipt.branch !== job.branch ||
+      receipt.worktreeRoot !== job.worktreeRoot || !receipt.snapshot?.id ||
+      architecture.phase !== "committed" || architecture.jobId !== job.jobId ||
+      !architecture.plan || architecture.plan.version !== receipt.planVersion ||
+      digest(JSON.stringify(architecture.plan.contract)) !== receipt.contractDigest ||
+      receipt.architectureHead !== architecture.expectedHead ||
+      !unit || unit.id !== (domain === "world" ? "world-foundations" : "character-foundations") ||
+      unit.domain !== domain || unit.phase !== "conflicted" ||
+      !unit.assignment || unit.assignment.domain !== domain ||
+      unit.beforeHead !== head || unit.claimedPaths?.length || unit.paths?.length ||
+      unit.commitSha || !unit.conflictDigest || !unit.architecturalConflicts?.length ||
+      unit.architecturalConflicts.some(c => typeof c !== "string" || !c.trim()) ||
+      !Array.isArray(unit.laterObligations) ||
+      (index === 0 && (other?.phase !== "pending" || other.beforeHead || other.commitSha)) ||
+      (index === 1 && (other?.phase !== "committed" || !other.commitSha)) ||
+      dirty(job).length)
+    throw Error("Settled Foundation no-write conflict has stale or untrusted source evidence.");
+  if (index === 1) {
+    // A Character contradiction depends on the original committed World,
+    // not merely a mutable claim that World previously completed.
+    verifyCommit(job, other!, receipt.startHead ?? receipt.architectureHead, other!.commitSha!);
+    await verifiedWorldReviewHandoff(job, other!.commitSha!, unit.beforeHead!);
+  }
+  if (receipt.worker === "pi") {
+    await verifyJobPiSession(job, domain, unit.piSessionFile, unit.piSessionId);
+    const path = unit.piSessionFile!;
+    if ((await lstat(path)).size > 64 * 1024 * 1024 ||
+        !unit.piSessionSha256 || digest(await readFile(path)) !== unit.piSessionSha256)
+      throw Error("Foundation no-write original Pi transcript changed.");
+    const entries = (await readFile(path, "utf8")).trim().split("\n").map(line =>
+      JSON.parse(line) as { type?: string; message?: { role?: string; stopReason?: string;
+        content?: Array<{ type?: string; text?: string }> } });
+    const final = entries.filter(entry => entry.type === "message" && entry.message?.role === "assistant")
+      .at(-1)?.message;
+    if (!final || final.stopReason !== "stop") throw Error("Foundation no-write Pi report never settled.");
+    const text = (final.content ?? []).filter(c => c.type === "text").map(c => c.text ?? "").join("\n");
+    const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
+    const parsed = match ? JSON.parse(match) as {
+      modifiedRecords?: unknown; architecturalConflicts?: unknown; laterObligations?: unknown } : null;
+    if (!parsed || JSON.stringify(parsed.modifiedRecords) !== "[]" ||
+        JSON.stringify(parsed.architecturalConflicts) !== JSON.stringify(unit.architecturalConflicts) ||
+        JSON.stringify(parsed.laterObligations) !== JSON.stringify(unit.laterObligations))
+      throw Error("Foundation no-write receipt differs from the original accepted Pi response.");
+  } else if (receipt.worker !== "fixture" || unit.piSessionFile || unit.piSessionSha256) {
+    throw Error("Foundation no-write worker identity is not authenticated.");
+  }
+  const reportDigest = foundationConflictDigest(receipt, unit);
+  if (reportDigest !== unit.conflictDigest) throw Error("Foundation negative report digest changed.");
+  return { relative, expectedHead: head, reportDigest, domain,
+    planVersion: receipt.planVersion, worker: receipt.worker,
+    conflicts: unit.architecturalConflicts, obligations: unit.laterObligations,
+    piSessionFile: unit.piSessionFile ?? null };
+}
 function output(job: JobStartResult, receipt: Receipt) {
-  return { status: receipt.units.every(unit => unit.phase === "committed") ? "foundations-committed" : "in-progress",
+  const conflicted = receipt.units.find(unit => unit.phase === "conflicted");
+  return { status: conflicted ? "foundations-conflict-reported" :
+    receipt.units.every(unit => unit.phase === "committed") ? "foundations-committed" : "in-progress",
+    ...(conflicted ? { prerequisite: { domain: conflicted.domain,
+      expectedHead: conflicted.beforeHead!, reportDigest: conflicted.conflictDigest! },
+      conflicts: conflicted.architecturalConflicts ?? [], obligations: conflicted.laterObligations ?? [] } : {}),
     jobId: job.jobId, branch: job.branch, worktreeStoryRoot: job.worktreeStoryRoot,
     headSha: receipt.units[1].commitSha ?? receipt.units[1].beforeHead ??
       receipt.units[0].commitSha ?? receipt.startHead ?? receipt.architectureHead,
@@ -425,10 +516,11 @@ type Recovery = {
  * Character's parent. A valid descendant or a passing model claim alone is
  * NOT sufficient. Original World authorship and failed review remain intact.
  *
- * A maximum of two exact, contiguous repair commits is supported. Every
- * checkpoint is verified against the original controller plan, Git diff,
- * protected baseline and independent review by the recovery inspector;
- * every repair proof is separately bound to the original rejected owner.
+ * A source-linked chain of independently reviewed repairs may have any
+ * productive length (ADR 0006). Every checkpoint is verified against the
+ * original controller plan, Git diff, protected baseline and independent
+ * review by the recovery inspector. A visited set prevents cycles without
+ * imposing an obsolete semantic correction limit.
  */
 export async function verifiedWorldReviewHandoff(
   job: JobStartResult, originalWorldSha: string, requestedHead: string,
@@ -453,7 +545,9 @@ export async function verifiedWorldReviewHandoff(
   if (!original?.assurance || original.semanticReview !== "failed")
     throw new Error("World correction lacks its original independently failed World checkpoint.");
   let source = originalWorldSha;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const visited = new Set<string>();
+  while (!visited.has(source) && visited.size < points.length) {
+    visited.add(source);
     const successors = points.filter(point => point.eligible &&
       point.workItem === "repair-" + source);
     if (successors.length !== 1)
@@ -479,7 +573,7 @@ export async function verifiedWorldReviewHandoff(
       throw new Error("World correction has unexpected commits after its passing review.");
     source = next.commitSha;
   }
-  throw new Error("World correction exceeds the two-attempt independent repair limit.");
+  throw new Error("World correction has cyclic or unbounded provenance; preserve exact receipts.");
 }
 
 /** Inspect actual Git and the original Pi transcript before any resumed writer. */
@@ -546,6 +640,10 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
         }
       }
       return result;
+    }
+    if (unit.phase === "conflicted") {
+      await inspectFoundationConflict(job, unit.domain);
+      return blocked("Original Foundation no-write contradiction is settled; parent controller must revise its source-bound assignment.");
     }
     if (unit.phase === "pending") {
       return actualHead === before && !changes.length
@@ -640,6 +738,13 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         status: recovery.status === "blocked" ? "blocked" : result.status, recovery };
     }
     if (input.action === "run" && recovery.status === "blocked") {
+      const conflicted = receipt.units.find(unit => unit.phase === "conflicted");
+      if (conflicted) {
+        // Inspecting a blocked phase may have caught forged source evidence.
+        // Never report a successful no-write handoff without authenticating it.
+        await inspectFoundationConflict(job, conflicted.domain);
+        return output(job, receipt);
+      }
       throw new Error(recovery.reason ?? "Foundations recovery blocked.");
     }
     if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
@@ -719,7 +824,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     const graph = new StateGraph(Channels)
       .addNode("world_foundations", async ({ receipt }) => { await executeUnit(receipt.units[0]!, receipt); return { receipt }; })
       .addNode("character_foundations", async ({ receipt }) => { await executeUnit(receipt.units[1]!, receipt); return { receipt }; })
-      .addEdge(START, "world_foundations").addEdge("world_foundations", "character_foundations")
+      .addEdge(START, "world_foundations")
+      .addConditionalEdges("world_foundations", ({ receipt }) =>
+        receipt.units[0].phase === "conflicted" ? END : "character_foundations",
+        [END, "character_foundations"])
       .addEdge("character_foundations", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
@@ -730,6 +838,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         throw new Error("Work-unit head changed since reviewed correction assignment.");
       if (index && before !== prior)
         await verifiedWorldReviewHandoff(job, prior, before);
+      if (unit.phase === "conflicted") {
+        await inspectFoundationConflict(job, unit.domain);
+        return;
+      }
       if (unit.phase === "committed") {
         if (!unit.commitSha || !unit.digest || !unit.paths) {
           throw new Error("Saved foundation commit provenance cannot be verified.");
@@ -818,7 +930,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
             let paths: string[] | undefined;
             let manifestFeedback: string | undefined;
             try {
-              paths = await auditPaths(job, unit, assign, proposed.claimedPaths);
+              paths = await auditPaths(job, unit, assign, proposed.claimedPaths,
+                !!proposed.architecturalConflicts?.length && !proposed.claimedPaths.length);
             } catch (error) {
               const message = String(error);
               // Only an incomplete self-report or empty work item is repairable.
@@ -828,9 +941,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
             }
             assertHead(job, before);
             if (proposed.architecturalConflicts?.length) {
-              // A self-reported conflict is bounded repair feedback to the
-              // SAME Pi session, not permission to commit or begin a new
-              // writer. Unresolved conflicts still stop after the final pass.
+              // An exactly clean no-write report is an accepted negative
+              // semantic result, not an incentive to invent Foundation files.
+              // A draft with effects still uses the bounded original Pi repair.
+              if (!paths?.length && !dirty(job).length) return [];
               return proposed.architecturalConflicts.slice(0, 8).map(message =>
                 "Unresolved architectural conflict; repair the existing files and references: " +
                 message.slice(0, 800));
@@ -891,6 +1005,17 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         unit.skillReads = evidence.skillReads;
         unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
         unit.piSessionId = evidence.piSessionId ?? unit.piSessionId;
+        if (!evidence.claimedPaths.length && evidence.architecturalConflicts?.length) {
+          unit.paths = await auditPaths(job, unit, assign, [], true);
+          if (unit.paths.length || dirty(job).length) throw Error("Negative Foundation report has unexpected writer effects");
+          unit.piSessionSha256 = unit.piSessionFile
+            ? digest(await readFile(unit.piSessionFile)) : undefined;
+          unit.conflictDigest = foundationConflictDigest(state, unit);
+          unit.phase = "conflicted";
+          await persist(file, state);
+          await inspectFoundationConflict(job, unit.domain);
+          return; // Never advance the next owner on an unresolved contradiction.
+        }
         unit.paths = await auditPaths(job, unit, assign, evidence.claimedPaths);
         unit.digest = await fileDigest(job, unit.paths);
         unit.phase = "authored";

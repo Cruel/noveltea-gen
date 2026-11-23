@@ -43,6 +43,8 @@ export interface GenerationOperationRecovery {
     /** Settled Choice contradiction from the original pinned specialist Pi session. */
     interactiveNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string;
       domain: "choice" };
+    /** Original settled World/Character no-write report; never a replacement writer grant. */
+    foundationsNoWrite?: { domain: "world" | "character"; expectedHead: string; reportDigest: string };
     /** Controller-captured verifier input; its source and correction baseline are not model claims. */
     verifier?: { assignmentId: string; stage: string; resultStatus: string;
       resultHeadSha: string; failureHeadSha: string;

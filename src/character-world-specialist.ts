@@ -200,6 +200,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       "\nAt the END of a completed task, provide a JSON object on its own line with the exact Story-relative paths you changed: " +
       '`{"modifiedRecords":["characters/example.md"],"architecturalConflicts":[],"laterObligations":["Bind the disclosure to an Event"]}` (replace example with reality). ' +
       "Report any blocked architectural conflict in architecturalConflicts and all deferred Event/branch dependencies in laterObligations. " +
+      "A truthful, exactly clean no-write with a named original-plan/owner contradiction is valid negative evidence for controller Repair; do not invent files just to return a nonempty modifiedRecords list. " +
       "List ALL paths changed since the beginning of this work item, not just the latest edits. " +
       "Call story_validate with no arguments, inspect diagnostics and coverage, repair and revalidate before reporting. " +
       "The graph will check this claim against the actual Git diff; your self-report is not acceptance evidence.";
@@ -243,29 +244,12 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       }
       const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
         typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
-      if (!edits.length) {
-        // A completed model turn may fail to author because it misunderstood
-        // stable skill:// reads or assumed absent World/Character directories
-        // were a blocker. One in-session correction remains under the original
-        // write boundary; it never replays a failed, interrupted model turn.
-        if (attempt === 2) throw new Error("Foundation specialist did not edit canonical Markdown.");
-        prompt = "No canonical files were authored in the previous completed turn. " +
-          "Read missing pinned references using their EXACT skill:// addresses (never " +
-          "an absolute snapshot path). Absent world-entities/, facts/, characters/ " +
-          "or relationships/ directories can be CREATED by the normal write tool " +
-          "inside the authorized Story; they are not blockers. Your assigned " +
-          "new-Story foundation requires substantive canonical authored records, " +
-          "not an outline or empty modifiedRecords list. Preserve protected canon, " +
-          "run story_validate and return the complete JSON manifest. " +
-          "If a genuine consequential creative ambiguity remains, use a bounded " +
-          "authorDecisionRequest instead of fabricating an unapproved detail.";
-        continue;
-      }
+      const noEdits = edits.length === 0;
       const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
       let declared: unknown;
       try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }
       const paths = (declared as { modifiedRecords?: unknown })?.modifiedRecords;
-      if (!Array.isArray(paths) || paths.length === 0 || !paths.every(p => typeof p === "string")) {
+      if (!Array.isArray(paths) || !paths.every(p => typeof p === "string")) {
         if (attempt === 2) throw new Error("Foundation specialist did not provide a valid modifiedRecords manifest.");
         prompt = foundationManifestCorrectionPrompt();
         continue;
@@ -275,6 +259,20 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       if (!strings(messages.architecturalConflicts) || !strings(messages.laterObligations)) {
         if (attempt === 2) throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
         prompt = foundationManifestCorrectionPrompt();
+        continue;
+      }
+      if (noEdits && (paths.length !== 0 || !(messages.architecturalConflicts as string[]).length)) {
+        // Missing methodology reads or misunderstood directory ownership can
+        // still be repaired in the SAME context; a genuine, settled no-write
+        // architectural contradiction is not a writer/protocol failure.
+        if (attempt === 2) throw new Error("Foundation specialist produced no edits or authenticated architectural contradiction.");
+        prompt = "No canonical files were authored. Check the pinned skill:// references " +
+          "and remember absent Story record directories can be CREATED within your " +
+          "original lease. If the assignment is feasible, author its required " +
+          "canonical files and return the complete manifest. If an exact earlier " +
+          "Architecture/owner contradiction prevents this, return modifiedRecords: [] " +
+          "with specific architecturalConflicts and laterObligations. Do NOT invent " +
+          "a workaround or request permission to change protected scope.";
         continue;
       }
       const evidence: SpecialistEvidence = { claimedPaths: paths, skillReads,

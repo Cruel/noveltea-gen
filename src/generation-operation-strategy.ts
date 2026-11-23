@@ -63,6 +63,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         !op.evidence.assignmentId && !op.evidence.priorHead &&
         !op.evidence.verifier && !op.evidence.closeout &&
         !op.evidence.eventNoWrite && !op.evidence.interactiveNoWrite &&
+        !op.evidence.foundationsNoWrite &&
         op.source.jobId === job.jobId && op.source.threadId === c.origin.graphThreadId &&
         op.source.turnDigest === turnDigest && op.source.planVersion === planVersion &&
         op.source.headSha === head) {
@@ -214,6 +215,60 @@ export async function originalFailedReviewProof(job: JobStartResult, s: State,
       assurance: point.assurance, verdict: reviewed.result,
     })).digest("hex") };
 }
+/** A settled specialist contradiction requests a separately authorized
+ * owner/Plan amendment. Selection is not permission to change approved canon;
+ * the C06 controller consumes this source-bound input for supersession. */
+export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
+  c: RecoveryCase): Promise<{ owner: string; proof: RecoveryEvidence } | null> {
+  if (s.request.fixture || !s.request.turnPlanDigest ||
+      c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
+      s.active || s.result || s.causalAmendment || s.crossDomainCloseout ||
+      s.escalation?.kind !== "dependency-replan" ||
+      s.escalation.requiresTrustedApproval || s.inventory?.headSha !== c.origin.sourceHeadSha ||
+      !c.origin.assignmentId || !s.failures[c.origin.assignmentId] ||
+      !s.inventory.items.some(item => item.id === c.origin.assignmentId && item.status === "blocked"))
+    return null;
+  const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+  const op = source?.input as GenerationOperationRecovery | undefined;
+  if (op?.outcome !== "returned-failure" || op.operation !== "specialist-result" ||
+      op.evidence.reference !== "specialist-receipt" ||
+      op.evidence.assignmentId !== c.origin.assignmentId)
+    return null;
+  const choice = op.evidence.interactiveNoWrite;
+  if (op.evidence.resultStatus === "interactive-conflict-reported" && choice &&
+      choice.domain === "choice" && choice.expectedHead === c.origin.sourceHeadSha &&
+      c.origin.assignmentId === "interactive:" + choice.milestoneId) {
+    const { inspectInteractiveConflict } = await import("./interactive-work.js");
+    const original = await inspectInteractiveConflict(job, choice.milestoneId);
+    if (original.reportDigest !== choice.reportDigest ||
+        original.expectedHead !== c.origin.sourceHeadSha ||
+        original.planVersion !== c.origin.planVersion || original.worker !== "pi") return null;
+    // The original approved Blueprint belongs to an independently pinned
+    // Event review cycle, not to a new Choice plan authored by its reporter.
+    const event = JSON.parse(await readFile(join(job.stateDir, "event-items",
+      choice.milestoneId.slice(10) + ".json"), "utf8")) as {
+        assignment?: import("./event-specialist.js").EventAssignment;
+        blueprintPin?: import("./milestone-blueprint.js").MilestoneBlueprintPin };
+    if (!event.assignment || !event.blueprintPin) return null;
+    const { readReviewedMilestoneBlueprint } = await import("./milestone-blueprint.js");
+    await readReviewedMilestoneBlueprint(job, event.blueprintPin, event.assignment);
+    return { owner: "architecture", proof: {
+      store: "specialist-receipt", ref: original.relative, digest: original.reportDigest } };
+  }
+  const foundations = op.evidence.foundationsNoWrite;
+  if (op.evidence.resultStatus === "foundations-conflict-reported" && foundations &&
+      foundations.expectedHead === c.origin.sourceHeadSha &&
+      c.origin.assignmentId === "foundations") {
+    const { inspectFoundationConflict } = await import("./character-world.js");
+    const original = await inspectFoundationConflict(job, foundations.domain);
+    if (original.reportDigest !== foundations.reportDigest ||
+        original.expectedHead !== c.origin.sourceHeadSha ||
+        original.planVersion !== c.origin.planVersion || original.worker !== "pi") return null;
+    return { owner: "architecture", proof: {
+      store: "specialist-receipt", ref: original.relative, digest: original.reportDigest } };
+  }
+  return null;
+}
 export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonNullable<State["crossDomainCloseout"]>): boolean {
   const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
   const evidence = source?.input.evidence as GenerationOperationRecovery["evidence"] | undefined;
@@ -224,6 +279,12 @@ export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonN
 }
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  const owner = await originalNoWriteOwnerProof(job, s, c);
+  if (owner) {
+    await assertSource(job, s, c);
+    return { ...base(c, owner.proof), action: "plan-amendment",
+      adapter: "dependency-work", owner: owner.owner, scopeRef: owner.proof };
+  }
   const reviewProof = await originalFailedReviewProof(job, s, c);
   if (reviewProof) {
     await assertSource(job, s, c);
@@ -249,6 +310,15 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
 /** The saved decision may identify a real accepted Pi response yet have lost
  * the ORIGINAL selected source proof (e.g. an altered review/repair receipt).
  * Re-read that proof at the same HEAD; never let checkpoint data rebind it. */
+export async function authenticateOperationOwnerProof(job: JobStartResult, s: State,
+  c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
+  if (d.action !== "plan-amendment" || d.adapter !== "dependency-work" ||
+      d.owner !== "architecture") return false;
+  const original = await originalNoWriteOwnerProof(job, s, c);
+  return !!original && original.owner === d.owner &&
+    isDeepStrictEqual(original.proof, d.scopeRef) &&
+    isDeepStrictEqual(d.evidence, [...c.evidence, original.proof]);
+}
 export async function authenticateOperationReviewProof(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   if (d.action !== "known-correction" || d.adapter !== "review-cycle") return false;
@@ -294,8 +364,28 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   const c = lifecycle.active!, d = lifecycle.decision!;
   if (!lifecycle.assessorPending || !d || !c || !s.recoverySources.some(x => x.caseId === c.id && x.channel === "operationRecovery") ||
       (d.action !== "diagnostic" &&
-        !(d.action === "plan-amendment" && d.adapter === "cross-domain-closeout") &&
+        !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work"].includes(d.adapter)) &&
         !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
+  if (d.action === "plan-amendment" && d.adapter === "dependency-work") {
+    await assertSource(job, s, c);
+    if (!await authenticateOperationOwnerProof(job, s, c, d))
+      throw Error("Owner amendment lost its original negative specialist Pi report");
+    // C04 converts the negative report into an authenticated plan-owner
+    // correction request. C06 owns supersession of the approved Blueprint /
+    // adaptive assignment and its separate author/Review signatures. A C04
+    // report must NEVER dispatch another writer or claim plan approval.
+    return { recoveryLifecycle: { ...lifecycle, assessorPending: false },
+      status: "blocked", reason: "Authenticated specialist contradiction is assigned " +
+        "to controller-owned Architecture/Work-plan correction. No source mutation " +
+        "or replacement writer is permitted until the original approved scope " +
+        "and dependent Review are reverified.",
+      escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
+        sources: [{ source: d.scopeRef.ref, message: "Source-bound original specialist no-write",
+          repair: "controller-authorized Architecture/Work-plan amendment" }],
+        action: "Route this exact source to the Orchestrator/Work-plan controller for " +
+          "a versioned in-objective assignment correction. Ask the author only if the " +
+          "independent scope/protected-decision checks require new authority." } };
+  }
   if (d.action === "known-correction") {
     await assertSource(job, s, c);
     if (!await authenticateOperationReviewProof(job, s, c, d))

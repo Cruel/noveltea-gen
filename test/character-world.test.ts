@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
-import { deriveFoundationAssignment, auditPaths, checkOutput } from "../src/character-world.js";
+import { deriveFoundationAssignment, auditPaths, checkOutput,
+  runCharacterWorldJob, inspectFoundationConflict } from "../src/character-world.js";
+import { withJobModelRuntime } from "../src/model-runtime.js";
+import { scriptedStoryRuntime, scriptedModel, scriptedReadCalls, scriptedText,
+  fixtureSandboxClient } from "./c03-scripted-story-helpers.js";
 import { foundationManifestCorrectionPrompt, characterInitialKnowledgeCorrection,
   CHARACTER_INITIAL_KNOWLEDGE_GUIDANCE } from "../src/character-world-specialist.js";
 
@@ -122,6 +126,109 @@ Ada investigates a missing witness and Neri's concealed evidence.
   }
   return { repo, story, baseline, job, cli, architecture };
 }
+
+test("C04 a clean World no-write contradiction seals original owner/source without starting Character", { skip: !available }, () => {
+  const f = setup("c04-world-no-write");
+  f.architecture();
+  const head = git(f.repo, "rev-parse", "HEAD");
+  const first = f.cli(["foundations", "run", "--fixture", "--skills-source", source], "world-conflict");
+  assert.equal(first.status, 0, first.stderr);
+  const report = JSON.parse(first.stdout);
+  assert.equal(report.status, "foundations-conflict-reported");
+  assert.equal(report.prerequisite.domain, "world");
+  assert.match(report.conflicts[0], /another specialist/);
+  assert.deepEqual(report.items.map((item: { phase: string }) => item.phase), ["conflicted", "pending"]);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), head);
+  const again = f.cli(["foundations", "run", "--fixture", "--skills-source", source], "world-conflict");
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(JSON.parse(again.stdout).prerequisite.reportDigest, report.prerequisite.reportDigest);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), head, "Neither World nor Character may replay");
+  const file = join(f.job.stateDir, "character-world.json");
+  const receipt = JSON.parse(readFileSync(file, "utf8"));
+  receipt.units[0].architecturalConflicts = ["Unreviewed alternative owner proposal"];
+  writeFileSync(file, JSON.stringify(receipt));
+  const inspected = f.cli(["foundations", "inspect"], "world-conflict");
+  if (inspected.status === 0)
+    assert.equal(JSON.parse(inspected.stdout).status, "blocked");
+  else assert.match(inspected.stderr, /conflict|digest|source|receipt|authenticated/i);
+  const replay = f.cli(["foundations", "run", "--fixture", "--skills-source", source], "world-conflict");
+  assert.notEqual(replay.status, 0, "Tampered source must never be reported as a successful controller handoff");
+  assert.match(replay.stderr, /conflict|digest|source|receipt|authenticated/i);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), head);
+});
+
+test("C04 a clean Character no-write after verified World preserves the original World commit", { skip: !available }, () => {
+  const f = setup("c04-character-no-write");
+  f.architecture();
+  const run = f.cli(["foundations", "run", "--fixture", "--skills-source", source], "character-conflict");
+  assert.equal(run.status, 0, run.stderr);
+  const report = JSON.parse(run.stdout);
+  assert.equal(report.status, "foundations-conflict-reported");
+  assert.equal(report.prerequisite.domain, "character");
+  assert.deepEqual(report.items.map((i: { phase: string }) => i.phase), ["committed", "conflicted"]);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(report.items[0].commitSha, head);
+  assert.equal(report.items[1].commitSha, undefined);
+  const again = f.cli(["foundations", "run", "--fixture", "--skills-source", source], "character-conflict");
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(JSON.parse(again.stdout).prerequisite.reportDigest, report.prerequisite.reportDigest);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  const receiptFile = join(f.job.stateDir, "character-world.json");
+  const altered = JSON.parse(readFileSync(receiptFile, "utf8"));
+  altered.units[0].commitSha = "0".repeat(40);
+  writeFileSync(receiptFile, JSON.stringify(altered));
+  const denied = f.cli(["foundations", "run", "--fixture", "--skills-source", source], "character-conflict");
+  assert.notEqual(denied.status, 0, "Character cannot claim a verified negative report over a forged World commit");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+});
+
+test("C04 original World Pi transcript settles a no-write contradiction without format replay", { skip: !available }, async () => {
+  const f = setup("c04-real-world-negative");
+  f.architecture();
+  const head = git(f.repo, "rev-parse", "HEAD");
+  const sources = ["nt-worldbuilding/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
+    "nt-catalog/references/progression.md", "nt-catalog/references/authority-and-validation.md",
+    "nt-catalog/references/glossary.md"].map(path => "skill://" + path);
+  const { runtime, observed } = await scriptedStoryRuntime((i) => {
+    if (i === 0) return { content: scriptedReadCalls(sources, i), reason: "toolUse" };
+    if (i === 1) return { content: scriptedText({
+      modifiedRecords: [], architecturalConflicts: [
+        "The approved prerequisite belongs to an Architecture owner and cannot be satisfied by World without a protected rewrite.",
+      ], laterObligations: ["Controller must inspect the original Architecture dependency"],
+    }), reason: "stop" };
+    throw Error("Negative World manifest caused an unauthorized second Pi invocation");
+  });
+  const old = Object.fromEntries(["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR"]
+    .map(key => [key, process.env[key]]));
+  process.env.NT_STATE_DIR = join(f.job.stateDir, "..", "..");
+  process.env.NT_CONFIG_FILE = join(root, "missing-config.json");
+  process.env.NT_SKILL_CACHE_DIR = join(root, "skills");
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const report = await withJobModelRuntime(runtime, () => runCharacterWorldJob({
+      story: f.story, job: "draft", action: "run", fixture: false,
+      skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id,
+    }));
+    assert.equal(report.status, "foundations-conflict-reported");
+    assert.equal(observed.length, 2, "One original specialist turn + mandatory pinned reads");
+    const proof = await inspectFoundationConflict(f.job, "world");
+    assert.equal(proof.worker, "pi");
+    assert.equal(proof.reportDigest, report.prerequisite.reportDigest);
+    assert.equal(git(f.repo, "rev-parse", "HEAD"), head);
+    const again = await withJobModelRuntime(runtime, () => runCharacterWorldJob({
+      story: f.story, job: "draft", action: "run", fixture: false,
+      skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id,
+    }));
+    assert.equal(again.prerequisite.reportDigest, proof.reportDigest);
+    assert.equal(observed.length, 2, "Restart may not call Pi again");
+  } finally {
+    restoreSandbox();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("existing foundation categories may remain unchanged during a scoped revision", { skip: !available }, async () => {
   const { job, cli, architecture } = setup("existing-foundation-revisions");

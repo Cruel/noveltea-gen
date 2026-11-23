@@ -47,7 +47,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:20,status:2,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:14,status:1,blocked:1,operationFailure:5,throws:5",
+  specialist_dispatch: "returns:15,status:1,blocked:1,operationFailure:6,throws:7",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
   independent_assignment_review: "returns:6,status:3,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",

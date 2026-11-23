@@ -12,6 +12,7 @@ import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
   scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
 import { runEventWorkItem } from "../src/event-work.js";
+import { runCharacterWorldJob } from "../src/character-world.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { startStoryJob } from "../src/job.js";
 import { validateStoryJob } from "../src/validator.js";
@@ -3900,6 +3901,131 @@ test("C04 Review strategy demands the original sealed failed Pi cycle before any
       else process.env[key] = value;
     }
   }
+});
+
+test("C04 real Pi World negative selects source-bound owner strategy in the original production graph", { skip: !available }, async () => {
+  const f = setup("c04-world-owner-pi");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  saveFixtureTurn(f.job, contract, f.start[3]!, [
+    "World Foundations may not rewrite an independently approved Architecture prerequisite.",
+  ]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const sources = ["nt-worldbuilding/SKILL.md", "nt-catalog/SKILL.md",
+    "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
+    "nt-catalog/references/authority-and-validation.md",
+    "nt-catalog/references/glossary.md"].map(p => "skill://" + p);
+  const { runtime, observed } = await scriptedStoryRuntime(i => {
+    if (i === 0) return { content: scriptedReadCalls(sources, i), reason: "toolUse" };
+    if (i === 1) return { content: scriptedText({ modifiedRecords: [],
+      architecturalConflicts: ["The approved Architecture assigned this upstream dependency to a separate owner; World cannot retcon it."],
+      laterObligations: ["Use the original Orchestrator owner-plan amendment"] }), reason: "stop" };
+    throw Error("Original Pi World contradiction cannot trigger another writer call");
+  });
+  const before = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const produced = await withJobModelRuntime(runtime, () => runCharacterWorldJob({
+      story: f.story, job: "single", action: "run", fixture: false,
+      task: f.start[3]!, turnPlanDigest: turnDigest,
+      skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id }));
+    assert.equal(produced.status, "foundations-conflict-reported");
+    assert.equal(observed.length, 2);
+    const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const cfg = { configurable: { thread_id: paused.threadId } };
+      const initial = (await graph.getState(cfg)).values;
+      const item = paused.inventory.items.find((i: { id: string }) => i.id === "foundations");
+      assert.ok(item);
+      await graph.updateState(cfg, {
+        status: "running", reason: null, active: item, result: null, pauseAfter: null,
+        request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest,
+          provider: scriptedModel.provider, model: scriptedModel.id },
+      }, "author_update_intake");
+      const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "specialist-result",
+        JSON.stringify({ status: admitted.status, reason: admitted.reason,
+          recovery: admitted.recoveryLifecycle, sources: admitted.recoverySources,
+          active: admitted.active, result: admitted.result }));
+      assert.equal(admitted.recoveryLifecycle.active?.observation, "returned-failure");
+      assert.equal(admitted.recoveryLifecycle.attempt, null);
+      const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+      assert.equal(selected.recoveryLifecycle.decision?.action, "plan-amendment");
+      assert.equal(selected.recoveryLifecycle.decision?.adapter, "dependency-work");
+      assert.equal(selected.recoveryLifecycle.decision?.owner, "architecture");
+      assert.equal(selected.recoveryLifecycle.assessorPending, true);
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+        selected.recoveryLifecycle,
+        "A saved owner correction must authenticate the original Pi and source on restart");
+      assert.equal(observed.length, 2, "Selection does not invoke any model or replacement writer");
+      const stopped = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+      assert.equal(stopped.status, "blocked");
+      assert.equal(stopped.escalation?.kind, "dependency-replan");
+      assert.equal(stopped.escalation?.requiresTrustedApproval, false,
+        "In-objective owner routing is not automatically an author-only protected change");
+      assert.equal(stopped.recoveryLifecycle.active?.id, admitted.recoveryLifecycle.active?.id);
+      assert.equal(stopped.recoveryLifecycle.attempt, null);
+      assert.equal(observed.length, 2);
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    } finally { saver.db.close(); }
+  } finally {
+    restoreSandbox();
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("C04 production graph admits settled World contradiction and never dispatches Character", { skip: !available }, () => {
+  const f = setup("c04-world-negative-graph");
+  Object.assign(f.env, { NT_FOUNDATIONS_FIXTURE_CASE: "world-conflict" });
+  const initial = f.cli(f.start);
+  assert.equal(initial.status, "blocked");
+  const recovery = currentOperationRecovery(initial);
+  assert.equal(recovery?.operation, "specialist-result");
+  assert.equal(recovery?.outcome, "returned-failure");
+  assert.equal(recovery?.evidence.resultStatus, "foundations-conflict-reported");
+  assert.equal(recovery?.evidence.foundationsNoWrite?.domain, "world");
+  assert.equal(initial.inventory.items.find((i: { id: string }) => i.id === "foundations").status, "blocked");
+  const original = join(f.job.stateDir, "character-world.json");
+  const saved = readFileSync(original, "utf8");
+  const before = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const resumed = f.cli(["generate", "resume"]);
+  assert.equal(resumed.status, "blocked");
+  assert.equal(readFileSync(original, "utf8"), saved);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
+  assert.equal(JSON.parse(saved).units[1].phase, "pending",
+    "A World contradiction must not turn Character into an automatic replacement writer");
+});
+
+test("C04 production graph admits Character's settled contradiction without replaying the committed World", { skip: !available }, () => {
+  const f = setup("c04-character-negative-graph");
+  Object.assign(f.env, { NT_FOUNDATIONS_FIXTURE_CASE: "character-conflict" });
+  const initial = f.cli(f.start);
+  assert.equal(initial.status, "blocked");
+  const recovery = currentOperationRecovery(initial);
+  assert.equal(recovery?.operation, "specialist-result");
+  assert.equal(recovery?.outcome, "returned-failure");
+  assert.equal(recovery?.evidence.resultStatus, "foundations-conflict-reported");
+  assert.equal(recovery?.evidence.foundationsNoWrite?.domain, "character");
+  const receiptFile = join(f.job.stateDir, "character-world.json");
+  const saved = readFileSync(receiptFile, "utf8");
+  const world = JSON.parse(saved).units[0];
+  assert.equal(world.phase, "committed");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(world.commitSha, head);
+  const resumed = f.cli(["generate", "resume"]);
+  assert.equal(resumed.status, "blocked");
+  assert.equal(readFileSync(receiptFile, "utf8"), saved);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
 test("C04 production graph admits a settled Choice contradiction as specialist-result and never replays the writer", { skip: !available }, () => {

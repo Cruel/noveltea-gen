@@ -2146,6 +2146,41 @@ export function createGenerationGraph(
                 "source-authenticated owner/plan amendment if warranted; no replacement " +
                 "Choice, protected decision or new specialist scope is authorized." } };
         }
+        if (result.status === "foundations-conflict-reported") {
+          const evidence = result as typeof result & {
+            prerequisite?: { domain: "world" | "character"; expectedHead: string; reportDigest: string };
+            conflicts?: string[]; obligations?: string[] };
+          if (!evidence.prerequisite || s.active?.stage !== "foundations" ||
+              s.active.id !== "foundations" || !evidence.conflicts?.length ||
+              !/^[0-9a-f]{64}$/.test(evidence.prerequisite.reportDigest))
+            throw Error("Foundation semantic conflict lacks its original bounded assignment");
+          const job = await openJob(s);
+          const { inspectFoundationConflict } = await import("./character-world.js");
+          const report = await inspectFoundationConflict(job, evidence.prerequisite.domain);
+          if (report.reportDigest !== evidence.prerequisite.reportDigest ||
+              report.expectedHead !== evidence.prerequisite.expectedHead ||
+              report.planVersion !== s.planVersion ||
+              report.worker !== (s.request.fixture ? "fixture" : "pi") ||
+              JSON.stringify(report.conflicts) !== JSON.stringify(evidence.conflicts) ||
+              JSON.stringify(report.obligations) !== JSON.stringify(evidence.obligations))
+            throw Error("Foundation no-write report differs from its original settled specialist");
+          const failure = "Original " + report.domain + " Foundation returned a settled, clean architectural contradiction: " +
+            report.conflicts.join("; ") + ". Controller/Architecture owns prerequisite rescoping; " +
+            "neither Foundation writer may receive an expanded lease.";
+          const assessed = await operationFailure(s, job, "specialist-result", failure,
+            { reference: "specialist-receipt", assignmentId: s.active.id,
+              resultStatus: result.status, foundationsNoWrite: {
+                domain: report.domain, expectedHead: report.expectedHead,
+                reportDigest: report.reportDigest } }, "returned-failure");
+          return { ...assessed, failures: { ...s.failures, [s.active.id]: failure },
+            inventory: blockedAssignmentInventory(s, failure), active: null, result: null,
+            escalation: { kind: "dependency-replan" as const, requiresTrustedApproval: false,
+              sources: report.conflicts.map(message => ({
+                source: report.domain + "-foundations@" + report.expectedHead,
+                message, repair: "controller-plan-review" })),
+              action: "Review the original approved Architecture/Turn assignment and the " +
+                "settled World/Character specialist report before separately authorizing an owner or plan amendment." } };
+        }
         if (result.status === "event-prerequisite-reported") {
           let evidence = result as typeof result & {
             prerequisite?: { reportDigest: string; expectedHead: string };
