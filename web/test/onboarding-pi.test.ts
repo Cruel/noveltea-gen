@@ -213,7 +213,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(calls.length, 3)
 
     // A delegated ending cannot be used to create an unrelated artwork
-    // budget. The separate read-only review rejects both model proposals.
+    // budget. Independent review rejects three non-improving proposals.
     const previousEvidenceRoot = process.env.NT_DISCOVERY_EVIDENCE_DIR
     process.env.NT_DISCOVERY_EVIDENCE_DIR = join(root, 'semantic-rejection-evidence')
     try {
@@ -227,7 +227,8 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         if (writerCalls === 3) assert.match(prompt, /Independent read-only scope review rejected/)
         return JSON.stringify({ ...JSON.parse(proposed), foundation: {
           ...JSON.parse(proposed).foundation,
-          decisions: [{ statement: 'Use twelve expensive character portraits.',
+          decisions: [{ statement: writerCalls >= 5
+            ? 'Allow an ending that may be hopeful.' : 'Use twelve expensive character portraits.',
             authority: 'delegated', source: { kind: 'answer',
               setId: state.accepted![0]!.setId, questionId: 'ending' } }],
         } })
@@ -235,8 +236,11 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       const reject: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
         reviewCalls++
         assert.equal(packet.claims.length, 1)
-        return packet.claims.map(c => ({ claimId: c.id, verdict: 'unsupported' as const,
-          reason: 'A question about endings does not authorize an artwork budget.' }))
+        return packet.claims.map(c => ({ claimId: c.id,
+          verdict: c.statement.includes('portraits') ? 'unsupported' as const : 'supported' as const,
+          reason: c.statement.includes('portraits')
+            ? 'A question about endings does not authorize an artwork budget.'
+            : 'The delegated question concerns the ending.' }))
       }
       const workspace = 'projects/semantic-scope-rejection'
       const start = await request('POST', { action: 'start', model,
@@ -249,22 +253,142 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
       }, own, url, writer, workspace, reject)
       assert.equal(rejected.status, 503)
-      assert.equal(writerCalls, 3)
-      assert.equal(reviewCalls, 2)
+      assert.equal(writerCalls, 4)
+      assert.equal(reviewCalls, 3, 'Two nonproductive semantic corrections stop safely')
       const saved = JSON.parse((await store.persistence.onboarding.conversation(
         alice.id, repo, workspace))!.state)
       assert.equal(saved.phase, 'blocked')
       assert.equal(saved.accepted[0].responses[0].answer.kind, 'delegate')
       assert.equal(saved.proposal, undefined)
       assert.equal(saved.semanticReview, undefined)
+      assert.equal(saved.pendingDiscovery.kind, 'correction')
+      assert.equal(saved.pendingDiscovery.reviewHistory.length, 3)
+      assert.equal(saved.pendingDiscovery.nonprogress, 2)
       const reviews = saved.discoveryEvidencePaths.filter((path: string) =>
         path.includes('-semantic-review-'))
-      assert.equal(reviews.length, 2)
+      assert.equal(reviews.length, 3)
       assert.ok(reviews.every((path: string) =>
         JSON.parse(readFileSync(join(path, 'validation.json'), 'utf8')).status === 'rejected'))
+      const resumed = await request('POST', { action: 'retry', revision: saved.revision },
+        own, url, writer, workspace, reject)
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+      assert.equal(resumed.body.session.phase, 'proposed')
+      assert.equal(writerCalls, 5)
+      assert.equal(reviewCalls, 4)
+      const final = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      const latestReview = final.discoveryEvidencePaths.at(-1)
+      assert.match(readFileSync(join(latestReview, 'request.json'), 'utf8'),
+        /Prior independent verdicts/, 'Review history survives user-initiated retry')
+      assert.equal(final.semanticReview.proposalDigest, final.digest)
     } finally {
       if (previousEvidenceRoot === undefined) delete process.env.NT_DISCOVERY_EVIDENCE_DIR
       else process.env.NT_DISCOVERY_EVIDENCE_DIR = previousEvidenceRoot
+    }
+
+    // Structural correction must not consume subsequent independent semantic review.
+    {
+      let calls = 0, reviews = 0
+      const workspace = 'projects/structural-then-semantic'
+      const writer: DiscoveryInference = async state => {
+        calls++
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'tone', kind: 'yes-no', question: 'Should the tone be unsettling?', allowStudioDecision: true },
+          { id: 'experience', kind: 'yes-no', question: 'Should choices be consequential?', allowStudioDecision: true },
+        ])
+        const source = (questionId: string) => ({ kind: 'answer' as const,
+          setId: state.accepted![0]!.setId, questionId })
+        const decisions = calls === 2
+          ? [{ statement: 'Keep a tense experience.', authority: 'delegated', source: source('missing') }]
+          : calls === 3
+            ? [{ statement: 'Uneasy tone and a consequential player experience.',
+              authority: 'delegated', source: source('tone') }]
+            : [{ statement: 'Uneasy tone.', authority: 'delegated', source: source('tone') },
+              { statement: 'Consequential choices.', authority: 'delegated', source: source('experience') }]
+        return JSON.stringify({ ...JSON.parse(proposed),
+          foundation: { ...JSON.parse(proposed).foundation, decisions } })
+      }
+      const reviewer: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
+        reviews++
+        return packet.claims.map(claim => ({
+          claimId: claim.id,
+          verdict: claim.source.kind === 'answer' && claim.source.questionId === 'tone' &&
+            claim.statement.includes('player experience') ? 'unsupported' as const : 'supported' as const,
+          reason: 'This assessment is limited to the exact delegated question.',
+        }))
+      }
+      const started = await request('POST', { action: 'start', model, text: 'A short mystery.' },
+        own, url, writer, workspace, reviewer)
+      assert.equal(started.status, 200)
+      const qs = started.body.session.questions
+      const revised = await request('POST', { action: 'answer', revision: started.body.session.revision,
+        setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'tone', answer: { kind: 'delegate', note: '' } },
+          { questionId: 'experience', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, reviewer)
+      assert.equal(revised.status, 200, JSON.stringify(revised.body))
+      assert.equal(revised.body.session.phase, 'proposed')
+      assert.equal(calls, 4)
+      assert.equal(reviews, 2)
+      const persisted = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(persisted.semanticReview.proposalDigest, persisted.digest)
+      assert.equal((await request('GET', undefined, own, url, writer, workspace, reviewer))
+        .body.session.phase, 'proposed')
+      assert.equal(calls, 4, 'Reload must never replay an accepted writer')
+    }
+
+    // A completed writer response survives a malformed or interrupted independent
+    // reviewer; explicit retry re-reviews exact evidence without calling the writer.
+    {
+      const workspace = 'projects/reviewer-retry'
+      let writers = 0, reviews = 0, reviewerAvailable = false
+      const writer: DiscoveryInference = async state => {
+        writers++
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'ending', kind: 'yes-no',
+            question: 'Should the story allow different endings?', allowStudioDecision: true },
+        ])
+        return JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          ...JSON.parse(proposed).foundation,
+          decisions: [{ statement: 'Allow multiple endings.', authority: 'delegated',
+            source: { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'ending' } }],
+        } })
+      }
+      const review: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
+        reviews++
+        return reviewerAvailable ? packet.claims.map(c => ({
+          claimId: c.id, verdict: 'supported' as const, reason: 'Exact author delegation.',
+        })) : []
+      }
+      const started = await request('POST', { action: 'start', model,
+        text: 'A short mystery' }, own, url, writer, workspace, review)
+      assert.equal(started.status, 200)
+      const qs = started.body.session.questions
+      const failed = await request('POST', { action: 'answer',
+        revision: started.body.session.revision, setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, review)
+      assert.equal(failed.status, 503)
+      assert.equal(writers, 2)
+      assert.equal(reviews, 1)
+      const blocked = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(blocked.phase, 'blocked')
+      assert.equal(blocked.pendingDiscovery.kind, 'review')
+      assert.ok(!JSON.stringify(failed.body).includes(blocked.pendingDiscovery.raw),
+        'Private draft cannot leak to public error responses')
+      reviewerAvailable = true
+      const resumed = await request('POST', { action: 'retry', revision: blocked.revision },
+        own, url, writer, workspace, review)
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+      assert.equal(resumed.body.session.phase, 'proposed')
+      assert.equal(writers, 2, 'Never re-run an already-completed discovery writer')
+      assert.equal(reviews, 2)
+      const accepted = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(accepted.pendingDiscovery, undefined)
+      assert.equal(accepted.semanticReview.proposalDigest, accepted.digest)
     }
 
     // The shared contract permits 16 typed questions, each with 4,000 custom
