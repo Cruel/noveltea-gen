@@ -219,6 +219,33 @@ the regular original-review path. The
 regressions prove localized diagnostic text does not clear a negative
 review and a forged message alone cannot create an invalidation.
 
+**C08 real-Pi diagnosis correction.** A production live diagnostic returned
+`reconcile-original` for a source-authenticated transient scheduling
+exception, yet its explanatory `prerequisites` list was nonempty. The
+previous C05 controller refused **all** such recommendations even when
+the original read-only checkpoint reconciliation was independently safe.
+The model's advisory prerequisites are neither proofs nor permission gates;
+the controller must not classify a natural-language note as a new author
+approval, scope grant or writer capability. The revised controller ignores
+that advisory list **only when** all existing typed checks still establish
+the original infrastructure/protocol category, operation and exception
+observation, exact Job/Thread/Turn/check/HEAD, absent active writers and escalation, null
+owner/scopeRef, and original failed-check proof. A model-authored
+`integrity` category is advisory, **not** an authenticated integrity
+finding; it may not override the independently source-bound *read-only*
+recheck. Any actual provenance failure still fences before writer dispatch.
+The adapter then reruns the unchanged original read-only operation under job
+lock; verified success
+is the only way to discharge the case. All other strategies and unsafe
+author/Review/HEAD states retain their explicit stops. The
+[controller regression](../test/recovery-diagnostic-proposal.test.ts)
+tests both ordinary source notes and a malicious approval suggestion;
+[the production C05 scenario](../test/generation.test.ts) is optionally
+run with `NT_LIVE_RECOVERY_C08=1` and the user's authenticated
+`openai-codex` Pi account, checking persisted started/settled attempt,
+budget, current-source inspection and original-Thread continuation.
+No private Pi transcript is committed.
+
 **Evidence limits.** The new C08 crosswalk is a source and regression
 *gate*, not a claim that a textual anchor certifies a model attempt. A true
 diagnosis requires the already implemented production C03/C05 tests to

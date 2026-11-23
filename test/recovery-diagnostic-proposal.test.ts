@@ -71,10 +71,26 @@ test("C05 model recommendations are admitted only when the original controller a
     assert.equal(approved.adapter, "checkpoint-reconciliation");
     assert.equal(approved.originalRef.ref, evidence[0]!.ref);
   }
+  assert.equal(authorizeDiagnosticStrategy(state, c, diagnostic, {
+    ...proposal, prerequisites: [
+      "Recheck the original checkpoint before resuming",
+      "Do not invent a new author approval",
+    ],
+  })?.action, "reconcile-effects",
+  "Advisory model prerequisites cannot veto independently authorized read-only verification");
+  assert.equal(authorizeDiagnosticStrategy(state, c, diagnostic, {
+    ...proposal, prerequisites: ["Additional unverified author approval"],
+  })?.action, "reconcile-effects",
+  "An unverified model suggestion cannot become an actual approval requirement or write grant");
+  assert.equal(authorizeDiagnosticStrategy(state, c, diagnostic, {
+    ...proposal, category: "integrity", uncertainty: "Original source requires an independent check.",
+  })?.action, "reconcile-effects",
+  "A model integrity label cannot veto an independently source-bound read-only recheck");
+  for (const kind of ["integrity", "authorization", "resource", "semantic"] as const)
+    assert.equal(authorizeDiagnosticStrategy(state, { ...c, kind }, diagnostic, proposal), null,
+      "A verified controller category is a safety barrier even if the model suggests reconciliation");
   for (const unsafe of [
     { ...proposal, strategy: "local-repair" as const },
-    { ...proposal, category: "integrity" as const },
-    { ...proposal, prerequisites: ["Additional unverified author approval"] },
     { ...proposal, owner: "composition" },
     { ...proposal, scopeRef: "all-story" },
   ]) assert.equal(authorizeDiagnosticStrategy(state, c, diagnostic, unsafe), null);

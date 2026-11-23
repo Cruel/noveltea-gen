@@ -57,9 +57,17 @@ export function diagnosticPacket(s: GenerationGraphState, c: RecoveryCase,
 export function authorizeDiagnosticStrategy(s: GenerationGraphState, c: RecoveryCase,
   diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>,
   proposal: RecoveryDiagnosticProposal): RecoveryDecision | null {
+  // Prerequisites are model-authored advice, not executable gates or grants.
+  // The original controller independently checks source, author control,
+  // scope and the read-only operation. Requiring an empty prose list made
+  // legitimate diagnostics stop without even trying safe reconciliation.
+  // The model's category can be "integrity" for an unfamiliar exception,
+  // but it is not an integrity finding. Only the ORIGINAL source verifier may
+  // decide whether the read-only reconciliation is safe. A diagnosis alone
+  // cannot grant a writer or suppress a verified original check.
   if (proposal.strategy !== "reconcile-original" ||
-      !["infrastructure", "protocol"].includes(proposal.category) ||
-      proposal.prerequisites.length !== 0 || c.observation !== "exception" ||
+      !["infrastructure", "protocol"].includes(c.kind) ||
+      c.observation !== "exception" ||
       s.ideaTask || s.crossDomainCloseout || s.causalAmendment || s.escalation ||
       proposal.owner !== null || proposal.scopeRef !== null ||
       s.inventory?.headSha !== c.origin.sourceHeadSha ||

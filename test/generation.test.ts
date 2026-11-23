@@ -59,7 +59,8 @@ import { recoveryAdmission } from "../src/generation-recovery-lifecycle.js";
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
 after(() => {
   if ((process.env.NT_LIVE_GENERATION === "1" ||
-    process.env.NT_LIVE_GENERATION_IDEA === "1") && process.env.NT_KEEP_FAILED_LIVE === "1")
+    process.env.NT_LIVE_GENERATION_IDEA === "1" ||
+    process.env.NT_LIVE_RECOVERY_C08 === "1") && process.env.NT_KEEP_FAILED_LIVE === "1")
     console.error("Preserved disposable generation evidence: " + root);
   else removeTestTree(root);
 });
@@ -1939,10 +1940,14 @@ test("C03 production graph diagnoses a source-authenticated unknown scheduling e
   }
 });
 
-test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation", {
-  skip: !available, timeout: 100_000,
+for (const live of [false, true] as const)
+test(live
+  ? "C08 opt-in real Pi scheduling diagnosis settles its original attempt, verifies and resumes the original Thread"
+  : "C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation", {
+  skip: !available || (live && process.env.NT_LIVE_RECOVERY_C08 !== "1"),
+  timeout: live ? 300_000 : 100_000,
 }, async () => {
-  const f = setup("c05-source-bound-reconciliation");
+  const f = setup(live ? "c08-live-recovery-reconciliation" : "c05-source-bound-reconciliation");
   captureRecoveryIdea(f, "c05-transient-idea");
   const paused = f.cli([...f.start, "--pause-after", "event"]);
   assert.equal(paused.status, "paused");
@@ -1963,11 +1968,12 @@ test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and 
   Object.assign(process.env, f.env);
   const saver = SqliteSaver.fromConnString(paused.checkpointPath);
   try {
-    const transport = await (await import("./scripted-recovery-model.js"))
+    const transport = live ? null : await (await import("./scripted-recovery-model.js"))
       .scriptedRecoveryModel("reconcile-original");
+    const provider = transport?.model.provider ?? (process.env.NT_RECOVERY_PI_PROVIDER ?? "openai-codex");
+    const model = transport?.model.id ?? (process.env.NT_RECOVERY_PI_MODEL ?? "gpt-6-luna");
     await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
-      profile: { provider: transport.model.provider, model: transport.model.id },
-      limits: { modelCalls: 2 } });
+      profile: { provider, model }, limits: { modelCalls: 2 } });
     const graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId } };
     const values = (await graph.getState(cfg)).values;
@@ -1981,13 +1987,25 @@ test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and 
     assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "scheduling");
     const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
     assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic");
-    const proposed = await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
+    const { withJobModelRuntime, createJobModelRuntime } = await import("../src/model-runtime.js");
+    const runtime = transport?.rt ?? await createJobModelRuntime();
+    const proposed = await withJobModelRuntime(runtime,
       () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(proposed.recoveryLifecycle.attempt?.phase, "settled",
+      "Only a real settled external Pi invocation, not a selected intent, qualifies");
+    if (live) {
+      const attempt = proposed.recoveryLifecycle.attempt!;
+      assert.equal(attempt.purpose, "diagnosis");
+      assert.equal(attempt.mode, "read-only");
+      assert.equal(attempt.startedRef?.store, "pi-session");
+      assert.equal(attempt.settledRef?.store, "response-contract");
+      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 1,
+        "One real model response must be metered exactly once");
+    }
     assert.equal(proposed.recoveryLifecycle.decision?.action, "reconcile-effects",
       JSON.stringify({ status: proposed.status, reason: proposed.reason, lifecycle: proposed.recoveryLifecycle }));
-    assert.equal(proposed.recoveryLifecycle.attempt?.phase, "settled");
     assert.equal(proposed.recoveryLifecycle.assessorPending, true);
-    assert.equal(transport.calls.length, 1);
+    if (transport) assert.equal(transport.calls.length, 1);
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
       proposed.recoveryLifecycle);
 
@@ -2004,7 +2022,9 @@ test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and 
     assert.equal(reconciled.status, "running");
     assert.deepEqual((await graph.getState(cfg)).next, ["author_update_intake"],
       "The original graph resumes after independently verified read-only reconciliation");
-    assert.equal(transport.calls.length, 1);
+    if (transport) assert.equal(transport.calls.length, 1);
+    else assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 1,
+      "Read-only independent recheck must not consume another external Pi call");
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
       "Neither the diagnosis nor original read-only reconciliation can commit");
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
