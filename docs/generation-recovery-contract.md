@@ -131,6 +131,105 @@ The production graph's preexisting `assess_recovery → author_update_intake →
 
 The C07 production regressions in [`generation.test.ts`](../test/generation.test.ts) exercise (1) a crash after real-Pi Event owner correction, separately sealed dependent reviews and published Git commit, followed by identical-case/unchanged-budget replay and downstream Composition; (2) the original negative Choice → independently reviewed Event-only omission → real Pi Composition writer and independent reviewer → native/Review-verified stage reconciliation → independently reviewed final Turn completeness → `completed` on the original Thread; and (3) local mandatory/Story-wide Choice refusals and source-tampered restart fences. [`adaptive-assignments.test.ts`](../test/adaptive-assignments.test.ts) certifies that a verified terminal Review permits only no-op historical plan replay, not new scope; [`generation-recovery-lifecycle.test.ts`](../test/generation-recovery-lifecycle.test.ts) tests persisted identity and restart-tamper refusal.
 
+### C08 source-exit certification and retirement (#245)
+
+C08 maintains two complementary executable inventories: [the original AST exit and
+routing gate](../test/generation-recovery-coverage.test.ts), including source-specific
+return/throw/status fingerprints and reviewed direct-stop evidence, and [the final
+graph/stage/decision crosswalk](../test/generation-recovery-c08-matrix.test.ts).
+The first gate fails when an original return, thrown exception, conditional END
+route, shared dispatch predicate or immediate status assignment changes without
+review. Every direct `F` status/return is additionally classified by proof owner
+and linked to a production or protocol regression. The async factory return
+from `recoveryNode` is an ordinary graph-wrapper construction (`G`), **not**
+a blocked graph exit. The second gate fails if a production node loses its
+shared recovery wrapper or typed original-operation check, a stage changes
+its original specialist, or any C01 decision/phase loses its regression anchor.
+A source location alone is not evidence of a verified correction: the referenced
+tests must actually execute the production graph and inspect its persisted
+origin, attempt and assurance.
+
+| Graph and domain surface | Original failure/proof | Audited direct-stop or corrective ownership |
+| --- | --- | --- |
+| `schedule`, `author_update_intake` | `generation-scheduling.v1`, `author-update-intake.v1`; pinned Turn, author update and inventory | Reconcile the original read-only check or fence source drift; user pause/cancel never becomes an integrity failure |
+| `idea_integration`, `verify_idea_integration` | `idea-dispatch.v1`, `idea-placement-provenance.v1`; original idea dispatch and exact Git result | Verified deferred/no-write remains a pending obligation; same idea may be discharged only by authentic later placement |
+| `specialist_dispatch` | `specialist-dispatch.v1`; claimed specialist Pi/HEAD/assignment | Original writer is never replayed on ambiguous effect; return statuses from Foundation, Architecture, World/Character, Event, Choice/Puzzle, Composition, Focus and Review go through shared wrapper/typed assessor |
+| `dependency_amendment` | `dependency-amendment.v1`; selected supporting owner and dependency-plan receipt | Bounded owner amendment or explicit author/owner stop, not automatic writer permission |
+| `independent_assignment_review` | `independent-assignment-review.v1`; sealed reviewer verdict and original submitted commit | Known `review-cycle` correction or original-source diagnosis; cross-owner prerequisite and protected approvals remain stops |
+| `verify_committed_work` | `committed-work-verification.v1`; original Git/native/Review receipt | Exact original effect reconciliation before verified successor; no duplicate writer or passing verdict from status alone |
+| `completion_decision` | `generation-completion.v1`; final independently reviewed inventory and objective | No completion if unresolved active or deferred recovery; unsafe final report is an integrity stop |
+| `assess_recovery` | C01 original failure anchor, source-bound decision and actual adapter | Controller does not count assessment as agent attempt; it either verifies a selected correction, keeps original case pending, pauses, or fences untrusted evidence |
+
+The authoritative `RecoveryDecision` variants are `known-correction`,
+`plan-amendment`, `diagnostic`, `diagnostic-stop`,
+`reconcile-effects`, `continue-independent`, `pause`,
+`exhausted` and `integrity-fence`; the matrix requires a test anchor
+for each. Its exhaustive stage dispatch list is the `generationStages`
+union, not a second scheduler. C01's `RecoveryLifecycle` phases remain
+`idle`, `assessing`, `reconciling`, `diagnosing`,
+`correcting`, `verifying`, `paused`, `fenced`, `resolved`.
+Any new variant must revise this contract and add an independently verified
+source-to-effect transition; it cannot inherit a generic `blocked` default.
+
+**Current authority/retirement audit.** The graph serializes only one
+`recoveryLifecycle` plus immutable phase-free `recoverySources`; it
+does **not** persist `operationRecovery`, `recovery` or
+`unknownRecovery` as alternate writable channels. The first two are
+transient original-adapter projections inside `recoveryNode`, with their
+effect verification delegated to existing native, Pi, Git and Review
+authorities. `unknownRecovery` is inspection-only for old completion
+receipts and cannot mint a new C01 case. The former `safeAction` domain
+hint is a candidate only: `independentObligation` requires the exact
+no-write source and unchanged HEAD. The original review-cycle and
+format-only protocol receipts remain independent **evidence sources**, not
+duplicate parent-graph recovery supervisors. Historical semantic 2/3/12
+attempt ceilings are not an admission policy; ADR 0006 controls semantic
+convergence and the response-contract protocol retains its deliberately
+bounded *format-only* allowance.
+
+C08 also retires two operational decisions previously made from display
+strings. [`isRepeatedUnchangedOperation`](../src/generation-operation-recovery.ts)
+uses the canonical versioned check, operation, outcome, Job/Thread/Turn,
+plan, HEAD and original failed-check evidence rather than comparing
+human-readable error text. A genuinely changed source/check is *not*
+classified as the same failure. [`ProtocolVerifierRecheckRejectedError`](../src/response-contract-recovery.ts)
+distinguishes a completed failed verifier recheck (including parse refusal)
+from untrusted protocol receipts without testing `error.message.includes`.
+An exhausted verifier has no new model or writer permission. Both paths
+have deterministic regressions in
+[`generation-operation-repeat.test.ts`](../test/generation-operation-repeat.test.ts).
+
+The inventory's previous English `blockingReason.startsWith` branches were also
+active source-phrase gates: a changed or forged display string could alter
+causal revalidation and downstream Review decisions. The existing
+[`ExecutionItem.invalidation`](../src/generation-plan.ts) is now a
+separate **typed dependency invalidation reason**, not another recovery
+case/phase. `causal-new-edge`, `dependent-revalidation` and
+`omission-invalidated` are set by the actual changed dependency or
+[reviewed omission invalidation](../src/pending-work-state.ts). A
+previously blocked checkpoint **from an older inventory without the
+`invalidationVersion: 1` marker** and with no typed cause can only acquire
+the `legacy-unclassified` safety disposition at an unchanged verified
+source; it cannot be silently promoted based on old text. Current-format
+inventories emit the marker even for noncausal author/resource blocks, so
+those blocks are not mistaken for historical invalidation. A newly
+independently verified successor at a changed HEAD remains eligible for
+the regular original-review path. The
+[`pending-work-amendments.test.ts`](../test/pending-work-amendments.test.ts)
+regressions prove localized diagnostic text does not clear a negative
+review and a forged message alone cannot create an invalidation.
+
+**Evidence limits.** The new C08 crosswalk is a source and regression
+*gate*, not a claim that a textual anchor certifies a model attempt. A true
+diagnosis requires the already implemented production C03/C05 tests to
+prove a started and settled Pi transcript, retained usage and restart-safe
+same-case decision; review corrections require the C04/C07 native/Git and
+independent-review checks. An optional paid real-Pi run must still be
+recorded separately with its original runner receipt and no private logs
+committed. Absence of that run must be reported as an incomplete C08
+release qualification rather than interpreted as success. Full 60-minute
+new-Story certification remains owned by #181.
+
 ### C02 implementation mapping (one current-format lifecycle)
 
 [`generation.ts`](../src/generation.ts) persists exactly one graph recovery authority, `recoveryLifecycle: RecoveryLifecycle`, and phase-free `recoverySources` bound to original domain receipts. The three domain-specific `recovery`, `operationRecovery` and `unknownRecovery` graph annotations and route predicates are removed. Existing domain adapters still consume local, **nonpersisted** projections while later tickets consolidate their execution. The graph does not create new writer, Pi, Review or approval permissions. Every recovery wrapper exit applies integrity/completion gates, even when the domain node emits no recovery update: a completed status is rejected whenever `active` or `pending` remains nonempty. `assessorPending` is the graph's typed dispatch indicator and replaces the former user-visible `reason` sentinel. Deferred no-write resolution belongs in `recoveryNode` at the authenticated schedule/intake boundary: verify the original failure and the *later* committed reviewer/native/idea-placement proof before appending `discharged[]`. Never rerun the original failed assessor against its obsolete `blocked` and unchanged-HEAD preconditions.

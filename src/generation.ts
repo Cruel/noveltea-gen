@@ -10,7 +10,7 @@ import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import { inspectUnknownRecoveryStatus, inspectOriginalUnknownDiagnosis,
   type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
-import { assessGenerationOperation, nodeFailureSource, operationChecks, type GenerationOperationRecovery,
+import { assessGenerationOperation, isRepeatedUnchangedOperation, nodeFailureSource, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { projectRecoveryInspection, authenticateOriginalFailure,
@@ -30,7 +30,7 @@ import type { RecoveryLifecycle, RecoveryOrigin, RecoveryEvidence } from "./gene
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { captureVerificationFailure, verifyCorrectedOriginalResult, verifiableResultStatus } from "./commit-verification-continuation.js";
 import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
-import { ProtocolExhaustedError, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
+import { ProtocolExhaustedError, ProtocolVerifierRecheckRejectedError } from "./response-contract-recovery.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
 import { Annotation, END, START, StateGraph, isGraphBubbleUp } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
@@ -550,8 +550,7 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     if (error instanceof ProtocolExhaustedError && s.recovery?.phase === "authorized" && error.contract === s.recovery.check)
       return { request, completedStages, planVersion: plan!.version, active: null,
         status: "blocked", reason: error.message, recovery: { ...s.recovery, phase: "protocol-exhausted" } };
-    if (s.fixPickup && error instanceof ProtocolIntegrityBlockedError &&
-        error.message.includes("Original response still fails the fixed verifier"))
+    if (s.fixPickup && error instanceof ProtocolVerifierRecheckRejectedError)
       return { request, active: null, status: "blocked", fixPickup: null,
         reason: "protocol-exhausted: original response still fails this deployed verifier fix; no writer was started." };
     if (s.fixPickup) {
@@ -719,13 +718,13 @@ async function operationFailure(s: State, job: JobStartResult, operation: Operat
   // A completed read-only assessment must not restart the same deterministically
   // failing operation on unchanged evidence. A new failure or verified source
   // change gets its own assessment, but no graph invocation can spin forever.
-  if (previous?.phase === "continued" && previous.operation === operation &&
-      previous.outcome === outcome && previous.reason === reason &&
-      previous.source.jobId === job.jobId &&
-      previous.source.planVersion === (s.planVersion ?? null) &&
-      previous.source.turnDigest === (s.request.turnPlanDigest ?? null) &&
-      previous.source.headSha === await trustedHead(job).catch(() => null) &&
-      JSON.stringify(previous.evidence) === JSON.stringify(evidence))
+  if (previous && isRepeatedUnchangedOperation(previous, {
+    operation, outcome, evidence,
+    source: { jobId: job.jobId,
+      threadId: s.graphThreadId ?? graphThreadId ?? job.threadId + ":generation",
+      planVersion: s.planVersion ?? null, turnDigest: s.request.turnPlanDigest ?? null,
+      headSha: await trustedHead(job).catch(() => null) },
+  }))
     return { status: "blocked", operationRecovery: { ...previous, phase: "fenced" },
       reason: reason + " The same recovery check failed again on unchanged evidence; " +
         "inspect the original operation before another attempt." };

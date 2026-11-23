@@ -157,6 +157,7 @@ export async function applyPendingHistory(job: JobStartResult, state: PendingSta
       if (changed) {
         invalid.add(item.id);
         item.status = "blocked";
+        item.invalidation = "omission-invalidated";
         item.blockingReason = "Downstream checkpoint depends on invalidated omission: " +
           changed + "; reconcile the preserved commit and independent review.";
         delete item.verifiedSha;

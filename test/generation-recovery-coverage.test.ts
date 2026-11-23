@@ -448,6 +448,113 @@ test("direct graph edges cannot silently skip controller dispatch", () => {
 test("every typed failed operation is inventoried (new operations fail this gate)", () => {
   assert.deepEqual(Object.keys(operationChecks).sort(), operations);
 });
+/** C08 direct-block/END audit. The existing AST baseline checks each exact
+ * return/status fingerprint; this table adds source-linked terminal disposition
+ * and safety evidence for every reviewed F marker. A new F cannot inherit an
+ * unexamined generic "blocked" classification. No category grants a retry.
+ * Nonterminal arrow-factory returns are G, not stopped graph executions. */
+const reviewedDirectStopFamilies = {
+  "legacy-read-only": {
+    disposition: "inspection-only",
+    proof: "Old completion-only advisory has no C02 admission capability",
+    regression: ["test/generation-recovery-graph.test.ts", "C05 legacy completion-only channel cannot mint a second active recovery case"],
+    sites: ["assess_recovery/return#1", "assess_recovery/status#1"],
+  },
+  "original-proof-missing": {
+    disposition: "integrity-fence",
+    proof: "Original graph task, HEAD, author control, Review/commit or deferred receipt cannot be authenticated",
+    regression: ["test/generation.test.ts", "C02 current-format checkpoint tampering cannot grant a new recovery or writer attempt"],
+    sites: [
+      "schedule/status#4",
+      "assess_recovery/return#2", "assess_recovery/return#4",
+      "assess_recovery/return#9", "assess_recovery/return#11",
+      "assess_recovery/return#12", "assess_recovery/return#16",
+      "assess_recovery/status#2",
+      "completion_decision/return#6", "completion_decision/status#1",
+      "observeNodeOutcome/return#3",
+      "recoveryNode/return#2", "recoveryNode/return#3", "recoveryNode/return#5",
+      "recoveryNode/return#13", "recoveryNode/return#15", "recoveryNode/return#18",
+      "recoveryNode/status#1", "recoveryNode/status#2", "recoveryNode/status#3",
+      "recoveryNode/status#4", "recoveryNode/status#10",
+      "recoveryNode/status#12", "recoveryNode/status#14",
+    ],
+  },
+  "original-check-unresolved": {
+    disposition: "reconciliation-required",
+    proof: "Same original read-only check remains negative or unchanged-source repeated check has already been assessed",
+    regression: ["test/generation.test.ts", "C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation"],
+    sites: [
+      "assess_recovery/return#7", "assess_recovery/return#13",
+      "operationFailure/return#2", "operationFailure/status#1",
+    ],
+  },
+  "protocol-verifier-exhausted": {
+    disposition: "bounded-protocol-stop",
+    proof: "Original response exhausted its format allowance or independently failed the deployed verifier; no new writer",
+    regression: ["test/response-contract-recovery.test.ts", "two invalid corrections exhaust with typed protocol result"],
+    sites: [
+      "reconcile/return#7", "reconcile/return#9", "reconcile/return#10",
+      "reconcile/status#4", "reconcile/status#5", "reconcile/status#6",
+    ],
+  },
+  "pending-owner-approval": {
+    disposition: "owner-or-author-resolution",
+    proof: "Independent Review/prerequisite refused cross-owner action without approved owner or author source",
+    regression: ["test/generation.test.ts", "C04 Review strategy demands the original sealed failed Pi cycle before any correction attempt"],
+    sites: [
+      "independentAssignmentBoundary/return#9", "independentAssignmentBoundary/return#17",
+      "independentAssignmentBoundary/status#1", "independentAssignmentBoundary/status#3",
+      "independentAssignmentBoundary/status#7", "independentAssignmentBoundary/status#8",
+    ],
+  },
+  "sealed-diagnostic-stop": {
+    disposition: "operator-advisory",
+    proof: "Started-and-settled original Pi transcript is authenticated, but no corrective adapter is authorized",
+    regression: ["test/generation.test.ts", "C03 production graph diagnoses a source-authenticated unknown scheduling exception once"],
+    sites: ["recoveryNode/return#4"],
+  },
+  "returned-terminal-projection": {
+    disposition: "read-only-output",
+    proof: "The entrypoint reports a stopped graph checkpoint but cannot create or fulfill a recovery decision",
+    regression: ["test/generation.test.ts", "generation start and read-only inspect preserve invalid corrective evidence without replay"],
+    sites: [
+      "runStoryGeneration/status#3", "runStoryGeneration/status#4",
+      "runStoryGeneration/status#5", "runStoryGeneration/status#6",
+    ],
+  },
+} as const;
+
+test("C08 every direct blocked/status source has an audited disposition and independent regression", () => {
+  const observed: string[] = [];
+  const exits = exitSites();
+  for (const site of siteNames) {
+    for (const [kind, baseline] of [
+      ["return", reviewedReturnExits[site]],
+      ["status", reviewedStatusExits[site]],
+    ] as const) {
+      const annotated = baseline.split(" ").filter(Boolean);
+      const records = exits[site]!.filter(item => item.id.includes("/" + kind + "#"));
+      annotated.forEach((entry, i) => {
+        if (entry.endsWith(":F")) {
+          assert.equal(records[i]!.fingerprint, entry.slice(0, 16),
+            "Reviewed direct-block fingerprint must remain bound to source");
+          observed.push(records[i]!.id);
+        }
+      });
+    }
+  }
+  const classified: string[] = [];
+  for (const [family, spec] of Object.entries(reviewedDirectStopFamilies)) {
+    assert.ok(spec.proof.length > 20, family + " has no evidence condition");
+    const [file, anchor] = spec.regression;
+    assert.ok(readFileSync(resolve(root, file!), "utf8").includes(anchor!),
+      family + " lost its independent regression");
+    classified.push(...spec.sites);
+  }
+  assert.equal(new Set(classified).size, classified.length, "Direct stop is classified twice");
+  assert.deepEqual(classified.sort(), observed.sort(),
+    "A direct blocked graph source has no reviewed C08 evidence-backed disposition");
+});
 test("new terminal returns, throws or recovery bypass sites require explicit exit-matrix review", () => {
   const nodes = graphNodes(),
     funcs = helpers();

@@ -1,6 +1,7 @@
 /** Source-bound controller disposition for non-specialist Turn boundaries.
  * The generation graph checkpoints assessment before this disposition is
  * executed. No receipt here grants a new writer invocation or author consent. */
+import { isDeepStrictEqual } from "node:util";
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 
@@ -60,6 +61,24 @@ export interface GenerationOperationRecovery {
   };
   reason: string;
   nextAction: string;
+}
+
+/** A second failure at the same checked source cannot mint a new recovery
+ * entitlement merely because the error string, locale, or suggested action
+ * changed. Only the typed operation, original Thread/Turn/source and sealed
+ * failed-check evidence can establish whether the failed operation changed.
+ * This is a guard against replay, never proof that a writer may be retried. */
+export function isRepeatedUnchangedOperation(
+  previous: GenerationOperationRecovery | null | undefined,
+  current: Pick<GenerationOperationRecovery, "operation" | "outcome" | "source" | "evidence">,
+): boolean {
+  return !!previous &&
+    previous.version === 1 && previous.phase === "continued" &&
+    previous.checkVersion === 1 && previous.check === operationChecks[previous.operation] &&
+    previous.operation === current.operation && previous.outcome === current.outcome &&
+    !!current.source.headSha && /^[a-f0-9]{40}$/.test(current.source.headSha) &&
+    isDeepStrictEqual(previous.source, current.source) &&
+    isDeepStrictEqual(previous.evidence, current.evidence);
 }
 
 /** The failed operation when a node has no more specific specialist receipt.

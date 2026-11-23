@@ -160,6 +160,63 @@ test("a new downstream dependency invalidates only the affected verified checkpo
   assert.equal(repeated.items.find(item => item.id === "review")?.status, "blocked");
 });
 
+test("C08 persisted causal invalidation is typed; changed display wording cannot clear or forge a blocked checkpoint", () => {
+  const prior = inventory();
+  for (const item of prior.items)
+    if (["focus:character.nia", "focus:character.sol", "review"].includes(item.id)) {
+      item.status = "verified";
+      item.verifiedSha = head;
+    }
+  const altered = structuredClone(prior);
+  const nia = altered.items.find(i => i.id === "focus:character.nia")!;
+  nia.dependencies.push("focus:character.sol");
+  invalidateChangedVerifiedPrerequisites(altered.items, prior);
+  assert.equal(nia.invalidation, "causal-new-edge");
+  assert.equal(altered.items.find(i => i.id === "review")?.invalidation, "dependent-revalidation");
+
+  const replay = structuredClone(prior);
+  replay.items.find(i => i.id === nia.id)!.dependencies = [...nia.dependencies];
+  for (const item of altered.items) if (item.invalidation)
+    item.blockingReason = "Diagnostic text changed or localized by a newer CLI.";
+  invalidateChangedVerifiedPrerequisites(replay.items, altered);
+  assert.equal(replay.items.find(i => i.id === nia.id)?.status, "blocked");
+  assert.equal(replay.items.find(i => i.id === "review")?.status, "blocked");
+
+  const forged = structuredClone(prior);
+  forged.items.find(i => i.id === nia.id)!.blockingReason =
+    "Verified checkpoint has a new causal prerequisite: an attacker-controlled message";
+  const unchanged = structuredClone(prior);
+  invalidateChangedVerifiedPrerequisites(unchanged.items, forged);
+  assert.equal(unchanged.items.find(i => i.id === nia.id)?.status, "verified",
+    "unauthenticated prose must never create a causal invalidation");
+
+  const oldCheckpoint = structuredClone(prior);
+  const oldItem = oldCheckpoint.items.find(i => i.id === nia.id)!;
+  oldItem.status = "blocked";
+  oldItem.blockingReason = "Legacy checkpoint with unknown blocked reason";
+  delete oldItem.invalidation;
+  delete oldItem.verifiedSha;
+  const sameHead = structuredClone(prior);
+  invalidateChangedVerifiedPrerequisites(sameHead.items, oldCheckpoint);
+  assert.equal(sameHead.items.find(i => i.id === nia.id)?.invalidation, "legacy-unclassified");
+  assert.equal(sameHead.items.find(i => i.id === nia.id)?.status, "blocked",
+    "a previously blocked source without typed proof cannot regain assurance at unchanged HEAD");
+  assert.equal(sameHead.items.find(i => i.id === "review")?.status, "blocked",
+    "legacy unresolved source cannot confer dependent Review completion");
+
+  const modern = structuredClone(prior);
+  modern.invalidationVersion = 1;
+  const priorAuthorBlock = modern.items.find(i => i.id === nia.id)!;
+  priorAuthorBlock.status = "blocked";
+  priorAuthorBlock.blockingReason = "Author control pending";
+  delete priorAuthorBlock.verifiedSha;
+  const independentlyVerified = structuredClone(prior);
+  independentlyVerified.invalidationVersion = 1;
+  invalidateChangedVerifiedPrerequisites(independentlyVerified.items, modern);
+  assert.equal(independentlyVerified.items.find(i => i.id === nia.id)?.status, "verified",
+    "current-format noncausal author blocks are not misclassified as legacy invalidation");
+});
+
 const canonicalRecords: CanonicalScopeRecord[] = [
   { path: "characters/nia.md", metadata: { id: "character.nia", type: "character",
     status: "approved", decisions: [] } },

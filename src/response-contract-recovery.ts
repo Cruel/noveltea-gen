@@ -107,6 +107,17 @@ export class ProtocolIntegrityBlockedError extends Error {
   }
 }
 
+/** The original exhausted response was safely rechecked, but still fails
+ * the deployed fixed verifier. Distinguish this terminal protocol outcome
+ * from receipt tampering without interpreting diagnostic prose. */
+export class ProtocolVerifierRecheckRejectedError extends Error {
+  readonly code = "verifier-rejected";
+  constructor(reason: string) {
+    super("verifier-rejected: " + reason + "; the original protocol allowance remains exhausted.");
+    this.name = "ProtocolVerifierRecheckRejectedError";
+  }
+}
+
 interface StartedInvocation {
   version: 1;
   contract: string;
@@ -373,9 +384,9 @@ export async function recheckExhaustedProtocolResponse<T>(options: {
   }
   const answer = proof.complete.at(-1)!;
   if (options.validate(answer).length)
-    throw new ProtocolIntegrityBlockedError("Original response still fails the fixed verifier");
+    throw new ProtocolVerifierRecheckRejectedError("Original response still fails the fixed verifier");
   try { return options.parse(answer); }
-  catch { throw new ProtocolIntegrityBlockedError("Original response cannot be parsed by the fixed verifier"); }
+  catch { throw new ProtocolVerifierRecheckRejectedError("Original response cannot be parsed by the fixed verifier"); }
 }
 
 /** Return BOTH Pi identities only when the original protocol exhausted
