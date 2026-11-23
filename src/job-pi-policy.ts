@@ -36,6 +36,8 @@ interface ContextReceipt {
   model: string;
   sources: Record<string, string>;
   nativeRevisions?: Record<string, string>;
+  /** Added for crash-safe recognition of an already COMPLETED Pi turn. */
+  sessionSha256?: string;
 }
 interface BudgetState {
   version: 1;
@@ -359,6 +361,50 @@ export async function recordPiSession(job: JobStartResult, sessionFile: string):
   }
 }
 
+/** Read-only proof of an already COMPLETED reviewer invocation.
+ * The normal Pi context writer records this only after the model response,
+ * independent verdict checks, and required source reads have all succeeded.
+ * A reviewer session path/started marker alone never qualifies. */
+export async function inspectCompletedPiReviewContext(job: JobStartResult, input: {
+  group: string; sessionFile: string; snapshotId: string;
+  requested: { provider: string; model: string };
+}): Promise<{ sessionId: string; sessionSha256: string }> {
+  const folder = join(job.stateDir, "review-sessions", "review") + sep;
+  const file = input.sessionFile;
+  if (!file.startsWith(folder) || !file.endsWith(".jsonl") ||
+      !existsSync(file) || await realpath(file) !== file ||
+      !(await stat(file)).isFile())
+    throw Error("Completed reviewer session is missing or outside the pinned review folder.");
+  const receipt = await json<ContextReceipt>(contextPath(job, input.group));
+  const resolved = await json<Resolution>(resolutionPath(job));
+  const budget = await json<BudgetState>(budgetPath(job));
+  const configured = await json<PiPolicy>(policyPath(job));
+  const requested = configured && input.requested.provider === defaultProfile.provider &&
+    input.requested.model === defaultProfile.model ? configured.profile : input.requested;
+  const expectedModel = resolved?.selected.provider + "/" + resolved?.selected.model +
+    ":" + (resolved?.thinking ?? "pi-default");
+  if (!receipt || receipt.version !== 1 || receipt.group !== input.group ||
+      receipt.file !== file || !receipt.sessionId?.trim() ||
+      receipt.snapshot !== input.snapshotId ||
+      !resolved || resolved.version !== 1 ||
+      resolved.requested.provider !== requested.provider ||
+      resolved.requested.model !== requested.model ||
+      receipt.model !== expectedModel ||
+      !budget || budget.version !== 1 || !budget.sessions.includes(file) ||
+      budget.pendingSessions?.includes(file) ||
+      !/^[a-f0-9]{64}$/.test(receipt.sessionSha256 ?? ""))
+    throw Error("Original closeout reviewer has no authenticated completed Pi context.");
+  const content = await readFile(file, "utf8");
+  const records = content.trimEnd().split("\n").map(line => JSON.parse(line)) as
+    Array<{ type?: string; id?: string; message?: { role?: string; stopReason?: string } }>;
+  if (records[0]?.type !== "session" || records[0].id !== receipt.sessionId ||
+      !records.some(r => r.type === "message" && r.message?.role === "assistant" &&
+        r.message.stopReason === "stop") ||
+      createHash("sha256").update(content).digest("hex") !== receipt.sessionSha256)
+    throw Error("Completed reviewer transcript changed after the original accepted Pi turn.");
+  return { sessionId: receipt.sessionId, sessionSha256: receipt.sessionSha256 };
+}
+
 /** Share a prefix only when assignments reference the same actual Arc scope.
  * Different domains/roles remain isolated even within that Arc. */
 export function piNarrativeGroup(role: string, paths: string[], fallback: string): string {
@@ -568,7 +614,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
         sources: await sourceVersions(project.root,
           [...Object.keys(versions), ...Object.keys(storyReader.loadedRevisions()),
             ...await loadedStoryPaths(sessionFile, project.root)]),
-        nativeRevisions: storyReader.loadedRevisions() } satisfies ContextReceipt);
+        nativeRevisions: storyReader.loadedRevisions(),
+        sessionSha256: createHash("sha256").update(await readFile(sessionFile)).digest("hex"),
+      } satisfies ContextReceipt);
     },
   };
 }

@@ -19,7 +19,7 @@ import { preflightCompositionBoundary, type CompositionBoundaryDecision,
 import { authorMilestoneCloseout } from "./cross-domain-closeout-specialist.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair, settlePrerequisiteRepair,
   inspectRepairLedger } from "./repair-ledger.js";
-import { preflightPiAssignment } from "./job-pi-policy.js";
+import { preflightPiAssignment, inspectCompletedPiReviewContext } from "./job-pi-policy.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { reviewNarrative, checkEditorialVerdict,
@@ -59,6 +59,8 @@ interface Receipt {
   evidence?: string[]; authoredDigest?: string; commitSha?: string;
   validation?: { status: "passed"; sourceSha: string; validatorVersion: string };
   review?: EditorialVerdict; reviewDigest?: string; failure?: string;
+  /** Original completed reviewer context, never just a started Pi session. */
+  reviewCompletion?: { sessionId: string; sessionSha256: string };
   history?: RejectedCloseout[];
   originalInventoryDigest?: string;
   retry?: { sourceSession: string; feedback: string };
@@ -105,6 +107,39 @@ async function checkedSessionDigest(job: JobStartResult, file: string | undefine
     throw Error("Original Pi transcript has no authentic durable session header.");
   return hash(content);
 }
+async function completedReviewerContext(job: JobStartResult, state: Receipt) {
+  if (!state.reviewSnapshot || !state.reviewerSessionFile ||
+      !state.commitSha || !sha.test(state.commitSha) ||
+      await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path)
+    throw Error("Interrupted reviewer has no pinned original session, snapshot or commit.");
+  return inspectCompletedPiReviewContext(job, {
+    group: "narrative:" + state.proposal.planVersion,
+    sessionFile: state.reviewerSessionFile, snapshotId: state.reviewSnapshot.id,
+    requested: { provider: state.provider, model: state.model },
+  });
+}
+
+/** Parse an already completed, source-bound independent Pi verdict. This is a
+ * read-only recovery of the SAME review, not a fresh Review invocation, nor
+ * permission to accept the model's opinion without native/ledger checks. */
+export async function recoveredCloseoutReview(job: JobStartResult, file: string,
+  sessionDigest: string, assignment: ReviewAssignment): Promise<EditorialVerdict> {
+  if (await checkedSessionDigest(job, file, "review-sessions") !== sessionDigest)
+    throw Error("Original completed reviewer transcript changed during recovery.");
+  const stat = await lstat(file);
+  if (stat.size > 16 * 1024 * 1024)
+    throw Error("Original closeout reviewer transcript exceeds bounded proof.");
+  const records = (await readFile(file, "utf8")).trimEnd().split("\n").map(line =>
+    JSON.parse(line)) as Array<{ type?: string; message?: { role?: string;
+      stopReason?: string; content?: Array<{ type?: string; text?: string }> } }>;
+  const answers = records.filter(r => r.type === "message" &&
+    r.message?.role === "assistant" && r.message.stopReason === "stop" &&
+    Array.isArray(r.message.content)).map(r => r.message!.content!
+      .filter(c => c.type === "text").map(c => c.text ?? "").join("\n"));
+  if (!answers.length) throw Error("Original closeout review has no completed independent verdict.");
+  return checkEditorialVerdict(parseSpecialistJson(answers.at(-1)!), assignment);
+}
+
 /** #211 upgrade recovery: the old reviewed-phase digest did not seal the
  * progress diagnosis. Never use that unsealed field to authorize a retry.
  * Reauthenticate the original settled Pi transcript and source-grounded
@@ -234,7 +269,7 @@ export async function inspectInterruptedCloseoutCommit(job: JobStartResult,
     proposalDigest: string; repairId: string; originalInventoryDigest: string },
 ): Promise<string> {
   const state = await load(fileOf(job, expected.milestoneId));
-  if (!state || !["authored", "committed"].includes(state.phase) ||
+  if (!state || !["authored", "committed", "reviewing", "reviewed", "verified"].includes(state.phase) ||
       state.version !== 1 || state.jobId !== job.jobId ||
       state.threadId !== job.threadId || state.baseSha !== job.baseSha ||
       state.worker !== "pi" || state.history?.length ||
@@ -249,12 +284,42 @@ export async function inspectInterruptedCloseoutCommit(job: JobStartResult,
   const verified = JSON.parse(await readFile(join(job.stateDir, "revisions", "verified-head.json"), "utf8")) as {
     version?: number; jobId?: string; headSha?: string };
   if (verified.version !== 1 || verified.jobId !== job.jobId ||
-      verified.headSha !== expected.sourceSha)
+      (verified.headSha !== expected.sourceSha &&
+        !(state.phase === "verified" && verified.headSha === state.commitSha)))
     throw Error("Unpublished closeout lost its prior independently verified source.");
   let head: string;
   if (state.phase === "authored") {
     head = await inspectPublishedCloseoutCommit(job, state);
   } else {
+    // The original reviewer may have COMPLETED its valid response and Pi
+    // context before the parent persisted phase=reviewed. Recognize only a
+    // completed, digest-bound original conversation; a mere reviewer session
+    // path or pending model invocation is insufficient for restart.
+    if (state.phase === "reviewing") await completedReviewerContext(job, state);
+    if (state.phase === "reviewed" || state.phase === "verified") {
+      if (!state.review || !state.reviewDigest || !state.reviewerSessionDigest ||
+          !state.reviewerSessionFile || !state.reviewSnapshot ||
+          await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path ||
+          await checkedSessionDigest(job, state.reviewerSessionFile, "review-sessions") !==
+            state.reviewerSessionDigest ||
+          closeoutReviewDigest({ reviewerSessionDigest: state.reviewerSessionDigest,
+            proposal: state.proposal.digest, commitSha: state.commitSha!,
+            review: state.review }) !== state.reviewDigest)
+        throw Error("Interrupted reviewed closeout lost its original independent verdict.");
+      if (state.reviewCompletion && !isDeepStrictEqual(
+        await completedReviewerContext(job, state), state.reviewCompletion))
+        throw Error("Original completed closeout reviewer context changed.");
+      if (state.phase === "verified") {
+        if (state.review.verdict !== "pass")
+          throw Error("Unapproved closeout cannot publish a verified successor.");
+        const ledger = await inspectRepairLedger(job, state.turnDigest);
+        if (!ledger.prerequisites?.some(item => item.id === state.repairId &&
+            item.status === "resolved" && item.attempts.some(attempt =>
+              attempt.submittedSha === state.commitSha && attempt.verdict === "passed" &&
+              attempt.reviewDigest === state.reviewDigest)))
+          throw Error("Published closeout lacks its original resolved independent Review ledger.");
+      }
+    }
     if (!state.commitSha || !state.writerSessionDigest ||
         state.writerSessionDigest !== await checkedSessionDigest(job,
           state.sessionFile, "prerequisite-sessions") ||
@@ -500,8 +565,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
           (state.history?.[0]?.proposal.digest ?? state.proposal.digest) !== request.expected.proposalDigest ||
           state.repairId !== request.expected.repairId)))
       throw Error("Closeout resumed with a stale original Turn, provider or source.");
-    if (state.phase === "blocked" || state.phase === "writing" ||
-        state.phase === "reviewing")
+    if (state.phase === "blocked" || state.phase === "writing")
       throw Error("Interrupted or rejected closeout must be reconciled at its preserved " +
         "original specialist/reviewer session, never replayed.");
     // Every round changes the authenticated source and proposal. Repeating an
@@ -510,6 +574,29 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
     const traversed = new Set<string>();
     for (;;) {
     const proposal = state.proposal;
+    if (state.phase === "reviewing") {
+      // Never start another reviewer on an interrupted original invocation.
+      // Reconstitute only the response already authenticated as completed by
+      // the original Pi context; the usual Review/ledger gates still follow.
+      verifyCommitted(job, state);
+      if (git(job, "rev-parse", "HEAD") !== state.commitSha ||
+          gitRaw(job, "status", "--porcelain=v1", "--untracked-files=all"))
+        throw Error("Interrupted closeout review lost its exact committed Story HEAD.");
+      const context = await completedReviewerContext(job, state);
+      const assignment = await reviewerAssignment(job, request, proposal, state.commitSha!);
+      const previous = state.history?.at(-1);
+      if (previous) assignment.progressScope = repairProgressScope(job,
+        previous.commitSha, state.commitSha!, proposal.allowedPaths, previous.review.findings);
+      state.review = await recoveredCloseoutReview(job, state.reviewerSessionFile!,
+        context.sessionSha256, assignment);
+      state.reviewerSessionDigest = context.sessionSha256;
+      state.reviewCompletion = context;
+      state.reviewDigest = closeoutReviewDigest({
+        reviewerSessionDigest: context.sessionSha256, proposal: proposal.digest,
+        commitSha: state.commitSha!, review: state.review,
+      });
+      state.phase = "reviewed"; await persist(file, state);
+    }
     const transition = state.phase + ":" + proposal.digest;
     if (traversed.has(transition))
       throw Error("Prerequisite correction repeated an unchanged controller transition.");
@@ -625,6 +712,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
           async sessionFile => { state!.reviewerSessionFile = sessionFile; await persist(file, state!); });
         state.reviewerSessionDigest = await checkedSessionDigest(job, state.reviewerSessionFile,
           "review-sessions");
+        state.reviewCompletion = await completedReviewerContext(job, state);
         state.reviewDigest = closeoutReviewDigest({
           reviewerSessionDigest: state.reviewerSessionDigest,
           proposal: proposal.digest, commitSha: state.commitSha!,
@@ -645,6 +733,17 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
             state.sessionFile, "prerequisite-sessions") ||
           await openSkillSnapshot(state.reviewSnapshot.id) !== state.reviewSnapshot.path)
         throw Error("Independent closeout review lacks pinned source or session.");
+      if (state.reviewCompletion) {
+        const context = await completedReviewerContext(job, state);
+        if (!isDeepStrictEqual(context, state.reviewCompletion))
+          throw Error("Original closeout reviewer context changed after completion.");
+        const assignment = await reviewerAssignment(job, request, proposal, state.commitSha);
+        const previous = state.history?.at(-1);
+        if (previous) assignment.progressScope = repairProgressScope(job,
+          previous.commitSha, state.commitSha, proposal.allowedPaths, previous.review.findings);
+        await verifyLegacyCloseoutReviewTranscript(job, state.reviewerSessionFile,
+          state.reviewerSessionDigest, state.review, assignment);
+      }
       const sealed = closeoutReviewDigest({
         reviewerSessionDigest: state.reviewerSessionDigest,
         proposal: state.proposal.digest, commitSha: state.commitSha,
@@ -713,6 +812,7 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         state.reviewDigest = undefined;
         state.reviewerSessionFile = undefined;
         state.reviewerSessionDigest = undefined;
+        state.reviewCompletion = undefined;
         state.writerSessionDigest = undefined;
         state.authoredDigest = undefined;
         state.sessionFile = undefined;

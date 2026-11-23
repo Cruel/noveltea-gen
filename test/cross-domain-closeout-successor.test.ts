@@ -10,8 +10,8 @@ import { removeTestTree } from "./helpers.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair,
   settlePrerequisiteRepair } from "../src/repair-ledger.js";
 import { verifyCrossDomainCloseoutSuccessor, closeoutReviewDigest,
-  verifyLegacyCloseoutReviewTranscript, inspectPublishedCloseoutCommit,
-  inspectInterruptedCloseoutCommit } from "../src/cross-domain-closeout-work.js";
+  verifyLegacyCloseoutReviewTranscript, recoveredCloseoutReview,
+  inspectPublishedCloseoutCommit, inspectInterruptedCloseoutCommit } from "../src/cross-domain-closeout-work.js";
 import type { ReviewAssignment } from "../src/narrative-review-specialist.js";
 import { validCloseoutProposal, retryCloseoutProposal,
   type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
@@ -199,8 +199,142 @@ test("#240: parent graph restart may inspect only the selected unpublished close
     ...committed, phase: "reviewing" as const,
   }));
   await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
-    /selected original recovery operation/,
+    /completed reviewer session|pinned original session/i,
     "An uncertain independent reviewer cannot be replayed under the writer exception");
+});
+
+test("#240: completed original closeout reviewer can be recovered after phase checkpoint loss without replay", async t => {
+  const f = await setup(t);
+  writeFileSync(join(f.root, ".git", "info", "exclude"), "/state/\n/skill-cache/\n");
+  const sessionDir = join(f.stateDir, "review-sessions", "review");
+  mkdirSync(sessionDir, { recursive: true });
+  const sessionFile = join(sessionDir, "completed-original.jsonl");
+  const sessionId = "original-completed-independent-review";
+  const positive = { verdict: "pass", findings: [], evidence: [f.path + ":5"] };
+  const transcript = JSON.stringify({ type: "session", id: sessionId }) + "\n" +
+    JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop",
+      content: [{ type: "text", text: JSON.stringify(positive) }] } }) + "\n";
+  const sessionSha256 = hash(transcript);
+  writeFileSync(sessionFile, transcript);
+  const model = "openai/gpt-6-luna:pi-default";
+  const group = "narrative:" + f.proposal.planVersion;
+  const contextFile = join(f.stateDir, "pi-contexts", hash(group) + ".json");
+  mkdirSync(join(f.stateDir, "pi-contexts"), { recursive: true });
+  writeFileSync(contextFile, JSON.stringify({ version: 1, group, file: sessionFile,
+    sessionId, snapshot: f.snapshot.id, model, sources: {},
+    sessionSha256 }) + "\n");
+  writeFileSync(join(f.stateDir, "pi-resolution.json"), JSON.stringify({
+    version: 1, requested: { provider: "openai", model: "gpt-6-luna" },
+    selected: { provider: "openai", model: "gpt-6-luna" }, source: "required",
+  }) + "\n");
+  writeFileSync(join(f.stateDir, "pi-budget.json"), JSON.stringify({
+    version: 1, steps: [], sessions: [sessionFile],
+  }) + "\n");
+  const expected = { milestoneId: f.proposal.milestoneId,
+    planVersion: f.proposal.planVersion, sourceSha: f.before,
+    proposalDigest: f.proposal.digest, repairId: f.admitted.id,
+    originalInventoryDigest: hash("immutable-graph-inventory") };
+  const reviewing = { ...f.state, phase: "reviewing" as const,
+    originalInventoryDigest: expected.originalInventoryDigest,
+    review: undefined, reviewDigest: undefined, reviewerSessionDigest: undefined,
+    reviewerSessionFile: sessionFile };
+  writeFileSync(f.receiptFile, JSON.stringify(reviewing));
+  const savedHead = readFileSync(join(f.stateDir, "revisions", "verified-head.json"), "utf8");
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after,
+    "The exact original completed Pi session qualifies only for review recovery");
+  assert.equal(readFileSync(join(f.stateDir, "revisions", "verified-head.json"), "utf8"),
+    savedHead, "Inspection cannot publish the unreviewed correction");
+  assert.equal(git(f.root, "rev-parse", "HEAD"), f.after);
+  const assignment: ReviewAssignment = { contract: {}, planVersion: f.proposal.planVersion,
+    scopeIds: [f.proposal.milestoneId], paths: [f.path], routes: [],
+    milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
+    specialistAssignments: [{ id: "prerequisite:" + f.proposal.milestoneId,
+      specialist: "nt-event-design", outcome: "Certify the original Milestone",
+      targets: [f.proposal.milestoneId],
+      authority: { recordTypes: ["milestone"], existingPaths: [f.path], mayCreate: false } }],
+  };
+  assert.deepEqual(await recoveredCloseoutReview(f.job, sessionFile, sessionSha256, assignment),
+    positive, "The actual transcript supplies the editorial verdict without model invocation");
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after,
+    "Reinspection remains immutable and cannot restart the reviewer");
+  const blockedReview = { verdict: "block", findings: [{
+    severity: "blocking", dimension: "continuity", source: f.path + ":5",
+    message: "The original Event evidence does not establish the proposed fulfillment.",
+    repair: "event",
+  }], evidence: [] };
+  const blockedTranscript = JSON.stringify({ type: "session", id: sessionId }) + "\n" +
+    JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop",
+      content: [{ type: "text", text: JSON.stringify(blockedReview) }] } }) + "\n";
+  writeFileSync(sessionFile, blockedTranscript);
+  writeFileSync(contextFile, JSON.stringify({ version: 1, group, file: sessionFile,
+    sessionId, snapshot: f.snapshot.id, model, sources: {},
+    sessionSha256: hash(blockedTranscript) }) + "\n");
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after);
+  const recoveredNegative = await recoveredCloseoutReview(f.job, sessionFile,
+    hash(blockedTranscript), assignment);
+  assert.equal(recoveredNegative.verdict, "block",
+    "Original negative independent verdict remains negative after crash recovery");
+  const inconsistentReview = JSON.stringify({ type: "session", id: sessionId }) + "\n" +
+    JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop",
+      content: [{ type: "text", text: JSON.stringify({ ...blockedReview, verdict: "pass" }) }] } }) + "\n";
+  writeFileSync(sessionFile, inconsistentReview);
+  await assert.rejects(recoveredCloseoutReview(f.job, sessionFile,
+    hash(inconsistentReview), assignment), /blocking|verdict/i,
+    "A blocking original finding cannot be upgraded to PASS");
+  writeFileSync(sessionFile, transcript);
+  writeFileSync(contextFile, JSON.stringify({ version: 1, group, file: sessionFile,
+    sessionId, snapshot: f.snapshot.id, model, sources: {}, sessionSha256 }) + "\n");
+  writeFileSync(sessionFile, transcript + JSON.stringify({ type: "message",
+    message: { role: "assistant", stopReason: "stop",
+      content: [{ type: "text", text: "forged approval" }] } }) + "\n");
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
+    /transcript changed|completed reviewer/i);
+  writeFileSync(sessionFile, transcript);
+  writeFileSync(contextFile, JSON.stringify({ version: 1, group, file: sessionFile,
+    sessionId, snapshot: f.snapshot.id, model, sources: {} }) + "\n");
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
+    /completed Pi context/);
+  assert.equal(git(f.root, "status", "--porcelain", "--untracked-files=all"), "",
+    "Recovery never edits the source Story");
+});
+
+test("#240: original reviewed and independently published closeout reconcile after checkpoint loss", async t => {
+  const f = await setup(t);
+  writeFileSync(join(f.root, ".git", "info", "exclude"), "/state/\n/skill-cache/\n");
+  const originalInventoryDigest = hash("reviewed-and-published-inventory");
+  const expected = { milestoneId: f.proposal.milestoneId,
+    planVersion: f.proposal.planVersion, sourceSha: f.before,
+    proposalDigest: f.proposal.digest, repairId: f.admitted.id,
+    originalInventoryDigest };
+  const state = { ...f.state, originalInventoryDigest };
+  writeFileSync(f.receiptFile, JSON.stringify({ ...state, phase: "reviewed" }));
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after,
+    "Original settled independent verdict is enough to resume missing ledger settlement");
+  const verifiedHeadFile = join(f.stateDir, "revisions", "verified-head.json");
+  const originalHeadReceipt = readFileSync(verifiedHeadFile, "utf8");
+  const verified = { ...state, phase: "verified" };
+  writeFileSync(f.receiptFile, JSON.stringify(verified));
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after,
+    "Verified but not yet published remains recoverable, not a new writer");
+  writeFileSync(verifiedHeadFile, JSON.stringify({
+    version: 1, jobId: f.job.jobId, headSha: f.after,
+    workItemId: state.workItemId,
+  }));
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after,
+    "Published commit before parent checkpoint remains the SAME recovered closeout");
+  assert.equal(git(f.root, "rev-parse", "HEAD"), f.after);
+  const tampered = { ...verified, reviewDigest: "f".repeat(64) };
+  writeFileSync(f.receiptFile, JSON.stringify(tampered));
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
+    /original independent verdict/);
+  writeFileSync(f.receiptFile, JSON.stringify(verified));
+  writeFileSync(join(f.stateDir, "repair-ledgers", f.turnDigest + ".json"),
+    JSON.stringify({ version: 1, prerequisites: [] }));
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
+    /resolved independent Review ledger|Repair ledger identity/);
+  assert.equal(git(f.root, "status", "--porcelain", "--untracked-files=all"), "");
+  // No session, writer invocation, original source or HEAD mutation occurred.
+  writeFileSync(verifiedHeadFile, originalHeadReceipt);
 });
 
 test("#240: only original parent, exact owned paths and source-bound trailers can reconcile an interrupted closeout", async t => {
