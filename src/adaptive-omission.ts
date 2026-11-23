@@ -28,7 +28,7 @@ interface InteractiveOmissionReceipt {
     paths?: string[]; claimedPaths?: string[]; eventOnly?: EventOnlyRef }>;
 }
 
-async function authenticate(job: JobStartResult, milestone: string, planVersion: number,
+export async function authenticateAdaptiveOmission(job: JobStartResult, milestone: string, planVersion: number,
   planDigest: string, records: RecordItem[], sourceHashes: Record<string, string>): Promise<AdaptiveOmissionProof> {
   if (!MILESTONE.test(milestone)) throw Error("Unsafe adaptive omission assignment identity.");
   const path = join(job.stateDir, "interactive-items", milestone.slice("milestone.".length) + ".json");
@@ -102,7 +102,7 @@ export async function reviewedAdaptiveOmissions(input: {
   }
   for (const [id, original] of originals) {
     const milestone = id.startsWith("interactive:") ? id.slice("interactive:".length) : "";
-    const authenticated = await authenticate(job, milestone, inventory.planVersion,
+    const authenticated = await authenticateAdaptiveOmission(job, milestone, inventory.planVersion,
       input.planDigest, records, sourceHashes);
     if (!original.eventOnly || JSON.stringify(authenticated) !== JSON.stringify(original))
       throw Error("Previously admitted adaptive omission differs from its independently sealed source.");
@@ -130,7 +130,7 @@ export async function reviewedAdaptiveOmissions(input: {
         throw Error("Unsafe saved interactive work while checking adaptive omission.");
       const receipt = JSON.parse(await readFile(file, "utf8")) as InteractiveOmissionReceipt;
       if (receipt.units?.[0]?.eventOnly || receipt.units?.[1]?.eventOnly)
-        proofs.push(await authenticate(job, item.milestone, inventory.planVersion,
+        proofs.push(await authenticateAdaptiveOmission(job, item.milestone, inventory.planVersion,
           input.planDigest, records, sourceHashes));
       continue;
     }
@@ -145,7 +145,7 @@ export async function reviewedAdaptiveOmissions(input: {
     if (reviewed.status === "omission-not-justified") continue;
     if (reviewed.status !== "interactive-slice-committed")
       throw Error("Adaptive omission preflight did not settle into a reviewed no-write receipt.");
-    proofs.push(await authenticate(job, item.milestone, inventory.planVersion,
+    proofs.push(await authenticateAdaptiveOmission(job, item.milestone, inventory.planVersion,
       input.planDigest, records, sourceHashes));
   }
   return proofs;

@@ -11,7 +11,7 @@ import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import type { GenerationInventory, GenerationEvidence, ExecutionItem } from "./generation-plan.js";
 import type { GenerationRequest } from "./generation.js";
-import type { ValidationResult } from "./validator.js";
+import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { loadSelectedStoryOrchestrator } from "./orchestrator-selection.js";
 import { parseStoryPlanning } from "./story-planning.js";
@@ -19,18 +19,21 @@ import { nativeStoryMetrics, reviewArchitectureMetrics } from "./story-metrics.j
 import { dependencyGit } from "./dependency-state.js";
 import { pendingDigest } from "./pending-work-amendments.js";
 import { evaluateAdaptiveProposal, applyAdaptiveAssignments, revalidateAdaptiveAmendment,
-  removeAdaptiveOverlays, assertReviewedOmissionDisposition,
-  type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment } from "./adaptive-assignments.js";
+  removeAdaptiveOverlays, assertReviewedOmissionDisposition, preservesWholeStoryInteraction,
+  type AdaptiveProposal, type AdaptiveAdmission, type AdaptiveAmendment, type AdaptiveOmissionProof } from "./adaptive-assignments.js";
 import { emptyAdaptiveState, readAdaptiveState, isProvablyUninvokedAdaptiveAttempt,
   assertAdaptiveSettled, beginAdaptiveAttempt, settleAdaptiveAttempt, saveAdaptiveState,
-  bindAdaptiveContext, beginAdaptiveInvocation, completeAdaptiveInvocation } from "./adaptive-state.js";
+  bindAdaptiveContext, beginAdaptiveInvocation, completeAdaptiveInvocation,
+  admitAdaptiveSupersession, type AdaptiveState, type AdaptiveSupersession } from "./adaptive-state.js";
 import { AdaptiveRecoveryRequired, MalformedAdaptiveResponse, recheckAdaptiveResponse, type AdaptiveRecovery, type AdaptiveResponseProof } from "./adaptive-protocol.js";
 import { proposeAdaptiveWork, recoverCompletedAdaptiveProposal, InvalidAdaptiveProposalError } from "./adaptive-planner.js";
 import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
 import { registerPendingPiSession } from "./job-pi-policy.js";
 import { readEventOnlyOmission } from "./interactive-event-only.js";
 import { readPuzzleNoWrite } from "./puzzle-obligation.js";
-import { reviewedAdaptiveOmissions } from "./adaptive-omission.js";
+import { reviewedAdaptiveOmissions, authenticateAdaptiveOmission } from "./adaptive-omission.js";
+import { inspectInteractiveConflict, runInteractiveWorkItem } from "./interactive-work.js";
+import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition } from "./milestone-obligation-handoff.js";
 import { milestoneFulfillmentProjection } from "./milestone-field-scope.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
@@ -206,6 +209,145 @@ export async function restoreCompletedAdaptiveWork(job: JobStartResult,
   return inventory;
 }
 
+/** C06 reopens BOTH original authorities: the negative Pi Choice transcript and
+ * the positive independent no-write/Blueprint review. A saved signed plan
+ * operation without these live source checks cannot make a writer disappear. */
+export async function verifyAdaptiveSupersession(job: JobStartResult, plan: Plan,
+  successor: AdaptiveSupersession, inventory: GenerationInventory,
+  records: NativeRecord[], sourceHashes: Record<string, string>,
+  protectedPaths: string[], authorTargets: string[],
+  planning: ReturnType<typeof parseStoryPlanning>,
+): Promise<AdaptiveOmissionProof> {
+  const item = inventory.items.find(i => i.id === successor.assignmentId);
+  if (!item || item.stage !== "interactive" || !item.milestone ||
+      !["blocked", "verified"].includes(item.status) ||
+      item.status === "verified" && item.verifiedSha !== successor.sourceSha ||
+      inventory.planVersion !== successor.planVersion)
+    throw Error("Adaptive supersession lost its original blocked or independently completed assignment.");
+  const negative = await inspectInteractiveConflict(job, item.milestone, true);
+  if (negative.worker !== "pi" || negative.reportDigest !== successor.negativeReportDigest ||
+      negative.expectedHead !== successor.sourceSha ||
+      negative.planVersion !== successor.planVersion)
+    throw Error("Adaptive supersession does not match the settled original negative Pi report.");
+  const planDigest = createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+  const omission = await authenticateAdaptiveOmission(job, item.milestone,
+    successor.planVersion, planDigest, records, sourceHashes);
+  if (omission.assignmentId !== item.id || omission.sourceSha !== successor.sourceSha ||
+      !isDeepStrictEqual(omission.eventOnly, successor.omission))
+    throw Error("Adaptive supersession lost its exact independent no-write Review.");
+  const event = JSON.parse(await readFile(join(job.stateDir, "event-items",
+    item.milestone.slice(10) + ".json"), "utf8"));
+  const blueprint = await reviewedMilestoneHandoff(job, event);
+  if (!blueprint || !isDeepStrictEqual(blueprint.pin, successor.reviewedBlueprint))
+    throw Error("Adaptive supersession no longer matches the reviewed Blueprint correction.");
+  assertMilestoneInteractiveDisposition(blueprint, true);
+  if (protectedPaths.includes(omission.path) ||
+      authorTargets.includes(item.milestone) ||
+      authorTargets.some(target => target.startsWith("choice-point.") ||
+        target.startsWith("puzzle.")) ||
+      !preservesWholeStoryInteraction(inventory.items, item, planning))
+    throw Error("Original author Interaction promise or protected Milestone cannot be superseded.");
+  return omission;
+}
+
+/** C01 selects this original, source-bound corrective adapter, not an ad hoc
+ * scheduler fallback. The old negative Interactive receipt and original
+ * adaptive Pi response survive the new reviewed version unmodified. */
+export async function resolveAdaptiveNoWriteSupersession(input: {
+  job: JobStartResult; request: GenerationRequest; plan: Plan;
+  inventory: GenerationInventory; assignmentId: string;
+  pinnedVersion: number | null;
+}): Promise<{ outcome: "corrected" | "declined"; version?: number;
+  sourceSha?: string; proof?: AdaptiveOmissionProof }> {
+  const { job, request, plan, inventory, assignmentId } = input;
+  if (request.fixture || !request.turnPlanDigest ||
+      request.orchestrationPolicy !== "explicit" || plan.contract.scope.kind !== "full-story" ||
+      process.env.NT_ADAPTIVE_PLANNING !== "1" ||
+      !assignmentId.startsWith("interactive:milestone.") ||
+      !input.pinnedVersion || input.pinnedVersion <= 1)
+    throw Error("C06 corrective amendment has no original full-Story adaptive authority.");
+  const head = inventory.headSha;
+  const item = inventory.items.find(i => i.id === assignmentId);
+  if (!item || item.status !== "blocked" || item.stage !== "interactive" || !item.milestone ||
+      head !== dependencyGit(job, "rev-parse", "HEAD"))
+    throw Error("C06 correction requires the original failed pending Interactive assignment and unchanged HEAD.");
+  const turn = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
+  if (!turn || !turn.objective || turn.kind !== "full-story")
+    throw Error("C06 correction lost the protected original author objective.");
+  const validation = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
+    { ...job, baseSha: head });
+  const { report, sourceHashes } = await verifySource(job, validation, inventory);
+  const direction = report.records.find(r => r.metadata.type === "creative-direction" &&
+    r.metadata.status === "approved");
+  if (!direction?.metadata.planning) throw Error("Missing approved Story Interaction profile.");
+  const planning = parseStoryPlanning(direction.metadata.planning);
+  const protectedPaths = report.records.filter(r =>
+    r.metadata.type === "creative-direction" || (r.metadata.decisions?.length ?? 0) > 0).map(r => r.path);
+  if (turn.objective.requestedTargets.includes(item.milestone) ||
+      turn.objective.requestedTargets.some(id => id.startsWith("choice-point.") || id.startsWith("puzzle.")) ||
+      !preservesWholeStoryInteraction(inventory.items, item, planning))
+    throw Error("C06 cannot waive protected or Story-wide gameplay obligations.");
+  const negative = await inspectInteractiveConflict(job, item.milestone, true);
+  if (negative.worker !== "pi" || negative.expectedHead !== head)
+    throw Error("Original Choice no-write is not a settled, unchanged Pi specialist report.");
+  const state = await readAdaptiveState(job, turn.digest, plan.version);
+  if (!state || state.version < input.pinnedVersion)
+    throw Error("C06 original adaptive plan/version is missing.");
+  const old = state.entries.filter(entry => entry.order.includes(assignmentId) &&
+    entry.afterVersion <= input.pinnedVersion!).at(-1);
+  if (!old) throw Error("C06 has no historical source-bound narrow/reorder assignment to supersede.");
+  const existing = state.supersessions?.find(s => s.assignmentId === assignmentId);
+  if (existing) {
+    const proof = await verifyAdaptiveSupersession(job, plan, existing, inventory, report.records,
+      sourceHashes, protectedPaths, turn.objective.requestedTargets, planning);
+    return { outcome: "corrected", version: state.version, sourceSha: existing.sourceSha, proof };
+  }
+  if (state.version !== input.pinnedVersion)
+    throw Error("C06 adaptive source advanced without an authenticated corrective supersession.");
+  const rejected = state.attempts.filter(a => a.phase === "rejected");
+  if (rejected.some(a => a.sourceSha !== head) || rejected.length > 1 ||
+      state.attempts.some(a => a.phase === "planning"))
+    throw Error("C06 cannot replace an unrelated or interrupted original planner response.");
+  const reviewed = await runInteractiveWorkItem({
+    story: job.storyRoot, job: job.jobId, action: "review-omission",
+    milestone: item.milestone, fixture: false, generationObjective: request.task,
+    turnPlanDigest: request.turnPlanDigest,
+    skillsSource: request.skillsSource, validatorSource: request.validatorSource,
+    provider: request.provider, model: request.model,
+  });
+  if (reviewed.status === "omission-not-justified") return { outcome: "declined" };
+  if (reviewed.status !== "interactive-slice-committed" || reviewed.headSha !== head)
+    throw Error("C06 received no independently completed, commitless correction.");
+  const newValidation = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
+    { ...job, baseSha: head });
+  const after = await verifySource(job, newValidation, inventory);
+  if (pendingDigest(after.sourceHashes) !== pendingDigest(sourceHashes))
+    throw Error("C06 reviewed correction changed canonical source without authorization.");
+  const active = JSON.parse(await readFile(join(job.stateDir,
+    "interactive-items", item.milestone.slice(10) + ".json"), "utf8")) as {
+      units?: Array<{ eventOnly?: import("./interactive-event-only.js").EventOnlyRef }>;
+    };
+  const eventOnly = active.units?.[0]?.eventOnly;
+  const event = JSON.parse(await readFile(join(job.stateDir,
+    "event-items", item.milestone.slice(10) + ".json"), "utf8"));
+  const blueprint = await reviewedMilestoneHandoff(job, event);
+  if (!eventOnly || !blueprint)
+    throw Error("C06 omission or reviewed successor Blueprint is absent.");
+  const unsigned = { turnDigest: turn.digest, planVersion: plan.version,
+    sourceSha: head, assignmentId, originalAmendmentDigest: old.digest,
+    negativeReportDigest: negative.reportDigest, omission: eventOnly,
+    reviewedBlueprint: blueprint.pin,
+    ...(rejected.length ? { rejectedAttemptSignature: rejected[0]!.signature } : {}) };
+  const candidate: AdaptiveSupersession = { ...unsigned,
+    schema: "noveltea-adaptive-supersession/v1",
+    beforeVersion: state.version, afterVersion: state.version + 1,
+    digest: "" };
+  const proof = await verifyAdaptiveSupersession(job, plan, candidate, inventory, report.records,
+    sourceHashes, protectedPaths, turn.objective.requestedTargets, planning);
+  await admitAdaptiveSupersession(job, state, unsigned);
+  return { outcome: "corrected", version: state.version, sourceSha: head, proof };
+}
+
 /** The previous LangGraph inventory may contain controller-approved aliases
  * absent from the base Architecture. Undo only those overlays represented by
  * an already checkpointed plan version BEFORE canonical prerequisite-drift
@@ -220,7 +362,8 @@ export async function canonicalPreviousAdaptiveInventory(
   const state = await readAdaptiveState(job, turnDigest, planVersion);
   if (!state || state.version < pinnedVersion!)
     throw Error("Checkpointed adaptive plan history is missing; no unreviewed writer replay.");
-  return removeAdaptiveOverlays(previous, state.entries.slice(0, pinnedVersion! - 1));
+  return removeAdaptiveOverlays(previous,
+    state.entries.filter(entry => entry.afterVersion <= pinnedVersion!));
 }
 
 /** A controller-admitted plan can be sealed before LangGraph checkpoints its
@@ -355,7 +498,23 @@ export async function reconcileAdaptiveWork(input: {
   });
   let effective = original;
   let order: string[] | null = null;
-  for (const entry of state.entries) {
+  const mutations = [...state.entries.map(entry => ({ kind: "proposal" as const, entry })),
+    ...(state.supersessions ?? []).map(entry => ({ kind: "supersession" as const, entry }))]
+    .sort((a, b) => a.entry.beforeVersion - b.entry.beforeVersion);
+  for (const mutation of mutations) {
+    if (mutation.kind === "supersession") {
+      const proof = await verifyAdaptiveSupersession(job, plan, mutation.entry,
+        effective, report.records, sourceHashes, protectedPaths,
+        turn.objective.requestedTargets, planning);
+      const item = effective.items.find(i => i.id === mutation.entry.assignmentId)!;
+      if (item.status !== "verified")
+        throw Error("Authenticated adaptive supersession lost the independently completed no-write stage.");
+      item.omission = { reason: "Controller-reviewed original Choice no-write supersession",
+        evidence: proof.evidence, reviewerSession: proof.reviewerSession };
+      order = (order as string[] | null)?.filter((id: string) => id !== item.id) ?? null;
+      continue;
+    }
+    const entry = mutation.entry;
     const admission = authorized(effective, {
       sourceSha: effective.headSha, turnDigest: entry.turnDigest,
       beforeVersion: entry.beforeVersion, reason: entry.reason,

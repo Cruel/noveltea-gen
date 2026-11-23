@@ -51,6 +51,31 @@ test("choice-heavy adaptive assignments reach final review with new causal Event
   assert.ok(review.objectives.some(o => /causal/.test(o.text)));
 });
 
+
+test("#243 reviewed C06 successor replaces the stale narrowed goal in final whole-Story review", () => {
+  const id = "interactive:milestone.discovery";
+  const s = state([{ kind: "narrow", item: id, sourcePath: "milestones/discovery.md",
+    sourceHash: digest, outcome: "An early formal Choice must be authored." }]);
+  s.entries[0]!.order = [id, "review"];
+  s.version = 3;
+  s.supersessions = [{
+    schema: "noveltea-adaptive-supersession/v1", beforeVersion: 2, afterVersion: 3,
+    turnDigest: digest, planVersion: 1, sourceSha: sha, assignmentId: id,
+    originalAmendmentDigest: digest, negativeReportDigest: "c".repeat(64),
+    omission: { nonce: "aafaba04-d8b8-4fdc-b22e-37df8c98228d", digest: "d".repeat(64) },
+    reviewedBlueprint: { milestoneId: "milestone.discovery", sourceSha: sha,
+      digest: "e".repeat(64), cycleId: "review-cycle" }, digest: "f".repeat(64),
+  }];
+  const review = projectAdaptiveFinal(s);
+  assert.deepEqual(review.source.amendments, [digest, "f".repeat(64)]);
+  assert.equal(review.source.version, 3);
+  assert.deepEqual(review.plannedWork.map(w => [w.id, w.status]), [[id, "reviewed-omission"]]);
+  assert.ok(review.plannedWork[0]!.supersession);
+  assert.ok(review.objectives.some(o => /original author goals/i.test(o.text)));
+  assert.ok(!review.objectives.some(o => /An early formal Choice must be authored/.test(o.text)),
+    "supersession must not keep treating the superseded narrow task as an independent writer demand");
+});
+
 test("missing or conflicting omission provenance never becomes a final no-write disposition", () => {
   assert.throws(() => projectAdaptiveFinal(state([{
     kind: "omit", item: "interactive:milestone.discovery",

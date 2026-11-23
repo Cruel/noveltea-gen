@@ -11,6 +11,8 @@ import { dependencyGit } from "./dependency-state.js";
 import { pendingDigest } from "./pending-work-amendments.js";
 import { assertAdaptiveTrackedRead } from "./adaptive-source-reads.js";
 import type { AdaptiveAmendment } from "./adaptive-assignments.js";
+import type { EventOnlyRef } from "./interactive-event-only.js";
+import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
 
 import type { AdaptiveResponseProof } from "./adaptive-protocol.js";
 
@@ -41,11 +43,27 @@ export interface AdaptiveAttempt {
   malformedResponse?: AdaptiveResponseProof;
   recoveryContext?: string;
 }
+/** Controller-owned C06 successor to an originally sealed narrow/reorder
+ * plan. This records the separately reviewed correction; it cannot rewrite
+ * the old Pi proposal, its failed specialist or its original review. */
+export interface AdaptiveSupersession {
+  schema: "noveltea-adaptive-supersession/v1";
+  beforeVersion: number; afterVersion: number;
+  turnDigest: string; planVersion: number; sourceSha: string;
+  assignmentId: string; originalAmendmentDigest: string;
+  negativeReportDigest: string; omission: EventOnlyRef;
+  reviewedBlueprint: MilestoneBlueprintPin;
+  /** An original rejected planning response remains historical, not a
+   * pretext for retrying that model call on the corrected source. */
+  rejectedAttemptSignature?: string;
+  digest: string;
+}
 export interface AdaptiveState {
   schema: "noveltea-adaptive-plan/v1";
   jobId: string; threadId: string; baseSha: string; branch: string;
   turnDigest: string; planVersion: number; version: number;
   entries: AdaptiveAmendment[]; attempts: AdaptiveAttempt[];
+  supersessions?: AdaptiveSupersession[];
   digest: string;
 }
 const HASH = /^[0-9a-f]{64}$/, SHA = /^[0-9a-f]{40}$/;
@@ -55,7 +73,7 @@ export const emptyAdaptiveState = (job: JobStartResult, turnDigest: string,
   planVersion: number): AdaptiveState => ({
   schema: "noveltea-adaptive-plan/v1", jobId: job.jobId, threadId: job.threadId,
   baseSha: job.baseSha, branch: job.branch, turnDigest, planVersion,
-  version: 1, entries: [], attempts: [], digest: "",
+  version: 1, entries: [], attempts: [], supersessions: [], digest: "",
 });
 
 export async function saveAdaptiveState(job: JobStartResult, state: AdaptiveState) {
@@ -126,19 +144,52 @@ export async function readAdaptiveState(job: JobStartResult, turnDigest: string,
       saved !== pendingDigest(body) ||
       !Array.isArray(state.entries) || state.entries.length > 4 ||
       !Array.isArray(state.attempts) || state.attempts.length > 24 ||
-      state.version !== state.entries.length + 1)
+      state.supersessions !== undefined && (!Array.isArray(state.supersessions) ||
+        state.supersessions.length > 4) ||
+      state.version !== state.entries.length + (state.supersessions?.length ?? 0) + 1)
     throw Error("Adaptive plan identity, source, version or digest differs.");
-  for (const [index, entry] of state.entries.entries()) {
+  for (const entry of state.entries) {
     const { digest, ...receipt } = entry;
     if (entry.schema !== "noveltea-adaptive-assignments/v1" ||
         !HASH.test(digest) || digest !== pendingDigest(receipt) ||
-        entry.beforeVersion !== index + 1 || entry.afterVersion !== index + 2 ||
+        !Number.isSafeInteger(entry.beforeVersion) || entry.beforeVersion < 1 ||
+        entry.afterVersion !== entry.beforeVersion + 1 ||
         entry.turnDigest !== turnDigest || entry.planVersion !== planVersion ||
         !SHA.test(entry.sourceSha) || !HASH.test(entry.inventoryDigest) ||
         !Array.isArray(entry.actions) || !Array.isArray(entry.order) ||
         !Array.isArray(entry.carried) || !Array.isArray(entry.omissions))
       throw Error("Adaptive plan amendment receipt was altered or reordered.");
     dependencyGit(job, "merge-base", "--is-ancestor", entry.sourceSha, "HEAD");
+  }
+  const mutations = [...state.entries, ...(state.supersessions ?? [])]
+    .sort((a, b) => a.beforeVersion - b.beforeVersion);
+  if (mutations.some((item, i) => item.beforeVersion !== i + 1 ||
+      item.afterVersion !== i + 2))
+    throw Error("Adaptive amendment/supersession history is not consecutively versioned.");
+  const changed = new Set<string>();
+  const discharged = new Set<string>();
+  for (const item of state.supersessions ?? []) {
+    const { digest: sealed, ...body } = item;
+    if (item.schema !== "noveltea-adaptive-supersession/v1" ||
+        sealed !== pendingDigest(body) || !HASH.test(sealed) ||
+        item.turnDigest !== turnDigest || item.planVersion !== planVersion ||
+        !SHA.test(item.sourceSha) || !HASH.test(item.originalAmendmentDigest) ||
+        !HASH.test(item.negativeReportDigest) ||
+        !HASH.test(item.omission?.digest) || !item.omission?.nonce ||
+        !HASH.test(item.reviewedBlueprint?.digest) ||
+        item.reviewedBlueprint.milestoneId !== item.assignmentId.slice("interactive:".length) ||
+        !/^interactive:milestone\.[a-z][a-z0-9-]*$/.test(item.assignmentId) ||
+        item.rejectedAttemptSignature !== undefined && (!HASH.test(item.rejectedAttemptSignature) ||
+          discharged.has(item.rejectedAttemptSignature) ||
+          !state.attempts.some(attempt => attempt.signature === item.rejectedAttemptSignature &&
+            attempt.phase === "rejected" && attempt.sourceSha === item.sourceSha)) ||
+        changed.has(item.assignmentId) ||
+        !state.entries.some(entry => entry.digest === item.originalAmendmentDigest &&
+          entry.afterVersion <= item.beforeVersion && entry.order.includes(item.assignmentId)))
+      throw Error("Adaptive supersession lost its original signed assignment or Review source.");
+    dependencyGit(job, "merge-base", "--is-ancestor", item.sourceSha, "HEAD");
+    changed.add(item.assignmentId);
+    if (item.rejectedAttemptSignature) discharged.add(item.rejectedAttemptSignature);
   }
   const signatures = new Set<string>();
   for (const attempt of state.attempts) {
@@ -196,7 +247,8 @@ export function isProvablyUninvokedAdaptiveAttempt(attempt: AdaptiveAttempt | nu
 export function assertAdaptiveSettled(state: AdaptiveState) {
   if (state.attempts.some(a => a.phase === "planning"))
     throw Error("Interrupted adaptive orchestrator session: preserve its transcript and reconcile before another plan.");
-  if (state.attempts.some(a => a.phase === "rejected"))
+  if (state.attempts.some(a => a.phase === "rejected" &&
+      !(state.supersessions ?? []).some(s => s.rejectedAttemptSignature === a.signature)))
     throw Error("Rejected adaptive orchestrator proposal: preserve its evidence and reconcile before dispatching remaining work.");
 }
 export async function beginAdaptiveAttempt(job: JobStartResult, state: AdaptiveState,
@@ -288,6 +340,30 @@ export async function completeAdaptiveInvocation(job: JobStartResult, state: Ada
     invocation: { ...original,
       responseSha256: createHash("sha256").update(bytes).digest("hex") } };
   await saveAdaptiveState(job, state);
+}
+
+/** A versioned successor is admitted only by the C01 owner after rereading
+ * the independent omission, historical negative Pi report and approved
+ * Blueprint correction. This is a controller decision, not a Pi amendment. */
+export async function admitAdaptiveSupersession(job: JobStartResult, state: AdaptiveState,
+  proposal: Omit<AdaptiveSupersession, "digest" | "schema" | "beforeVersion" | "afterVersion">,
+): Promise<AdaptiveSupersession> {
+  if (state.attempts.some(a => a.phase === "planning") ||
+      (state.supersessions?.length ?? 0) >= 4 ||
+      !state.entries.some(entry => entry.digest === proposal.originalAmendmentDigest &&
+        entry.order.includes(proposal.assignmentId)) ||
+      (state.supersessions ?? []).some(s => s.assignmentId === proposal.assignmentId) ||
+      proposal.rejectedAttemptSignature !== undefined &&
+        !state.attempts.some(a => a.signature === proposal.rejectedAttemptSignature && a.phase === "rejected"))
+    throw Error("Adaptive supersession lacks a bounded original plan and settled correction authority.");
+  const body = { ...proposal, schema: "noveltea-adaptive-supersession/v1" as const,
+    beforeVersion: state.version, afterVersion: state.version + 1 };
+  const signed: AdaptiveSupersession = { ...body, digest: pendingDigest(body) };
+  state.supersessions ??= [];
+  state.supersessions.push(signed);
+  state.version++;
+  await saveAdaptiveState(job, state);
+  return signed;
 }
 
 export async function settleAdaptiveAttempt(job: JobStartResult, state: AdaptiveState,

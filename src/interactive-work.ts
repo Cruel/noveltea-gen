@@ -24,8 +24,8 @@ import type { Plan } from "./architecture.js";
 import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { decideEventOnlyOmission, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
-import { reviewedMilestoneHandoff, consumedCorrection, assertMilestoneInteractiveDisposition,
-  type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
+import { historicalMilestoneHandoff, reviewedMilestoneHandoff, consumedCorrection,
+  assertMilestoneInteractiveDisposition, type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 import { correctPendingBlueprint } from "./milestone-blueprint-correction.js";
 import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import type { EventAssignment } from "./event-specialist.js";
@@ -48,6 +48,9 @@ interface Receipt {
   planVersion: number; planDigest: string; eventHead: string; worker: "fixture" | "pi";
   provider: string; model: string; thinking?: "low" | "medium" | "high"; snapshot?: SkillSnapshot;
   correctedBlueprintPin?: MilestoneBlueprintPin;
+  /** Immutable historical negative Choice receipt, archived before a reviewed
+   * no-write correction replaces this active dependent disposition. */
+  supersededNegative?: { relative: string; digest: string };
   eventSource?: InteractiveAssignment["eventSource"]; units: [Unit, Unit];
 }
 interface SourceReceipt {
@@ -705,10 +708,23 @@ function choiceConflictReportDigest(receipt: Receipt, choice: Unit,
 }
 /** Reauthenticate a settled Choice contradiction at the original unchanged
  * HEAD. The negative report is evidence, never an authority to revise canon. */
-export async function inspectInteractiveConflict(job: JobStartResult, milestoneId: string) {
+export async function inspectInteractiveConflict(job: JobStartResult, milestoneId: string,
+  allowHistoricalDescendant = false) {
   if (!validMilestone.test(milestoneId)) throw Error("Invalid Interactive conflict Milestone");
   const relative = "interactive-items/" + milestoneId.slice(10) + ".json";
-  const receipt = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as Receipt;
+  let receipt = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as Receipt;
+  if (receipt.supersededNegative) {
+    const ref = receipt.supersededNegative;
+    const historical = "interactive-negative-history/" + milestoneId.slice(10) + ".json";
+    if (ref.relative !== historical || !/^[0-9a-f]{64}$/.test(ref.digest))
+      throw Error("Original Choice negative history reference is invalid.");
+    const prior = JSON.parse(await readFile(join(job.stateDir, historical), "utf8")) as Receipt;
+    if (prior.supersededNegative || digest(JSON.stringify(prior)) !== ref.digest ||
+        prior.jobId !== receipt.jobId || prior.eventHead !== receipt.eventHead ||
+        prior.milestoneId !== receipt.milestoneId || prior.planDigest !== receipt.planDigest)
+      throw Error("Archived original Choice contradiction was changed after supersession.");
+    receipt = prior;
+  }
   const choice = receipt.units?.[0];
   const puzzle = receipt.units?.[1];
   const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as {
@@ -723,7 +739,7 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       !["pi", "fixture"].includes(receipt.worker) || !receipt.snapshot?.id ||
       !choice || choice.phase !== "conflicted" || choice.domain !== "choice" ||
       choice.id !== "interactive-choice-" + milestoneId.slice(10) ||
-      !choice.beforeHead || choice.beforeHead !== head ||
+      !choice.beforeHead || choice.beforeHead !== head && !allowHistoricalDescendant ||
       !receipt.eventHead || !receipt.planDigest || !receipt.planVersion ||
       choice.paths?.length || choice.claimedPaths?.length || choice.commitSha ||
       !choice.conflicts?.length || !choice.conflicts.every(x => !!x.trim()) ||
@@ -769,6 +785,7 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       event.planVersion !== receipt.planVersion)
     throw Error("Original Choice source no longer matches its verified Event receipt");
   git(job, "merge-base", "--is-ancestor", receipt.eventHead, choice.beforeHead);
+  if (allowHistoricalDescendant) git(job, "merge-base", "--is-ancestor", choice.beforeHead, head);
   const reportHash = choiceConflictReportDigest(receipt, choice, sessionPath, sessionHash);
   if (choice.digest !== reportHash) throw Error("Original Choice negative report digest changed");
   return { relative, reportDigest: reportHash, expectedHead: head,
@@ -1125,6 +1142,53 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
       assertPlanContinuity(job, architecture, "interactive:" + input.milestone,
         receipt.planVersion, receipt.planDigest);
+      if (input.action === "review-omission" && receipt.units[0]?.phase === "conflicted") {
+        // C06: never overwrite the negative model report as if it had passed.
+        // Authenticate its original Pi session, ask a separate independent
+        // reviewer, and retain the original receipt in immutable history.
+        const negative = await inspectInteractiveConflict(job, input.milestone);
+        if (negative.worker !== "pi" || negative.reportDigest !== receipt.units[0].digest ||
+            negative.expectedHead !== await trustedHead(job) ||
+            receipt.units[1]?.phase !== "pending")
+          throw Error("Postconflict omission lacks settled original Choice evidence.");
+        await verifiedNarrativeSuccessor(job, event.commitSha);
+        const head = await trustedHead(job);
+        const baseline = reportOf(await validateStoryJob(job, input.validatorSource ??
+          input.skillsSource, { ...job, baseSha: head }), head);
+        const omission = await decideEventOnlyOmission(job, architecture.plan, baseline,
+          input.milestone, event.commitSha, event.validation.eventIds, event.snapshot.id,
+          event.obligations ?? [], { fixture: false, skillsSource: input.skillsSource,
+            provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+            blueprint: await historicalMilestoneHandoff(job, event) });
+        if (!omission) return { status: "omission-not-justified", headSha: head,
+          milestoneId: input.milestone };
+        await correctPendingBlueprint(job, architecture.plan, event, {
+          head, fixture: false, omission, protectionBase: baseline.protection.base,
+          objective: input.generationObjective, turnDigest: input.turnPlanDigest,
+          native: baseline,
+        });
+        milestoneBlueprint = await reviewedMilestoneHandoff(job, event);
+        assertMilestoneInteractiveDisposition(milestoneBlueprint, true);
+        const original = structuredClone(receipt);
+        const historical = "interactive-negative-history/" + input.milestone.slice(10) + ".json";
+        const historyPath = join(root, historical);
+        await mkdir(dirname(historyPath), { recursive: true });
+        if (existsSync(historyPath)) {
+          const stored = JSON.parse(await readFile(historyPath, "utf8")) as Receipt;
+          if (digest(JSON.stringify(stored)) !== digest(JSON.stringify(original)))
+            throw Error("Original Choice history changed across interrupted supersession.");
+        } else await writeFile(historyPath, JSON.stringify(original, null, 2) + "\n",
+          { flag: "wx", mode: 0o600 });
+        const unit = (domain: InteractiveDomain): Unit => ({
+          id: "interactive-" + domain + "-" + input.milestone.slice(10), domain,
+          phase: "not-applicable", beforeHead: head, paths: [], claimedPaths: [], eventOnly: omission,
+        });
+        receipt = { ...receipt, correctedBlueprintPin: consumedCorrection(milestoneBlueprint),
+          supersededNegative: { relative: historical, digest: digest(JSON.stringify(original)) },
+          units: [unit("choice"), unit("puzzle")] };
+        await persist(file, receipt);
+        return output(job, receipt, input.unit);
+      }
       if (input.action === "review-omission" &&
           !(receipt.units[0]?.phase === "not-applicable" &&
             receipt.units[1]?.phase === "not-applicable" && receipt.units[0]?.eventOnly))
@@ -1153,6 +1217,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           event.obligations ?? [], {
             fixture: !!input.fixture, skillsSource: input.skillsSource,
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+            blueprint: await historicalMilestoneHandoff(job, event),
           });
         await correctPendingBlueprint(job, architecture.plan, event, {
           head, fixture: !!input.fixture, omission, protectionBase: baseline.protection.base,
@@ -1554,7 +1619,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
   };
   if (input.action === "review-omission")
     return withStoryJobLockOrReuse(job, "interactive-" + input.milestone.slice(10),
-      ["generation-boundary", "generation-verification", "generation-idea-verification"],
+      ["generation-boundary", "generation-verification", "generation-idea-verification",
+        "generation-c06-interactive-supersession"],
       execute);
   return withStoryJobLock(job, "interactive-" + input.milestone.slice(10), execute);
 }

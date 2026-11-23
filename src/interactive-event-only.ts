@@ -8,9 +8,7 @@ import { dirname, join, sep } from "node:path";
 import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
-import { observedNondecisionMilestone } from "./event-specialist.js";
-import { currentMilestoneChoiceBinding } from "./event-work.js";
-import { explicitlyRequiresPuzzle } from "./puzzle-obligation.js";
+import type { ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 import { declaredCanonicalReferences } from "./focused-scope.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { createSkillSnapshot, openSkillSnapshot } from "./snapshot.js";
@@ -42,6 +40,11 @@ export interface EventOnlyPayload {
 }
 interface Seal { phase: "sealed"; nonce: string; digest: string; payload: EventOnlyPayload;
   inherited?: { sourceJobId: string; sourceSeal: EventOnlyRef; sourcePayloadDigest: string } }
+/** An independent negative Review is an authenticated instruction to retain
+ * the original Choice/Puzzle work, never a positive no-write authorization. */
+interface DeclinedSeal { phase: "declined"; nonce: string; digest: string;
+  payload: Omit<EventOnlyPayload, "decision" | "evidence"> & {
+    decision: "retain-interactive"; findings: unknown[] } }
 const pathFor = (job: JobStartResult, milestone: string) => {
   if (!MILESTONE.test(milestone)) throw Error("Invalid Event-only Milestone ID.");
   return join(job.stateDir, "interactive-event-only", milestone.slice(10) + ".json");
@@ -57,8 +60,10 @@ function scopedRecords(report: NativeReport, milestone: string, eventIds: string
   const selected = records.find(r => r.metadata.type === "milestone" && r.metadata.id === milestone);
   const routes = report.coverage.milestoneRoutes.find(r => r.id === milestone)?.routes ?? [];
   const fulfillment = selected?.metadata.fulfillment?.any_of as string[][] | undefined;
-  if (!selected || !observedNondecisionMilestone(String(selected.metadata.change ?? "")) ||
-      selected.metadata.completeness === "partial" || !fulfillment?.length ||
+  // Native reachable routes and actual Event sources determine whether an
+  // independently reviewed no-write outcome is possible. The narrative
+  // change field is evidence for the reviewer, not a keyword authorization.
+  if (!selected || selected.metadata.completeness === "partial" || !fulfillment?.length ||
       routes.length !== fulfillment.length || !routes.some(r => r.status === "reachable") ||
       routes.some(r => r.status === "impossible" || r.status === "incomplete" || r.status === "unverified") ||
       !eventIds.length || !eventIds.some(id => fulfillment.some(route => route.includes(id))) ||
@@ -68,36 +73,33 @@ function scopedRecords(report: NativeReport, milestone: string, eventIds: string
     return null;
   return { records, selected, routes };
 }
+/** An observed, native-reachable Event cluster can be examined for a
+ * no-write disposition without interpreting English Milestone prose. Native
+ * Choice/Puzzle sources, unlike model-reported keyword hints, are binding. */
+export function eventOnlySourceCandidate(report: NativeReport, milestone: string,
+  eventIds: string[]): boolean {
+  const selected = scopedRecords(report, milestone, eventIds);
+  return !!selected && !selected.records.some(r =>
+    r.metadata.type === "choice-point" &&
+      (r.metadata.events as string[] ?? []).some(id => eventIds.includes(id)) ||
+    r.metadata.type === "puzzle" &&
+      (r.metadata.solutions as string[] ?? []).some(id => eventIds.includes(id)));
+}
 /** This is a conservative eligibility preflight, not a semantic verdict.
  * Only an independent reviewer can authorize the omission on a live Turn. */
 export async function eventOnlyCandidate(job: JobStartResult, plan: Plan, report: NativeReport,
-  milestone: string, eventIds: string[], obligations: string[]) {
-  const selected = scopedRecords(report, milestone, eventIds);
-  if (!selected || currentMilestoneChoiceBinding(obligations, milestone,
-      String(selected.selected.metadata.change ?? ""))) return false;
+  milestone: string, eventIds: string[]) {
+  if (!eventOnlySourceCandidate(report, milestone, eventIds)) return false;
   const turn = await readReviewTurnEvidence(job);
   if (!turn?.objective || !turn.digest) return false;
   if (plan.contract.scope.targets.some(id => id.startsWith("choice-point.") || id.startsWith("puzzle.")) &&
       plan.contract.scope.kind === "partial") return false;
   if (turn.objective.requestedTargets.some(id => id.startsWith("choice-point.") ||
       id.startsWith("puzzle.")) && turn.contract.scope.kind === "partial") return false;
-  if (selected.records.some(r =>
-      r.metadata.type === "choice-point" &&
-        (r.metadata.events as string[] ?? []).some(id => eventIds.includes(id)) ||
-      r.metadata.type === "puzzle" &&
-        (r.metadata.solutions as string[] ?? []).some(id => eventIds.includes(id))))
-    return false;
-  // A whole-Story objective (e.g. solve the mystery later) is not a
-  // per-Milestone demand for a Puzzle at *every* observational scene.
-  // Preserve that global obligation for the independently reviewed final
-  // Turn. Do not omit explicit local, every-Milestone, or bound mechanics.
-  const global = [turn.originalRequest, turn.goal,
-    ...turn.objective.obligations, ...turn.contract.constraints];
-  const everyMilestone = /\b(?:every|each|per)\s+(?:single\s+)?(?:event|milestone|scene)\b.{0,75}\b(?:choice|decision|puzzle|riddle)\b|\b(?:choice|decision|puzzle|riddle)\b.{0,75}\b(?:every|each|per)\s+(?:single\s+)?(?:event|milestone|scene)\b/i;
-  if (global.some(text => everyMilestone.test(text))) return false;
-  if (obligations.some(text => explicitlyRequiresPuzzle(text, "event-handoff"))) return false;
-  if (plan.contract.scope.kind === "partial" &&
-      plan.contract.constraints.some(text => explicitlyRequiresPuzzle(text))) return false;
+  // Local and Story-wide semantic promises remain with the independent
+  // reviewer and final Turn review, respectively. Text-pattern preflights
+  // cannot recognize every legitimate Event-only outcome and cannot prove
+  // that a required Choice/Puzzle is absent.
   return true;
 }
 async function sourceHashes(job: JobStartResult, report: NativeReport,
@@ -256,14 +258,34 @@ export async function readHistoricalEventOnlyOmission(job: JobStartResult, miles
 export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   report: NativeReport, milestone: string, eventHead: string, eventIds: string[],
   eventSnapshotId: string, obligations: string[], input: {
-    fixture: boolean; skillsSource?: string; provider: string; model: string }): Promise<EventOnlyRef | null> {
-  if (!await eventOnlyCandidate(job, plan, report, milestone, eventIds, obligations)) return null;
+    fixture: boolean; skillsSource?: string; provider: string; model: string;
+    blueprint?: ReviewedMilestoneHandoff }): Promise<EventOnlyRef | null> {
+  if (!await eventOnlyCandidate(job, plan, report, milestone, eventIds)) return null;
   const turn = await readReviewTurnEvidence(job);
   if (!turn?.digest || !turn.objective) return null;
   const path = pathFor(job, milestone);
   const reviewHead = git(job, "rev-parse", "HEAD");
   if (existsSync(path)) {
-    const saved = JSON.parse(await readFile(path, "utf8")) as Seal;
+    const saved = JSON.parse(await readFile(path, "utf8")) as Seal | DeclinedSeal;
+    if (saved.phase === "declined") {
+      const p = saved.payload;
+      if (saved.digest !== sha256(p) || !HASH.test(saved.digest) ||
+          !/^[0-9a-f-]{36}$/.test(saved.nonce) ||
+          p.decision !== "retain-interactive" || p.jobId !== job.jobId ||
+          p.threadId !== job.threadId || p.branch !== job.branch || p.baseSha !== job.baseSha ||
+          p.milestoneId !== milestone || p.eventHead !== eventHead || p.reviewHead !== reviewHead ||
+          p.planDigest !== sha256(plan) || p.planVersion !== plan.version ||
+          p.validatorVersion !== job.validatorVersion || p.eventSnapshotId !== eventSnapshotId ||
+          p.turnDigest !== turn.digest || p.reviewMode !== "pi" || input.fixture ||
+          !p.reviewerSnapshotId || !HASH.test(p.reviewerSnapshotId) ||
+          !(await openSkillSnapshot(p.reviewerSnapshotId)) ||
+          !p.reviewerSession || !p.reviewerSessionSha256 ||
+          await sessionDigest(job, p.reviewerSession) !== p.reviewerSessionSha256 ||
+          JSON.stringify(p.eventIds) !== JSON.stringify(eventIds) ||
+          JSON.stringify(p.sourceHashes) !== JSON.stringify(await sourceHashes(job, report, milestone, eventIds)))
+        throw Error("Declined Event-only review has lost its original independently authenticated source.");
+      return null; // No new review or writer substitution on a restart.
+    }
     if (saved.phase !== "sealed")
       throw Error("Started Event-only omission review exists; preserve its interrupted transcript, never replay.");
     const ref = { nonce: saved.nonce, digest: saved.digest };
@@ -284,6 +306,7 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   await writeFile(path, JSON.stringify(file) + "\n", { flag: "wx", mode: 0o600 });
   let snapshotId: string | null = null, session: string | null = null;
   let evidence: string[] = [];
+  let rejectedFindings: unknown[] | null = null;
   if (!input.fixture) {
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource,
@@ -302,24 +325,34 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
       milestoneRoutes: milestoneRoutes.map((r, i) => ({ milestone, alternative: i,
         status: r.status, witness: r.witness ?? [] })),
       puzzleRoutes: [], outstanding: [], uncertainties: [],
-      turnGoal: "INDEPENDENT EVENT-ONLY OMISSION REVIEW. The existing source-grounded Event " +
-        "already completes this observational Milestone. Independently inspect the author-approved " +
+      turnGoal: "INDEPENDENT EVENT-ONLY OMISSION REVIEW. The validated Event cluster " +
+        "has reachable native fulfillment routes. Independently determine whether the actual sources " +
+        "meet the author-approved local outcome; inspect the author-approved " +
         "goal and actual Milestone/Event sources. PASS only when no formal Choice and no formal Puzzle " +
         "is justified for THIS milestone, the Event fulfillment and narrative causality are real, " +
         "and the original author did not promise a required local decision, Puzzle, or consequence. " +
         "A broader Story-wide interaction promise remains mandatory at final Turn review. " +
         "Do not demand an invented Choice, write anything, or assert that absent branching exists. " +
         "If any essential decision or Puzzle is needed, BLOCK with the exact source requirement. " +
-        "Original author goal: " + turn.goal,
+        "The reviewed Milestone Blueprint is an independently approved downstream obligation, " +
+        "not a generic per-Milestone gameplay quota. Do not overrule a mandatory local " +
+        "Interactive owner without independently identifying an actual source contradiction; " +
+        "its removal requires a separate post-approval correction and independent Review. " +
+        "Approved Milestone Blueprint: " + JSON.stringify(input.blueprint ? {
+          pin: input.blueprint.pin, design: input.blueprint.design,
+          originalEventHead: input.blueprint.eventHead } : null) + ". " +
+        "Sealed Event downstream handoff: " + JSON.stringify(obligations) + ". " +
+        "Original author contract: " + JSON.stringify(turn.contract) + ". " +
+        "Original author requirements: " + JSON.stringify(turn.objective) + ". " +
+        "Original author request: " + turn.originalRequest + ". Original author goal: " + turn.goal,
       omission: { assignmentId: "interactive:" + milestone, headSha: reviewHead },
     };
     const reviewed = await reviewNarrative(job, snapshot, assignment, input.provider, input.model,
       undefined, async file => { session = file; });
-    if (reviewed.verdict !== "pass")
-      throw Error("Independent reviewer rejected Event-only omission: " + JSON.stringify(reviewed.findings));
-    evidence = reviewed.evidence;
-    for (const record of records.filter(r =>
-      r.metadata.id === milestone || eventIds.includes(r.metadata.id))) {
+    if (reviewed.verdict !== "pass") rejectedFindings = reviewed.findings;
+    else evidence = reviewed.evidence;
+    for (const record of (rejectedFindings ? [] : records.filter(r =>
+      r.metadata.id === milestone || eventIds.includes(r.metadata.id)))) {
       const lines = (await readFile(join(job.worktreeStoryRoot, record.path), "utf8"))
         .split(/\r?\n/).length;
       const witness = evidence.some(item => {
@@ -336,6 +369,23 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   const current = await sourceHashes(job, report, milestone, eventIds);
   if (JSON.stringify(current) !== JSON.stringify(hashes))
     throw Error("Event-only canonical sources changed during independent review.");
+  if (rejectedFindings) {
+    if (!session || !snapshotId || !HASH.test(snapshotId) ||
+        !Array.isArray(rejectedFindings) || JSON.stringify(rejectedFindings).length > 16_000)
+      throw Error("Independent negative Event-only review lacks a bounded settled source.");
+    const payload: DeclinedSeal["payload"] = {
+      version: 1, decision: "retain-interactive", jobId: job.jobId,
+      threadId: job.threadId, branch: job.branch, baseSha: job.baseSha,
+      eventHead, reviewHead, milestoneId: milestone, eventIds, planVersion: plan.version,
+      planDigest, turnDigest: turn.digest, validatorVersion: job.validatorVersion,
+      eventSnapshotId, reviewerSnapshotId: snapshotId, reviewMode: "pi",
+      reviewerSession: session, reviewerSessionSha256: await sessionDigest(job, session),
+      sourceHashes: hashes, findings: rejectedFindings,
+    };
+    await writeFile(path, JSON.stringify({ phase: "declined", nonce: randomUUID(),
+      digest: sha256(payload), payload }, null, 2) + "\n", { mode: 0o600 });
+    return null;
+  }
   const payload: EventOnlyPayload = { version: 1, decision: "event-only",
     jobId: job.jobId, threadId: job.threadId, branch: job.branch, baseSha: job.baseSha,
     eventHead, reviewHead, milestoneId: milestone, eventIds, planVersion: plan.version,

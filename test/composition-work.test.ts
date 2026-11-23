@@ -745,7 +745,8 @@ test("production graph lease owners safely execute the real Event-only omission 
   const { before, disposition } = await x.prepareEventOnly("fixture", true, "generation-verification");
   assert.equal(disposition.completionEvidence.eventOnlyDisposition, "sealed-no-write");
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), before);
-  for (const owner of ["generation-idea-verification", "generation-boundary"]) {
+  for (const owner of ["generation-idea-verification", "generation-boundary",
+    "generation-c06-interactive-supersession"]) {
     const result = await x.reviewUnderLease(owner);
     assert.equal(result.status, "interactive-slice-committed");
     assert.equal(result.headSha, before);

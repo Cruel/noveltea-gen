@@ -440,26 +440,6 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       (d.action !== "diagnostic" &&
         !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work"].includes(d.adapter)) &&
         !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
-  if (d.action === "plan-amendment" && d.adapter === "dependency-work") {
-    await assertSource(job, s, c);
-    if (!await authenticateOperationOwnerProof(job, s, c, d))
-      throw Error("Owner amendment lost its original negative specialist Pi report");
-    // C04 converts the negative report into an authenticated plan-owner
-    // correction request. C06 owns supersession of the approved Blueprint /
-    // adaptive assignment and its separate author/Review signatures. A C04
-    // report must NEVER dispatch another writer or claim plan approval.
-    return { recoveryLifecycle: { ...lifecycle, assessorPending: false },
-      status: "blocked", reason: "Authenticated specialist contradiction is assigned " +
-        "to controller-owned Architecture/Work-plan correction. No source mutation " +
-        "or replacement writer is permitted until the original approved scope " +
-        "and dependent Review are reverified.",
-      escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
-        sources: [{ source: d.scopeRef.ref, message: "Source-bound original specialist no-write",
-          repair: "controller-authorized Architecture/Work-plan amendment" }],
-        action: "Route this exact source to the Orchestrator/Work-plan controller for " +
-          "a versioned in-objective assignment correction. Ask the author only if the " +
-          "independent scope/protected-decision checks require new authority." } };
-  }
   if (d.action === "known-correction") {
     await assertSource(job, s, c);
     if (!await authenticateOperationReviewProof(job, s, c, d))
@@ -479,6 +459,71 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
     if ("error" in author) throw Error("Author receipts could not be authenticated");
     if (author.status !== "ready") return stop({ ...base(c), action: "pause", reason: author.status === "cancelled" ? "cancelled" :
       author.status === "paused" ? "author-pause" : "author-choice" }, "Author boundary precedes corrective work.", author.status === "cancelled" ? "cancelled" : "paused");
+    if (d.action === "plan-amendment" && d.adapter === "dependency-work") {
+      await assertSource(job, s, c);
+      if (!await authenticateOperationOwnerProof(job, s, c, d))
+        throw Error("Owner correction lost the original negative specialist Pi report.");
+      const original = s.recoverySources.find(x => x.caseId === c.id &&
+        x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+      const source = original?.evidence.interactiveNoWrite;
+      if (source?.domain === "choice" && c.origin.assignmentId === "interactive:" + source.milestoneId &&
+          s.inventory && s.inventory.headSha === c.origin.sourceHeadSha &&
+          s.inventory.items.some(i => i.id === c.origin.assignmentId && i.status === "blocked") &&
+          s.failures[c.origin.assignmentId]) {
+        const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as {
+          jobId?: string; phase?: string; plan?: import("./architecture.js").Plan };
+        if (architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
+            architecture.plan?.version !== s.planVersion)
+          throw Error("The original approved Architecture plan is missing from C06.");
+        const { resolveAdaptiveNoWriteSupersession } = await import("./adaptive-work.js");
+        const result = await withStoryJobLock(job, "generation-c06-interactive-supersession", () =>
+          resolveAdaptiveNoWriteSupersession({ job, request: s.request, plan: architecture.plan!,
+            inventory: s.inventory!, assignmentId: c.origin.assignmentId!,
+            pinnedVersion: s.adaptiveVersion }));
+        if (result.outcome === "corrected" && result.proof && result.sourceSha && result.version) {
+          const proof = result.proof;
+          const priorFailures = { ...s.failures };
+          delete priorFailures[c.origin.assignmentId];
+          const inventory = { ...s.inventory, items: s.inventory.items.map(item =>
+            item.id === c.origin.assignmentId ? { ...item,
+              status: "verified" as const, verifiedSha: result.sourceSha,
+              omission: { reason: "Independently reviewed C06 source-bound no-write supersession",
+                evidence: proof.evidence, reviewerSession: proof.reviewerSession },
+              blockingReason: undefined } : item) };
+          const completedStages = [...s.completedStages.filter(e =>
+            !(e.stage === "interactive" && e.milestone === source.milestoneId)), {
+            stage: "interactive" as const, milestone: source.milestoneId,
+            headSha: result.sourceSha, status: "interactive-slice-committed",
+            planVersion: s.planVersion!,
+          }];
+          const settled = { ...lifecycle, assessorPending: false };
+          return { recoveryLifecycle: finishRecovery(recordRecoveryOutcome(settled,
+            { status: "verified", caseId: c.id, sourceHeadSha: result.sourceSha,
+              assurance: { store: "specialist-receipt",
+                ref: "interactive-event-only/" + source.milestoneId.slice(10) + ".json",
+                digest: proof.eventOnly?.digest } }, true)),
+            inventory, failures: priorFailures, completedStages, adaptiveVersion: result.version,
+            active: null, result: null, escalation: null, status: "running", reason: null };
+        }
+        if (result.outcome === "declined") return {
+          recoveryLifecycle: { ...lifecycle, assessorPending: false }, status: "blocked",
+          reason: "Independent omission Review retained this Milestone's required Choice/Puzzle. " +
+            "The original no-write specialist and author commitments are preserved; " +
+            "a separate source-backed owner correction is required.",
+          escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
+            sources: [{ source: d.scopeRef.ref, message: "Independent Event-only omission refused",
+              repair: "correct causal prerequisites without waiving gameplay" }],
+            action: "Correct the approved prerequisite or obtain genuinely new author scope; " +
+              "never replay the negative Choice writer." } };
+      }
+      return { recoveryLifecycle: { ...lifecycle, assessorPending: false },
+        status: "blocked", reason: "Authenticated no-write requires an independently " +
+          "reviewed Architecture or Work-plan amendment; no new writer scope was granted.",
+        escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
+          sources: [{ source: d.scopeRef.ref, message: "Original source-bound no-write",
+            repair: "controller-authorized Architecture/Work-plan amendment" }],
+          action: "Review original prerequisites and independently approve a bounded owner correction." } };
+    }
     if (d.action === "plan-amendment") {
       const pending = s.crossDomainCloseout!;
       if (!matchesOriginalCloseout(s, c, pending) ||

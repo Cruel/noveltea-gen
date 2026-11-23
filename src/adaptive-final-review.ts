@@ -14,6 +14,8 @@ interface FinalWork {
   outcome?: string;
   dependsOn?: string[];
   omission?: { sourceSha: string; path: string; evidence: string; reviewerSnapshot: string };
+  supersession?: { originalAmendment: string; negativeReport: string;
+    omissionReview: string; reviewedBlueprint: string; sourceSha: string };
 }
 interface FinalObjective { id: string; text: string }
 
@@ -23,12 +25,43 @@ export function projectAdaptiveFinal(state: AdaptiveState): {
   plannedWork: FinalWork[];
   superseded: string[];
 } {
-  if (state.version !== state.entries.length + 1)
+  if (state.version !== state.entries.length + (state.supersessions?.length ?? 0) + 1)
     throw Error("Final adaptive review lost the authorized plan version.");
   const work = new Map<string, FinalWork>();
   const superseded = new Set<string>();
   const objectives = new Map<string, FinalObjective>();
-  for (const entry of state.entries) {
+  const history = [...state.entries.map(entry => ({ kind: "proposal" as const, entry })),
+    ...(state.supersessions ?? []).map(entry => ({ kind: "supersession" as const, entry }))]
+    .sort((a, b) => a.entry.beforeVersion - b.entry.beforeVersion);
+  for (const item of history) {
+    if (item.kind === "supersession") {
+      const successor = item.entry;
+      const original = state.entries.find(entry => entry.digest === successor.originalAmendmentDigest);
+      if (!original || !original.order.includes(successor.assignmentId) ||
+          work.get(successor.assignmentId)?.status === "reviewed-omission")
+        throw Error("Final adaptive supersession lost its unique reviewed original assignment.");
+      for (const entry of state.entries) if (entry.afterVersion <= successor.beforeVersion)
+        for (const [index, action] of entry.actions.entries())
+          if (action.kind === "narrow" && action.item === successor.assignmentId)
+            objectives.delete("adaptive:" + entry.afterVersion + ":" + index);
+      const milestone = successor.assignmentId.slice("interactive:".length);
+      work.set(successor.assignmentId, { id: successor.assignmentId,
+        kind: "reviewed-omission", targets: [milestone], status: "reviewed-omission",
+        supersession: { originalAmendment: successor.originalAmendmentDigest,
+          negativeReport: successor.negativeReportDigest,
+          omissionReview: successor.omission.digest,
+          reviewedBlueprint: successor.reviewedBlueprint.digest,
+          sourceSha: successor.sourceSha } });
+      objectives.set("adaptive:" + successor.afterVersion + ":supersession", {
+        id: "adaptive:" + successor.afterVersion + ":supersession",
+        text: "Recheck the independently reviewed Event-only no-write outcome for " +
+          successor.assignmentId + " against original author goals, actual Milestone/Event sources, " +
+          "the prior negative Choice report and the superseding approved Blueprint. " +
+          "Do not infer new gameplay, replay the failed specialist or treat this as a Git commit. " +
+          "All remaining Story-wide Choice/Puzzle promises and causal consequences remain required." });
+      continue;
+    }
+    const entry = item.entry;
     for (const [index, action] of entry.actions.entries()) {
       const objectiveId = "adaptive:" + entry.afterVersion + ":" + index;
       if (action.kind === "add") {
@@ -88,7 +121,7 @@ export function projectAdaptiveFinal(state: AdaptiveState): {
     }
   }
   return { source: { version: state.version, digest: state.digest,
-      amendments: state.entries.map(entry => entry.digest) },
+      amendments: history.map(item => item.entry.digest) },
     objectives: [...objectives.values()], plannedWork: [...work.values()],
     superseded: [...superseded] };
 }
