@@ -2514,9 +2514,17 @@ export async function runStoryGeneration(options: GenerationOptions) {
           preflightStopped = true;
         }
       }
-      if (options.action === "resume" && !cancelled && !preflightStopped &&
+      const selectedCloseout = state.recoveryLifecycle.active &&
+        state.recoveryLifecycle.assessorPending &&
+        state.recoveryLifecycle.decision?.action === "plan-amendment" &&
+        state.recoveryLifecycle.decision.adapter === "cross-domain-closeout";
+      if (options.action === "resume" && !cancelled && !preflightStopped && !selectedCloseout &&
           (state.operationRecovery?.phase !== "fenced" ||
            state.operationRecovery.operation === "specialist-dispatch")) {
+        // The selected original closeout owns an unpublished Git successor
+        // until its independent review is settled. Generic checkpoint
+        // reconciliation must not inspect that pending commit as unrelated
+        // work or dispatch another specialist before the original adapter.
         // Reconcile independently committed work items without ever replaying
         // their external Pi writer. An unsuccessful pre-graph reconciliation
         // must be checkpointed as an assessment before the graph can dispatch.

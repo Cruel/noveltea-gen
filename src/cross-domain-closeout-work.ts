@@ -163,8 +163,10 @@ async function assertOnlyOwnedEdit(job: JobStartResult, proposal: CloseoutPropos
     await readFile(target, "utf8"));
 }
 async function validateCloseoutDraft(job: JobStartResult, request: CloseoutRunRequest,
-  proposal: CloseoutProposal) {
-  await assertOnlyOwnedEdit(job, proposal);
+  proposal: CloseoutProposal, committed = false) {
+  // A recovered original Git commit has no dirty draft. Its exact path and
+  // allowed fields were authenticated by inspectPublishedCloseoutCommit.
+  if (!committed) await assertOnlyOwnedEdit(job, proposal);
   const outcome = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
     { ...job, baseSha: proposal.sourceSha });
   const report = outcome.report as { diagnostics?: Array<{ path: string; code: string; message: string }>;
@@ -185,6 +187,90 @@ async function validateCloseoutDraft(job: JobStartResult, request: CloseoutRunRe
     throw Error("Milestone closeout is not canonically valid, complete and reachable.");
   return { report, outcome };
 }
+/** Recover the exact crash window after Git committed the already-authored
+ * Milestone but before the closeout receipt recorded its commit SHA.
+ *
+ * This is read-only and deliberately cannot discover/authorize a successor
+ * from a plausible trailer alone. It requires the previously persisted
+ * authored bytes, original writer session digest and single permitted field
+ * change. Review/repair-ledger settlement still happens in the normal
+ * `committed` branch and is never inferred here.
+ */
+export async function inspectPublishedCloseoutCommit(job: JobStartResult,
+  state: Pick<Receipt, "phase" | "proposal" | "workItemId" | "jobId" |
+    "authoredDigest" | "writerSessionDigest" | "sessionFile">): Promise<string> {
+  const proposal = state.proposal;
+  if (state.phase !== "authored" || !validCloseoutProposal(proposal) ||
+      state.jobId !== job.jobId || !state.authoredDigest ||
+      !state.writerSessionDigest || !state.sessionFile ||
+      state.writerSessionDigest !== await checkedSessionDigest(job,
+        state.sessionFile, "prerequisite-sessions"))
+    throw Error("Unpublished closeout lacks its original settled writer receipt.");
+  const head = git(job, "rev-parse", "HEAD");
+  const target = repoPath(job, proposal.allowedPaths[0]!);
+  if (gitRaw(job, "status", "--porcelain=v1", "--untracked-files=all") ||
+      git(job, "rev-parse", head + "^") !== proposal.sourceSha ||
+      git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", head) !== target)
+    throw Error("Published closeout differs from its exact original parent or bounded file inventory.");
+  const trailers = git(job, "log", "-1", "--format=%B").split("\n");
+  if (![ "NovelTea-Job: " + job.jobId,
+        "NovelTea-Work-Item: " + state.workItemId,
+        "NovelTea-Plan-Version: " + proposal.planVersion,
+        "NovelTea-Prerequisite: " + proposal.digest ].every(t => trailers.includes(t)) ||
+      state.authoredDigest !== hash(gitRaw(job, "show", head + ":" + target)))
+    throw Error("Published closeout lacks its original signed source or authored bytes.");
+  assertMilestoneFulfillmentOnly(gitRaw(job, "show", proposal.sourceSha + ":" + target),
+    gitRaw(job, "show", head + ":" + target));
+  return head;
+}
+
+/** Authenticate an unpublished original Event-owned commit for its SELECTED
+ * generation recovery case. This only permits the existing adapter to resume
+ * its independent review; it does not promote the commit to trustedHead.
+ * Only the first original closeout is eligible here: subsequent negative
+ * review retries have distinct source/ledger lineage handled separately. */
+export async function inspectInterruptedCloseoutCommit(job: JobStartResult,
+  expected: { milestoneId: string; planVersion: number; sourceSha: string;
+    proposalDigest: string; repairId: string; originalInventoryDigest: string },
+): Promise<string> {
+  const state = await load(fileOf(job, expected.milestoneId));
+  if (!state || !["authored", "committed"].includes(state.phase) ||
+      state.version !== 1 || state.jobId !== job.jobId ||
+      state.threadId !== job.threadId || state.baseSha !== job.baseSha ||
+      state.worker !== "pi" || state.history?.length ||
+      state.workItemId !== "prerequisite-" + expected.milestoneId.slice(10) ||
+      state.proposal.milestoneId !== expected.milestoneId ||
+      state.proposal.planVersion !== expected.planVersion ||
+      state.proposal.sourceSha !== expected.sourceSha ||
+      state.proposal.digest !== expected.proposalDigest ||
+      state.repairId !== expected.repairId ||
+      state.originalInventoryDigest !== expected.originalInventoryDigest)
+    throw Error("Interrupted closeout is not the selected original recovery operation.");
+  const verified = JSON.parse(await readFile(join(job.stateDir, "revisions", "verified-head.json"), "utf8")) as {
+    version?: number; jobId?: string; headSha?: string };
+  if (verified.version !== 1 || verified.jobId !== job.jobId ||
+      verified.headSha !== expected.sourceSha)
+    throw Error("Unpublished closeout lost its prior independently verified source.");
+  let head: string;
+  if (state.phase === "authored") {
+    head = await inspectPublishedCloseoutCommit(job, state);
+  } else {
+    if (!state.commitSha || !state.writerSessionDigest ||
+        state.writerSessionDigest !== await checkedSessionDigest(job,
+          state.sessionFile, "prerequisite-sessions") ||
+        state.validation?.status !== "passed" ||
+        state.validation.sourceSha !== expected.sourceSha ||
+        state.validation.validatorVersion !== job.validatorVersion ||
+        gitRaw(job, "status", "--porcelain=v1", "--untracked-files=all"))
+      throw Error("Interrupted committed closeout lost its native validation or writer proof.");
+    verifyCommitted(job, state);
+    head = state.commitSha;
+  }
+  if (head === expected.sourceSha || git(job, "rev-parse", "HEAD") !== head)
+    throw Error("Interrupted closeout did not publish its exact original Git successor.");
+  return head;
+}
+
 function verifyCommitted(job: JobStartResult, state: Receipt) {
   if (!state.commitSha || !sha.test(state.commitSha) ||
       git(job, "rev-parse", state.commitSha + "^") !== state.proposal.sourceSha ||
@@ -484,22 +570,29 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
       }
     }
     if (state.phase === "authored") {
-      if (git(job, "rev-parse", "HEAD") !== proposal.sourceSha ||
-          !(state.history?.length) && await trustedHead(job) !== proposal.sourceSha)
-        throw Error("Authored closeout changed its Git source before commit.");
-      await validateCloseoutDraft(job, request, proposal);
-      if (state.authoredDigest !== hash(await readFile(join(job.worktreeStoryRoot,
-        proposal.allowedPaths[0]!), "utf8")))
-        throw Error("Milestone closeout draft changed after specialist submission.");
-      git(job, "add", "--", repoPath(job, proposal.allowedPaths[0]!));
-      git(job, "-c", "user.name=NovelTea Generator",
-        "-c", "user.email=noveltea-gen@users.noreply.github.com",
-        "commit", "-m", "Close out " + proposal.milestoneId + " [" + job.jobId + "]\n\n" +
-          "NovelTea-Job: " + job.jobId + "\n" +
-          "NovelTea-Work-Item: " + state.workItemId + "\n" +
-          "NovelTea-Plan-Version: " + proposal.planVersion + "\n" +
-          "NovelTea-Prerequisite: " + proposal.digest);
-      state.commitSha = git(job, "rev-parse", "HEAD");
+      // If the authored commit already exists, reauthenticate it and resume
+      // the original independent reviewer. Never invoke or commit the writer
+      // twice merely because the parent receipt wasn't published yet.
+      if (git(job, "rev-parse", "HEAD") !== proposal.sourceSha) {
+        state.commitSha = await inspectPublishedCloseoutCommit(job, state);
+        await validateCloseoutDraft(job, request, proposal, true);
+      } else {
+        if (!(state.history?.length) && await trustedHead(job) !== proposal.sourceSha)
+          throw Error("Authored closeout changed its verified source before commit.");
+        await validateCloseoutDraft(job, request, proposal);
+        if (state.authoredDigest !== hash(await readFile(join(job.worktreeStoryRoot,
+          proposal.allowedPaths[0]!), "utf8")))
+          throw Error("Milestone closeout draft changed after specialist submission.");
+        git(job, "add", "--", repoPath(job, proposal.allowedPaths[0]!));
+        git(job, "-c", "user.name=NovelTea Generator",
+          "-c", "user.email=noveltea-gen@users.noreply.github.com",
+          "commit", "-m", "Close out " + proposal.milestoneId + " [" + job.jobId + "]\n\n" +
+            "NovelTea-Job: " + job.jobId + "\n" +
+            "NovelTea-Work-Item: " + state.workItemId + "\n" +
+            "NovelTea-Plan-Version: " + proposal.planVersion + "\n" +
+            "NovelTea-Prerequisite: " + proposal.digest);
+        state.commitSha = git(job, "rev-parse", "HEAD");
+      }
       state.validation = { status: "passed", sourceSha: proposal.sourceSha,
         validatorVersion: job.validatorVersion };
       state.phase = "committed";

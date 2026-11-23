@@ -30,6 +30,8 @@ import type { GenerationGraphState } from "./generation.js";
 import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy } from "./generation-operation-strategy.js";
 import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
+import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
+import { originalInventorySnapshotDigest } from "./selective-revalidation.js";
 
 const object = (x: unknown): x is Record<string, unknown> =>
   !!x && typeof x === "object" && !Array.isArray(x);
@@ -91,6 +93,7 @@ export async function authenticateOriginalFailure(
   graphThreadId: string,
   origin: RecoveryOrigin,
   evidence: readonly RecoveryEvidence[],
+  authenticatedUnpublishedHead = false,
 ): Promise<boolean> {
   if (
     origin.jobId !== job.jobId ||
@@ -109,7 +112,12 @@ export async function authenticateOriginalFailure(
     // A source that is neither HEAD nor an ancestor cannot be silently
     // reinterpreted as the pinned failed operation. This proves lineage only,
     // not that an uncertain child writer settled.
-    const current = await trustedHead(job);
+    // Only the selected cross-domain adapter may present an authenticated
+    // unpublished commit. A source-bound original writer/commit proof must
+    // be checked separately BEFORE passing true here; no other recovery may
+    // bypass trustedHead's independent-review publication requirement.
+    const current = authenticatedUnpublishedHead
+      ? jobGit(job, "rev-parse", "HEAD") : await trustedHead(job);
     execFileSync("git", ["merge-base", "--is-ancestor", origin.sourceHeadSha, current], {
       cwd: job.worktreeRoot,
       env: cleanGitEnv(),
@@ -259,7 +267,30 @@ export async function inspectModernGenerationRecovery(
       }
       return head === origin.sourceHeadSha;
     }
-    return authenticateOriginalFailure(job, request, threadId, origin, evidence);
+    if (await authenticateOriginalFailure(job, request, threadId, origin, evidence))
+      return true;
+    const selected = original.active?.id === caseFile.id && original.assessorPending &&
+      original.decision?.action === "plan-amendment" &&
+      original.decision.adapter === "cross-domain-closeout";
+    if (!selected) return false;
+    const graphState = values as GenerationGraphState;
+    const pendingCloseout = graphState.crossDomainCloseout;
+    if (!pendingCloseout || !graphState.inventory ||
+        !matchesOriginalCloseout(graphState, caseFile, pendingCloseout))
+      return false;
+    // A Git child before independent review is NOT generally trusted. The
+    // only exception is replaying the precise already-selected original
+    // closeout adapter, after its writer session, field-only commit, parent
+    // and pinned inventory have all been independently authenticated.
+    try {
+      const published = await inspectInterruptedCloseoutCommit(job, {
+        ...pendingCloseout,
+        milestoneId: pendingCloseout.milestoneId,
+        originalInventoryDigest: originalInventorySnapshotDigest(graphState.inventory),
+      });
+      if (published !== jobGit(job, "rev-parse", "HEAD")) return false;
+      return authenticateOriginalFailure(job, request, threadId, origin, evidence, true);
+    } catch { return false; }
   };
   const checked = await verifyRecoveryCheckpoint({
     current: original,
@@ -292,7 +323,8 @@ export async function inspectModernGenerationRecovery(
           const pending = graphState.crossDomainCloseout;
           return d.adapter === "cross-domain-closeout" && d.owner === "event" && !!pending &&
             matchesOriginalCloseout(graphState, active, pending) && d.scopeRef.store === "repair-ledger" &&
-            d.scopeRef.ref === pending.repairId && d.scopeRef.digest === pending.proposalDigest;
+            d.scopeRef.ref === pending.repairId && d.scopeRef.digest === pending.proposalDigest &&
+            isDeepStrictEqual(d.evidence, [...active.evidence, d.scopeRef]);
         }
         case "diagnostic":
           if (source.channel === "operationRecovery") return isDeepStrictEqual(d,

@@ -10,7 +10,8 @@ import { removeTestTree } from "./helpers.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair,
   settlePrerequisiteRepair } from "../src/repair-ledger.js";
 import { verifyCrossDomainCloseoutSuccessor, closeoutReviewDigest,
-  verifyLegacyCloseoutReviewTranscript } from "../src/cross-domain-closeout-work.js";
+  verifyLegacyCloseoutReviewTranscript, inspectPublishedCloseoutCommit,
+  inspectInterruptedCloseoutCommit } from "../src/cross-domain-closeout-work.js";
 import type { ReviewAssignment } from "../src/narrative-review-specialist.js";
 import { validCloseoutProposal, retryCloseoutProposal,
   type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
@@ -72,7 +73,8 @@ async function setup(t: import("node:test").TestContext, firstVerdict: "passed" 
   const proposal: CloseoutProposal = { ...body, digest: hash(JSON.stringify(body)) };
   assert.equal(validCloseoutProposal(proposal), true);
   const job = { stateDir, jobId: "job-1", threadId: "thread-1",
-    validatorVersion: "0.1.0", worktreeRoot: root, worktreeStoryRoot: story,
+    baseSha: before, validatorVersion: "0.1.0",
+    worktreeRoot: root, worktreeStoryRoot: story,
     storyRelativePath: "story" } as JobStartResult;
   const turnDigest = "a".repeat(64);
   const admitted = await admitPrerequisiteRepair(job, {
@@ -129,6 +131,118 @@ NovelTea-Prerequisite: ${proposal.digest}`);
   return { job, root, target, stateDir, snapshot, turnDigest, admitted,
     proposal, receiptFile, state, before, after, trailers, path };
 }
+test("#240: authored closeout reconciles exactly one already-published original commit without writer replay", async t => {
+  const f = await setup(t);
+  // The original Pi session and authored-byte digest were durable before Git
+  // committed, but the process crashed before persisting phase=committed.
+  const interrupted = { ...f.state, phase: "authored" as const,
+    commitSha: undefined, validation: undefined, review: undefined,
+    reviewDigest: undefined, reviewerSessionDigest: undefined,
+    reviewerSessionFile: undefined };
+  // Test fixture keeps private session/ledger state inside its temporary
+  // Git root; a real job keeps those files outside the Story worktree.
+  writeFileSync(join(f.root, ".git", "info", "exclude"), "/state/\n/skill-cache/\n");
+  const originalSession = readFileSync(interrupted.sessionFile, "utf8");
+  const originalHead = git(f.root, "rev-parse", "HEAD");
+  assert.equal(await inspectPublishedCloseoutCommit(f.job, interrupted), f.after);
+  assert.equal(await inspectPublishedCloseoutCommit(f.job, interrupted), f.after,
+    "Reinspect cannot stage, commit or re-invoke an already-authored writer");
+  assert.equal(readFileSync(interrupted.sessionFile, "utf8"), originalSession);
+  assert.equal(git(f.root, "rev-parse", "HEAD"), originalHead);
+  assert.equal(git(f.root, "status", "--porcelain"), "");
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, {
+    ...interrupted, writerSessionDigest: "f".repeat(64),
+  }), /original settled writer receipt/);
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, {
+    ...interrupted, authoredDigest: "f".repeat(64),
+  }), /signed source or authored bytes/);
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, {
+    ...interrupted, phase: "writing" as const,
+  }), /original settled writer receipt/);
+});
+
+test("#240: parent graph restart may inspect only the selected unpublished closeout, never promote HEAD", async t => {
+  const f = await setup(t);
+  writeFileSync(join(f.root, ".git", "info", "exclude"), "/state/\n/skill-cache/\n");
+  const originalInventoryDigest = hash("immutable-original-graph-inventory");
+  const expected = { milestoneId: f.proposal.milestoneId,
+    planVersion: f.proposal.planVersion, sourceSha: f.before,
+    proposalDigest: f.proposal.digest, repairId: f.admitted.id,
+    originalInventoryDigest };
+  // Emulate the actual receipt persisted after the original source-bound
+  // writer finished, before the controller received its LangGraph node return.
+  const authenticated = { ...f.state, phase: "authored" as const,
+    originalInventoryDigest, commitSha: undefined, review: undefined,
+    reviewDigest: undefined, validation: undefined };
+  writeFileSync(f.receiptFile, JSON.stringify(authenticated));
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after);
+  const reviewNotYetPublished = JSON.parse(readFileSync(join(f.stateDir,
+    "revisions", "verified-head.json"), "utf8"));
+  assert.equal(reviewNotYetPublished.headSha, f.before,
+    "The original source stays the only verified HEAD until a new reviewer passes");
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, {
+    ...expected, originalInventoryDigest: "f".repeat(64),
+  }), /selected original recovery operation/);
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, {
+    ...expected, proposalDigest: "f".repeat(64),
+  }), /selected original recovery operation/);
+  const committed = { ...authenticated, phase: "committed" as const,
+    commitSha: f.after, validation: f.state.validation };
+  writeFileSync(f.receiptFile, JSON.stringify(committed));
+  assert.equal(await inspectInterruptedCloseoutCommit(f.job, expected), f.after);
+  writeFileSync(f.receiptFile, JSON.stringify({
+    ...committed, validation: { ...committed.validation, sourceSha: "f".repeat(40) },
+  }));
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
+    /native validation or writer proof/);
+  writeFileSync(f.receiptFile, JSON.stringify({
+    ...committed, phase: "reviewing" as const,
+  }));
+  await assert.rejects(inspectInterruptedCloseoutCommit(f.job, expected),
+    /selected original recovery operation/,
+    "An uncertain independent reviewer cannot be replayed under the writer exception");
+});
+
+test("#240: only original parent, exact owned paths and source-bound trailers can reconcile an interrupted closeout", async t => {
+  const f = await setup(t);
+  const original = { ...f.state, phase: "authored" as const,
+    commitSha: undefined, validation: undefined };
+  writeFileSync(join(f.root, ".git", "info", "exclude"), "/state/\n/skill-cache/\n");
+  // The current HEAD is now a descendant, not the exact committed operation.
+  git(f.root, "commit", "--allow-empty", "-qm", "Other author touched the branch");
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, original),
+    /original parent or bounded file inventory/);
+
+  git(f.root, "reset", "--hard", f.before);
+  writeFileSync(f.target, completed);
+  // Reuse the original metadata but add a forbidden unrelated file to the
+  // same Git commit: even matching trailers cannot widen the Event grant.
+  mkdirSync(join(f.root, "story", "events"), { recursive: true });
+  writeFileSync(join(f.root, "story", "events", "unrelated.md"), "Unauthorised change\n");
+  git(f.root, "add", "--", "story/");
+  git(f.root, "commit", "-qm", f.trailers.join("\n"));
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, original),
+    /original parent or bounded file inventory/);
+
+  git(f.root, "reset", "--hard", f.before);
+  writeFileSync(f.target, completed);
+  git(f.root, "add", "--", "story/");
+  git(f.root, "commit", "-qm", "Unrelated commit lacking signed prerequisite trailers");
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, original),
+    /original signed source or authored bytes/);
+
+  git(f.root, "reset", "--hard", f.before);
+  const unauthorized = completed.replace("The audience recognizes the genuine consequence.",
+    "The Story now claims an entirely different protected outcome.");
+  writeFileSync(f.target, unauthorized);
+  git(f.root, "add", "--", "story/");
+  git(f.root, "commit", "-qm", f.trailers.join("\n"));
+  await assert.rejects(inspectPublishedCloseoutCommit(f.job, {
+    ...original, authoredDigest: hash(unauthorized),
+  }), /frontmatter|field|body|scope|protected/i,
+    "A matching commit, digest and trailers still cannot change Milestone prose");
+});
+
 test("verified descendant accepts exactly a signed, reviewed Milestone-only Git successor", async t => {
   const f = await setup(t);
   await verifyCrossDomainCloseoutSuccessor(f.job, f.after, f.before,

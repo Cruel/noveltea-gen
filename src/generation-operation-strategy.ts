@@ -137,7 +137,9 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       author.status === "paused" ? "author-pause" : "author-choice" }, "Author boundary precedes corrective work.", author.status === "cancelled" ? "cancelled" : "paused");
     if (d.action === "plan-amendment") {
       const pending = s.crossDomainCloseout!;
-      if (!matchesOriginalCloseout(s, c, pending) || d.scopeRef.digest !== pending.proposalDigest || d.scopeRef.ref !== pending.repairId ||
+      if (!matchesOriginalCloseout(s, c, pending) ||
+          !isDeepStrictEqual(d.evidence, [...c.evidence, d.scopeRef]) ||
+          d.scopeRef.digest !== pending.proposalDigest || d.scopeRef.ref !== pending.repairId ||
           pending.sourceSha !== c.origin.sourceHeadSha || pending.planVersion !== c.origin.planVersion ||
           pending.milestoneId !== s.active?.milestone || s.active?.id !== c.origin.assignmentId)
         throw Error("Saved prerequisite correction differs from original admission");
