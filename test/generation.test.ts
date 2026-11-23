@@ -12,6 +12,14 @@ import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
   scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
 import { runEventWorkItem } from "../src/event-work.js";
+import { runInteractiveWorkItem, inspectInteractiveConflict } from "../src/interactive-work.js";
+import { createSkillSnapshot } from "../src/snapshot.js";
+import { emptyAdaptiveState, beginAdaptiveAttempt, settleAdaptiveAttempt, readAdaptiveState } from "../src/adaptive-state.js";
+import { projectAdaptiveFinal } from "../src/adaptive-final-review.js";
+import { pendingDigest } from "../src/pending-work-amendments.js";
+import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
+import { parseStoryPlanning } from "../src/story-planning.js";
+import { nativeStoryMetrics, reviewArchitectureMetrics } from "../src/story-metrics.js";
 import { runCharacterWorldJob } from "../src/character-world.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { startStoryJob } from "../src/job.js";
@@ -4242,6 +4250,458 @@ test("C04 Review strategy demands the original sealed failed Pi cycle before any
       "Tampered reviewer session must invalidate the selected original operation");
   } finally {
     for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+
+for (const mode of ["event-only", "required-interactive", "story-wide-required"] as const)
+test("#243 C06 original-Thread historical Choice " + mode + " uses independently authenticated owner correction", {
+  skip: !available, timeout: 180_000,
+}, async () => {
+  const mandatory = mode === "required-interactive";
+  const storyWide = mode === "story-wide-required";
+  const f = setup("c06-original-negative-choice-" + mode, story => {
+    mkdirSync(join(story, "creative-direction"), { recursive: true });
+    writeFileSync(join(story, "creative-direction/foundation.md"), [
+      "---", "schema: '0.1'", "type: creative-direction",
+      "id: creative-direction.foundation", 'title: "The archive witness"',
+      "status: approved", "decisions: []",
+      'premise: "A witness disappeared after a disputed ledger transfer"',
+      'central_conflict: "Verify the ledger before the later disclosure choice"',
+      'genre: "Mystery"', 'tone: "Investigative"',
+      'player_experience: "Source-grounded investigation followed by consequential disclosure"',
+      'scope: "A short dialogue-led Story with two characters"',
+      "planning:", "  choice_frequency: " + (storyWide ? "frequent" : "none"),
+      "  puzzle_emphasis: none",
+      "---", "",
+      "The opening must establish the verified transfer before later player decisions.",
+      "",
+    ].join("\n"));
+  });
+  for (const key of ["NT_ARCHITECTURE_FIXTURE_CASE", "NT_EVENT_FIXTURE_CASE",
+    "NT_INTERACTIVE_FIXTURE_CASE", "NT_COMPOSITION_FIXTURE_CASE"])
+    f.env[key] = "event-only";
+  f.env.NT_ADAPTIVE_PLANNING = "1";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  contract.constraints = mandatory
+    ? ["The player must choose at this Milestone to release or withhold the evidence, with genuinely different consequences."]
+    : storyWide ? ["The Story must include consequential player Choices; the only Interactive Milestone cannot be dropped without another approved owner."]
+    : ["A later consequential disclosure Choice remains possible, without requiring one at every Milestone."];
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const task = "First verify a falsified transfer credit from signed records, then allow later player decisions.";
+  f.start[3] = task;
+  saveFixtureTurn(f.job, contract, task, mandatory
+    ? ["Implement the playable release/withhold decision at this Milestone; retain the original evidence."]
+    : storyWide ? ["The Story-wide Interaction profile requires a consequential Choice somewhere, not just observed evidence."]
+    : ["Verify the source evidence at the opening, and retain Story-wide consequential interaction for later." ]);
+  // This seeded Story already has a complete Creative Direction; generation
+  // legitimately reuses its original Foundation rather than authoring a new one.
+  const architecture = f.cli([...f.start, "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused", JSON.stringify({ status: architecture.status,
+    reason: architecture.reason }), "the original Architecture must pause before downstream work");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
+    /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const env = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const milestoneFile = join(f.job.worktreeStoryRoot, "milestones/disclosure.md");
+    const milestone = readFileSync(milestoneFile, "utf8");
+    assert.match(milestone, /fulfillment: \{any_of: \[\]\}/);
+    const completed = milestone.replace("completeness: partial\n", "")
+      .replace("fulfillment: {any_of: []}",
+        "fulfillment:\n  any_of:\n    - [event.disclose-ledger]");
+    const authored = [
+      "---", "schema: '0.1'", "type: event", "id: event.disclose-ledger",
+      'title: "disclose-ledger"', "status: draft", "decisions: []",
+      "participants: [character.ada, character.neri]", "arcs: [arc.truth]",
+      'consequences: ["Ada verifies an original signed ledger and recognizes concealed attribution"]',
+      "after: []", "prerequisites:", "  any_of:",
+      "    - completed: []", "      not_completed: []", "      conditions:",
+      "        - kind: knowledge", "          character: character.neri",
+      "          fact: fact.evidence-concealed", "          value: knows",
+      "steps:", "  - id: disclose", "    branches:",
+      "      - id: inspect", "        conditions: []", "        effects:",
+      "          - kind: knowledge", "            character: character.ada",
+      "            fact: fact.evidence-concealed", "            value: knows",
+      "          - kind: relationship", "            relationship: relationship.ada-neri",
+      "            value: trusting", "---", "",
+      "Neri opens the signed transfer ledger on the archive table. Ada inspects its dated entries ",
+      "against a separate register and verifies that the missing witness was transferred. ",
+      "She learns Neri deliberately concealed the attribution and takes the corroborating source ",
+      "into custody. The evidence is observed before any later player disclosure decision.",
+      "",
+    ].join("\n");
+    const blueprint = { schema: "noveltea-milestone-blueprint/v1",
+      milestoneId: "milestone.disclosure",
+      events: [{ id: "disclose-ledger", purpose: "Validate the transfer record from primary evidence",
+        dependsOn: [], participants: ["character.ada", "character.neri"],
+        evidence: [{ anchorPath: "milestones/disclosure.md",
+          source: "Neri's original signed record and the independent register",
+          observation: "Ada checks dated entries across both authentic records",
+          access: "Neri opens the ledger in the archive while Ada is present",
+          establishes: "The witness was transferred and the attribution deliberately hidden",
+          limits: "A later disclosure decision belongs to a separate player-facing scene" }],
+        knowledge: "Ada verifies the transfer record and understands the concealment",
+        routes: [] }],
+      downstream: [{ owner: "interactive",
+        obligation: mandatory
+          ? "Implement the required local release/withhold Choice and both consequential results."
+          : "Evaluate whether local formal Choice is justified; a consequential disclosure remains later." },
+      { owner: "composition",
+        obligation: "Present the actual source comparison and preserve later meaningful interaction." }] };
+    const reads = [...boundedPinnedSources("nt-event-design").map(p => "skill://" + p),
+      "milestones/disclosure.md"];
+    const { runtime, observed } = await scriptedStoryRuntime((i, ctx) => {
+      if ([0, 2, 4].includes(i))
+        return { content: scriptedReadCalls(reads, i), reason: "toolUse" };
+      if (i === 1) return { content: scriptedText(blueprint), reason: "stop" };
+      if (i === 3) return { content: scriptedText({
+        schema: "noveltea-milestone-blueprint-review/v5",
+        status: "pass", findings: [], prior: [] }), reason: "stop" };
+      if (i === 5) return { content: [
+        { type: "toolCall", id: "c06-event-write", name: "write",
+          arguments: { path: "events/disclose-ledger.md", content: authored } },
+        { type: "toolCall", id: "c06-fulfillment-write", name: "write",
+          arguments: { path: "milestones/disclosure.md", content: completed } },
+      ], reason: "toolUse" };
+      if (i === 6) return { content: scriptedText({
+        modifiedRecords: ["events/disclose-ledger.md", "milestones/disclosure.md"],
+        architecturalConflicts: [], laterObligations: [
+          "A consequential player Choice may be authored at a later Milestone, after the ledger is verified.",
+        ] }), reason: "stop" };
+      if (i === 7) {
+        const prompt = (ctx.messages as any[]).filter(m => m.role === "user")
+          .flatMap(m => m.content.map((c: any) => c.text ?? ""))
+          .findLast((s: string) => s.includes("INDEPENDENT EVENT-ONLY OMISSION REVIEW"));
+        assert.ok(prompt, "C06 must invoke the genuine independent Event-only reviewer");
+        const blocks = prompt.match(/PINNED REFERENCES:\n([\s\S]*?)\nSTORY PATHS:\n([\s\S]*?)\nASSIGNMENT:\n/);
+        assert.ok(blocks, "Independent omission reviewer must list actual pinned skills and Story paths");
+        const paths = [...new Set([...blocks[1]!.trim().split("\n"),
+          ...blocks[2]!.trim().split("\n")].filter(Boolean))];
+        return { content: scriptedReadCalls(paths, i), reason: "toolUse" };
+      }
+      if (i === 8 && mandatory) return { content: scriptedText({ verdict: "block",
+        findings: [{ severity: "blocking", dimension: "obligation",
+          source: "milestones/disclosure.md:11",
+          message: "The original author explicitly requires a playable local release/withhold decision, which the observed Event alone does not implement.",
+          repair: "interactive" }], evidence: [],
+      }), reason: "stop" };
+      if (i === 8) return { content: scriptedText({ verdict: "pass", findings: [],
+        evidence: ["milestones/disclosure.md:11 source-bound observed credit",
+          "events/disclose-ledger.md:23 primary signed ledger",
+          "event.disclose-ledger#disclose/inspect: events/disclose-ledger.md:24",
+          "milestone.disclosure#0: milestones/disclosure.md:11"],
+      }), reason: "stop" };
+      if (i === 9 || i === 11) return { content: scriptedReadCalls(
+        [...reads, "events/disclose-ledger.md"], i), reason: "toolUse" };
+      if (i === 10) return { content: scriptedText({ ...blueprint,
+        downstream: blueprint.downstream.filter(x => x.owner !== "interactive"),
+      }), reason: "stop" };
+      if (i === 12) return { content: scriptedText({
+        schema: "noveltea-milestone-blueprint-review/v5",
+        status: "pass", findings: [], prior: [],
+      }), reason: "stop" };
+      throw Error("Unscripted #243 independent correction turn: " + i + " " +
+        JSON.stringify(ctx.messages.slice(-2)).slice(0, 1400));
+    });
+    const authoredEvent = await withJobModelRuntime(runtime, () => runEventWorkItem({
+      story: f.story, job: "single", action: "run", milestone: "milestone.disclosure",
+      fixture: false, skillsSource: source,
+      provider: scriptedModel.provider, model: scriptedModel.id,
+    }));
+    assert.equal(authoredEvent.status, "event-cluster-committed");
+    assert.equal(observed.length, 7);
+    await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+    const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+    const arch = JSON.parse(readFileSync(join(f.job.stateDir, "architecture.json"), "utf8"));
+    const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+    const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const skill = await createSkillSnapshot({ discovery: "explicit-only",
+      novelteaSkills: source, skillDirs: [], requiredSkills: [
+        "nt-interactive-narrative", "nt-catalog" ] });
+    assert.ok(skill);
+    const session = join(f.job.stateDir, "interactive-sessions", "interactive-disclosure",
+      "choice", "historical-negative.jsonl");
+    mkdirSync(dirname(session), { recursive: true });
+    const conflict = [
+      "An earlier approved downstream task presumes an unearned local player decision despite a completed evidence observation.",
+    ];
+    const obligations = ["Preserve a consequential later player disclosure Choice after this reviewed opening."];
+    const piText = JSON.stringify({ modifiedRecords: [], architecturalConflicts: conflict,
+      laterObligations: obligations });
+    const bytes = [JSON.stringify({ type: "session", id: "c06-legacy-original" }),
+      JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop",
+        content: [{ type: "text", text: piText }] } }), ""].join("\n");
+    writeFileSync(session, bytes);
+    const h = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+    const receipt: any = {
+      version: 1, jobId: f.job.jobId, baseSha: f.job.baseSha,
+      workItemId: "interactive-disclosure", milestoneId: "milestone.disclosure",
+      planVersion: arch.plan.version, planDigest: h(JSON.stringify(arch.plan)),
+      eventHead: event.commitSha, worker: "pi",
+      provider: scriptedModel.provider, model: scriptedModel.id,
+      snapshot: skill,
+      eventSource: { headSha: event.commitSha, snapshotId: event.snapshot.id,
+        eventIds: event.validation.eventIds,
+        milestoneState: event.validation.milestoneState ?? "complete", missingObligations: [] },
+      units: [{ id: "interactive-choice-disclosure", domain: "choice", phase: "conflicted",
+        beforeHead: head, paths: [], claimedPaths: [],
+        conflicts: conflict, obligations, skillReads: [],
+        piSessionFile: session, piSessionSha256: h(bytes) },
+      { id: "interactive-puzzle-disclosure", domain: "puzzle", phase: "pending" }],
+    };
+    receipt.units[0].digest = h(JSON.stringify({
+      jobId: receipt.jobId, worker: receipt.worker, workItemId: receipt.workItemId,
+      milestoneId: receipt.milestoneId, baseSha: receipt.baseSha,
+      planVersion: receipt.planVersion, planDigest: receipt.planDigest,
+      eventHead: receipt.eventHead, provider: receipt.provider, model: receipt.model,
+      thinking: null, eventSource: receipt.eventSource, head,
+      snapshotId: skill.id, unitId: receipt.units[0].id,
+      paths: [], conflicts: conflict, obligations, skillReads: [],
+      piSessionFile: session, piSessionSha256: h(bytes),
+    }));
+    const path = join(f.job.stateDir, "interactive-items/disclosure.json");
+    mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(receipt, null, 2));
+    const oldNegative = await inspectInteractiveConflict(f.job, "milestone.disclosure");
+    assert.equal(oldNegative.reportDigest, receipt.units[0].digest);
+    const inspected = await runInteractiveWorkItem({
+      story: f.story, job: "single", action: "inspect", milestone: "milestone.disclosure" });
+    assert.equal(inspected.status, "interactive-conflict-reported");
+    assert.equal(observed.length, 7, "historical negative is inspected without launching another Pi writer");
+    const validation = await validateStoryJob(f.job, source, { ...f.job, baseSha: head });
+    const records = (validation.report as any).records as Array<{ path: string;
+      metadata: { type: string; status: string; id: string; decisions?: unknown[]; planning?: unknown } }>;
+    const hashes = Object.fromEntries(records.map(r => [r.path,
+      h(readFileSync(join(f.job.worktreeStoryRoot, r.path)))]));
+    const checkpoints = await inspectRecoveryCheckpoints(f.job);
+    const completedStages: any[] = [];
+    completedStages.push(...architecture.completedStages.filter((e: any) => e.stage === "foundation"));
+    for (const [workItem, stage, status] of [
+      ["global-architecture", "architecture", "architecture-committed"],
+      ["character-foundations", "foundations", "foundations-committed"],
+      ["event-disclosure", "event", "event-cluster-committed"],
+    ] as const) {
+      const p = checkpoints.find(x => x.workItem === workItem && x.eligible);
+      assert.ok(p, "Missing authenticated " + workItem);
+      completedStages.push({ stage, status, headSha: p.commitSha,
+        ...(stage === "event" ? { milestone: "milestone.disclosure" } : {}) });
+    }
+    const nativeInventory = reconcileInventory(arch.plan, validation, head, completedStages, {});
+    assert.equal(nativeInventory.items.find(i => i.id === "interactive:milestone.disclosure")?.status,
+      "pending");
+    const order = nativeInventory.items.filter(i => i.status === "pending").map(i => i.id);
+    const proposal = { sourceSha: head, turnDigest: turn.digest, beforeVersion: 1,
+      reason: "The original reviewed Event establishes what is observable before any later disclosure decision.",
+      actions: [{ kind: "narrow" as const, item: "interactive:milestone.disclosure",
+        sourcePath: "milestones/disclosure.md", sourceHash: hashes["milestones/disclosure.md"],
+        outcome: "Only authorize a local Choice if independently justified by the observed evidence." }],
+      order };
+    const admission = {
+      proposal, inventory: nativeInventory, plan: arch.plan,
+      turnDigest: turn.digest, version: 1,
+      verifiedSource: true, records, sourceHashes: hashes,
+      milestoneSourceHashes: hashes, protectedPaths: records.filter(r =>
+        r.metadata.type === "creative-direction" || r.metadata.decisions?.length).map(r => r.path),
+      typedEdges: [], authorTargets: [],
+      planning: parseStoryPlanning(records.find(r => r.metadata.type === "creative-direction")!.metadata.planning),
+      carried: nativeInventory.items.filter(i => i.status === "verified")
+        .map(i => ({ id: i.id, sha: i.verifiedSha! })),
+      omissionProofs: [],
+    };
+    const amendment = admitAdaptiveAssignments(admission);
+    const narrowed = applyAdaptiveAssignments(nativeInventory, amendment);
+    const state = emptyAdaptiveState(f.job, turn.digest, arch.plan.version);
+    const budget = reviewArchitectureMetrics(nativeStoryMetrics(f.job),
+      records, (validation.report as any).contractRevision, head);
+    const signature = pendingDigest({ source: head, planVersion: arch.plan.version,
+      turn: turn.digest, metricSources: budget.sourceRevisionsDigest });
+    await beginAdaptiveAttempt(f.job, state, head, signature);
+    const selected = await createSkillSnapshot({ discovery: "explicit-only",
+      novelteaSkills: source, skillDirs: [], requiredSkills: ["nt-story-orchestrate", "nt-catalog"] });
+    assert.ok(selected);
+    const adaptiveFile = join(f.job.stateDir, "adaptive-planning-sessions", "historical.jsonl");
+    mkdirSync(dirname(adaptiveFile), { recursive: true });
+    const adaptiveBytes = JSON.stringify({ role: "assistant", text: "Original admitted narrow assignment" }) + "\n";
+    writeFileSync(adaptiveFile, adaptiveBytes);
+    await settleAdaptiveAttempt(f.job, state, signature, "admitted", amendment, {
+      sessionFile: adaptiveFile, sessionSha256: h(adaptiveBytes),
+      snapshotId: selected.id, provider: scriptedModel.provider, model: scriptedModel.id,
+      skillReads: [join(selected.path, "skills/nt-story-orchestrate/SKILL.md")],
+      proposalDigest: pendingDigest(proposal),
+    });
+    // Rebuild the fixture-only null-Turn method pin as a properly selected
+    // source-bound production method BEFORE creating the historical failure.
+    // A real production Turn selects this exact identity on initial admission;
+    // the fixture CLI deliberately did not have a Turn digest.
+    const selectedFile = join(f.job.stateDir, "orchestrator-selection.json");
+    assert.equal(JSON.parse(readFileSync(selectedFile, "utf8")).turnPlanDigest, null);
+    unlinkSync(selectedFile);
+    const originalMethod = await selectStoryOrchestrator(f.job,
+      f.job.threadId + ":generation", { task, kind: "full-story",
+        turnPlanDigest: turn.digest }, source);
+    assert.equal(originalMethod.receipt.turnPlanDigest, turn.digest);
+    const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const cfg = { configurable: { thread_id: f.job.threadId + ":generation" }, recursionLimit: 10000 };
+      const initial = (await graph.getState(cfg)).values;
+      assert.ok(initial.request);
+      await graph.updateState(cfg, {
+        request: { ...initial.request, task, contract, fixture: false,
+          provider: scriptedModel.provider, model: scriptedModel.id,
+          turnPlanDigest: turn.digest, orchestrationPolicy: "explicit" },
+        completedStages, inventory: narrowed, adaptiveVersion: 2,
+        planVersion: arch.plan.version, status: "running", reason: null,
+        active: narrowed.items.find(i => i.id === "interactive:milestone.disclosure"),
+        result: null, pauseAfter: null, failures: {},
+      }, "author_update_intake");
+      const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.active?.origin.operation,
+        "specialist-result", JSON.stringify({ status: admitted.status, reason: admitted.reason,
+          recovery: admitted.recoveryLifecycle }));
+      assert.equal(admitted.inventory.items.find((i: { id: string }) =>
+        i.id === "interactive:milestone.disclosure")?.status, "blocked");
+      const firstDecision = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+      assert.equal(firstDecision.recoveryLifecycle.decision?.action, "plan-amendment");
+      assert.equal(firstDecision.recoveryLifecycle.decision?.adapter, "dependency-work");
+      assert.equal(firstDecision.recoveryLifecycle.assessorPending, true);
+      assert.equal(observed.length, 7, "selection never starts the Choice specialist or a replacement reviewer");
+      if (mandatory || storyWide) {
+        const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null,
+          { ...cfg, interruptAfter: ["assess_recovery"] }));
+        assert.equal(stopped.status, "blocked");
+        assert.equal(stopped.escalation?.kind, "dependency-replan");
+        assert.equal(stopped.escalation?.requiresTrustedApproval, false);
+        assert.ok(stopped.escalation?.sources.some((s: { source: string; repair: string }) =>
+          s.source === "milestone.disclosure" && s.repair === "interactive"),
+          "a genuine mandatory local Choice must be routed to its typed plan owner, not omitted");
+        assert.equal(stopped.recoveryLifecycle.active?.id,
+          firstDecision.recoveryLifecycle.active?.id);
+        assert.notEqual(stopped.recoveryLifecycle.decision?.action, "integrity-fence");
+        assert.equal(observed.length, mandatory ? 9 : 7,
+          "a binding Story-wide quota is source-proven; it needs no speculative omission reviewer");
+        assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+        assert.equal(JSON.parse(readFileSync(path, "utf8")).units[0].phase, "conflicted",
+          "required Choice remains blocked, never superseded by an unreviewed omission");
+        const refusalPath = join(f.job.stateDir, "interactive-event-only/disclosure.json");
+        if (mandatory) {
+          const refusal = JSON.parse(readFileSync(refusalPath, "utf8"));
+          assert.equal(refusal.phase, "declined");
+          assert.equal(refusal.payload.decision, "retain-interactive");
+        } else assert.equal(existsSync(refusalPath), false,
+          "a binding original Story-wide Choice promise must refuse omission before asking a new Pi reviewer");
+        assert.equal((await inspectInteractiveConflict(f.job, "milestone.disclosure")).reportDigest,
+          oldNegative.reportDigest);
+        assert.equal((await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id))?.active?.id,
+          stopped.recoveryLifecycle.active?.id);
+        if (mandatory) {
+          const refusedAgain = await withJobModelRuntime(runtime, () => runInteractiveWorkItem({
+            story: f.story, job: "single", action: "review-omission",
+            milestone: "milestone.disclosure", fixture: false,
+            generationObjective: task, turnPlanDigest: turn.digest,
+            skillsSource: source, provider: scriptedModel.provider,
+            model: scriptedModel.id,
+          }));
+          assert.equal(refusedAgain.status, "omission-not-justified");
+          assert.equal(observed.length, 9,
+            "a repeated independently refused omission cannot start a replacement reviewer");
+        }
+        return;
+      }
+      const corrected = await withJobModelRuntime(runtime, () => graph.invoke(null,
+        { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.equal(corrected.status, "running", JSON.stringify({ status: corrected.status,
+        reason: corrected.reason, lifecycle: corrected.recoveryLifecycle,
+        calls: observed.slice(7).map(x => ({ tools: x.tools,
+          prompt: JSON.stringify(x.messages.slice(-2)).slice(0, 650) })) }));
+      assert.equal(corrected.recoveryLifecycle.active, null);
+      assert.equal(corrected.adaptiveVersion, 3);
+      assert.equal(corrected.inventory.items.find((i: { id: string }) =>
+        i.id === "interactive:milestone.disclosure")?.status, "verified");
+      assert.equal(corrected.completedStages.filter((e: { stage: string; milestone?: string }) =>
+        e.stage === "interactive" && e.milestone === "milestone.disclosure").length, 1);
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
+        "no Choice/Puzzle commit was invented while resolving the original contradiction");
+      const savedPlan = JSON.parse(readFileSync(join(f.job.stateDir, "adaptive-plan.json"), "utf8"));
+      assert.equal(savedPlan.entries.length, 1);
+      assert.equal(savedPlan.supersessions.length, 1);
+      assert.equal(savedPlan.supersessions[0].originalAmendmentDigest, amendment.digest);
+      const activeReceipt = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal(activeReceipt.units[0].phase, "not-applicable");
+      assert.equal(activeReceipt.units[1].phase, "not-applicable");
+      assert.ok(activeReceipt.supersededNegative);
+      assert.equal((await inspectInteractiveConflict(f.job, "milestone.disclosure", true)).reportDigest,
+        oldNegative.reportDigest, "original negative remains independently reauthenticatable");
+      assert.equal((await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id))?.phase,
+        "idle", "graph restart must authenticate the resolved original case");
+      const oldFile = join(f.job.stateDir, activeReceipt.supersededNegative.relative);
+      const oldBytes = readFileSync(oldFile, "utf8");
+      try {
+        const altered = JSON.parse(oldBytes);
+        altered.units[0].conflicts[0] = "A forged different historical contradiction.";
+        writeFileSync(oldFile, JSON.stringify(altered));
+        await assert.rejects(inspectInteractiveConflict(f.job, "milestone.disclosure", true),
+          /historical|original|changed|source/i);
+      } finally { writeFileSync(oldFile, oldBytes); }
+      const reviewPath = join(f.job.stateDir, "interactive-event-only/disclosure.json");
+      const reviewBytes = readFileSync(reviewPath, "utf8");
+      try {
+        const altered = JSON.parse(reviewBytes);
+        altered.payload.sourceHashes["milestones/disclosure.md"] = "f".repeat(64);
+        writeFileSync(reviewPath, JSON.stringify(altered));
+        await assert.rejects(readEventOnlyOmission(f.job, "milestone.disclosure",
+          activeReceipt.units[0].eventOnly), /identity|digest|source/i,
+          "a forged independent no-write source cannot authorize the old failed assignment");
+      } finally { writeFileSync(reviewPath, reviewBytes); }
+      assert.equal((await inspectInteractiveConflict(f.job, "milestone.disclosure", true)).reportDigest,
+        oldNegative.reportDigest);
+      const originalPiBytes = readFileSync(session, "utf8");
+      try {
+        writeFileSync(session, originalPiBytes.replace(
+          "An earlier approved downstream task presumes an unearned local",
+          "An unrelated forged downstream author task presumes an unearned local"));
+        await assert.rejects(inspectInteractiveConflict(f.job, "milestone.disclosure", true),
+          /session|original|transcript|changed/i,
+          "changing the original settled Pi transcript must invalidate its historical owner proof");
+      } finally { writeFileSync(session, originalPiBytes); }
+      const reentered = await withJobModelRuntime(runtime, () => graph.invoke(null,
+        { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+      assert.equal(reentered.status, "running", JSON.stringify({ status: reentered.status,
+        reason: reentered.reason, recovery: reentered.recoveryLifecycle }));
+      assert.equal(reentered.active?.stage, "composition",
+        "the same original Thread must resume only its real downstream Composition assignment");
+      assert.equal(reentered.active?.milestone, "milestone.disclosure");
+      const { preflightCompositionBoundary } =
+        await import("../src/cross-domain-prerequisite-controller.js");
+      const compositionAdmission = await preflightCompositionBoundary(f.job,
+        reentered.request, "milestone.disclosure", arch.plan.version);
+      assert.equal(compositionAdmission.kind, "ready",
+        "the real Composition admission must recheck and accept the revised Blueprint and no-write proof");
+      const finalProjection = projectAdaptiveFinal((await readAdaptiveState(
+        f.job, turn.digest, arch.plan.version))!);
+      assert.equal(finalProjection.source.version, 3);
+      assert.equal(finalProjection.plannedWork.find((item: { id: string }) =>
+        item.id === "interactive:milestone.disclosure")?.status, "reviewed-omission");
+      assert.ok(finalProjection.objectives.some((item: { text: string }) =>
+        item.text.includes("remaining Story-wide Choice/Puzzle promises")),
+        "the final Turn reviewer must still check whole-Story interaction and causal obligations");
+      assert.equal(reentered.inventory.items.find((i: { id: string }) =>
+        i.id === "interactive:milestone.disclosure")?.status, "verified");
+      assert.equal(observed.length, 13,
+        "retrying the original graph must not start another Choice/Blueprint/reviewer Pi call");
+    } finally { saver.db.close(); }
+  } finally {
+    restoreSandbox();
+    for (const [key, value] of Object.entries(env)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }

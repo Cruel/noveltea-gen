@@ -507,14 +507,24 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         }
         if (result.outcome === "declined") return {
           recoveryLifecycle: { ...lifecycle, assessorPending: false }, status: "blocked",
-          reason: "Independent omission Review retained this Milestone's required Choice/Puzzle. " +
+          reason: (result.decline === "protected-author" ?
+            "The original author explicitly requires the targeted Choice/Puzzle. " :
+            result.decline === "story-wide-obligation" ?
+            "The original Story-wide Interaction profile still requires consequential gameplay. " :
+            "Independent omission Review retained this Milestone's required Choice/Puzzle. ") +
             "The original no-write specialist and author commitments are preserved; " +
             "a separate source-backed owner correction is required.",
-          escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
-            sources: [{ source: d.scopeRef.ref, message: "Independent Event-only omission refused",
-              repair: "correct causal prerequisites without waiving gameplay" }],
-            action: "Correct the approved prerequisite or obtain genuinely new author scope; " +
-              "never replay the negative Choice writer." } };
+          escalation: { kind: "dependency-replan",
+            requiresTrustedApproval: result.decline === "protected-author",
+            sources: [{ source: source.milestoneId,
+              message: result.decline === "independent-review" ?
+                "Source-bound independent Review retained the mandatory local Interactive obligation" :
+                "Authenticated author/Story-wide scope retains the missing Interactive obligation",
+              repair: "interactive" }],
+            action: "Have the Interactive plan owner correct the cited missing Choice/Puzzle " +
+              "within the authenticated original author objective, or obtain a separately " +
+              "reviewed prerequisite amendment before dispatch. Do not replay the original " +
+              "negative Choice session or substitute an invented no-write approval." } };
       }
       return { recoveryLifecycle: { ...lifecycle, assessorPending: false },
         status: "blocked", reason: "Authenticated no-write requires an independently " +
