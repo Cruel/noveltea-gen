@@ -1414,6 +1414,11 @@ async function runFixtureRecoveryGraph(
       }
       assert.equal(transport.calls.length, 1); assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 1);
     }
+    if (refused === "exception-actionable" && next.recoveryLifecycle.active === null) {
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+        next.recoveryLifecycle,
+        "C07 original independently reviewed Review transport recovery must survive restart");
+    }
     assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial,
       "The author's original Story repository must not be rewritten");
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
@@ -1718,6 +1723,11 @@ test("#240 original staged Event is authentically authored by a scripted Pi agen
         assert.equal(createHash("sha256").update(readFileSync(item.sessionFile)).digest("hex"),
           item.sessionDigest, "An independently sealed dependent transcript must not change later");
       }
+      assert.equal(corrected.recoveryLifecycle.discharged.at(-1)?.disposition,
+        "active-verified", "C07 keeps the original resolved case and reviewed successor in one lifecycle");
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+        corrected.recoveryLifecycle,
+        "C07 restart must reauthenticate the writer, independent Review and every dependent transcript");
       assert.ok(observed.length >= beforeSelectionCalls + 7 &&
         (observed.length - beforeSelectionCalls - 5) % 2 === 0,
         "One bounded writer, its independent reviewer and fresh read-only affected-dependent reviews must settle");
@@ -3760,6 +3770,9 @@ for (const stage of ["foundations", "event"] as const) test(
     const restored = await server.invoke({ request: failed.request }, {
       ...config, interruptAfter: ["verify_committed_work"] });
     assert.equal(currentOperationRecovery(restored), null, restored.reason ?? undefined);
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, threadId),
+      restored.recoveryLifecycle,
+      "C07 restored commit verifier must authenticate the original reviewed source and signed carry-forward");
     assert.equal(restored.completedStages.filter((entry: any) =>
       entry.stage === stage && entry.headSha === originalHead).length, 1);
     assert.equal(restored.result, null);
@@ -4641,8 +4654,10 @@ test("#243 C06 original-Thread historical Choice " + mode + " uses independently
       assert.ok(activeReceipt.supersededNegative);
       assert.equal((await inspectInteractiveConflict(f.job, "milestone.disclosure", true)).reportDigest,
         oldNegative.reportDigest, "original negative remains independently reauthenticatable");
-      assert.equal((await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id))?.phase,
-        "idle", "graph restart must authenticate the resolved original case");
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id),
+        corrected.recoveryLifecycle,
+        "C07 graph restart must authenticate the resolved original case and actual Event-only omission");
+      assert.equal(corrected.recoveryLifecycle.discharged.at(-1)?.disposition, "active-verified");
       const oldFile = join(f.job.stateDir, activeReceipt.supersededNegative.relative);
       const oldBytes = readFileSync(oldFile, "utf8");
       try {
@@ -4661,6 +4676,8 @@ test("#243 C06 original-Thread historical Choice " + mode + " uses independently
         await assert.rejects(readEventOnlyOmission(f.job, "milestone.disclosure",
           activeReceipt.units[0].eventOnly), /identity|digest|source/i,
           "a forged independent no-write source cannot authorize the old failed assignment");
+        assert.equal((await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id))?.phase,
+          "fenced", "C07 cannot reenter with a tampered independently reviewed omission");
       } finally { writeFileSync(reviewPath, reviewBytes); }
       assert.equal((await inspectInteractiveConflict(f.job, "milestone.disclosure", true)).reportDigest,
         oldNegative.reportDigest);

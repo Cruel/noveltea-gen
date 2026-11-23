@@ -27,7 +27,7 @@ import { preflightCompositionBoundary } from "./cross-domain-prerequisite-contro
 import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis,
   operationDiagnosisCase, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
-import { decideRecovery, finishRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
+import { decideRecovery, finishVerifiedRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
 import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "./generation-diagnostic-controller.js";
 import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle } from "./generation-recovery-contract.js";
 
@@ -497,11 +497,11 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
             planVersion: s.planVersion!,
           }];
           const settled = { ...lifecycle, assessorPending: false };
-          return { recoveryLifecycle: finishRecovery(recordRecoveryOutcome(settled,
+          return { recoveryLifecycle: finishVerifiedRecovery(settled,
             { status: "verified", caseId: c.id, sourceHeadSha: result.sourceSha,
               assurance: { store: "specialist-receipt",
                 ref: "interactive-event-only/" + source.milestoneId.slice(10) + ".json",
-                digest: proof.eventOnly?.digest } }, true)),
+                digest: proof.eventOnly?.digest } }, true),
             inventory, failures: priorFailures, completedStages, adaptiveVersion: result.version,
             active: null, result: null, escalation: null, status: "running", reason: null };
         }
@@ -549,8 +549,8 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         originalInventory: s.inventory ?? undefined,
         milestoneId: pending.milestoneId, planVersion: pending.planVersion, expected: pending });
       if (result.status !== "verified" || !result.headSha) throw Error("Prerequisite has no verified successor");
-      return { recoveryLifecycle: finishRecovery(recordRecoveryOutcome(settled, { status: "verified", caseId: c.id,
-        sourceHeadSha: result.headSha, assurance: { store: "repair-ledger", ref: pending.repairId } }, true)),
+      return { recoveryLifecycle: finishVerifiedRecovery(settled, { status: "verified", caseId: c.id,
+        sourceHeadSha: result.headSha, assurance: { store: "repair-ledger", ref: pending.repairId } }, true),
         crossDomainCloseout: null, active: null, result: null, reason: null, status: "running" };
     }
     return await withStoryJobLock(job, "assess-original-operation-diagnostic", async () => {

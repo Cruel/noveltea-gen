@@ -7,12 +7,145 @@ import { isDeepStrictEqual } from "node:util";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCase, RecoveryDischarge } from "./generation-recovery-contract.js";
 import type { RecoverySource } from "./generation-recovery-graph.js";
-import type { GenerationInventory } from "./generation-plan.js";
-import type { IdeaHistoryEntry } from "./generation.js";
+import { generationStages, type GenerationInventory, type GenerationStage } from "./generation-plan.js";
+import type { IdeaHistoryEntry, GenerationRequest } from "./generation.js";
+import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
+import { inspectRejectedRepair } from "./rejected-review-repair.js";
+import { inspectRepairLedger } from "./repair-ledger.js";
+import { assertCompletedSelectiveRevalidation } from "./selective-revalidation-work.js";
+import { readEventOnlyOmission, readHistoricalEventOnlyOmission } from "./interactive-event-only.js";
+import { verifiedNarrativeChain } from "./job-successor.js";
+import { inspectInteractiveConflict } from "./interactive-work.js";
+import { readAdaptiveState } from "./adaptive-state.js";
+import { verifyCompletedAdaptiveResponseCorrection, type AdaptiveRecovery } from "./adaptive-protocol.js";
+import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { verifyCorrectedOriginalResult } from "./commit-verification-continuation.js";
 import { git, load } from "./ideas.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { trustedHead } from "./revision.js";
 import { independentObligation, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+
+/** C07: authenticate a previously verified ACTIVE case after its controller
+ * has returned to the original scheduler. No model, author approval, or write
+ * is performed here. The saved lifecycle carries only links to the EXISTING
+ * source authorities, and a later unrelated HEAD must descend from the
+ * correction, not replace the original failed-check provenance. */
+export async function inspectActiveRecoveryResolution(
+  job: JobStartResult, original: RecoveryCase, source: RecoverySource,
+  resolution: RecoveryDischarge,
+  state: { request: GenerationRequest; inventory: GenerationInventory | null },
+): Promise<boolean> {
+  if (resolution.disposition !== "active-verified" ||
+      resolution.case.id !== original.id || source.caseId !== original.id ||
+      !isDeepStrictEqual(resolution.case, original)) return false;
+  const head = await trustedHead(job);
+  git(job, "merge-base", "--is-ancestor", original.origin.sourceHeadSha, resolution.correctedHeadSha);
+  git(job, "merge-base", "--is-ancestor", resolution.correctedHeadSha, head);
+  const { correction, correctedHeadSha } = resolution;
+  const checkpoints = await inspectRecoveryCheckpoints(job);
+  if (correction.store === "review-checkpoint" && correction.ref === correctedHeadSha) {
+    const point = checkpoints.find(p => p.eligible && p.commitSha === correctedHeadSha &&
+      p.validation.status === "passed" &&
+      (p.semanticReview === "passed" || p.semanticReview === "not-required"));
+    if (!point) return false;
+    if (original.origin.operation === "commit-verification" &&
+        source.channel === "operationRecovery" && original.origin.assignmentId) {
+      const operation = source.input as unknown as GenerationOperationRecovery;
+      const verifier = operation.evidence?.verifier;
+      if (operation.operation !== "commit-verification" || !verifier ||
+          verifier.assignmentId !== original.origin.assignmentId ||
+          verifier.resultHeadSha !== correctedHeadSha ||
+          verifier.failureHeadSha !== original.origin.sourceHeadSha ||
+          verifier.planVersion !== original.origin.planVersion ||
+          !generationStages.includes(verifier.stage as GenerationStage)) return false;
+      const assignment = { id: verifier.assignmentId, stage: verifier.stage as GenerationStage,
+        ...(verifier.assignmentId.includes(":") ?
+          { milestone: verifier.assignmentId.slice(verifier.assignmentId.indexOf(":") + 1) } : {}) };
+      return (await verifyCorrectedOriginalResult(job, original.origin.turnDigest,
+        assignment, { status: verifier.resultStatus, headSha: verifier.resultHeadSha },
+        verifier, original.origin.planVersion)).eligible;
+    }
+    if (original.origin.operation === "independent-review" &&
+        original.observation === "returned-failure") {
+      const repair = await inspectRejectedRepair(job, original.origin.sourceHeadSha);
+      const reviews = await resolvedCheckpointReviews(job, checkpoints.filter(p => p.eligible));
+      return repair.phase === "passed" && repair.rootFailureSha === original.origin.sourceHeadSha &&
+        repair.repairedCommitSha === correctedHeadSha &&
+        reviews.get(original.origin.sourceHeadSha) === "not-required";
+    }
+    return original.origin.operation === "independent-review" &&
+      original.observation === "exception" && original.origin.sourceHeadSha === correctedHeadSha;
+  }
+  if (correction.store === "repair-ledger" &&
+      original.origin.operation === "dependency-amendment" &&
+      correction.ref && original.origin.assignmentId?.startsWith("composition:milestone.")) {
+    const milestone = original.origin.assignmentId.slice("composition:".length);
+    const receipt = JSON.parse(await readFile(join(job.stateDir, "prerequisite-items",
+      milestone.slice(10) + ".json"), "utf8")) as {
+      jobId?: string; phase?: string; repairId?: string; commitSha?: string;
+      reviewDigest?: string; review?: { verdict?: string };
+    };
+    if (receipt.jobId !== job.jobId || receipt.phase !== "verified" ||
+        receipt.repairId !== correction.ref || receipt.commitSha !== correctedHeadSha ||
+        receipt.review?.verdict !== "pass" || !receipt.reviewDigest) return false;
+    const ledger = await inspectRepairLedger(job, original.origin.turnDigest);
+    const supported = ledger.prerequisites?.some(entry => entry.id === correction.ref &&
+      entry.status === "resolved" && entry.attempts.some(a =>
+        a.submittedSha === correctedHeadSha && a.verdict === "passed" &&
+        a.reviewDigest === receipt.reviewDigest));
+    if (!supported) return false;
+    await assertCompletedSelectiveRevalidation(job, correctedHeadSha,
+      original.origin.turnDigest, receipt.reviewDigest, true);
+    return true;
+  }
+  if (correction.store === "specialist-receipt" &&
+      original.origin.operation === "specialist-result" &&
+      source.channel === "operationRecovery" &&
+      original.origin.assignmentId?.startsWith("interactive:milestone.")) {
+    const milestone = original.origin.assignmentId.slice("interactive:".length);
+    if (correction.ref !== "interactive-event-only/" + milestone.slice(10) + ".json" ||
+        correctedHeadSha !== original.origin.sourceHeadSha ||
+        state.inventory?.items.find(item => item.id === original.origin.assignmentId)?.status !== "verified")
+      return false;
+    const originalInput = source.input as unknown as GenerationOperationRecovery;
+    const negative = originalInput.evidence?.interactiveNoWrite;
+    if (!negative || negative.milestoneId !== milestone || negative.expectedHead !== correctedHeadSha)
+      return false;
+    const conflict = await inspectInteractiveConflict(job, milestone, true);
+    if (conflict.reportDigest !== negative.reportDigest || conflict.worker !== "pi") return false;
+    const saved = JSON.parse(await readFile(join(job.stateDir,
+      "interactive-items", milestone.slice(10) + ".json"), "utf8")) as {
+      units?: Array<{ phase?: string; eventOnly?: { nonce: string; digest: string } }>;
+    };
+    const [choice, puzzle] = saved.units ?? [];
+    if (choice?.phase !== "not-applicable" || puzzle?.phase !== "not-applicable" ||
+        !choice.eventOnly || !isDeepStrictEqual(choice.eventOnly, puzzle.eventOnly) ||
+        correction.digest !== choice.eventOnly.digest) return false;
+    if (head === correctedHeadSha) await readEventOnlyOmission(job, milestone, choice.eventOnly);
+    else {
+      await verifiedNarrativeChain(job, correctedHeadSha, head);
+      await readHistoricalEventOnlyOmission(job, milestone, choice.eventOnly);
+    }
+    const adaptive = await readAdaptiveState(job, original.origin.turnDigest,
+      original.origin.planVersion!);
+    return !!adaptive?.supersessions?.some(entry => entry.assignmentId === original.origin.assignmentId &&
+      entry.sourceSha === correctedHeadSha && isDeepStrictEqual(entry.omission, choice.eventOnly));
+  }
+  if (correction.store === "response-contract" && source.channel === "recovery" &&
+      original.origin.operation === "adaptive-admission") {
+    const input = source.input as unknown as AdaptiveRecovery;
+    if (correction.ref !== input.proof.file || correctedHeadSha !== original.origin.sourceHeadSha)
+      return false;
+    return verifyCompletedAdaptiveResponseCorrection(job, { ...input, phase: "assessment" });
+  }
+  if (correction.store === "graph-checkpoint" && source.channel === "operationRecovery" &&
+      original.origin.operation === "scheduling" && correctedHeadSha === original.origin.sourceHeadSha &&
+      correction.ref === original.origin.failureAnchor.ref && state.request.turnPlanDigest) {
+    return !!await readTurnEvidence(job, state.request.contract, state.request.task,
+      state.request.turnPlanDigest);
+  }
+  return false;
+}
 
 export interface DeferredResolutionState {
   inventory: GenerationInventory | null;

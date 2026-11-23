@@ -162,6 +162,7 @@ async function authenticatedCorrectionHeads(job: JobStartResult, state: Receipt)
 export async function assertCompletedSelectiveRevalidation(
   job: JobStartResult, successorSha: string, turnDigest: string,
   correctionReviewDigest?: string,
+  historicalAudit = false,
 ) {
   if (!SHA.test(successorSha) || !DIGEST.test(turnDigest))
     throw Error("Revalidation gate lacks pinned Story or Turn identity.");
@@ -192,11 +193,15 @@ export async function assertCompletedSelectiveRevalidation(
   if (state.correctiveAssignment)
     throw Error("A pending original-owner correction cannot be certified as completed.");
   const heads = await authenticatedCorrectionHeads(job, state);
-  // Every completion belongs to one exact verified Story source. Reusing a
-  // passing review after later unrelated commits would silently skip impact.
-  if (!state.finalHead || state.finalHead !== await trustedHead(job))
+  // Normal Composition admission still requires the EXACT current source.
+  // C07 historical recovery audit may accept a later HEAD only after proving
+  // every intervening canonical commit through the existing successor chain;
+  // this does not carry the old dependent Review into a new assignment.
+  const current = await trustedHead(job);
+  if (!state.finalHead || (!historicalAudit && state.finalHead !== current))
     throw Error("Dependent carry-forward is stale against the current verified Story HEAD.");
   await verifiedNarrativeChain(job, successorSha, state.finalHead);
+  if (historicalAudit) await verifiedNarrativeChain(job, state.finalHead, current);
   const expected = [...state.proposal.affected, ...state.proposal.unknown];
   if (new Set(expected).size !== expected.length || state.results.length !== expected.length ||
       new Set(state.results.map(r => r.itemId)).size !== expected.length ||

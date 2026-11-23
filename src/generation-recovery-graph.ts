@@ -18,7 +18,7 @@ import {
   admitRecovery,
   decideRecovery,
   emptyRecoveryLifecycle,
-  finishRecovery,
+  finishVerifiedRecovery,
   inspectionFence,
   recoveryAdmission,
   recoveryCaseId,
@@ -538,18 +538,10 @@ export async function applyDomainRecovery(
         l = fence(l, "Missing independently verified completion receipt");
       else
         l = safelyTransition(l, () =>
-          finishRecovery(
-            recordRecoveryOutcome(
-              l,
-              {
-                status: "verified",
-                caseId: c.id,
-                sourceHeadSha: assurance.verifiedHead!,
-                assurance: assurance.verifiedReceipt!,
-              },
-              true,
-            ),
-          ),
+          finishVerifiedRecovery(l, {
+            status: "verified", caseId: c.id, sourceHeadSha: assurance.verifiedHead!,
+            assurance: assurance.verifiedReceipt!,
+          }, true),
         );
     } else if (object(raw)) {
       if (raw.phase === "continued") {
@@ -583,18 +575,10 @@ export async function applyDomainRecovery(
           l = fence(l, "Protocol completion has no original source and verified effect receipt");
         else
           l = safelyTransition(l, () =>
-            finishRecovery(
-              recordRecoveryOutcome(
-                l,
-                {
-                  status: "verified",
-                  caseId: c.id,
-                  sourceHeadSha: assurance.verifiedHead!,
-                  assurance: assurance.verifiedReceipt!,
-                },
-                true,
-              ),
-            ),
+            finishVerifiedRecovery(l, {
+              status: "verified", caseId: c.id, sourceHeadSha: assurance.verifiedHead!,
+              assurance: assurance.verifiedReceipt!,
+            }, true),
           );
       } else if (raw.phase === "fenced" && assurance.authorControl) {
         l = l.decision

@@ -29,7 +29,7 @@ export const reviewedReturnExits = {
     "e4b08665b2511bc8:G 1b68a6bf68ff6ba6:R 8d7a42cbc9b16f12:R 0d9e6ec6e5934712:G 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G 68f520279c4733e1:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
   dependency_amendment: "cfba761fff836f54:S 0a126b3a9f0f9f2b:G 179232cd4e6294bf:S 0769876482d9a3e7:R",
   independent_assignment_review:
-    "418d3dec6f744971:S 418d3dec6f744971:S 4d0c3b0ac80f6dc6:B afdf1326cc4166fc:V 9fe665d7fe799027:R 418d3dec6f744971:S",
+    "418d3dec6f744971:S 418d3dec6f744971:S 4d0c3b0ac80f6dc6:B f4182fbeb1e79313:V 9fe665d7fe799027:R 418d3dec6f744971:S",
   verify_committed_work:
     "1de161a5ffd576bc:G 3585ea4da1b9e523:B 4c68a7532035bcf2:G 46be02fd000dbeda:R 54958ad74d3d985c:G a93c92edb8171d44:G 179232cd4e6294bf:S a426d6990d0699f1:R",
   completion_decision:

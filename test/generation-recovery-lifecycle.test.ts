@@ -5,6 +5,7 @@ import {
   decideRecovery,
   emptyRecoveryLifecycle,
   finishRecovery,
+  finishVerifiedRecovery,
   deferRecoveryForIndependentWork,
   dischargePendingRecovery,
   selectPendingRecovery,
@@ -124,6 +125,48 @@ test("C02 distinct authenticated failures serialize with original assignment ide
   state = finishRecovery(state);
   assert.equal(state.active?.id, second.id);
   assert.equal(state.phase, "assessing");
+});
+
+test("C07 verified correction persists original identity and successor proof across reentry", async () => {
+  const first = caseOf(await admitted());
+  const second = caseOf(await admitted({ ...origin, failureAnchor: {
+    ...origin.failureAnchor, failedCheckInstanceId: "next-original-check",
+  } }));
+  const correction = { status: "verified" as const, caseId: first.id,
+    sourceHeadSha: "c".repeat(40), assurance: { store: "review-checkpoint" as const, ref: "c".repeat(40) } };
+  let lifecycle = admitRecovery(emptyRecoveryLifecycle(), { outcome: "admitted", case: first });
+  lifecycle = admitRecovery(lifecycle, { outcome: "admitted", case: second });
+  lifecycle = decideRecovery(lifecycle, { schema: "noveltea-generation-recovery-decision/v1",
+    caseId: first.id, checkedSourceHeadSha: source, evidence: [evidence],
+    action: "reconcile-effects", adapter: "original-specialist", originalRef: evidence });
+  lifecycle = finishVerifiedRecovery(lifecycle, correction, true);
+  assert.equal(lifecycle.active?.id, second.id);
+  assert.equal(lifecycle.phase, "assessing");
+  assert.deepEqual(lifecycle.discharged, [{ case: first, correction: correction.assurance,
+    correctedHeadSha: correction.sourceHeadSha, disposition: "active-verified" }]);
+  assert.deepEqual(admitRecovery(lifecycle, { outcome: "admitted", case: first }), lifecycle,
+    "replaying the original failed check cannot invoke a new correction");
+  assert.throws(() => finishVerifiedRecovery(lifecycle, correction, true), /source-mismatched|resolved|paused/i);
+});
+
+test("C07 restarting a resolved active case requires its original correction assurance", async () => {
+  const first = caseOf(await admitted());
+  let state = admitRecovery(emptyRecoveryLifecycle(), { outcome: "admitted", case: first });
+  state = decideRecovery(state, { schema: "noveltea-generation-recovery-decision/v1",
+    caseId: first.id, checkedSourceHeadSha: source, evidence: [evidence],
+    action: "reconcile-effects", adapter: "original-specialist", originalRef: evidence });
+  state = finishVerifiedRecovery(state, { status: "verified", caseId: first.id,
+    sourceHeadSha: "c".repeat(40), assurance: { store: "review-checkpoint", ref: "c".repeat(40) } }, true);
+  const reader = { current: state, request: { jobId: origin.jobId,
+    jobThreadId: origin.jobThreadId, graphThreadId: origin.graphThreadId,
+    turnDigest: origin.turnDigest }, checkpointRef: evidence, authenticate: trusted,
+    authenticateDischarge: async () => true };
+  const inspected = await verifyRecoveryCheckpoint(reader);
+  assert.deepEqual(inspected, state);
+  const tampered = await verifyRecoveryCheckpoint({ ...reader, authenticateDischarge: async () => false });
+  assert.equal(tampered.phase, "fenced");
+  assert.equal(tampered.active, null);
+  assert.equal(tampered.inspectionFences.length, 1);
 });
 
 test("C02 no model attempt is inferred from assessment, prepared or missing Pi start proof", async () => {

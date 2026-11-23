@@ -10,7 +10,7 @@ import type { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { JobStartResult } from "./job.js";
 import type { GenerationRequest, IdeaHistoryEntry } from "./generation.js";
 import type { GenerationInventory } from "./generation-plan.js";
-import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
+import { inspectActiveRecoveryResolution, inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { git as jobGit } from "./ideas.js";
 import type { RecoveryDecision, RecoveryEvidence, RecoveryLifecycle, RecoveryOrigin } from "./generation-recovery-contract.js";
 import { verifyRecoveryCheckpoint } from "./generation-recovery-lifecycle.js";
@@ -406,6 +406,9 @@ export async function inspectModernGenerationRecovery(
       const source = sourceFor(discharge.case.id);
       if (!inputsValid || !source) return false;
       try {
+        if (discharge.disposition === "active-verified")
+          return await inspectActiveRecoveryResolution(job, discharge.case, source,
+            discharge, { request, inventory: (values.inventory as GenerationInventory | null) ?? null });
         return !!await inspectDeferredCorrection(job, discharge.case, source, {
           inventory: (values.inventory as GenerationInventory | null) ?? null,
           ideaHistory: (values.ideaHistory as IdeaHistoryEntry[] | undefined) ?? [],

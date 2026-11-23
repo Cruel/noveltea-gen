@@ -347,7 +347,7 @@ export function admitRecovery(state: RecoveryLifecycle, admission: RecoveryAdmis
   }
   const item = admission.case;
   if (!validCase(item)) throw Error("Invalid or fabricated recovery case identity");
-  const incumbent = [state.active, ...state.pending]
+  const incumbent = [state.active, ...state.pending, ...state.discharged.map(entry => entry.case)]
     .filter((c): c is RecoveryCase => !!c)
     .find((c) => sameAnchor(c, item));
   if (incumbent && !sameFailure(incumbent, item))
@@ -506,6 +506,26 @@ export function finishRecovery(state: RecoveryLifecycle): RecoveryLifecycle {
     decision: null,
     attempt: null,
   };
+}
+
+/** One verified disposition is the only active-case exit into the original
+ * scheduler. The original case, exact successor HEAD and source receipt remain
+ * in the SAME lifecycle for restart authentication and attempt deduplication.
+ * The existing native/Review/owner adapter must authenticate before calling. */
+export function finishVerifiedRecovery(
+  state: RecoveryLifecycle,
+  outcome: Extract<RecoveryAdapterOutcome, { status: "verified" }>,
+  authenticated: boolean,
+): RecoveryLifecycle {
+  const verified = recordRecoveryOutcome(state, outcome, authenticated);
+  const original = verified.active!;
+  if (verified.discharged.some(entry => sameAnchor(entry.case, original)))
+    throw Error("Verified recovery would duplicate an original failure disposition");
+  const completed = finishRecovery(verified);
+  return { ...completed, discharged: [...completed.discharged, {
+    case: original, correction: outcome.assurance, correctedHeadSha: outcome.sourceHeadSha,
+    disposition: "active-verified" as const,
+  }] };
 }
 
 /** Independent work may proceed, but the unresolved case stays pending and
@@ -703,7 +723,8 @@ export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Pr
     value.attempt !== undefined &&
     value.pending.every(validCase) &&
     value.discharged.every(entry => entry && validCase(entry.case) &&
-      validEvidence(entry.correction) && hex40.test(entry.correctedHeadSha)) &&
+      validEvidence(entry.correction) && hex40.test(entry.correctedHeadSha) &&
+      (entry.disposition === undefined || entry.disposition === "active-verified")) &&
     new Set([...value.pending, ...(value.active ? [value.active] : []),
       ...value.discharged.map(entry => entry.case)].map(c => c.id)).size ===
       value.pending.length + (value.active ? 1 : 0) + value.discharged.length &&

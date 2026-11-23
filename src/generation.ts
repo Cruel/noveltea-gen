@@ -21,7 +21,7 @@ import { selectOperationStrategy, executeOperationStrategy,
 import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
 import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
-  finishRecovery, recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
+  finishVerifiedRecovery, recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
@@ -2365,10 +2365,10 @@ export function createGenerationGraph(
           return { status: "blocked" as const,
             reason: "Original failed independent Review has no independently passing corrective successor." };
         return { ...reviewed,
-          recoveryLifecycle: finishRecovery(recordRecoveryOutcome(selected, {
+          recoveryLifecycle: finishVerifiedRecovery(selected, {
             status: "verified", caseId: original.id, sourceHeadSha: head,
             assurance: { store: "review-checkpoint", ref: head },
-          }, true)), status: "running" as const, reason: null };
+          }, true), status: "running" as const, reason: null };
       }
       // A trusted negative Review disposition must reach the same typed
       // assessment as a thrown reviewer failure. Keep the existing persistent

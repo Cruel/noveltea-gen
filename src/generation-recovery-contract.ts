@@ -201,13 +201,16 @@ export type RecoveryAdapterOutcome =
   | Readonly<{ status: "verified"; caseId: string; sourceHeadSha: string; assurance: RecoveryEvidence }>
   | Readonly<{ status: "stopped"; caseId: string; decision: RecoveryDecision }>;
 
-/** Historical no-write obligation discharged by a LATER, independently
- * authenticated correction. Only links to existing Git/Review/Idea receipts
- * are stored; original case identity is retained for restart verification. */
+/** Source-linked resolution of a historical recovery case. Existing deferred
+ * no-write discharges retain their original shape; C07 also persists the exact
+ * verified successor of an active correction so restart can authenticate it. */
 export type RecoveryDischarge = Readonly<{
   case: RecoveryCase;
   correction: RecoveryEvidence;
   correctedHeadSha: string;
+  /** Absent for legacy/later deferred corrections. An active correction never
+   * gains a second model invocation or changes its original failure anchor. */
+  disposition?: "active-verified";
 }>;
 
 /** Checkpoint data for C02, not a second side-effect or semantic issue ledger. */
@@ -216,7 +219,7 @@ export type RecoveryLifecycle = Readonly<{
   /** Oldest eligible case owns the mutation lane; other cases stay pending. */
   active: RecoveryCase | null;
   pending: readonly RecoveryCase[];
-  /** Append-only resolved pending obligations, with source-grounded later proof. */
+  /** Append-only resolved obligations (deferred and active), with source-bound proof. */
   discharged: readonly RecoveryDischarge[];
   /** No caseId or decision exists for an unauthenticated admission. These
    * inspection-only fences block mutation and survive resume independently. */

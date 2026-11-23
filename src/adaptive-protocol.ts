@@ -118,6 +118,19 @@ export async function verifyAdaptiveRecoveryProof(job: JobStartResult, decision:
     throw Error("Original adaptive response changed");
 }
 
+/** C07 read-only restart proof for a finished format-only correction. The
+ * original negative Pi prefix and the terminal accepted same-session receipt
+ * must both remain authentic; completion prose cannot settle this case. */
+export async function verifyCompletedAdaptiveResponseCorrection(job: JobStartResult,
+  original: AdaptiveRecovery): Promise<boolean> {
+  await verifyAdaptiveRecoveryProof(job, original);
+  const completed = await inspectCompletedProtocolReads({
+    receiptFile: join(job.stateDir, "adaptive-protocol", original.signature),
+    sourceDigest: original.signature, contract, sessionRoots: [dirname(original.proof.file)],
+  });
+  return completed.sessionFile === original.proof.file;
+}
+
 /** Read-only eligibility gate. A declared fix is not enough: the original
  * terminal receipt and transcript must survive, and the newly shipped
  * contract must actually accept the SAME exhausted response. */
