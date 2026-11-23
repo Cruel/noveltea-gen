@@ -1377,6 +1377,74 @@ async function runFixtureRecoveryGraph(
   }
 }
 
+test("#240 production closeout cannot promote a fixture Event to a Pi-owned review grant", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("c03-closeout-full-graph");
+  f.env.NT_EVENT_FIXTURE_CASE = "decision-pending";
+  f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  saveFixtureTurn(f.job, contract, f.start[3]!,
+    ["Retain original Event decisions and close Milestone only after authored Choice outcomes."]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
+    /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const eventStop = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(eventStop.status, "paused", JSON.stringify(eventStop));
+  await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+  const handoff = f.cli(["generate", "resume", "--pause-after", "interactive"]);
+  assert.equal(handoff.status, "blocked");
+  assert.match(handoff.reason, /separately sealed independent semantic Review/);
+  assert.notEqual(handoff.operationRecovery?.operation, "specialist-result",
+    "A legitimate fixture Review handoff cannot be recast as a failed writer");
+  const interactive = ["interactive", "run", "--milestone", "milestone.disclosure",
+    "--fixture", "--skills-source", source];
+  assert.match(f.cli(interactive, false), /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "interactive-choice-disclosure");
+  const second = f.cli(interactive);
+  assert.match(second.status, /interactive|committed|pending/i);
+  const puzzlePoint = (await inspectRecoveryCheckpoints(f.job))
+    .find(point => point.workItem === "interactive-puzzle-disclosure");
+  if (puzzlePoint?.semanticReview === "required-pending") {
+    await sealFixtureGenerationCheckpoint(f, "interactive-puzzle-disclosure");
+    assert.equal(f.cli(interactive).status, "interactive-slice-committed");
+  }
+  const { preflightCompositionBoundary } =
+    await import("../src/cross-domain-prerequisite-controller.js");
+  const eventFile = join(f.job.stateDir, "event-items/disclosure.json");
+  const event = JSON.parse(readFileSync(eventFile, "utf8"));
+  assert.equal(event.validation.milestoneState, "partial-choice-pending");
+  const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const before = await inspectRecoveryCheckpoints(f.job);
+  const eventCheckpoint = before.find(point => point.workItem === "event-disclosure");
+  assert.ok(eventCheckpoint?.eligible && eventCheckpoint.semanticReview === "passed");
+  assert.equal(eventCheckpoint.assurance?.turnDigest, turn.digest);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  // A structural fixture's independently sealed original checkpoint cannot
+  // become a production-Pi Event merely by changing its saved worker field.
+  writeFileSync(eventFile, JSON.stringify({ ...event, worker: "pi" }));
+  const boundary = await preflightCompositionBoundary(f.job, {
+    story: f.story, job: "single", contract, task: f.start[3]!, fixture: false,
+    turnPlanDigest: turn.digest, skillsSource: source,
+  }, "milestone.disclosure", event.planVersion);
+  assert.equal(boundary.kind, "refuse", JSON.stringify(boundary));
+  assert.match(boundary.reason, /independently reviewed|Turn-bound|checkpoint/);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  const after = await inspectRecoveryCheckpoints(f.job);
+  assert.equal(after.some(point => point.workItem === "event-disclosure" &&
+    point.eligible && point.semanticReview === "passed"), false,
+  "Changing the worker invalidates the original independently sealed Event checkpoint");
+});
+
 test("C03 production graph sends an authenticated settled Event no-write to one actual read-only Pi diagnosis", {
   skip: !available,
 }, async () => {

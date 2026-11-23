@@ -2220,6 +2220,15 @@ export function createGenerationGraph(
           const receipt = await checkPlan(job, s.request, s.planVersion);
           const planVersion = receipt?.plan?.version ?? null;
           const stage = s.active!.stage;
+          // A fixture-only multi-specialist handoff has no independent Pi
+          // reviewer. It must stop for separately sealed semantic review,
+          // not fabricate a failed specialist-result recovery case. Real Pi
+          // runs keep their existing reviewer/reentry path unchanged.
+          if (s.request.fixture && s.result?.status === "review-handoff")
+            return { nonsemanticStop: "fixture-verdict" as const, status: "blocked" as const,
+              reason: "Fixture specialist is awaiting a separately sealed independent " +
+                "semantic Review. A structural fixture handoff is not a failed writer " +
+                "or an authorization to waive the original Review." };
           if (!s.result || !accepted[stage].includes(s.result.status))
             return operationFailure(s, job, "specialist-result",
               "Missing or unaccepted specialist result: " + (s.result?.status ?? "absent"),
