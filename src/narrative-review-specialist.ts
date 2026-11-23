@@ -155,7 +155,8 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   reviewKind: "narrative" | "turn-completeness" | "assignment-fidelity" |
     "assignment-diagnostic" = "narrative",
   freshProtocol = false,
-  postcommit?: { id: string; reviewer?: { id: string; file: string }; protocolFresh?: boolean }) {
+  postcommit?: { id: string; reviewer?: { id: string; file: string }; protocolFresh?: boolean },
+  independentReviewKey?: string) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: role === "review"
@@ -174,10 +175,13 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
     ...(freshProtocol || postcommit?.protocolFresh ? ["protocol-fresh"] : []));
   const context = role === "review" && assignment
     ? await preparePiContext(job, project, {
-      group: postcommit ? "assignment-fidelity:" + postcommit.id +
+      group: independentReviewKey ? reviewKind + ":" + assignment.planVersion +
+        ":independent:" + independentReviewKey :
+        postcommit ? "assignment-fidelity:" + postcommit.id +
         (freshProtocol || postcommit.protocolFresh ? ":protocol-fresh" : "") :
         reviewKind + ":" + assignment.planVersion + (freshProtocol ? ":protocol-fresh" : ""),
       step: reviewKind + ":" + assignment.planVersion + ":" + job.headSha +
+        (independentReviewKey ? ":independent:" + independentReviewKey : "") +
         (freshProtocol ? ":protocol-fresh" : ""),
       paths: ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
         ? [] : assignment.paths, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir,
@@ -234,8 +238,14 @@ function completedReads(session: Awaited<ReturnType<typeof sessionFor>>["session
 export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: ReviewAssignment, provider: string, model: string,
   thinking: "low" | "high" | undefined, onSession: (file: string) => Promise<void>,
+  /** Independent verdicts whose transcripts will be sealed separately must
+   * never append to one another, even when reviewing the same Story HEAD.
+   * Original same-session protocol corrections do not set this key. */
+  independentReviewKey?: string,
 ): Promise<EditorialVerdict> {
-  const { session, project, pinned, context } = await sessionFor(job, snapshot, provider, model, thinking, "review", undefined, assignment);
+  const { session, project, pinned, context } = await sessionFor(job, snapshot,
+    provider, model, thinking, "review", undefined, assignment,
+    "narrative", false, undefined, independentReviewKey);
   try {
     const file = session.sessionManager.getSessionFile();
     if (file) await onSession(file);

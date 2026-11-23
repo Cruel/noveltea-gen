@@ -3,16 +3,22 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { createSkillSnapshot } from "../src/snapshot.js";
+import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
+import { authorMilestoneCloseout } from "../src/cross-domain-closeout-specialist.js";
+import { withStoryJobLock } from "../src/job-lock.js";
+import { withJobModelRuntime } from "../src/model-runtime.js";
+import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
+  scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 import { removeTestTree } from "./helpers.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair,
   settlePrerequisiteRepair } from "../src/repair-ledger.js";
 import { verifyCrossDomainCloseoutSuccessor, closeoutReviewDigest,
   verifyLegacyCloseoutReviewTranscript, recoveredCloseoutReview,
   inspectPublishedCloseoutCommit, inspectInterruptedCloseoutCommit } from "../src/cross-domain-closeout-work.js";
-import type { ReviewAssignment } from "../src/narrative-review-specialist.js";
+import { reviewNarrative, type ReviewAssignment } from "../src/narrative-review-specialist.js";
 import { validCloseoutProposal, retryCloseoutProposal,
   type CloseoutProposal } from "../src/cross-domain-prerequisite.js";
 import type { JobStartResult } from "../src/job.js";
@@ -131,6 +137,122 @@ NovelTea-Prerequisite: ${proposal.digest}`);
   return { job, root, target, stateDir, snapshot, turnDigest, admitted,
     proposal, receiptFile, state, before, after, trailers, path };
 }
+test("#240: a genuine scripted Pi correction starts, edits only its bounded Milestone and settles in one original session", async t => {
+  const f = await setup(t);
+  // The disposable fixture keeps private Pi transcripts and the skill cache
+  // under its Git root. They are not canonical Story content.
+  writeFileSync(join(f.root, ".git", "info", "exclude"),
+    "/state/\n/skill-cache/\n");
+  const checkout = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
+  const snapshot = await createSkillSnapshot({ discovery: "explicit-only",
+    novelteaSkills: checkout, skillDirs: [],
+    requiredSkills: ["nt-event-design", "nt-catalog"] });
+  assert.ok(snapshot);
+  // The prebuilt signed fixture closeout is not a model execution. Return to
+  // the actual before-HEAD and require Pi to perform the edit with its own
+  // authenticated tool invocation rather than accepting the fixture's bytes.
+  git(f.root, "reset", "--hard", f.before);
+  assert.equal(readFileSync(f.target, "utf8"), original);
+  const cleanup = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  t.after(cleanup);
+  const mandatory = boundedPinnedSources("nt-event-design").map(path => "skill://" + path);
+  const { runtime, observed } = await scriptedStoryRuntime(index => {
+    if (index === 0) return {
+      content: scriptedReadCalls([...mandatory, f.path], index), reason: "toolUse",
+    };
+    if (index === 1) return {
+      content: [{
+        type: "toolCall", id: "bounded-milestone-original-edit", name: "edit",
+        arguments: { path: f.path, edits: [{
+          oldText: "completeness: partial\\nfulfillment:\\n  any_of: []".replace(/\\n/g, "\n"),
+          newText: "completeness: complete\\nfulfillment:\\n  any_of:\\n    - [event.setup]".replace(/\\n/g, "\n"),
+        }] },
+      }], reason: "toolUse",
+    };
+    if (index === 2) return {
+      content: scriptedText({ verdict: "pass",
+        evidence: [f.path + ":5"],
+        reason: "The existing reachable Event now proves the original Milestone." }),
+      reason: "stop",
+    };
+    throw Error("A bounded source-backed correction cannot require another Pi turn.");
+  });
+  let originalSession = "";
+  const verified = await withJobModelRuntime(runtime, () =>
+    withStoryJobLock(f.job, "test-original-milestone-closeout", () => authorMilestoneCloseout(
+      f.job, snapshot, f.proposal, [f.path], scriptedModel.provider, scriptedModel.id,
+      async file => { originalSession = file; },
+      async () => readFileSync(f.target, "utf8") === completed ? [] :
+        ["The original bounded fields have not been correctly amended."],
+    )));
+  assert.equal(verified.sessionFile, originalSession);
+  assert.deepEqual(verified.evidence, [f.path + ":5"]);
+  assert.equal(readFileSync(f.target, "utf8"), completed);
+  assert.equal(observed.length, 3, "One independent bounded Pi session, not retried authoring");
+  assert.ok(observed[0]?.tools.includes("read") &&
+    observed[0]?.tools.includes("edit") &&
+    !observed[0]?.tools.includes("write"),
+    "The Event closeout never receives general file-write tools");
+  const transcript = readFileSync(originalSession, "utf8");
+  assert.match(transcript, /bounded-milestone-original-edit/);
+  assert.equal(git(f.root, "rev-parse", "HEAD"), f.before,
+    "The correcting agent may edit only; controller still owns the Git commit");
+  assert.match(git(f.root, "status", "--porcelain"), /milestones\/choice-enacted\.md/);
+  git(f.root, "add", "--", "story/" + f.path);
+  git(f.root, "commit", "-qm", [
+    "Finish source-bound Milestone", "",
+    "NovelTea-Job: " + f.job.jobId,
+    "NovelTea-Work-Item: prerequisite-choice-enacted",
+    "NovelTea-Plan-Version: 2",
+    "NovelTea-Prerequisite: " + f.proposal.digest,
+  ].join("\n"));
+  const corrected = git(f.root, "rev-parse", "HEAD");
+  const reviewSnapshot = await createSkillSnapshot({ discovery: "explicit-only",
+    novelteaSkills: checkout, skillDirs: [],
+    requiredSkills: ["nt-narrative-review", "nt-catalog"] });
+  assert.ok(reviewSnapshot);
+  const reviewSources = [...boundedPinnedSources("nt-narrative-review"),
+    "nt-catalog/references/glossary.md"].map(path => "skill://" + path);
+  const { runtime: reviewerRuntime, observed: reviewerCalls } =
+    await scriptedStoryRuntime(index => {
+      if (index === 0) return {
+        content: scriptedReadCalls([...reviewSources, f.path], index),
+        reason: "toolUse",
+      };
+      if (index === 1) return {
+        content: scriptedText({ verdict: "pass", findings: [],
+          evidence: [f.path + ":5"] }), reason: "stop",
+      };
+      throw Error("The original independent reviewer must not run another turn.");
+    });
+  const assignment: ReviewAssignment = {
+    contract: {}, planVersion: 2, scopeIds: [f.proposal.milestoneId],
+    paths: [f.path], routes: [], milestoneRoutes: [], puzzleRoutes: [],
+    outstanding: [], uncertainties: [],
+    specialistAssignments: [{ id: "prerequisite:" + f.proposal.milestoneId,
+      specialist: "nt-event-design", outcome: "Verify the exact Milestone field amendment",
+      targets: [f.proposal.milestoneId],
+      authority: { recordTypes: ["milestone"], existingPaths: [f.path],
+        mayCreate: false } }],
+  };
+  let independentSession = "";
+  const review = await withJobModelRuntime(reviewerRuntime, () =>
+    withStoryJobLock(f.job, "test-independent-original-closeout-review", () =>
+      reviewNarrative({ ...f.job, headSha: corrected }, reviewSnapshot, assignment,
+        scriptedModel.provider, scriptedModel.id, undefined,
+        async file => { independentSession = file; })));
+  assert.equal(review.verdict, "pass");
+  assert.deepEqual(review.evidence, [f.path + ":5"]);
+  assert.equal(reviewerCalls.length, 2);
+  assert.ok(reviewerCalls.every(call => !call.tools.includes("write") &&
+    !call.tools.includes("edit") && !call.tools.includes("bash")),
+  "Independent reviewer receives no mutating Story tools");
+  assert.notEqual(independentSession, originalSession,
+    "Independent Review must never reuse the original author's conversation");
+  assert.match(readFileSync(independentSession, "utf8"), /c03-read-0/);
+  assert.equal(git(f.root, "status", "--porcelain"), "");
+});
+
 test("#240: authored closeout reconciles exactly one already-published original commit without writer replay", async t => {
   const f = await setup(t);
   // The original Pi session and authored-byte digest were durable before Git

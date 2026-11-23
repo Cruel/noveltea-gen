@@ -30,7 +30,7 @@ export const reviewedReturnExits = {
   dependency_amendment: "cfba761fff836f54:S 0a126b3a9f0f9f2b:G 179232cd4e6294bf:S 0769876482d9a3e7:R",
   independent_assignment_review: "9c7ec85aecee7718:S",
   verify_committed_work:
-    "b1efe5427822edd2:G 46be02fd000dbeda:R 54958ad74d3d985c:G a93c92edb8171d44:G 179232cd4e6294bf:S a426d6990d0699f1:R",
+    "1de161a5ffd576bc:G 3585ea4da1b9e523:B 4c68a7532035bcf2:G 46be02fd000dbeda:R 54958ad74d3d985c:G a93c92edb8171d44:G 179232cd4e6294bf:S a426d6990d0699f1:R",
   completion_decision:
     "5385d07936bbd87c:G e82ddace3d270648:S eb5fa434a0efca05:G cfba761fff836f54:S c1f5e16016e58ad7:R 74dad1e1bf39f6fd:F a2d2475ad5855eb0:G 57ac6aa2cc516c6b:G 678d9eac34f185a1:V 179232cd4e6294bf:S a6065c07bce79074:R",
   reconcile:
@@ -58,7 +58,7 @@ export const reviewedThrowExits = {
   specialist_dispatch: "b306d96cffbf864c 95fa1456013e2d48 a1beda487210eb50",
   dependency_amendment: "31c32f029ac15a97 4b99521c61fca4d0",
   independent_assignment_review: "",
-  verify_committed_work: "a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",
+  verify_committed_work: "302ad04127f5c981 8c468a57ba68bc74 a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",
   completion_decision: "a71c76f34850a2b8 07a14758d9e6bb2b",
   reconcile:
     "ade1624015af836b e5408683d3fb1dd8 576cff1c194705a5 38db02fe8a6067ea 910345f2baa6e195 c592b6404d524e14 c2b63cf0a6d3c52b ae7ecf07a7181d6c 0d380425d6ace20e",
@@ -86,7 +86,7 @@ export const reviewedStatusExits = {
   specialist_dispatch: "fb8dc871bfe4bc06:G",
   dependency_amendment: "",
   independent_assignment_review: "",
-  verify_committed_work: "7eabfb98aa4c295e:G 64104e1034916182:U f309314d6c8adbdd:G 64104e1034916182:U",
+  verify_committed_work: "e0394fa2f3847b80:B f309314d6c8adbdd:G 7eabfb98aa4c295e:G 64104e1034916182:U f309314d6c8adbdd:G 64104e1034916182:U",
   completion_decision:
     "e0394fa2f3847b80:F f309314d6c8adbdd:G e0394fa2f3847b80:F f309314d6c8adbdd:G 650759c538e40764:V",
   reconcile:

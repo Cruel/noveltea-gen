@@ -8,6 +8,11 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
+import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
+  scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
+import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
+import { runEventWorkItem } from "../src/event-work.js";
+import { withJobModelRuntime } from "../src/model-runtime.js";
 import { startStoryJob } from "../src/job.js";
 import { validateStoryJob } from "../src/validator.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
@@ -1377,6 +1382,329 @@ async function runFixtureRecoveryGraph(
   }
 }
 
+test("#240 original staged Event is authentically authored by a scripted Pi agent", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("c03-original-pi-event");
+  f.env.NT_ARCHITECTURE_FIXTURE_CASE = "decision-choice";
+  f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  saveFixtureTurn(f.job, contract, f.start[3]!, [
+    "Release and withhold must produce independently evidenced Choice consequences.",
+  ]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
+    /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const saved = Object.fromEntries(["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR",
+    "NT_SANDBOX_SOCKET", "NT_SANDBOX_TOKEN_FILE",
+    "NT_ARCHITECTURE_FIXTURE_CASE"].map(key => [key, process.env[key]]));
+  Object.assign(process.env, {
+    NT_STATE_DIR: f.env.NT_STATE_DIR,
+    NT_CONFIG_FILE: f.env.NT_CONFIG_FILE,
+    NT_SKILL_CACHE_DIR: f.env.NT_SKILL_CACHE_DIR,
+    NT_ARCHITECTURE_FIXTURE_CASE: f.env.NT_ARCHITECTURE_FIXTURE_CASE,
+  });
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const readSources = [...boundedPinnedSources("nt-event-design").map(p => "skill://" + p),
+      "milestones/disclosure.md"];
+    const plan = { schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.disclosure",
+      events: [{ id: "disclose-ledger", purpose: "The witness presents the concealed record",
+        dependsOn: [], participants: ["character.ada", "character.neri"],
+        evidence: [{ anchorPath: "milestones/disclosure.md",
+          source: "A transfer record Neri can physically present",
+          observation: "Ada sees the ledger and the prospective release decision",
+          access: "Neri has the preserved original, Ada is present",
+          establishes: "The witness knows where the evidence is kept",
+          limits: "The release and withhold consequences still need Choice authorship" }],
+        knowledge: "Ada sees the ledger; only a future player choice determines its release",
+        routes: [] }],
+      downstream: [{ owner: "interactive",
+        obligation: "Implement the release or withhold Choice and preserve both outcomes" },
+      { owner: "composition", obligation: "Present evidence and the implemented Choice consequences" }],
+    };
+    const authored = [
+      "---", "schema: '0.1'", "type: event", "id: event.disclose-ledger",
+      'title: "disclose-ledger"', "status: draft", "decisions: []",
+      "participants: [character.ada, character.neri]", "arcs: [arc.truth]",
+      'consequences: ["Neri presents a pending opportunity to release or withhold the ledger"]',
+      "after: []", "prerequisites:", "  any_of:", "    - completed: []",
+      "      not_completed: []", "      conditions:",
+      "        - kind: knowledge", "          character: character.neri",
+      "          fact: fact.evidence-concealed", "          value: knows",
+      "steps:", "  - id: decision-offered", "    branches:",
+      "      - id: protect", "        conditions: []", "        effects: []",
+      "      - id: challenge", "        conditions: []", "        effects: []",
+      "---", "", "Neri offers Ada the choice to protect him or challenge his concealment of the ledger. The player has not yet made that choice.", "",
+    ].join("\n");
+    const { runtime, observed } = await scriptedStoryRuntime((index, context) => {
+      if ([0, 2, 4].includes(index)) return {
+        content: scriptedReadCalls(readSources, index), reason: "toolUse",
+      };
+      if (index === 1) return { content: scriptedText(plan), reason: "stop" };
+      if (index === 3) return {
+        content: scriptedText({ schema: "noveltea-milestone-blueprint-review/v5",
+          status: "pass", findings: [], prior: [] }), reason: "stop",
+      };
+      if (index === 5) return { content: [{ type: "toolCall",
+        id: "original-c03-event-authoring", name: "write",
+        arguments: { path: "events/disclose-ledger.md", content: authored } }],
+        reason: "toolUse" };
+      if (index === 6) return {
+        content: scriptedText({ modifiedRecords: ["events/disclose-ledger.md"],
+          architecturalConflicts: [], laterObligations: [
+            "Formal Choice Point binding must enact the protect and challenge outcomes for this Milestone before fulfillment.",
+          ] }), reason: "stop",
+      };
+      const storyPaths = () => git(f.job.worktreeRoot, "ls-files", "--", "story/")
+        .split("\n").filter(p => p.endsWith(".md")).map(p => p.slice("story/".length));
+      if (index === 7) return {
+        content: scriptedReadCalls([
+          ...boundedPinnedSources("nt-event-design").map(path => "skill://" + path),
+          ...storyPaths(),
+        ], index), reason: "toolUse",
+      };
+      if (index === 8) return {
+        content: [{
+          type: "toolCall", id: "c03-original-approved-closeout", name: "edit",
+          arguments: { path: "milestones/disclosure.md", edits: [
+            { oldText: "completeness: partial", newText: "completeness: complete" },
+            { oldText: "fulfillment: {any_of: []}",
+              newText: "fulfillment:\n  any_of:\n    - [event.disclose-ledger]" },
+          ] },
+        }], reason: "toolUse",
+      };
+      if (index === 9) return {
+        content: scriptedText({ verdict: "pass",
+          evidence: ["milestones/disclosure.md:11", "events/disclose-ledger.md:25",
+            "choice-points/loyalty.md:10"],
+          reason: "The reviewed protect/challenge Choice produces reachable Event consequences and binds the existing Milestone." }),
+        reason: "stop",
+      };
+      // A passed closeout can invalidate previously reviewed downstream
+      // assumptions. Every affected dependent gets its OWN fresh independent
+      // read-only reviewer; do not pre-seal or skip those later verdicts.
+      if (index >= 10 && index < 60 && index % 2 === 0) return {
+        content: scriptedReadCalls([
+          ...boundedPinnedSources("nt-narrative-review").map(path => "skill://" + path),
+          "skill://nt-catalog/references/glossary.md", ...storyPaths(),
+        ], index), reason: "toolUse",
+      };
+      if (index >= 11 && index < 60 && index % 2 === 1) {
+        const prompt = context.messages
+          .filter((message): message is { role: "user"; content: Array<{ type?: string; text?: string }> } =>
+            message && typeof message === "object" && "role" in message &&
+            message.role === "user" && "content" in message && Array.isArray(message.content))
+          .flatMap(message => message.content.map(p => p.text ?? ""))
+          .findLast(message => message.includes("ASSIGNMENT:\n"));
+        if (!prompt) throw Error("Independent reviewer did not receive its actual pinned source assignment.");
+        const assignment = JSON.parse(prompt.slice(prompt.lastIndexOf("ASSIGNMENT:\n") +
+          "ASSIGNMENT:\n".length)) as {
+            specialistAssignments?: Array<{ authority: { existingPaths: string[] } }>;
+            routes: Array<{ event: string; step: string; branch: string }>;
+            milestoneRoutes: Array<{ milestone: string; alternative: number }>;
+            puzzleRoutes: Array<{ puzzle: string; event: string }>;
+          };
+        const evidence = [
+          ...(assignment.specialistAssignments ?? []).flatMap(a =>
+            a.authority.existingPaths.map(path => path + ":11")),
+          ...assignment.routes.map(r => r.event + "#" + r.step + "/" + r.branch +
+            ": events/" + r.event.slice(6) + ".md:23"),
+          ...assignment.milestoneRoutes.map(r => r.milestone + "#" + r.alternative +
+            ": milestones/disclosure.md:11"),
+          ...assignment.puzzleRoutes.map(r => r.puzzle + "/" + r.event +
+            ": puzzles/ledger-proof.md:14"),
+        ];
+        return { content: scriptedText({ verdict: "pass", findings: [], evidence }),
+          reason: "stop" };
+      }
+      throw Error("The original Pi Event/Closeout protocol exceeded its predetermined responses at call " +
+        index + "; recent prompts: " + JSON.stringify(context.messages.slice(-2)).slice(0, 2300));
+    });
+    const receipt = await withJobModelRuntime(runtime, () =>
+      runEventWorkItem({ story: f.story, job: "single", action: "run",
+        milestone: "milestone.disclosure", fixture: false, skillsSource: source,
+        provider: scriptedModel.provider, model: scriptedModel.id }));
+    assert.equal(receipt.status, "event-cluster-committed", JSON.stringify(receipt));
+    const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+    assert.equal(event.worker, "pi");
+    assert.equal(event.validation.milestoneState, "partial-choice-pending");
+    assert.equal(observed.length, 7, "Original bounded Blueprint and Event Pi conversations actually settled");
+    assert.ok(observed.some(call => call.tools.includes("write")));
+    assert.match(git(f.job.worktreeRoot, "show", "-s", "--format=%B", "HEAD"),
+      /NovelTea-Event-Consequence:/);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+    await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+    const interactive = ["interactive", "run", "--milestone", "milestone.disclosure",
+      "--fixture", "--skills-source", source];
+    assert.match(f.cli(interactive, false), /review|independent/i);
+    await sealFixtureGenerationCheckpoint(f, "interactive-choice-disclosure");
+    const nextUnit = f.cli(interactive);
+    assert.match(nextUnit.status, /interactive|committed|pending/i);
+    const point = (await inspectRecoveryCheckpoints(f.job)).find(p =>
+      p.workItem === "interactive-puzzle-disclosure");
+    if (point?.semanticReview === "required-pending") {
+      await sealFixtureGenerationCheckpoint(f, "interactive-puzzle-disclosure");
+      assert.equal(f.cli(interactive).status, "interactive-slice-committed");
+    }
+    const { preflightCompositionBoundary } =
+      await import("../src/cross-domain-prerequisite-controller.js");
+    const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+    const arch = JSON.parse(readFileSync(join(f.job.stateDir, "architecture.json"), "utf8"));
+    const decision = await preflightCompositionBoundary(f.job, {
+      story: f.story, job: "single", contract, task: f.start[3]!, fixture: false,
+      turnPlanDigest: turn.digest, skillsSource: source,
+      provider: scriptedModel.provider, model: scriptedModel.id,
+    }, "milestone.disclosure", arch.plan.version);
+    assert.equal(decision.kind, "repair", JSON.stringify(decision));
+    // Enter the ACTUAL persistent production graph from the reviewed canonical
+    // source. No dummy correction/approval and no fake next-stage task.
+    const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const config = { configurable: { thread_id: f.job.threadId + ":generation" },
+        recursionLimit: 10000 };
+      const initial = (await graph.getState(config)).values;
+      assert.ok(initial.request);
+      // Carry forward ONLY independently sealed actual earlier stage commits.
+      // The saved graph paused at Architecture while those later work items
+      // were completed through their original domain CLIs.
+      const sealed = await inspectRecoveryCheckpoints(f.job);
+      const completedStages = [...initial.completedStages];
+      for (const [item,stage,status] of [
+        ["character-foundations", "foundations", "foundations-committed"],
+        ["event-disclosure", "event", "event-cluster-committed"],
+        ["interactive-puzzle-disclosure", "interactive", "interactive-slice-committed"],
+      ] as const) {
+        const point = sealed.find(p => p.workItem === item);
+        assert.ok(point?.eligible && point.semanticReview === "passed",
+          "Original independently reviewed stage is not available: " + item);
+        completedStages.push({ stage, ...(stage === "foundations" ? {} :
+          { milestone: "milestone.disclosure" }), status,
+          headSha: point.commitSha, planVersion: point.planVersion ?? arch.plan.version });
+      }
+      await graph.updateState(config, {
+        completedStages,
+        request: { ...initial.request, fixture: false,
+          provider: scriptedModel.provider, model: scriptedModel.id,
+          turnPlanDigest: turn.digest },
+        status: "running", reason: null, active: null, result: null,
+        pauseAfter: null, planVersion: arch.plan.version,
+      }, "schedule");
+      const admitted = await graph.invoke(null, { ...config,
+        interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.active?.origin.operation,
+        "dependency-amendment", JSON.stringify({
+          status: admitted.status, reason: admitted.reason,
+          active: admitted.active, inventory: admitted.inventory,
+          recovery: admitted.recoveryLifecycle, crossDomainCloseout: admitted.crossDomainCloseout,
+        }));
+      assert.ok(admitted.crossDomainCloseout);
+      assert.equal(admitted.recoveryLifecycle.attempt, null);
+      assert.equal(admitted.active?.stage, "composition");
+      const beforeSelectionCalls = observed.length;
+      const selected = await graph.invoke(null, { ...config,
+        interruptAfter: ["assess_recovery"] });
+      assert.equal(selected.recoveryLifecycle.decision?.action, "plan-amendment",
+        JSON.stringify({ status: selected.status, reason: selected.reason,
+          decision: selected.recoveryLifecycle.decision,
+          recovery: selected.recoveryLifecycle }));
+      assert.equal(selected.recoveryLifecycle.decision?.adapter, "cross-domain-closeout");
+      assert.equal(selected.recoveryLifecycle.assessorPending, true);
+      assert.equal(selected.recoveryLifecycle.attempt, null);
+      assert.equal(observed.length, beforeSelectionCalls,
+        "Recovery selection must checkpoint without starting a model or writer");
+      const corrected = await withJobModelRuntime(runtime, () =>
+        graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
+      const partialFile = join(f.job.stateDir, "prerequisite-items/disclosure.json");
+      const partialReceipt = existsSync(partialFile) ?
+        JSON.parse(readFileSync(partialFile, "utf8")) : null;
+      const dependentFile = partialReceipt?.commitSha && join(f.job.stateDir,
+        "revalidation-items", partialReceipt.commitSha + ".json");
+      const dependent = dependentFile && existsSync(dependentFile) ?
+        JSON.parse(readFileSync(dependentFile, "utf8")) : null;
+      assert.equal(corrected.status, "running", JSON.stringify({
+        status: corrected.status, reason: corrected.reason,
+        receipt: partialReceipt && {
+          phase: partialReceipt.phase, failure: partialReceipt.failure,
+          commitSha: partialReceipt.commitSha, review: partialReceipt.review,
+          reviewerSessionFile: partialReceipt.reviewerSessionFile,
+        }, dependent: dependent && {
+          state: dependent.state, failure: dependent.failure,
+          reviewing: dependent.reviewing, results: dependent.results?.map(
+            (r: { itemId: string; status: string; verdict: unknown }) => ({
+              itemId: r.itemId, status: r.status, verdict: r.verdict,
+            })),
+        }, modelCalls: observed.length,
+        activeRecovery: corrected.recoveryLifecycle.active,
+        decision: corrected.recoveryLifecycle.decision,
+      }));
+      assert.equal(corrected.recoveryLifecycle.active, null);
+      assert.equal(corrected.recoveryLifecycle.phase, "idle",
+        "The original active case resolves after independently passed correction");
+      assert.equal(corrected.recoveryLifecycle.pending.length, 0);
+      const successor = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+      assert.notEqual(successor, decision.proposal.sourceSha);
+      const closeout = JSON.parse(readFileSync(join(f.job.stateDir,
+        "prerequisite-items/disclosure.json"), "utf8"));
+      assert.equal(closeout.phase, "verified");
+      assert.equal(closeout.review?.verdict, "pass");
+      assert.equal(closeout.commitSha, successor);
+      const revalidation = JSON.parse(readFileSync(join(f.job.stateDir,
+        "revalidation-items", successor + ".json"), "utf8"));
+      assert.equal(revalidation.state, "completed");
+      assert.ok(revalidation.results.length >= 2,
+        "Both the original Foundation and Interactive dependents require separate revalidation");
+      assert.equal(new Set(revalidation.results.map((entry: { sessionFile: string }) =>
+        entry.sessionFile)).size, revalidation.results.length,
+      "Each independently sealed dependent verdict must own a distinct immutable Pi transcript");
+      for (const item of revalidation.results as Array<{
+        status: string; sessionFile: string; sessionDigest: string;
+      }>) {
+        assert.equal(item.status, "passed");
+        assert.equal(createHash("sha256").update(readFileSync(item.sessionFile)).digest("hex"),
+          item.sessionDigest, "An independently sealed dependent transcript must not change later");
+      }
+      assert.ok(observed.length >= beforeSelectionCalls + 7 &&
+        (observed.length - beforeSelectionCalls - 5) % 2 === 0,
+        "One bounded writer, its independent reviewer and fresh read-only affected-dependent reviews must settle");
+      const afterCorrectionCalls = observed.length;
+      const reentered = await graph.invoke(null, { ...config,
+        interruptBefore: ["specialist_dispatch"] });
+      assert.equal(reentered.active?.stage, "composition", JSON.stringify({
+        status: reentered.status, reason: reentered.reason,
+        active: reentered.active, inventory: reentered.inventory?.items
+          ?.map((item: { id: string; status: string; blockingReason?: string }) => ({
+            id: item.id, status: item.status, reason: item.blockingReason,
+          })),
+      }));
+      assert.equal(reentered.active?.milestone, "milestone.disclosure");
+      assert.equal(reentered.status, "running", JSON.stringify({
+        status: reentered.status, reason: reentered.reason,
+        recovery: reentered.recoveryLifecycle, active: reentered.active,
+        operationRecovery: reentered.operationRecovery,
+      }));
+      assert.equal(observed.length, afterCorrectionCalls,
+        "Graph reentry cannot replay the original closeout writer or its independent reviewer");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), successor);
+    } finally { saver.db.close(); }
+  } finally {
+    restoreSandbox();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("#240 production closeout cannot promote a fixture Event to a Pi-owned review grant", {
   skip: !available, timeout: 120_000,
 }, async () => {
@@ -1409,13 +1737,21 @@ test("#240 production closeout cannot promote a fixture Event to a Pi-owned revi
     "--fixture", "--skills-source", source];
   assert.match(f.cli(interactive, false), /review|independent/i);
   await sealFixtureGenerationCheckpoint(f, "interactive-choice-disclosure");
-  const second = f.cli(interactive);
-  assert.match(second.status, /interactive|committed|pending/i);
+  const continued = f.cli(["generate", "resume", "--pause-after", "interactive"]);
+  assert.notEqual(continued.operationRecovery?.operation, "specialist-result",
+    "A sealed Choice review must reenter the original unfinished Puzzle, not fence recovery");
   const puzzlePoint = (await inspectRecoveryCheckpoints(f.job))
     .find(point => point.workItem === "interactive-puzzle-disclosure");
+  assert.ok(puzzlePoint, JSON.stringify({
+    status: continued.status, reason: continued.reason,
+    nextStage: continued.nextStage, operationRecovery: continued.operationRecovery,
+  }));
   if (puzzlePoint?.semanticReview === "required-pending") {
     await sealFixtureGenerationCheckpoint(f, "interactive-puzzle-disclosure");
-    assert.equal(f.cli(interactive).status, "interactive-slice-committed");
+    const resumed = f.cli(["generate", "resume", "--pause-after", "composition"]);
+    assert.notEqual(resumed.operationRecovery?.operation, "specialist-result",
+      "Sealed Puzzle review must not manufacture another recovery or replay Choice");
+    assert.ok(resumed.status === "paused" || resumed.status === "blocked");
   }
   const { preflightCompositionBoundary } =
     await import("../src/cross-domain-prerequisite-controller.js");

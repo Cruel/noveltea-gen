@@ -449,7 +449,11 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     state.state = "reviewing"; state.reviewing = { itemId: id }; await save(file, state);
     const verdict = await reviewNarrative({ ...job, headSha: reviewHead },
       state.snapshot, assignment, opts.provider, opts.model, undefined,
-      async sessionFile => { state!.reviewing = { itemId: id, sessionFile }; await save(file, state!); });
+      async sessionFile => { state!.reviewing = { itemId: id, sessionFile }; await save(file, state!); },
+      "selective-revalidation:" + correction.successorSha + ":" + id);
+    // Each independently sealed dependent verdict must own its immutable Pi
+    // transcript. Reusing the previous reviewer's file would append the next
+    // assignment and retroactively invalidate the earlier sealed session SHA.
     const sessionFile = state.reviewing?.sessionFile;
     if (!sessionFile) throw Error("Dependent reviewer has no durable independent session.");
     const sessionDigest = await transcript(job, sessionFile);

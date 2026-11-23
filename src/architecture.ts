@@ -424,10 +424,18 @@ async function fixtureAuthor(job: JobStartResult, state: Receipt) {
   const records = [
     ...arcs.map(arc => ({ folder: "arcs", id: arc, type: "arc", fields: 'dramatic_question: "Can truth survive loyalty?"\ncharacters: []',
       body: "The inquiry puts a friendship under pressure. Each admission makes concealment harder, until loyalty must mean either silence or accountability." })),
-    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns that Neri concealed the missing witness transfer ledger" :
+    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "decision-choice" ?
+        "The player chooses to protect Neri or challenge his concealed witness ledger, changing their trust and access to evidence" :
+        process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns that Neri concealed the missing witness transfer ledger" :
         process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal" ? "The signed transfer ledger conclusively proves that the missing witness entered the archive at midnight" :
         "The hidden evidence becomes a shared responsibility"}"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
-      body: process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal"
+      body: process.env.NT_ARCHITECTURE_FIXTURE_CASE === "decision-choice"
+        ? "The player must choose whether to protect Neri or challenge his concealment of the missing " +
+          "witness ledger. A protected choice preserves trust while a challenge risks the friendship " +
+          "and exposes evidence. Event design establishes the observable offer; Interactive must " +
+          "enact both outcomes and their causally distinct consequences before the Milestone " +
+          "can be marked complete or Composition may begin."
+        : process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal"
         ? "The missing witness is documented elsewhere at midnight, while the unverified ledger " +
           "entry claims the same witness personally entered the archive at midnight. " +
           "The architecture treats that uncorroborated entry as conclusive proof. " +

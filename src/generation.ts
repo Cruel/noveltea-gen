@@ -2224,11 +2224,27 @@ export function createGenerationGraph(
           // reviewer. It must stop for separately sealed semantic review,
           // not fabricate a failed specialist-result recovery case. Real Pi
           // runs keep their existing reviewer/reentry path unchanged.
-          if (s.request.fixture && s.result?.status === "review-handoff")
-            return { nonsemanticStop: "fixture-verdict" as const, status: "blocked" as const,
-              reason: "Fixture specialist is awaiting a separately sealed independent " +
-                "semantic Review. A structural fixture handoff is not a failed writer " +
-                "or an authorization to waive the original Review." };
+          if (s.request.fixture && s.result?.status === "review-handoff") {
+            const next = stage === "foundations" ? "character-foundations" :
+              ["interactive", "choice", "puzzle"].includes(stage) && s.active?.milestone
+                ? "interactive-" + (stage === "choice" ? "choice" : "puzzle") +
+                  "-" + s.active.milestone.slice(10) : null;
+            if (!next) throw Error("Fixture Review handoff has no original specialist.");
+            try {
+              await assertNativeReviewDependencies(job, next);
+            } catch (error) {
+              if (!(error instanceof IndependentReviewGateError)) throw error;
+              return { nonsemanticStop: "fixture-verdict" as const, status: "blocked" as const,
+                reason: "Fixture specialist is awaiting a separately sealed independent " +
+                  "semantic Review. A structural fixture handoff is not a failed writer " +
+                  "or an authorization to waive the original Review." };
+            }
+            // The original checkpoint's review is now independently sealed.
+            // Return to the SAME original specialist for its unfinished unit.
+            // The specialist itself reauthenticates the earlier commit before
+            // authoring any dependent Choice/Puzzle/Character work.
+            return { result: null, status: "running" as const, reason: null };
+          }
           if (!s.result || !accepted[stage].includes(s.result.status))
             return operationFailure(s, job, "specialist-result",
               "Missing or unaccepted specialist result: " + (s.result?.status ?? "absent"),
