@@ -1781,6 +1781,84 @@ test("#240 production closeout cannot promote a fixture Event to a Pi-owned revi
   "Changing the worker invalidates the original independently sealed Event checkpoint");
 });
 
+test("C03 production graph diagnoses a source-authenticated unknown scheduling exception once", {
+  skip: !available, timeout: 100_000,
+}, async () => {
+  const f = setup("c03-source-bound-scheduling");
+  captureRecoveryIdea(f, "c03-pending-idea");
+  const paused = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(paused.status, "paused");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Retain the original schedule and resolve all previously authorized work."]);
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  writeFileSync(join(f.job.stateDir, "idea-placement-tasks.json"),
+    JSON.stringify({ version: 999, jobId: "single", history: [] }));
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const transport = await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel();
+    await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
+      profile: { provider: transport.model.provider, model: transport.model.id },
+      limits: { modelCalls: 2 } });
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId } };
+    const values = (await graph.getState(cfg)).values;
+    await graph.updateState(cfg, {
+      request: { ...values.request, fixture: false, turnPlanDigest: turnDigest,
+        provider: undefined, model: undefined },
+      status: "running", active: null, result: null, ideaTask: null,
+      escalation: null, causalAmendment: null, pauseAfter: null,
+    }, "schedule");
+    const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+    assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "scheduling",
+      JSON.stringify({ status: admitted.status, reason: admitted.reason,
+        recovery: admitted.recoveryLifecycle.active, inventory: admitted.inventory,
+      }));
+    assert.equal(admitted.recoveryLifecycle.active?.observation, "exception");
+    assert.equal(admitted.recoveryLifecycle.attempt, null);
+    const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+    assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic",
+      JSON.stringify({ status: selected.status, reason: selected.reason,
+        recovery: selected.recoveryLifecycle, inventory: selected.inventory,
+      }));
+    assert.equal(selected.recoveryLifecycle.decision?.evidence.at(-1)?.store, "graph-checkpoint");
+    assert.equal(selected.recoveryLifecycle.assessorPending, true);
+    assert.equal(transport.calls.length, 0);
+    const completed = await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
+      () => graph.invoke(null, cfg));
+    assert.equal(completed.recoveryLifecycle.decision?.action, "diagnostic-stop");
+    assert.equal(completed.recoveryLifecycle.attempt?.phase, "settled");
+    assert.equal(transport.calls.length, 1);
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+      completed.recoveryLifecycle);
+    const restarted = await graph.invoke({ request: completed.request }, cfg);
+    assert.equal(restarted.status, "blocked");
+    assert.equal(restarted.recoveryLifecycle.decision?.action, "diagnostic-stop");
+    assert.equal(transport.calls.length, 1);
+    // The sealed diagnosis binds the original inventory as well as the failed
+    // graph task. Neither changing an unrelated item nor replaying the saved
+    // model opinion may silently reauthenticate a new scheduling case.
+    await graph.updateState(cfg, { inventory: {
+      ...restarted.inventory, items: [...restarted.inventory.items,
+        { ...restarted.inventory.items[0], id: "forged-new-composition-item" }],
+    } }, "schedule");
+    const tampered = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
+    assert.equal(tampered?.phase, "fenced");
+    assert.equal(tampered?.inspectionFences.length, 1);
+    assert.equal(transport.calls.length, 1);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("C03 production graph sends an authenticated settled Event no-write to one actual read-only Pi diagnosis", {
   skip: !available,
 }, async () => {

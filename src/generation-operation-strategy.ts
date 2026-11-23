@@ -1,6 +1,7 @@
 /** Decisions at the existing assessor only. Original adapters retain every
  * receipt, writer lock, validation, independent review and budget check. */
 import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -40,6 +41,36 @@ async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
 async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryEvidence | null> {
   const { operation, sourceHeadSha: head, turnDigest, planVersion } = c.origin;
   if (s.request.fixture || !s.request.turnPlanDigest || s.escalation?.requiresTrustedApproval) return null;
+  // The scheduler may fail AFTER a read-only source inspection with no
+  // selected writer. A genuine original task/Turn checkpoint is already
+  // authenticated by the production graph; bind the diagnostic to the exact
+  // saved operation receipt and unchanged inventory. This authorizes ONLY
+  // one read-only Pi diagnosis, never retry of the uncertain original task.
+  // In-flight writers, idea integrations, active specialists, causal amendments,
+  // protected author choices and source movement are not covered.
+  if (operation === "scheduling" && c.observation === "exception" &&
+      !s.active && !s.result && !s.ideaTask && !s.crossDomainCloseout &&
+      !s.causalAmendment && !s.escalation && s.inventory &&
+      s.inventory.headSha === head && s.inventory.planVersion === planVersion) {
+    const source = s.recoverySources.find(x =>
+      x.caseId === c.id && x.channel === "operationRecovery");
+    const op = source?.input as GenerationOperationRecovery | undefined;
+    if (op?.operation === "scheduling" && op.outcome === "exception" &&
+        op.check === c.origin.check && op.checkVersion === c.origin.checkVersion &&
+        op.evidence?.reference === "generation-checkpoint" &&
+        !op.evidence.assignmentId && !op.evidence.priorHead &&
+        !op.evidence.verifier && !op.evidence.closeout &&
+        !op.evidence.eventNoWrite &&
+        op.source.jobId === job.jobId && op.source.threadId === c.origin.graphThreadId &&
+        op.source.turnDigest === turnDigest && op.source.planVersion === planVersion &&
+        op.source.headSha === head) {
+      const fingerprint = createHash("sha256").update(JSON.stringify({
+        operation: op, inventory: s.inventory,
+        failedCheck: c.origin.failureAnchor, source: head,
+      })).digest("hex");
+      return { store: "graph-checkpoint", ref: c.origin.failureAnchor.ref, digest: fingerprint };
+    }
+  }
   // A returned Event no-write has an explicit original Pi completion report.
   // Unlike an uncertain specialist exception, it is safe to ASK a read-only
   // diagnostician what is missing; never grant a replacement Event writer.
@@ -100,7 +131,8 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
 export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonNullable<State["crossDomainCloseout"]>): boolean {
   const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
   const evidence = source?.input.evidence as GenerationOperationRecovery["evidence"] | undefined;
-  return evidence?.closeout?.repairId === pending.repairId && evidence.closeout.proposalDigest === pending.proposalDigest &&
+  return !!evidence?.closeout && evidence.closeout.repairId === pending.repairId &&
+    evidence.closeout.proposalDigest === pending.proposalDigest &&
     evidence.closeout.milestoneId === pending.milestoneId && pending.sourceSha === c.origin.sourceHeadSha &&
     pending.planVersion === c.origin.planVersion && evidence.assignmentId === c.origin.assignmentId;
 }
@@ -133,7 +165,8 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
 }
 export function diagnosticCaseForDecision(c: RecoveryCase, d: RecoveryDecision) {
   const proof = d.evidence.at(-1);
-  if (!proof?.digest || !["repair-ledger", "response-contract", "review-checkpoint", "specialist-receipt"].includes(proof.store))
+  if (!proof?.digest || !["repair-ledger", "response-contract", "review-checkpoint",
+    "specialist-receipt", "graph-checkpoint"].includes(proof.store))
     throw Error("Operation diagnosis has no settled effect reference");
   return operationDiagnosisCase(c, [proof.store, proof.ref, proof.digest].join(":"));
 }

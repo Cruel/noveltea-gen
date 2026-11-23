@@ -113,6 +113,59 @@ test("C03 authenticates an original Event Pi no-write once and selects advisory 
     "Repeated assessor selection cannot mint a new case or model entitlement");
   assert.equal(git(f.repo, "status", "--porcelain", "--untracked-files=all"), "");
 });
+test("C03 source-bound unknown scheduling exception selects exactly one read-only diagnosis", async t => {
+  const f = fixture(); t.after(() => removeTestTree(f.root));
+  const origin: RecoveryOrigin = { ...f.c.origin,
+    operation: "scheduling", check: "generation-scheduling.v1", assignmentId: null };
+  const c: RecoveryCase = { ...f.c, id: recoveryCaseId(origin), origin,
+    kind: "infrastructure", observation: "exception" };
+  const operation: GenerationOperationRecovery = {
+    ...f.s.recoverySources[0]!.input as GenerationOperationRecovery,
+    operation: "scheduling", check: "generation-scheduling.v1",
+    outcome: "exception", evidence: { reference: "generation-checkpoint" },
+  };
+  const { phase: _phase, ...input } = operation;
+  const s = { ...f.s,
+    recoverySources: [{ channel: "operationRecovery" as const, caseId: c.id, input }],
+    inventory: { ...f.s.inventory, items: [
+      { id: "composition:milestone.disclosure", stage: "composition", status: "pending" },
+    ] },
+    active: null, result: null, ideaTask: null, crossDomainCloseout: null,
+    causalAmendment: null, escalation: null,
+  } as unknown as GenerationGraphState;
+  const decision = await selectOperationStrategy(f.job, s, c);
+  assert.equal(decision?.action, "diagnostic");
+  assert.equal(decision?.adapter, "unknown-diagnostic");
+  assert.equal(decision?.mode, "read-only");
+  assert.equal(decision?.attemptRef, null);
+  assert.equal(decision?.evidence.at(-1)?.store, "graph-checkpoint");
+  assert.equal(decision?.evidence.at(-1)?.ref, origin.failureAnchor.ref);
+  assert.equal(await authenticateOperationDiagnosticProof(f.job, s, c, decision!), true);
+  assert.deepEqual(await selectOperationStrategy(f.job, s, c), decision,
+    "Selection is an original-case checkpoint, not a model attempt");
+  assert.equal(diagnosticCaseForDecision(c, decision!).operation, "scheduling");
+  const unsafe = async (next: Partial<GenerationGraphState>, why: string) =>
+    assert.equal(await selectOperationStrategy(f.job, { ...s, ...next }, c), null, why);
+  await unsafe({ active: { id: "foundation", stage: "foundation" } } as any,
+    "Cannot diagnose unknown operations while the original writer is active");
+  await unsafe({ ideaTask: { id: "unknown-in-flight-idea" } } as any,
+    "An unresolved external idea task takes precedence");
+  await unsafe({ escalation: { requiresTrustedApproval: true } } as any,
+    "Protected author decision takes precedence");
+  await unsafe({ crossDomainCloseout: { sourceSha: f.c.origin.sourceHeadSha } } as any,
+    "A pending owner amendment takes precedence");
+  await unsafe({ inventory: { ...s.inventory, headSha: "f".repeat(40) } },
+    "An altered source inventory cannot grant diagnosis");
+  const tampered = { ...s, recoverySources: [{
+    channel: "operationRecovery" as const, caseId: c.id,
+    input: { ...input, evidence: { ...input.evidence, assignmentId: f.assignmentId } },
+  }] } as GenerationGraphState;
+  assert.equal(await selectOperationStrategy(f.job, tampered, c), null);
+  const changedInventory = { ...s, inventory: { ...s.inventory, items: [] } };
+  assert.equal(await authenticateOperationDiagnosticProof(f.job, changedInventory, c, decision!), false,
+    "An already selected diagnostic cannot rebind its immutable original inventory");
+});
+
 test("C03 rejects changed, unsigned, uncompleted or ambiguous original Event reports", async t => {
   const f = fixture(); t.after(() => removeTestTree(f.root));
   const original = readFileSync(f.receiptFile, "utf8");
