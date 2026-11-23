@@ -13,18 +13,21 @@ import { trustedHead } from "./revision.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { readJobControl } from "./job-control.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { inspectPiPolicy } from "./job-pi-policy.js";
+import { inspectPiPolicy, PiModelUnavailableError } from "./job-pi-policy.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { inspectRejectedRepair } from "./rejected-review-repair.js";
+import { inspectJobReport } from "./job-report.js";
+import { authorizedInventoryComplete } from "./generation-plan.js";
 import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis,
   operationDiagnosisCase, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { decideRecovery, finishRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
+import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "./generation-diagnostic-controller.js";
 import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle } from "./generation-recovery-contract.js";
 
 type State = GenerationGraphState;
@@ -134,6 +137,30 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
     const attempt = state?.attempts.at(-1);
     if (attempt?.sourceSha === head && attempt.phase !== "planning" && attempt.session && attempt.effect?.phase === "responded")
       return { store: "response-contract", ref: attempt.signature, digest: attempt.session.sessionSha256 };
+  }
+  if (operation === "completion-verification" && c.observation === "returned-failure" &&
+      !s.active && !s.result && !s.ideaTask && !s.escalation && !s.causalAmendment &&
+      s.inventory?.headSha === head && s.inventory.planVersion === planVersion &&
+      authorizedInventoryComplete(s.inventory)) {
+    const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+    const op = source?.input as GenerationOperationRecovery | undefined;
+    const original = op?.evidence.completion;
+    const report = await inspectJobReport(s.request);
+    const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      p.eligible && p.commitSha === head && p.workItem === original?.checkpoint &&
+      (p.semanticReview === "passed" || p.semanticReview === "not-required"));
+    if (op?.evidence.reference !== "completion-report" || !original || !point ||
+        report.generation.status === "completed" ||
+        report.evidence.deferredIdeas.scopedOutstanding.length ||
+        original.reportStatus !== report.generation.status ||
+        original.scopeStatus !== report.generation.scopeFulfillment ||
+        original.planStatus !== report.generation.planFulfillment.status)
+      return null;
+    const digest = createHash("sha256").update(JSON.stringify({
+      operation: op, inventory: s.inventory, failedCheck: c.origin.failureAnchor,
+      source: head, checkpointProof: point.proofDigest,
+    })).digest("hex");
+    return { store: "completion-report", ref: c.origin.failureAnchor.ref, digest };
   }
   if (!["independent-review", "completion-verification"].includes(operation)) return null;
   if (operation === "independent-review" &&
@@ -335,7 +362,7 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
 export function diagnosticCaseForDecision(c: RecoveryCase, d: RecoveryDecision) {
   const proof = d.evidence.at(-1);
   if (!proof?.digest || !["repair-ledger", "response-contract", "review-checkpoint",
-    "specialist-receipt", "graph-checkpoint"].includes(proof.store))
+    "specialist-receipt", "graph-checkpoint", "completion-report"].includes(proof.store))
     throw Error("Operation diagnosis has no settled effect reference");
   return operationDiagnosisCase(c, [proof.store, proof.ref, proof.digest].join(":"));
 }
@@ -357,7 +384,8 @@ export async function authenticateSealedDiagnosticStop(job: JobStartResult, s: S
   const attempt = await inspectDiagnosticAttempt(job, target, c.id);
   return isDeepStrictEqual(attempt, lifecycle.attempt) &&
     d.receipt.store === "response-contract" && d.receipt.ref === target.signature &&
-    d.recommendation === sealed.action && d.advisoryCategory === sealed.category;
+    ("proposal" in d && d.proposal ? "strategy" in sealed && isDeepStrictEqual(d.proposal, sealed) :
+      "action" in sealed && d.recommendation === sealed.action && d.advisoryCategory === sealed.category);
 }
 
 export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle): Promise<Partial<State> | null> {
@@ -428,16 +456,30 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       if (!isDeepStrictEqual(await selectOperationStrategy(job, s, c), d)) throw Error("Original diagnosis source changed");
       const target = diagnosticCaseForDecision(c, d);
       const { policy } = await inspectPiPolicy(job);
-      await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider, s.request.model ?? policy.profile.model);
+      await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider,
+        s.request.model ?? policy.profile.model, diagnosticPacket(s, c, target));
       await assertSource(job, s, c);
+      // Reinspect the original completed Pi conversation rather than accept
+      // a model's in-memory return as a strategy or invocation receipt.
       const diagnosis = await inspectOriginalUnknownDiagnosis(job, target);
       const attempt = await inspectDiagnosticAttempt(job, target, c.id);
       const counted = recordRecoveryOutcome(settled, { status: "started", caseId: c.id, attempt }, true);
-      return { status: "blocked", reason: "Read-only diagnosis completed; inspect the original operation receipts. No write or approval was granted.",
+      if ("strategy" in diagnosis) {
+        const controller = authorizeDiagnosticStrategy(s, c, d, diagnosis);
+        if (controller) return { status: "running", reason: null,
+          recoveryLifecycle: { ...decideRecovery(counted, controller), assessorPending: true } };
+        return { status: "blocked", reason: "The read-only diagnosis has no presently authenticated corrective adapter. Original source and recommendation are preserved for plan/Review escalation.",
+          recoveryLifecycle: decideRecovery(counted,
+            terminalDiagnosticDecision(c, d, attempt.settledRef!, diagnosis)) };
+      }
+      return { status: "blocked", reason: "Historical read-only advisory diagnosis; no write or approval was granted.",
         recoveryLifecycle: decideRecovery(counted, { ...base(c), evidence: d.evidence, action: "diagnostic-stop", disposition: "operator-intervention",
           receipt: attempt.settledRef!, recommendation: diagnosis.action, advisoryCategory: diagnosis.category }) };
     });
   } catch (error) {
+    if (error instanceof PiModelUnavailableError)
+      return stop({ ...base(c), action: "pause", reason: "provider-unavailable" },
+        error.message + "; pinned model and original source remain unchanged.", "paused");
     if (error instanceof Error && error.name === "PiBudgetPause") return stop({ ...base(c), action: "pause", reason: "budget" }, error.message, "paused");
     if (error instanceof Error && error.name === "StoryCancelledError") return stop({ ...base(c), action: "pause", reason: "cancelled" }, error.message, "cancelled");
     return stop({ ...base(c), action: "integrity-fence", reason: "untrusted-receipt", requiredInspection: "Reconcile original adapter effects before any retry." },

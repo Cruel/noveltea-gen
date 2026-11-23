@@ -60,6 +60,8 @@ type Identity = {
   contract: unknown;
 };
 type AdmissionTrust = (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) => Promise<boolean>;
+// The old field remains recognizable to historical checkpoint readers, but
+// no new unknownRecovery admission may be minted by the current graph.
 const channels: readonly Channel[] = ["operationRecovery", "recovery", "unknownRecovery"];
 const object = (x: unknown): x is Record<string, unknown> =>
   !!x && typeof x === "object" && !Array.isArray(x);
@@ -440,6 +442,7 @@ export async function applyDomainRecovery(
   const sources = [...(state.recoverySources ?? [])];
   // Capture every new failure even when another case already owns the lane.
   for (const channel of channels) {
+    if (channel === "unknownRecovery") continue; // C05: historical inspect only.
     const raw = update[channel];
     if (!object(raw) || raw.phase !== "assessment") continue;
     const check =

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage, type Model, type Provider } from "@earendil-works/pi-ai";
+import type { DiagnosticStrategy } from "../src/recovery-diagnostic-proposal.js";
 
 /** In-process transport. No network, account, or provider credentials. */
-export async function scriptedRecoveryModel() {
+export async function scriptedRecoveryModel(strategy: DiagnosticStrategy = "unsafe") {
   const model: Model = { id: "diagnosis-fixture", provider: "diagnosis-fixture", api: "diagnosis-fixture", name: "Local recovery test",
     baseUrl: "http://unused.invalid", input: ["text"], reasoning: false, contextWindow: 32768, maxTokens: 2048,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
@@ -17,8 +18,16 @@ export async function scriptedRecoveryModel() {
     assert.equal(tools.size, 0);
     const signature = JSON.stringify(ctx.messages).match(/signature=([0-9a-f]{64})/)?.[1];
     assert.ok(signature); calls.push(signature);
-    const text = JSON.stringify({ schema: "noveltea-unknown-recovery-diagnosis/v1", signature,
-      category: "unclassified", action: "inspect-existing-receipt", summary: "Inspect the original assignment and ownership." });
+    const sourceRef = JSON.stringify(ctx.messages).match(/sourceRef=([^;]+); category=/)?.[1];
+    assert.ok(sourceRef);
+    const text = JSON.stringify({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature,
+      sourceRef, category: strategy === "reconcile-original" ? "infrastructure" : "invalid-assignment",
+      diagnosis: strategy === "reconcile-original" ?
+        "The original read-only operation should reconcile against sealed receipts." :
+        "The original assignment lacks a safe correction route.",
+      strategy, owner: null, scopeRef: null,
+      prerequisites: strategy === "reconcile-original" ? [] : ["Inspect original assignment"],
+      uncertainty: "No authenticated writer scope for this failure." });
     const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
       content: [{ type: "text", text }], usage: { input: 10, output: 10, totalTokens: 20, cacheRead: 0, cacheWrite: 0,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };

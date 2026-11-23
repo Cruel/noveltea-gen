@@ -52,7 +52,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independent_assignment_review: "returns:6,status:3,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
   completion_decision:
-    "returns:11,status:5,blocked:1,operationFailure:2,authorBoundary:2,reconcile:1,throws:2",
+    "returns:10,status:2,blocked:1,operationFailure:3,authorBoundary:2,reconcile:1,throws:2",
   reconcile: "returns:13,status:6,operationFailure:2,throws:9",
   authorBoundary: "returns:4,status:1,blocked:1,operationFailure:1",
   independentAssignmentBoundary: "returns:19,status:8,operationFailure:2,throws:9",
@@ -407,8 +407,8 @@ test("an existing blocked exit cannot change to running without changing its sou
   const altered = exitSites(bypass).assess_recovery!.filter((r) => r.id.includes("/return#"));
   assert.equal(altered.length, original.length, "Return count deliberately unchanged");
   assert.notEqual(
-    altered[18]!.fingerprint,
-    original[18]!.fingerprint,
+    altered[13]!.fingerprint,
+    original[13]!.fingerprint,
     "Source-specific fingerprint catches bypass even with the same return count",
   );
 });

@@ -1841,7 +1841,8 @@ test("C03 production graph diagnoses a source-authenticated unknown scheduling e
     assert.equal(transport.calls.length, 0);
     const completed = await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
       () => graph.invoke(null, cfg));
-    assert.equal(completed.recoveryLifecycle.decision?.action, "diagnostic-stop");
+    assert.equal(completed.recoveryLifecycle.decision?.action, "diagnostic-stop",
+      JSON.stringify({ status: completed.status, reason: completed.reason, lifecycle: completed.recoveryLifecycle }));
     assert.equal(completed.recoveryLifecycle.attempt?.phase, "settled");
     assert.equal(transport.calls.length, 1);
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
@@ -1863,6 +1864,76 @@ test("C03 production graph diagnoses a source-authenticated unknown scheduling e
     assert.equal(transport.calls.length, 1);
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("C05 read-only reconciliation refuses missing original objective seal without replaying a writer", {
+  skip: !available, timeout: 100_000,
+}, async () => {
+  const f = setup("c05-source-bound-reconciliation");
+  captureRecoveryIdea(f, "c05-transient-idea");
+  const paused = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(paused.status, "paused");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Preserve existing verified checkpoints and reconcile any transient scheduler failure."]);
+  const digest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const tasksFile = join(f.job.stateDir, "idea-placement-tasks.json");
+  const originalTasks = existsSync(tasksFile) ? readFileSync(tasksFile) : null;
+  writeFileSync(tasksFile, JSON.stringify({ version: 999, jobId: "single", history: [] }));
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const transport = await (await import("./scripted-recovery-model.js"))
+      .scriptedRecoveryModel("reconcile-original");
+    await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
+      profile: { provider: transport.model.provider, model: transport.model.id },
+      limits: { modelCalls: 2 } });
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId } };
+    const values = (await graph.getState(cfg)).values;
+    await graph.updateState(cfg, {
+      request: { ...values.request, fixture: false, turnPlanDigest: digest,
+        provider: undefined, model: undefined },
+      status: "running", active: null, result: null, ideaTask: null,
+      escalation: null, causalAmendment: null, pauseAfter: null,
+    }, "schedule");
+    const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+    assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "scheduling");
+    const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+    assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic");
+    const proposed = await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
+      () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(proposed.recoveryLifecycle.decision?.action, "reconcile-effects",
+      JSON.stringify({ status: proposed.status, reason: proposed.reason, lifecycle: proposed.recoveryLifecycle }));
+    assert.equal(proposed.recoveryLifecycle.attempt?.phase, "settled");
+    assert.equal(proposed.recoveryLifecycle.assessorPending, true);
+    assert.equal(transport.calls.length, 1);
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+      proposed.recoveryLifecycle);
+
+    // The injected transient private scheduling failure disappears. This is
+    // NOT an authorized Story correction; recovery must still independently
+    // rerun the original read-only check before any ordinary scheduling.
+    if (originalTasks) writeFileSync(tasksFile, originalTasks);
+    else unlinkSync(tasksFile);
+    const reconciled = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+    assert.equal(reconciled.recoveryLifecycle.decision?.action, "integrity-fence",
+      "An advisory recommendation does not bypass original plan attestation");
+    assert.equal(reconciled.recoveryLifecycle.phase, "fenced");
+    assert.match(reconciled.reason ?? "", /Original objective planning has no sealed graph result/);
+    assert.equal(transport.calls.length, 1);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
+      "Neither the diagnosis nor original read-only reconciliation can commit");
+    assert.equal((await inspectModernGenerationRecovery(f.job, saver, paused.threadId))?.phase,
+      "fenced");
   } finally {
     saver.db.close();
     for (const [key, value] of Object.entries(previous)) {

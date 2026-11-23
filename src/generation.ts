@@ -8,8 +8,8 @@ import { isDeepStrictEqual } from "node:util";
 import { git as jobGit, load, persist } from "./ideas.js";
 import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
-import { diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, inspectOriginalUnknownDiagnosis, unknownCompletionCase,
-  unknownDiagnosisDisposition, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
+import { inspectUnknownRecoveryStatus, inspectOriginalUnknownDiagnosis,
+  type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import { assessGenerationOperation, nodeFailureSource, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
@@ -1267,7 +1267,7 @@ export function recoveryNode(
     // and the same original authenticated source/Thread; cancellation is final.
     if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
         prior.recoveryLifecycle.decision?.action === "pause" &&
-        ["author-pause", "budget", "author-choice"].includes(prior.recoveryLifecycle.decision.reason) &&
+        ["author-pause", "budget", "author-choice", "provider-unavailable"].includes(prior.recoveryLifecycle.decision.reason) &&
         prior.recoveryLifecycle.active) {
       try {
         const job = await openJob(state);
@@ -1402,7 +1402,7 @@ export function recoveryNode(
         if (previous && claimed && isDeepStrictEqual(previous, claimed) &&
             await authenticate(current.origin, current.evidence)) {
           const diagnosis = await inspectOriginalUnknownDiagnosis(job, previous);
-          if (domain.unknownRecovery.recommendation === diagnosis.action &&
+          if ("action" in diagnosis && domain.unknownRecovery.recommendation === diagnosis.action &&
               domain.unknownRecovery.advisoryCategory === diagnosis.category) {
             assurance.diagnosis = { receipt: { store: "response-contract", ref: previous.signature },
               recommendation: diagnosis.action, advisoryCategory: diagnosis.category };
@@ -1609,83 +1609,11 @@ export function createGenerationGraph(
       }
     }))
     .addNode("assess_recovery", recoveryNode("assess_recovery", async (s, config) => {
-      // Two pending assessments cannot decide dispatch precedence for each
-      // other. Preserve both sources and require explicit reconciliation.
-      if (s.operationRecovery?.phase === "assessment" &&
-          s.unknownRecovery?.phase === "assessment")
+      // Historical v1 unknownRecovery receipts remain inspectable, not executable.
+      // Only the shared source-bound C03 operation lane can start a new diagnosis.
+      if (s.unknownRecovery?.phase === "assessment")
         return { status: "blocked" as const,
-          reason: "Conflicting pending recovery assessments; verify the original operations before continuation.",
-          operationRecovery: { ...s.operationRecovery, phase: "fenced" as const },
-          unknownRecovery: { ...s.unknownRecovery, phase: "unsafe-evidence" as const } };
-      if (s.unknownRecovery?.phase === "assessment") {
-        const target = s.unknownRecovery.case;
-        if (!target) return blocked(Error("Unknown recovery has no authenticated failure case."));
-        const job = await openJob(s);
-        const verify = () => withStoryJobLock(job, "unknown-recovery-proof", async () => {
-          clean(job);
-          if (await trustedHead(job) !== target.sourceSha ||
-              target.jobId !== job.jobId || target.threadId !== job.threadId ||
-              target.turnDigest !== (s.request.turnPlanDigest ?? null) ||
-              target.planVersion !== s.planVersion)
-            throw Error("Unfamiliar failure no longer has trusted Turn/source identity.");
-          await checkPlan(job, s.request, s.planVersion);
-          const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
-            point.eligible && point.commitSha === target.sourceSha &&
-            point.workItem === target.checkpoint &&
-            (point.semanticReview === "passed" || point.semanticReview === "not-required"));
-          if (!checkpoint || !s.inventory || !authorizedInventoryComplete(s.inventory))
-            throw Error("Unfamiliar failure lacks an eligible verified/reviewed checkpoint.");
-          const current = await inspectJobReport(s.request);
-          const same = unknownCompletionCase({
-            jobId: job.jobId, threadId: job.threadId,
-            turnDigest: s.request.turnPlanDigest ?? null, planVersion: s.planVersion!,
-            sourceSha: target.sourceSha, checkpoint: checkpoint.workItem,
-            reportStatus: current.generation.status,
-            scopeStatus: current.generation.scopeFulfillment,
-            planStatus: current.generation.planFulfillment.status,
-          });
-          if (same.signature !== target.signature || current.generation.status === "completed" ||
-              reviewEscalation(current, s.inventory))
-            throw Error("Unfamiliar failure state changed or has a deterministic recovery route.");
-        });
-        let proofTrusted = false;
-        try {
-          const control = await readJobControl(job);
-          if (control === "cancelled") return { status: "cancelled" as const,
-            reason: "Author cancelled; diagnostic model work was not started." };
-          if (control === "paused") return { status: "paused" as const,
-            reason: "Author pause precedes unfamiliar-failure diagnosis." };
-          await verify();
-          proofTrusted = true;
-          const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
-          const diagnosis = await withStoryJobLock(job, "generation-unknown-diagnostic", () =>
-            diagnoseUnknownCompletion(job, target,
-              s.request.provider ?? policy.profile.provider,
-              s.request.model ?? policy.profile.model));
-          proofTrusted = false;
-          await verify();
-          proofTrusted = true;
-          return { status: "blocked" as const,
-            reason: "Operator intervention required: unfamiliar generation completion check " +
-              "remains unresolved; the read-only diagnosis cannot waive verification or dispatch work.",
-            unknownRecovery: { case: target, phase: unknownDiagnosisDisposition(diagnosis),
-              recommendation: diagnosis.action, advisoryCategory: diagnosis.category } };
-        } catch (error) {
-          const stop = blocked(error);
-          const resourceLimit = (error as Error)?.name === "PiBudgetPause";
-          const unsafe = !proofTrusted ||
-            (error as { code?: string })?.code === "integrity-blocked";
-          return { ...stop, unknownRecovery: {
-            case: target, phase: resourceLimit ? "resource-limit" as const :
-              unsafe ? "unsafe-evidence" as const : "operator-intervention" as const },
-            reason: resourceLimit ? stop.reason :
-              unsafe
-                ? "Unsafe or incomplete unfamiliar-failure evidence; operator inspection is required. " +
-                  "Do not repeat the diagnostic against unchanged proof."
-                : "Operator intervention required: the bounded, read-only unknown-failure diagnosis " +
-                  "did not produce a verified recommendation. Do not replay the model or writer." };
-        }
-      }
+          reason: "Legacy completion-only diagnosis is inspection-only; reconcile the original receipt." };
       const op = s.operationRecovery;
       if (op?.phase === "assessment") {
         const fence = (reason: string): Partial<State> => ({
@@ -2544,9 +2472,10 @@ export function createGenerationGraph(
               "The completion report claims success without a complete authenticated assignment inventory.",
               { reference: "completion-report", resultStatus: report.generation.status }, "returned-failure");
           const escalation = complete ? null : reviewEscalation(report, s.inventory);
-          // A trusted but unexplained final failure has ONE advisory diagnosis
-          // opportunity. Known incomplete assignments, required author decisions,
-          // resource pauses and unverified writes never reach the model.
+          // Unknown final-verdict anomalies now use the SAME C03 case lane as
+          // specialist/Review/admission failures. Preserve the original report
+          // tuple and verified checkpoint; never issue a second diagnosis because
+          // the report merely rewrote its error prose.
           if (!complete && !escalation && !s.request.fixture && s.planVersion &&
               authorizedInventoryComplete(s.inventory) &&
               !report.evidence.deferredIdeas.scopedOutstanding.length) {
@@ -2555,27 +2484,15 @@ export function createGenerationGraph(
               point.eligible && point.commitSha === headSha &&
               (point.semanticReview === "passed" || point.semanticReview === "not-required"));
             if (!checkpoint) return { status: "blocked" as const,
-              reason: "Unsafe completion evidence: no eligible verified/reviewed checkpoint; operator inspection required.",
-              unknownRecovery: { case: null, phase: "unsafe-evidence" as const } };
-            const target = unknownCompletionCase({
-              jobId: job.jobId, threadId: job.threadId,
-              turnDigest: s.request.turnPlanDigest ?? null, planVersion: s.planVersion,
-              sourceSha: headSha, checkpoint: checkpoint.workItem,
-              reportStatus: report.generation.status,
-              scopeStatus: report.generation.scopeFulfillment,
-              planStatus: report.generation.planFulfillment.status,
-            });
-            if (s.unknownRecovery?.case?.signature === target.signature) {
-              return ["assessment", "resource-limit"].includes(s.unknownRecovery.phase)
-                ? { status: "running" as const, reason: "Assessing the original unfamiliar failure.",
-                    unknownRecovery: { ...s.unknownRecovery, phase: "assessment" as const } }
-                : { status: "blocked" as const,
-                    reason: "Unchanged unfamiliar failure has already received its one-time diagnosis or unsafe stop. Operator intervention is required.",
-                    unknownRecovery: s.unknownRecovery };
-            }
-            return { status: "running" as const,
-              reason: "Assessing an unfamiliar final verification failure without Story write authority.",
-              unknownRecovery: { case: target, phase: "assessment" as const } };
+              reason: "Unsafe final-verdict evidence: no eligible verified/reviewed checkpoint." };
+            return operationFailure(s, job, "completion-verification",
+              "Authenticated final-verdict anomaly requires general recovery assessment.",
+              { reference: "completion-report", resultStatus: report.generation.status,
+                completion: { checkpoint: checkpoint.workItem,
+                  reportStatus: report.generation.status,
+                  scopeStatus: report.generation.scopeFulfillment,
+                  planStatus: report.generation.planFulfillment.status } },
+              "returned-failure");
           }
           const details = s.inventory?.items.filter(i => i.status !== "verified")
             .map(i => i.stage === "review" ? i.blockingReason ?? "Scope remains unverified" :
@@ -2587,7 +2504,7 @@ export function createGenerationGraph(
             // Needing a *proposal* is blocked; only a real outstanding author
             // approval interrupt or execution control may report paused.
             status: complete ? "completed" as const : "blocked" as const,
-            ...(complete ? { unknownRecovery: null } : s.request.fixture ? { nonsemanticStop: "fixture-verdict" as const } : {}),
+            ...(s.request.fixture && !complete ? { nonsemanticStop: "fixture-verdict" as const } : {}),
             escalation,
             reason: complete ? null : [details || s.completedStages.at(-1)?.status ||
               "Scope remains unverified",

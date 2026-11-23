@@ -146,7 +146,13 @@ export type RecoveryDecision = RecoveryDecisionBase &
     | { action: "continue-independent"; inventoryRef: RecoveryEvidence; blockedAssignmentId: string }
     | { action: "diagnostic-stop"; disposition: "operator-intervention";
         receipt: RecoveryEvidence; recommendation: "operator-intervention" | "inspect-existing-receipt";
-        advisoryCategory: "software" | "unclassified" | "resources" | "integrity" }
+        advisoryCategory: "software" | "unclassified" | "resources" | "integrity";
+        proposal?: never }
+    | { action: "diagnostic-stop"; disposition: "operator-intervention";
+        receipt: RecoveryEvidence;
+        /** C05 source-bound proposal, NOT a corrective work authorization. */
+        proposal: import("./recovery-diagnostic-proposal.js").RecoveryDiagnosticProposal;
+        recommendation?: never; advisoryCategory?: never }
     | {
         action: "pause";
         reason:

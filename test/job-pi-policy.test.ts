@@ -11,7 +11,7 @@ import { after, test } from "node:test";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { startStoryJob } from "../src/job.js";
 import { openStoryProject } from "../src/project.js";
-import { configurePiPolicy, guardPiBudget, inspectPiPolicy, PiBudgetPause,
+import { configurePiPolicy, guardPiBudget, inspectPiPolicy, PiBudgetPause, PiModelUnavailableError,
   preparePiContext, piNarrativeGroup, resolvePiModel,
   restoreAcceptedPiReviewContext, type PiPolicy } from "../src/job-pi-policy.js";
 
@@ -94,7 +94,8 @@ test("public job Pi CLI configures and inspects a pinned profile and safe budget
 test("required model rejection, explicit fallback, immutable resolution and reasoning capability", async () => {
   const { job } = await fixture();
   await assert.rejects(resolvePiModel(job, runtime([]), "example", "required"),
-    /Required Pi model\/capabilities unavailable/);
+    (error: unknown) => error instanceof PiModelUnavailableError &&
+      /Required Pi model\/capabilities unavailable/.test(error.message));
   assert.equal((await inspectPiPolicy(job)).resolved, undefined);
   await configurePiPolicy(job, policy({ profile: { provider: "example", model: "required",
     optionalFallback: { provider: "example", model: "fallback" } } }));
@@ -102,7 +103,8 @@ test("required model rejection, explicit fallback, immutable resolution and reas
   assert.equal(selected.model.id, "fallback");
   assert.equal(selected.resolution.source, "explicit-optional-fallback");
   await assert.rejects(resolvePiModel(job, runtime(["required"]), "example", "required"),
-    /Pinned Pi model\/capabilities no longer available/);
+    (error: unknown) => error instanceof PiModelUnavailableError &&
+      /Pinned Pi model\/capabilities no longer available/.test(error.message));
   await assert.rejects(configurePiPolicy(job, policy({ profile: { provider: "example", model: "other" } })),
     /pinned/);
   const other = await fixture();

@@ -203,7 +203,7 @@ test("C02 failed re-verification fences the original case instead of throwing or
   assert.equal(failedAgain.recoveryLifecycle.attempt, null);
 });
 
-test("C02 unknown completion case is queued without replacing a pending original verification", async () => {
+test("C05 legacy completion-only channel cannot mint a second active recovery case", async () => {
   const first = await admit();
   const unknown = {
     case: unknownCompletionCase({
@@ -221,9 +221,9 @@ test("C02 unknown completion case is queued without replacing a pending original
   };
   const second = await applyDomainRecovery(first, { unknownRecovery: unknown }, cfg(two), id, trusted);
   assert.equal(second.recoveryLifecycle.active?.id, first.recoveryLifecycle.active?.id);
-  assert.equal(second.recoveryLifecycle.pending.length, 1);
-  assert.equal(second.recoveryLifecycle.pending[0]?.origin.operation, "completion-verification");
-  assert.equal(second.recoverySources[1]?.channel, "unknownRecovery");
+  assert.equal(second.recoveryLifecycle.pending.length, 0);
+  assert.equal(second.recoverySources.length, 1,
+    "historical unknownRecovery is inspection-only; use C03 operationRecovery for new cases");
 });
 
 
@@ -292,30 +292,19 @@ test("C02 deferred idea no-write stays unresolved without inventing an assignmen
   assertRecoverySources(continued);
 });
 
-test("C02 authenticated operator intervention is a diagnostic stop, not evidence corruption", async () => {
+test("C05 injected legacy advisory status cannot claim a real Pi attempt or authority", async () => {
   const unknown = { case: unknownCompletionCase({
     jobId: id.jobId, threadId: id.jobThreadId, turnDigest: turn,
     planVersion: 2, sourceSha: head, checkpoint: assignment,
     reportStatus: "blocked", scopeStatus: "incomplete", planStatus: "incomplete",
   }), phase: "assessment" as const };
-  const admitted = await applyDomainRecovery(empty(), { unknownRecovery: unknown }, cfg(one), id, trusted);
-  const diagnosed = { ...admitted, recoveryLifecycle: decideExistingRecovery(admitted) };
-  const claim = { ...unknown, phase: "operator-intervention" as const,
-    recommendation: "inspect-existing-receipt" as const,
-    advisoryCategory: "unclassified" as const };
-  const unproved = await applyDomainRecovery(diagnosed,
-    { unknownRecovery: claim }, cfg(one), id, trusted);
-  assert.equal(unproved.recoveryLifecycle.inspectionFences.length, 1,
-    "a claimed diagnostic disposition without the sealed original receipt fails closed");
-  const stopped = await applyDomainRecovery(diagnosed,
-    { unknownRecovery: claim }, cfg(one), id, trusted, { diagnosis: {
-      receipt: { store: "response-contract", ref: unknown.case.signature },
-      recommendation: claim.recommendation, advisoryCategory: claim.advisoryCategory,
-    } });
-  assert.equal(stopped.recoveryLifecycle.decision?.action, "diagnostic-stop");
-  assert.equal(stopped.recoveryLifecycle.phase, "fenced");
-  assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 0);
-  assert.equal(projectRecovery(stopped).unknownRecovery?.phase, "operator-intervention");
+  const claimed = await applyDomainRecovery(empty(), { unknownRecovery: unknown }, cfg(one), id, trusted,
+    { diagnosis: { receipt: { store: "response-contract", ref: unknown.case.signature },
+      recommendation: "inspect-existing-receipt", advisoryCategory: "unclassified" } });
+  assert.equal(claimed.recoveryLifecycle.active, null);
+  assert.equal(claimed.recoveryLifecycle.decision, null);
+  assert.equal(claimed.recoveryLifecycle.attempt, null);
+  assert.deepEqual(claimed.recoverySources, []);
 });
 
 test("C02 production recovery wrapper prevents completion with an active or deferred case", async () => {

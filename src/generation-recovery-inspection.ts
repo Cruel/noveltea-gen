@@ -29,6 +29,7 @@ import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from "./adaptive-p
 import type { GenerationGraphState } from "./generation.js";
 import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy } from "./generation-operation-strategy.js";
 import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
+import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
 import { originalInventorySnapshotDigest } from "./selective-revalidation.js";
@@ -158,7 +159,7 @@ export async function authenticateDiagnosticStop(
   if (!originalCase || decision.receipt.ref !== originalCase.signature) return false;
   try {
     const sealed = await inspectOriginalUnknownDiagnosis(job, originalCase);
-    return sealed.action === decision.recommendation &&
+    return "action" in sealed && sealed.action === decision.recommendation &&
       sealed.category === decision.advisoryCategory;
   } catch { return false; }
 }
@@ -315,8 +316,22 @@ export async function inspectModernGenerationRecovery(
       const source = sourceFor(active.id);
       if (!source) return false;
       switch (d.action) {
-        case "reconcile-effects":
-          return source.channel === "operationRecovery" && d.originalRef?.ref === active.evidence[0]?.ref;
+        case "reconcile-effects": {
+          if (source.channel !== "operationRecovery" || d.originalRef?.ref !== active.evidence[0]?.ref)
+            return false;
+          if (original.attempt?.purpose !== "diagnosis") return true;
+          // A model-derived reconciliation is valid only if the controller
+          // can still derive the EXACT adapter from its original sealed Pi
+          // proposal and independently authenticated failed-check source.
+          try {
+            const selected = await selectOperationStrategy(job, values as GenerationGraphState, active);
+            if (selected?.action !== "diagnostic") return false;
+            const target = diagnosticCaseForDecision(active, selected);
+            const proposed = await inspectOriginalUnknownDiagnosis(job, target);
+            return "strategy" in proposed && isDeepStrictEqual(d,
+              authorizeDiagnosticStrategy(values as GenerationGraphState, active, selected, proposed));
+          } catch { return false; }
+        }
         case "known-correction":
           if (source.channel === "recovery") return d.adapter === "response-contract";
           if (source.channel !== "operationRecovery" || d.adapter !== "review-cycle") return false;
@@ -345,8 +360,10 @@ export async function inspectModernGenerationRecovery(
               const sealed = await inspectOriginalUnknownDiagnosis(job, target);
               return !!original.attempt && await authenticateOperationDiagnosticProof(job,
                 values as GenerationGraphState, active, d) &&
-                d.receipt.ref === target.signature && d.recommendation === sealed.action &&
-                d.advisoryCategory === sealed.category && d.disposition === "operator-intervention";
+                d.receipt.ref === target.signature &&
+                ("strategy" in sealed ? isDeepStrictEqual(d.proposal, sealed) :
+                  d.recommendation === sealed.action && d.advisoryCategory === sealed.category) &&
+                d.disposition === "operator-intervention";
             } catch { return false; }
           }
           return authenticateDiagnosticStop(job, source, d);
@@ -376,7 +393,8 @@ export async function inspectModernGenerationRecovery(
     // inspectable without calling Pi again.
     authenticateAttempt: async attempt => {
       const { active, decision } = original;
-      if (!active || !decision || decision.action !== "diagnostic-stop" || attempt.caseId !== active.id) return false;
+      if (!active || !decision || !["diagnostic-stop", "reconcile-effects"].includes(decision.action) ||
+          attempt.caseId !== active.id || attempt.purpose !== "diagnosis") return false;
       const source = sourceFor(active.id);
       const target = source?.channel === "operationRecovery" ? diagnosticCaseForDecision(active, decision) :
         source?.channel === "unknownRecovery" ? source.input.case as UnknownRecoveryCase : null;

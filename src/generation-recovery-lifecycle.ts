@@ -5,6 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { parseRecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
 import type {
   RecoveryAdmission,
   RecoveryAdapterOutcome,
@@ -177,10 +178,21 @@ function validDecision(value: unknown): value is RecoveryDecision {
     case "continue-independent":
       return validEvidence(d.inventoryRef) && populated(d.blockedAssignmentId);
     case "diagnostic-stop":
-      return d.disposition === "operator-intervention" &&
-        d.receipt?.store === "response-contract" && validEvidence(d.receipt) &&
-        ["operator-intervention", "inspect-existing-receipt"].includes(d.recommendation) &&
-        ["software", "unclassified", "resources", "integrity"].includes(d.advisoryCategory);
+      if (d.disposition !== "operator-intervention" ||
+          d.receipt?.store !== "response-contract" || !validEvidence(d.receipt)) return false;
+      if (d.proposal) {
+        if (d.recommendation !== undefined || d.advisoryCategory !== undefined) return false;
+        try {
+          const proof = d.evidence.at(-1);
+          return !!proof?.digest && !!d.proposal.signature &&
+            !!parseRecoveryDiagnosticProposal(JSON.stringify(d.proposal), {
+              signature: d.proposal.signature,
+              proofRef: [proof.store, proof.ref, proof.digest].join(":"),
+            });
+        } catch { return false; }
+      }
+      return ["operator-intervention", "inspect-existing-receipt"].includes(d.recommendation!) &&
+        ["software", "unclassified", "resources", "integrity"].includes(d.advisoryCategory!);
     case "pause":
       return (
         [

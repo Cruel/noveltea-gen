@@ -118,6 +118,14 @@ export async function configurePiPolicy(job: JobStartResult, next: PiPolicy): Pr
   await persist(policyPath(job), next);
 }
 
+/** Distinguish unavailable pinned provider/capability from a corrupted or
+ * unauthorized model selection. A safe resource pause is not an integrity
+ * incident or a license to switch models. */
+export class PiModelUnavailableError extends Error {
+  readonly code = "provider-unavailable";
+  constructor(message: string) { super(message); this.name = "PiModelUnavailableError"; }
+}
+
 export async function resolvePiModel(job: JobStartResult, runtime: ModelRuntime,
   requestedProvider: string, requestedModel: string, thinking?: "low" | "medium" | "high"):
   Promise<{ model: NonNullable<ReturnType<ModelRuntime["getModel"]>>; resolution: Resolution }> {
@@ -155,7 +163,7 @@ export async function resolvePiModel(job: JobStartResult, runtime: ModelRuntime,
       ? await available(policy.profile.optionalFallback.provider, policy.profile.optionalFallback.model)
       : undefined;
     if (!primary && !fallback) {
-      throw new Error("Required Pi model/capabilities unavailable: " + provider + "/" +
+      throw new PiModelUnavailableError("Required Pi model/capabilities unavailable: " + provider + "/" +
         modelId + (policy.profile.optionalFallback ? " (explicit optional fallback also unavailable)" : "") +
         ". No implicit model fallback is permitted.");
     }
@@ -166,7 +174,7 @@ export async function resolvePiModel(job: JobStartResult, runtime: ModelRuntime,
     await persist(resolutionPath(job), resolved);
   }
   const model = await available(resolved.selected.provider, resolved.selected.model);
-  if (!model) throw new Error("Pinned Pi model/capabilities no longer available: " +
+  if (!model) throw new PiModelUnavailableError("Pinned Pi model/capabilities no longer available: " +
     resolved.selected.provider + "/" + resolved.selected.model);
   return { model, resolution: resolved };
 }

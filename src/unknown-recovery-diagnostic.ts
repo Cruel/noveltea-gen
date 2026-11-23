@@ -1,5 +1,6 @@
-/** One advisory diagnosis for a trustworthy, otherwise unexplained generation
- * completion verdict. No model response from here is an execution grant. */
+/** One source-bound read-only Pi invocation for unfamiliar generation failures.
+ * The controller, never this model, grants strategy and work authority.
+ * Legacy completion-only v1 receipts remain inspectable but are not emitted. */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, lstat, readFile, writeFile } from "node:fs/promises";
@@ -11,13 +12,15 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { guardPiBudget, recordPiSession, resolvePiModel } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { promptStorySpecialist } from "./story-interruption.js";
+import { parseRecoveryDiagnosticProposal, type RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
 import { beginProtocolInvocation, inspectCompletedProtocolResponse,
   recoverResponseContract, type ResponseContractFailure } from "./response-contract-recovery.js";
 
 const sha = (input: unknown) => createHash("sha256").update(JSON.stringify(input)).digest("hex");
 const hex40 = /^[a-f0-9]{40}$/;
 const hex64 = /^[a-f0-9]{64}$/;
-const contract = "generation.unknown-diagnosis.v1";
+const legacyContract = "generation.unknown-diagnosis.v1";
+const generalContract = "generation.recovery-diagnostic.v2";
 const safeCode = (value: string) => /^[a-z][a-z0-9.:-]{0,80}$/.test(value);
 export interface UnknownCompletionEvidence {
   jobId: string; threadId: string; turnDigest: string | null;
@@ -38,6 +41,24 @@ export interface OperationDiagnosisCase {
   assignmentId: string | null; proofRef: string;
 }
 type DiagnosticCase = UnknownRecoveryCase | OperationDiagnosisCase;
+export type RecoveryDiagnosis = UnknownDiagnosis | RecoveryDiagnosticProposal;
+/** Only authenticated, bounded controller values, never author-only inbox data. */
+export interface DiagnosticPacket {
+  jobId: string; jobThreadId: string; graphThreadId: string; turnDigest: string;
+  originalObjective: string;
+  approvedScope: unknown;
+  verifiedHistory: unknown;
+  assignment: unknown;
+  planVersion: number | null;
+  failedOperation: string;
+  failedCheck: string;
+  originalSource: string;
+  sourceProof: string;
+  inventory: unknown;
+  existingFindings: unknown;
+  previousAttempts: unknown;
+  availableAdapters: readonly string[];
+}
 export function operationDiagnosisCase(c: import("./generation-recovery-contract.js").RecoveryCase,
   proofRef: string): OperationDiagnosisCase {
   const body = { schema: "noveltea-operation-diagnosis-case/v1" as const,
@@ -110,10 +131,29 @@ export function unknownDiagnosisDisposition(_diagnosis: UnknownDiagnosis): "oper
 const dirFor = (job: JobStartResult) => join(job.stateDir, "unknown-diagnostics");
 const protocolRoot = (job: JobStartResult, key: string) => join(dirFor(job), key);
 const sessionsRoot = (job: JobStartResult) => join(job.stateDir, "unknown-diagnostic-sessions");
-const validation = (caseFile: DiagnosticCase) => (response: string): ResponseContractFailure[] => {
-  try { parseUnknownDiagnosis(response, caseFile); return []; }
-  catch { return [{ path: "$.diagnosis", expected: "strict advisory-only JSON bound to the original signature" }]; }
+const contractFor = (evidence: DiagnosticCase) => evidence.schema === "noveltea-operation-diagnosis-case/v1"
+  ? generalContract : legacyContract;
+const decode = (response: string, evidence: DiagnosticCase, chosen: string): RecoveryDiagnosis =>
+  chosen === generalContract && evidence.schema === "noveltea-operation-diagnosis-case/v1"
+    ? parseRecoveryDiagnosticProposal(response, evidence)
+    : parseUnknownDiagnosis(response, evidence);
+const validation = (caseFile: DiagnosticCase, chosen: string) => (response: string): ResponseContractFailure[] => {
+  try { decode(response, caseFile, chosen); return []; }
+  catch { return [{ path: "$.diagnosis", expected: "strict source-bound diagnostic proposal JSON" }]; }
 };
+/** Historical operation v1 sessions have their own immutable contract. An
+ * existing started marker must never be treated as allowance for a v2 call. */
+async function recordedContract(job: JobStartResult, evidence: DiagnosticCase): Promise<string> {
+  const started = protocolRoot(job, evidence.signature) + ".started.json";
+  if (!existsSync(started)) return contractFor(evidence);
+  const stat = await lstat(started);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000)
+    throw Error("Unsafe original diagnostic invocation marker");
+  const marker = JSON.parse(await readFile(started, "utf8")) as { contract?: string };
+  if (marker.contract !== contractFor(evidence) && marker.contract !== legacyContract)
+    throw Error("Unknown or altered original diagnostic protocol contract");
+  return marker.contract;
+}
 
 function assertCaseBoundToJob(job: JobStartResult, evidence: DiagnosticCase): DiagnosticCase {
   if (evidence.schema === "noveltea-operation-diagnosis-case/v1") {
@@ -138,8 +178,9 @@ function assertCaseBoundToJob(job: JobStartResult, evidence: DiagnosticCase): Di
  * This is read-only: no model/session reentry or new invocation allowance. */
 export async function inspectOriginalUnknownDiagnosis(
   job: JobStartResult, evidence: DiagnosticCase,
-): Promise<UnknownDiagnosis> {
+): Promise<RecoveryDiagnosis> {
   const bound = assertCaseBoundToJob(job, evidence);
+  const chosen = await recordedContract(job, evidence);
   const root = protocolRoot(job, evidence.signature);
   const admission = root + ".admission.json";
   const stat = await lstat(admission);
@@ -147,9 +188,9 @@ export async function inspectOriginalUnknownDiagnosis(
       await readFile(admission, "utf8") !== JSON.stringify(bound) + "\n")
     throw Error("Missing or altered original diagnostic admission.");
   return inspectCompletedProtocolResponse({
-    receiptFile: root, sourceDigest: evidence.signature, contract,
-    sessionRoots: [sessionsRoot(job)], validate: validation(evidence),
-    parse: text => parseUnknownDiagnosis(text, evidence),
+    receiptFile: root, sourceDigest: evidence.signature, contract: chosen,
+    sessionRoots: [sessionsRoot(job)], validate: validation(evidence, chosen),
+    parse: text => decode(text, evidence, chosen),
   });
 }
 
@@ -176,7 +217,7 @@ export async function inspectUnknownRecoveryStatus(job: JobStartResult,
   try {
     if (!status.case) throw Error("Missing original case.");
     const diagnosis = await inspectOriginalUnknownDiagnosis(job, status.case);
-    if (diagnosis.action !== status.recommendation ||
+    if (!("action" in diagnosis) || diagnosis.action !== status.recommendation ||
         diagnosis.category !== status.advisoryCategory)
       throw Error("Checkpointed recommendation differs from authenticated transcript.");
     return status;
@@ -189,15 +230,16 @@ export async function inspectUnknownRecoveryStatus(job: JobStartResult,
  * NEVER call Pi again. The shared protocol gate authenticates original session
  * transcript, attempt count and exact accepted bytes before returning it. */
 export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: DiagnosticCase,
-  provider: string, modelId: string): Promise<UnknownDiagnosis> {
+  provider: string, modelId: string, packet?: DiagnosticPacket): Promise<RecoveryDiagnosis> {
   const bound = assertCaseBoundToJob(job, evidence);
+  const chosen = await recordedContract(job, evidence);
   const root = dirFor(job), receipt = protocolRoot(job, evidence.signature);
   const admission = receipt + ".admission.json";
-  const parse = (text: string) => parseUnknownDiagnosis(text, evidence);
-  const validate = validation(evidence);
+  const parse = (text: string) => decode(text, evidence, chosen);
+  const validate = validation(evidence, chosen);
   const correction = (session: Parameters<typeof recoverResponseContract>[0]["session"],
     file: string, resumeOriginal = false) => recoverResponseContract({
-      session, contract, validate, parse, sourceDigest: evidence.signature,
+      session, contract: chosen, validate, parse, sourceDigest: evidence.signature,
       receiptFile: receipt + ".initial.json",
       ...(resumeOriginal ? { resumeOriginal: { base: receipt,
         sessionRoots: [sessionsRoot(job)] } } : {}),
@@ -246,7 +288,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
     // Ambiguous in-flight, exhausted, stale or corrupted conversations
     // never get a new model diagnosis.
     return inspectCompletedProtocolResponse({
-      receiptFile: receipt, sourceDigest: evidence.signature, contract,
+      receiptFile: receipt, sourceDigest: evidence.signature, contract: chosen,
       sessionRoots: [sessionsRoot(job)], validate, parse,
     });
   }
@@ -275,8 +317,21 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
     // BEFORE the SDK is allowed to issue a model request.
     await writeFile(admission, JSON.stringify(bound) + "\n", { flag: "wx", mode: 0o600 });
     await beginProtocolInvocation({ receiptFile: receipt,
-      sourceDigest: evidence.signature, contract, session });
-    await promptStorySpecialist(session,
+      sourceDigest: evidence.signature, contract: chosen, session });
+    await promptStorySpecialist(session, chosen === generalContract &&
+      evidence.schema === "noveltea-operation-diagnosis-case/v1" ?
+      "INDEPENDENT READ-ONLY GENERATION RECOVERY DIAGNOSIS. No tools, Story writes, scope " +
+      "grants, verdict overrides, new author approvals, or writer dispatch. " +
+      "Use ONLY the authenticated controller packet, do not infer missing evidence. " +
+      "Return strict JSON with EXACT keys schema,signature,sourceRef,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. " +
+      "schema=noveltea-recovery-diagnostic-proposal/v1; signature=" + evidence.signature +
+      "; sourceRef=" + evidence.proofRef + "; category=defect|invalid-assignment|protocol|infrastructure|integrity; " +
+      "strategy=local-repair|dependency-plan|blueprint-or-work-plan-amend|review-adjudication|reconcile-original|no-write-omission-review|resource-or-author-pause|unsafe. " +
+      "Provide a specific diagnosis (4-500 chars) and uncertainty (4-300 chars), " +
+      "owner and scopeRef as strings or null, prerequisites as up to five strings. " +
+      "A proposal never grants authority; the controller independently decides whether an exact existing adapter is safe. " +
+      "VERIFIED PACKET: " + JSON.stringify(packet ?? { failedOperation: evidence.operation,
+        failedCheck: evidence.check, sourceProof: evidence.proofRef }) :
       "INDEPENDENT READ-ONLY EXECUTION FAILURE DIAGNOSIS. No tools, Story edits, " +
       "approvals, verifier waivers, new scope, software patches, writer dispatch or " +
       "Author Questions. This operation has verified persisted source evidence but " +
