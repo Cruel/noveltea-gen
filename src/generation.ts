@@ -2128,7 +2128,22 @@ export function createGenerationGraph(
             return { failures: { ...s.failures, [s.active!.id]: failure },
               causalAmendment, active: null, result: null };
           }
-          return { failures: { ...s.failures, [s.active!.id]: failure }, active: null, result: null };
+          // A genuinely settled production Event no-write is a recoverable
+          // semantic failure, not a harmless skipped cluster. The original
+          // session/report remains the effect authority. Admit the exact
+          // failed specialist-result check before removing the active writer
+          // and keep the failed objective in the inventory; a diagnostic
+          // never grants another Event, Choice or Composition writer.
+          const originalFailure = s.request.fixture ? {} :
+            await operationFailure(s, job, "specialist-result", failure,
+              { reference: "specialist-receipt", assignmentId: s.active!.id,
+                resultStatus: "event-prerequisite-reported", eventNoWrite: {
+                  milestoneId: s.active!.milestone!, expectedHead: evidence.prerequisite!.expectedHead,
+                  reportDigest: evidence.prerequisite!.reportDigest,
+                } }, "returned-failure");
+          return { ...originalFailure, failures: { ...s.failures, [s.active!.id]: failure },
+            inventory: blockedAssignmentInventory(s, failure),
+            active: null, result: null };
         }
         // A failed or unexpected specialist *result* is as consequential as
         // an exception: do not silently sideline the assignment and dispatch

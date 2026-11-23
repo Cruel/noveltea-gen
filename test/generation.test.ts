@@ -20,6 +20,7 @@ import { inspectPiPolicy } from "../src/job-pi-policy.js";
 import { setJobControl } from "../src/job-control.js";
 import { assertMilestoneStageClosure } from "../src/turn-fulfillment.js";
 import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
+import { eventPrerequisiteReportDigest } from "../src/event-prerequisite-auth.js";
 import { inspectRepairLedger, recordBlueprintRepair } from "../src/repair-ledger.js";
 import { appendGenerationEvent, syncApprovalRevisionActivity,
   listGenerationEvents } from "../web/src/lib/generation-progress.server.js";
@@ -1197,7 +1198,7 @@ test("one authorized Choice assignment can certify multiple meaningful Choices w
  * This is a routing regression, not a substitute for a live Pi certification.
  */
 async function runFixtureRecoveryGraph(
-  name: string, refused: boolean | "exception" | "diagnostic",
+  name: string, refused: boolean | "exception" | "diagnostic" | "exception-diagnostic",
   controlAfterSelection?: "paused" | "cancelled" | "budget",
   corruptCompletedAttempt: false | "invocation" | "original-proof" = false,
 ) {
@@ -1229,7 +1230,7 @@ async function runFixtureRecoveryGraph(
       if (state.active?.id !== "foundation") return {}; // Later fixture stages require no Pi review.
       assert.equal(state.active?.id, "foundation");
       assert.equal(state.result?.headSha, before);
-      if (refused === "exception") {
+      if (refused === "exception" || refused === "exception-diagnostic") {
         log.push("review-transport-failed");
         throw Error("Injected review transport failure");
       }
@@ -1277,7 +1278,8 @@ async function runFixtureRecoveryGraph(
       return { result: state.result };
     });
     const config = { configurable: { thread_id: paused.threadId } };
-    const transport = refused === "diagnostic" ? await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel() : null;
+    const transport = refused === "diagnostic" || refused === "exception-diagnostic"
+      ? await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel() : null;
     const initial = (await graph.getState(config)).values;
     if (transport) await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
       profile: { provider: transport.model.provider, model: transport.model.id }, limits: { modelCalls: 2 } });
@@ -1291,7 +1293,7 @@ async function runFixtureRecoveryGraph(
       const admitted = await graph.invoke(null, { ...config, interruptBefore: ["assess_recovery"] });
       assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "independent-review");
       assert.equal(admitted.recoveryLifecycle.active?.observation,
-        refused === "exception" ? "exception" : "returned-failure");
+        refused === "exception" || refused === "exception-diagnostic" ? "exception" : "returned-failure");
       assert.equal(admitted.recoveryLifecycle.attempt, null, "A refusal is not a correction attempt");
       const selected = await graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
       assert.equal(selected.recoveryLifecycle.decision?.caseId, admitted.recoveryLifecycle.active?.id);
@@ -1303,7 +1305,8 @@ async function runFixtureRecoveryGraph(
           profile: { provider: transport!.model.provider, model: transport!.model.id },
           limits: { modelCalls: 0 } });
       } else if (controlAfterSelection) await setJobControl(f.job, controlAfterSelection);
-      assert.deepEqual(log, [refused === "exception" ? "review-transport-failed" : "refuse-other-owner-write"]);
+      assert.deepEqual(log, [refused === "exception" || refused === "exception-diagnostic"
+        ? "review-transport-failed" : "refuse-other-owner-write"]);
     }
     let next = transport ? await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
       () => createGenerationGraph(saver, "cli").invoke(null, config)) : await graph.invoke(null, config);
@@ -1373,6 +1376,117 @@ async function runFixtureRecoveryGraph(
     }
   }
 }
+
+test("C03 production graph sends an authenticated settled Event no-write to one actual read-only Pi diagnosis", {
+  skip: !available,
+}, async () => {
+  const f = setup("c03-event-no-write-assessor");
+  f.env.NT_EVENT_FIXTURE_CASE = "no-write-protected";
+  const blocked = f.cli(f.start);
+  assert.equal(blocked.status, "blocked");
+  const file = join(f.job.stateDir, "event-items/disclosure.json");
+  const original = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(original.phase, "prerequisite-reported");
+  assert.equal(original.worker, "fixture");
+  assert.equal(original.reroutedFrom, undefined);
+  const active = blocked.inventory.items.find((x: { id: string }) =>
+    x.id === "event:milestone.disclosure");
+  assert.ok(active);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(blocked.inventory.headSha, head);
+
+  // Convert only the deterministic Event transport into a signed Pi-format
+  // original session. The original real graph, receipt verifier and the
+  // diagnostic Pi transport execute normally; no second Event writer exists.
+  const directory = join(f.job.stateDir, "event-sessions", "event-disclosure");
+  mkdirSync(directory, { recursive: true });
+  const sessionFile = join(directory, "no-write.jsonl");
+  const sessionId = "c03-event-no-write-session";
+  const transcript = JSON.stringify({ type: "session", id: sessionId }) + "\n" +
+    JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop",
+      content: [{ type: "text", text: "No in-scope Event write is authorized." }] } }) + "\n";
+  writeFileSync(sessionFile, transcript);
+  const digest = createHash("sha256").update(transcript).digest("hex");
+  const assignmentDigest = createHash("sha256")
+    .update(JSON.stringify(original.assignment)).digest("hex");
+  // The fixture's original protected request is NOT diagnosable. Substitute
+  // a separately source-signed, nonprotected semantic no-write to exercise
+  // the genuine unknown-strategy lane, not to bypass author approval.
+  const conflicts = ["Canonical continuity cannot be established from the current sources."];
+  const obligations: string[] = [];
+  const payload = { jobId: original.jobId, workItemId: original.workItemId,
+    expectedHead: original.expectedHead, planDigest: original.planDigest,
+    sessionSha256: digest, sessionId, assignmentDigest, snapshotId: original.snapshot.id,
+    sessionFile, worker: "pi" as const, conflicts, obligations,
+    ...(original.causalDiscovery ? { causalDiscovery: original.causalDiscovery } : {}) };
+  const reportDigest = eventPrerequisiteReportDigest(payload);
+  const revised = { ...original, worker: "pi", sessionFile, conflicts, obligations,
+    prerequisite: { expectedHead: original.expectedHead,
+      sessionSha256: digest, sessionId, assignmentDigest,
+      snapshotId: original.snapshot.id, sessionFile, worker: "pi", reportDigest } };
+  writeFileSync(file, JSON.stringify(revised, null, 2) + "\n");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["The original source and its unresolved continuity obligation must remain unchanged."]);
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(blocked.checkpointPath);
+  try {
+    const transport = await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel();
+    await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
+      profile: { provider: transport.model.provider, model: transport.model.id },
+      limits: { modelCalls: 2 } });
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: blocked.threadId } };
+    const values = (await graph.getState(cfg)).values;
+    await graph.updateState(cfg, { request: { ...values.request,
+      fixture: false, turnPlanDigest: turnDigest, provider: undefined, model: undefined },
+      status: "running", active, result: null, failures: {}, escalation: null,
+      causalAmendment: null, pauseAfter: null }, "author_update_intake");
+    const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+    assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "specialist-result");
+    assert.equal(admitted.recoveryLifecycle.active?.observation, "returned-failure");
+    assert.equal(admitted.recoveryLifecycle.attempt, null);
+    assert.equal(admitted.recoveryLifecycle.phase, "assessing");
+    const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+    assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic",
+      JSON.stringify({ case: selected.recoveryLifecycle.active, source: selected.recoverySources,
+        inventory: selected.inventory, failures: selected.failures,
+        causalAmendment: selected.causalAmendment, receipt: revised }, null, 2));
+    assert.equal(selected.recoveryLifecycle.decision?.evidence.at(-1)?.digest, reportDigest);
+    assert.equal(selected.recoveryLifecycle.assessorPending, true);
+    assert.equal(transport.calls.length, 0, "A checkpointed decision is not a model call");
+    const completed = await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
+      () => graph.invoke(null, cfg));
+    assert.equal(completed.recoveryLifecycle.decision?.action, "diagnostic-stop");
+    assert.equal(completed.recoveryLifecycle.attempt?.phase, "settled");
+    assert.equal(transport.calls.length, 1);
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, blocked.threadId),
+      completed.recoveryLifecycle);
+    const restarted = await graph.invoke({ request: completed.request }, cfg);
+    assert.equal(restarted.status, "blocked");
+    assert.equal(restarted.recoveryLifecycle.decision?.action, "diagnostic-stop");
+    assert.equal(transport.calls.length, 1, "No second Pi session or Event dispatch on restart");
+    writeFileSync(file, JSON.stringify({ ...revised, prerequisite: {
+      ...revised.prerequisite, reportDigest: "f".repeat(64),
+    } }, null, 2) + "\n");
+    const inspected = await inspectModernGenerationRecovery(f.job, saver, blocked.threadId);
+    assert.equal(inspected?.inspectionFences.length, 1,
+      "Saved settled diagnostic requires the immutable ORIGINAL Event no-write source");
+    const tamperedRestart = await graph.invoke({ request: completed.request }, cfg);
+    assert.equal(tamperedRestart.status, "blocked");
+    assert.ok(tamperedRestart.recoveryLifecycle.inspectionFences.length);
+    assert.equal(transport.calls.length, 1, "Changed original Event proof cannot start another diagnosis");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("generation start and read-only inspect preserve invalid corrective evidence without replay", {
   skip: !available,
@@ -1498,6 +1612,30 @@ test("saved diagnostic stop refuses altered original review proof without new Pi
 test("saved diagnostic selection obeys budget pause and same-case resume", { skip: !available }, async () => {
   const resumed = await runFixtureRecoveryGraph("budget-before-diagnostic", "diagnostic", "budget");
   assert.equal(resumed.next.recoveryLifecycle.decision?.action, "diagnostic-stop");
+});
+
+test("C03 independently reviewed original commit permits one read-only Pi diagnosis after Review transport exception", {
+  skip: !available,
+}, async () => {
+  const { f, next, before, log } = await runFixtureRecoveryGraph(
+    "review-exception-source-bound-diagnostic", "exception-diagnostic");
+  assert.equal(next.status, "blocked");
+  assert.equal(next.recoveryLifecycle.decision?.action, "diagnostic-stop");
+  assert.equal(next.recoveryLifecycle.attempt?.phase, "settled");
+  assert.deepEqual(log, ["review-transport-failed"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before,
+    "The original specialist writer is not replayed after Review infrastructure failure");
+});
+
+test("C03 Review exception diagnostic refuses altered original independently reviewed commit proof", {
+  skip: !available,
+}, async () => {
+  const { next } = await runFixtureRecoveryGraph(
+    "review-exception-altered-original-proof", "exception-diagnostic",
+    undefined, "original-proof");
+  assert.equal(next.status, "blocked");
+  assert.equal(next.recoveryLifecycle.decision?.action, "diagnostic-stop",
+    "The sealed original diagnosis remains historical, never re-invoked");
 });
 
 test("review transport exception reaches the same assessor without retrying the writer", { skip: !available }, async () => {

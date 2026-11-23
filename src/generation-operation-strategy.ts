@@ -2,6 +2,7 @@
  * receipt, writer lock, validation, independent review and budget check. */
 import { isDeepStrictEqual } from "node:util";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { GenerationOperationRecovery } from "./generation-operation-recovery.js";
 import type { GenerationGraphState } from "./generation.js";
@@ -15,6 +16,7 @@ import { inspectPiPolicy } from "./job-pi-policy.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { inspectRejectedRepair } from "./rejected-review-repair.js";
+import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis,
@@ -38,16 +40,52 @@ async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
 async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryEvidence | null> {
   const { operation, sourceHeadSha: head, turnDigest, planVersion } = c.origin;
   if (s.request.fixture || !s.request.turnPlanDigest || s.escalation?.requiresTrustedApproval) return null;
+  // A returned Event no-write has an explicit original Pi completion report.
+  // Unlike an uncertain specialist exception, it is safe to ASK a read-only
+  // diagnostician what is missing; never grant a replacement Event writer.
+  if (operation === "specialist-result" && c.observation === "returned-failure" &&
+      !s.active && !s.result && !s.causalAmendment &&
+      s.inventory?.headSha === head && c.origin.assignmentId) {
+    const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+    const op = source?.input as GenerationOperationRecovery | undefined;
+    const report = op?.evidence.eventNoWrite;
+    const item = s.inventory.items.find(x => x.id === c.origin.assignmentId);
+    if (op?.evidence.resultStatus !== "event-prerequisite-reported" ||
+        op.evidence.assignmentId !== c.origin.assignmentId ||
+        !report || report.expectedHead !== head || item?.status !== "blocked" ||
+        !s.failures[c.origin.assignmentId] ||
+        !/^milestone\.[a-z][a-z0-9-]*$/.test(report.milestoneId) ||
+        !/^[0-9a-f]{64}$/.test(report.reportDigest) ||
+        c.origin.assignmentId !== "event:" + report.milestoneId)
+      return null;
+    const relative = "event-items/" + report.milestoneId.slice(10) + ".json";
+    const original = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as
+      EventNoWriteSource & { phase?: string; milestoneId?: string; planVersion?: number;
+        claimedPaths?: string[] };
+    if (original.phase !== "prerequisite-reported" || original.worker !== "pi" ||
+        original.milestoneId !== report.milestoneId ||
+        original.planVersion !== planVersion || original.jobId !== job.jobId ||
+        original.expectedHead !== head || original.claimedPaths?.length ||
+        original.prerequisite?.reportDigest !== report.reportDigest)
+      return null;
+    await authenticateEventNoWrite(job, original);
+    return { store: "specialist-receipt", ref: relative, digest: report.reportDigest };
+  }
   if (operation === "adaptive-admission" && planVersion) {
     const state = await readAdaptiveState(job, turnDigest, planVersion);
     const attempt = state?.attempts.at(-1);
     if (attempt?.sourceSha === head && attempt.phase !== "planning" && attempt.session && attempt.effect?.phase === "responded")
       return { store: "response-contract", ref: attempt.signature, digest: attempt.session.sessionSha256 };
   }
-  if (c.observation !== "returned-failure" || !["independent-review", "completion-verification"].includes(operation)) return null;
-  if (operation === "independent-review" && (!s.active || s.active.id !== c.origin.assignmentId ||
-      s.result?.headSha !== head || s.escalation?.kind !== "dependency-replan")) return null;
-  if (operation === "completion-verification" && !s.escalation) return null;
+  if (!["independent-review", "completion-verification"].includes(operation)) return null;
+  if (operation === "independent-review" &&
+      (c.observation !== "returned-failure" && c.observation !== "exception" ||
+        !s.active || s.active.id !== c.origin.assignmentId ||
+        s.result?.headSha !== head ||
+        (c.observation === "returned-failure" && s.escalation?.kind !== "dependency-replan")))
+    return null;
+  if (operation === "completion-verification" &&
+      (c.observation !== "returned-failure" || !s.escalation)) return null;
   const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === head &&
     p.assurance?.turnDigest === turnDigest && p.validation.status === "passed");
   if (!point?.assurance) return null;
@@ -95,7 +133,7 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
 }
 export function diagnosticCaseForDecision(c: RecoveryCase, d: RecoveryDecision) {
   const proof = d.evidence.at(-1);
-  if (!proof?.digest || !["repair-ledger", "response-contract", "review-checkpoint"].includes(proof.store))
+  if (!proof?.digest || !["repair-ledger", "response-contract", "review-checkpoint", "specialist-receipt"].includes(proof.store))
     throw Error("Operation diagnosis has no settled effect reference");
   return operationDiagnosisCase(c, [proof.store, proof.ref, proof.digest].join(":"));
 }
