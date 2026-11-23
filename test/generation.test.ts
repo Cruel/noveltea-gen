@@ -2344,6 +2344,235 @@ test("C05 original independently reviewed result is reconciled after unfamiliar 
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
 });
 
+test("C05 contradictory independently passed final report admits one read-only Pi diagnosis, never a Story pass", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("c05-final-report-contradiction");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  saveFixtureTurn(f.job, contract, f.start[3]!, [
+    "Preserve verified source and independently validate the final scope.",
+  ]);
+  const turnFile = join(f.job.stateDir, "turn-plan.json");
+  const turn = JSON.parse(readFileSync(turnFile, "utf8"));
+  const foundation = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(foundation.status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const architecture = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused", architecture.reason ?? undefined);
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
+    /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status,
+    "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const event = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(event.status, "paused", event.reason ?? undefined);
+  await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+  const interactive = f.cli(["generate", "resume", "--pause-after", "interactive"]);
+  assert.ok(["paused", "blocked"].includes(interactive.status),
+    interactive.reason ?? undefined);
+  let progressed = interactive;
+  for (let attempt = 0; attempt < 4 && progressed.status === "blocked"; attempt++) {
+    const points = await inspectRecoveryCheckpoints(f.job);
+    const pending = points.filter(p => p.eligible && p.semanticReview === "required-pending" &&
+      ["interactive-choice-disclosure", "interactive-puzzle-disclosure"].includes(p.workItem));
+    assert.ok(pending.length, "Interactive recovery cannot skip an unproven dependency");
+    for (const p of pending) await sealFixtureGenerationCheckpoint(f, p.workItem);
+    progressed = f.cli(["generate", "resume", "--pause-after", "interactive"]);
+  }
+  assert.equal(progressed.status, "paused", progressed.reason ?? undefined);
+  const pendingInteractive = (await inspectRecoveryCheckpoints(f.job)).filter(p =>
+    p.eligible && p.semanticReview === "required-pending" &&
+    ["interactive-choice-disclosure", "interactive-puzzle-disclosure"].includes(p.workItem));
+  for (const p of pendingInteractive) await sealFixtureGenerationCheckpoint(f, p.workItem);
+  const composition = f.cli(["generate", "resume", "--pause-after", "composition"]);
+  assert.equal(composition.status, "paused", composition.reason ?? undefined);
+  await sealFixtureGenerationCheckpoint(f, "composition-disclosure");
+  const fixture = f.cli(["generate", "resume"]);
+  assert.equal(fixture.status, "blocked", JSON.stringify({
+    status: fixture.status, reason: fixture.reason, inventory: fixture.inventory,
+  }));
+
+  const reviewFile = join(f.job.stateDir, "narrative-review.json");
+  if (existsSync(reviewFile)) unlinkSync(reviewFile);
+  const previous = Object.fromEntries(Object.keys(f.env).map(k => [k, process.env[k]]));
+  Object.assign(process.env, f.env);
+  const releaseSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  const storyPaths = () => git(f.job.worktreeRoot, "ls-files", "--", "story/")
+    .split("\n").filter(path => path.endsWith(".md")).map(path => path.slice(6));
+  try {
+    const { runtime, observed } = await scriptedStoryRuntime((index, ctx) => {
+      if (index === 0) return {
+        content: scriptedReadCalls([
+          ...boundedPinnedSources("nt-narrative-review").map(path => "skill://" + path),
+          "skill://nt-catalog/references/glossary.md", ...storyPaths(),
+        ], index), reason: "toolUse",
+      };
+      if (index === 1) {
+        const prompt = ctx.messages.filter((m): m is {
+          role: string; content: Array<{ text?: string }>;
+        } => !!m && typeof m === "object" && "role" in m &&
+          m.role === "user" && "content" in m && Array.isArray(m.content))
+          .flatMap(m => m.content.map(c => c.text ?? ""))
+          .findLast(text => text.includes("ASSIGNMENT:\n"));
+        assert.ok(prompt, "Independent final reviewer must receive its pinned assignment");
+        const a = JSON.parse(prompt.slice(prompt.lastIndexOf("ASSIGNMENT:\n") +
+          "ASSIGNMENT:\n".length)) as {
+            routes: Array<{ event: string; step: string; branch: string }>;
+            milestoneRoutes: Array<{ milestone: string; alternative: number }>;
+            puzzleRoutes: Array<{ puzzle: string; event: string }>;
+          };
+        return { content: scriptedText({ verdict: "pass", findings: [], evidence: [
+          ...storyPaths().map(p => p + ":1"),
+          ...a.routes.map(r => r.event + "#" + r.step + "/" + r.branch +
+            ": events/disclosure.md:1"),
+          ...a.milestoneRoutes.map(r => r.milestone + "#" + r.alternative +
+            ": milestones/disclosure.md:1"),
+          ...a.puzzleRoutes.map(r => r.puzzle + "/" + r.event +
+            ": events/disclosure.md:1"),
+        ] }), reason: "stop" };
+      }
+      if (index === 2) return {
+        content: scriptedReadCalls([
+          ...boundedPinnedSources("nt-narrative-review").map(path => "skill://" + path),
+          "skill://nt-catalog/references/glossary.md", ...storyPaths(),
+        ], index), reason: "toolUse",
+      };
+      if (index === 3) {
+        const user = ctx.messages.filter((m): m is { role: string; content: Array<{ text?: string }> } =>
+          !!m && typeof m === "object" && "role" in m &&
+          m.role === "user" && "content" in m && Array.isArray(m.content))
+          .flatMap(m => m.content.map(c => c.text ?? ""))
+          .findLast(s => s.includes("PLAN-LEVEL PACKET:\n"));
+        assert.ok(user);
+        const packet = JSON.parse(user.slice(user.lastIndexOf("PLAN-LEVEL PACKET:\n") +
+          "PLAN-LEVEL PACKET:\n".length)) as {
+          digest: string; objectives: Array<{id:string; text:string}>;
+          canonical: Array<{path:string;content:string}>;
+        };
+        const pathFor = (id: string) =>
+          id.includes("milestone-plan:") && (id.includes(":event:") || id.includes(":local-event:")) ? "events/disclose-ledger.md" :
+          id.includes("milestone-plan:") && id.includes(":interactive:") ? "choice-points/loyalty.md" :
+          id.includes("milestone-plan:") && id.includes(":composition:") ? "authored-content/disclosure-scene.md" :
+          id.includes("architecture") ? "arcs/truth.md" :
+          id.includes("interactive") || id.includes("branch") ? "choice-points/loyalty.md" :
+          "authored-content/disclosure-scene.md";
+        const checks = packet.objectives.map(o => {
+          const path = pathFor(o.id);
+          assert.ok(packet.canonical.some(c => c.path === path), "Source witness missing: " + path);
+          return { objectiveId: o.id, fulfilled: true,
+            evidence: [{ path, line: 1, explanation: "Canonical source supports " + o.text }] };
+        });
+        return { content: scriptedText({ digest: packet.digest, verdict: "complete",
+          checks, findings: [] }), reason: "stop" };
+      }
+      if (index === 4) {
+        const text = JSON.stringify(ctx.messages);
+        const signature = text.match(/signature=([0-9a-f]{64})/)?.[1];
+        const sourceRef = text.match(/sourceRef=([^;]+); category=/)?.[1];
+        assert.ok(signature && sourceRef);
+        return { content: scriptedText({
+          schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+          category: "invalid-assignment",
+          diagnosis: "The final Pi report passed but the original Graph inventory remains incomplete.",
+          strategy: "unsafe", owner: null, scopeRef: null,
+          prerequisites: ["Reconcile the original inventory against independent source proofs"],
+          uncertainty: "No independent proof yet permits promotion of the incomplete assignment.",
+        }), reason: "stop" };
+      }
+      throw Error("Unexpected model invocation after read-only diagnostic: " + index);
+    });
+    await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, {
+      version: 1, profile: { provider: scriptedModel.provider, model: scriptedModel.id },
+      limits: { modelCalls: 5 },
+    });
+    const reviewed = await withJobModelRuntime(runtime, () =>
+      (async () => {
+        const { runNarrativeReview } = await import("../src/narrative-review.js");
+        return runNarrativeReview({ story: f.story, job: "single", action: "run",
+          fixture: false, skillsSource: source, turnPlanDigest: turn.digest,
+          provider: scriptedModel.provider, model: scriptedModel.id });
+      })());
+    assert.equal(reviewed.worker, "pi");
+    assert.equal(reviewed.status, "complete-in-scope",
+      JSON.stringify({status:reviewed.status,failure:reviewed.failure,editorial:reviewed.editorial}));
+    const { inspectJobReport } = await import("../src/job-report.js");
+    const preliminary = await inspectJobReport({ story: f.story, job: "single" });
+    const { assessTurnFulfillment } = await import("../src/turn-fulfillment.js");
+    const { reviewTurnCompleteness } = await import("../src/narrative-review-specialist.js");
+    const { createSkillSnapshot } = await import("../src/snapshot.js");
+    const reviewSnapshot = await createSkillSnapshot({ discovery: "explicit-only",
+      novelteaSkills: source, skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"] });
+    assert.ok(reviewSnapshot);
+    const currentJob = await startStoryJob({ story: f.story, job: "single" }, false);
+    const { withStoryJobLock } = await import("../src/job-lock.js");
+    const turnResult = await withJobModelRuntime(runtime, () =>
+      withStoryJobLock(currentJob, "generation-final-turn-review", () =>
+        assessTurnFulfillment(currentJob, preliminary, "independent-pi-turn-completeness",
+          (packet, onSession) => reviewTurnCompleteness(currentJob, reviewSnapshot, packet,
+            scriptedModel.provider, scriptedModel.id, undefined, onSession))));
+    assert.equal(turnResult?.phase, "completed");
+    assert.equal(turnResult.verdict?.verdict, "complete");
+    const report = await inspectJobReport({ story: f.story, job: "single" });
+    assert.equal(report.generation.status, "completed", JSON.stringify(report.generation));
+
+    const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+    try {
+      const graph = createGenerationGraph(saver, "cli");
+      const config = { configurable: { thread_id: f.job.threadId + ":generation" } };
+      const saved = (await graph.getState(config)).values;
+      assert.ok(saved.inventory && !saved.inventory.items.every((i: any) => i.status === "verified"),
+        "The original Graph still has an unverified review assignment.");
+      await graph.updateState(config, {
+        request: { ...saved.request, fixture: false, turnPlanDigest: turn.digest,
+          provider: scriptedModel.provider, model: scriptedModel.id },
+        status: "running", active: null, result: null, pauseAfter: null,
+        escalation: null, causalAmendment: null,
+      }, "author_update_intake");
+      const admitted = await graph.invoke(null, { ...config, interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "completion-verification",
+        JSON.stringify({ status: admitted.status, reason: admitted.reason,
+          case: admitted.recoveryLifecycle.active }));
+      assert.equal(admitted.recoveryLifecycle.active?.observation, "returned-failure");
+      const selected = await graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
+      assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic");
+      assert.equal(observed.length, 4, "No diagnosis before its authenticated admission");
+      const diagnosed = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+      assert.equal(diagnosed.recoveryLifecycle.decision?.action, "diagnostic-stop",
+        JSON.stringify({ status: diagnosed.status, reason: diagnosed.reason,
+          lifecycle: diagnosed.recoveryLifecycle }));
+      assert.equal(diagnosed.recoveryLifecycle.attempt?.phase, "settled");
+      assert.equal(diagnosed.status, "blocked", "Diagnostic cannot waive the Graph inventory gate");
+      assert.equal(observed.length, 5);
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+        diagnosed.recoveryLifecycle);
+      const restarted = await graph.invoke({ request: diagnosed.request }, config);
+      assert.equal(restarted.status, "blocked");
+      assert.equal(observed.length, 5, "Saved completion diagnosis cannot run a second Pi call");
+      // A forged prior positive Review cannot keep a historical diagnostic
+      // authoritative. Inspection must recheck the exact original reviewer
+      // evidence, fence the saved case, and refuse an additional model call.
+      const beforeReview = readFileSync(reviewFile, "utf8");
+      const forgedReview = JSON.parse(beforeReview);
+      forgedReview.editorial.verdict = "block";
+      writeFileSync(reviewFile, JSON.stringify(forgedReview));
+      const fenced = await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id);
+      assert.equal(fenced?.phase, "fenced");
+      assert.ok(fenced?.inspectionFences.length);
+      assert.equal(observed.length, 5);
+      writeFileSync(reviewFile, beforeReview);
+      assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+    } finally { saver.db.close(); }
+  } finally {
+    releaseSandbox();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("C03 Review exception diagnostic refuses altered original independently reviewed commit proof", {
   skip: !available,
 }, async () => {

@@ -133,11 +133,57 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         return { store: "specialist-receipt", ref: original.relative, digest: original.reportDigest };
     }
   }
-  if (operation === "adaptive-admission" && planVersion) {
-    const state = await readAdaptiveState(job, turnDigest, planVersion);
-    const attempt = state?.attempts.at(-1);
-    if (attempt?.sourceSha === head && attempt.phase !== "planning" && attempt.session && attempt.effect?.phase === "responded")
-      return { store: "response-contract", ref: attempt.signature, digest: attempt.session.sessionSha256 };
+  if (operation === "adaptive-admission" && planVersion && c.observation === "exception" &&
+      !s.active && !s.result && !s.ideaTask && !s.crossDomainCloseout &&
+      !s.causalAmendment && !s.escalation) {
+    const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+    const op = source?.input as GenerationOperationRecovery | undefined;
+    if (op?.operation === "adaptive-admission" && op.outcome === "exception" &&
+        op.source.headSha === head && op.source.turnDigest === turnDigest &&
+        op.source.planVersion === planVersion &&
+        op.evidence.reference === "generation-checkpoint" && !op.evidence.assignmentId &&
+        !op.evidence.closeout && !op.evidence.eventNoWrite &&
+        !op.evidence.interactiveNoWrite && !op.evidence.verifier) {
+      const state = await readAdaptiveState(job, turnDigest, planVersion);
+      const attempt = state?.attempts.at(-1);
+      if (attempt?.sourceSha === head && ["rejected", "unchanged", "admitted"].includes(attempt.phase) &&
+          attempt.session && attempt.effect?.phase === "responded")
+        return { store: "response-contract", ref: attempt.signature,
+          digest: attempt.session.sessionSha256 };
+    }
+  }
+  // An independently accepted final report can disagree with a stale graph
+  // inventory. This is not a pass grant: authenticate the original Pi Review
+  // and checkpoint, allow one read-only assessment, and retain the blocked
+  // inventory until source-based reconciliation actually succeeds.
+  if (operation === "completion-verification" && c.observation === "returned-failure" &&
+      !s.active && !s.result && !s.ideaTask && !s.escalation && !s.causalAmendment &&
+      s.inventory?.headSha === head && s.inventory.planVersion === planVersion &&
+      !authorizedInventoryComplete(s.inventory)) {
+    const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+    const op = source?.input as GenerationOperationRecovery | undefined;
+    if (op?.evidence.reference === "completion-report" &&
+        op.evidence.resultStatus === "completed" && !op.evidence.completion &&
+        op.source.headSha === head && op.source.planVersion === planVersion &&
+        op.source.turnDigest === turnDigest) {
+      const report = await inspectJobReport(s.request);
+      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+        p.eligible && p.commitSha === head && p.validation.status === "passed" &&
+        (p.semanticReview === "passed" || p.semanticReview === "not-required"));
+      if (report.identity.headSha === head && report.identity.clean &&
+          report.generation.status === "completed" &&
+          report.generation.review?.worker === "pi" && report.generation.review.current &&
+          report.evidence.editorial.verdict === "pass" &&
+          report.evidence.scope?.deterministic === "passed" &&
+          report.evidence.protection.status === "checked" &&
+          !report.evidence.authorApprovals.required &&
+          !report.evidence.deferredIdeas.scopedOutstanding.length && point) {
+        return { store: "completion-report", ref: c.origin.failureAnchor.ref,
+          digest: createHash("sha256").update(JSON.stringify({ original: op,
+            inventory: s.inventory, source: head, review: report.generation.review,
+            checkpoint: point.proofDigest })).digest("hex") };
+      }
+    }
   }
   if (operation === "completion-verification" && c.observation === "returned-failure" &&
       !s.active && !s.result && !s.ideaTask && !s.escalation && !s.causalAmendment &&
@@ -151,7 +197,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
       p.eligible && p.commitSha === head && p.workItem === original?.checkpoint &&
       (p.semanticReview === "passed" || p.semanticReview === "not-required"));
     if (op?.evidence.reference !== "completion-report" || !original || !point ||
-        !isTrustedFinalVerdictAnomaly(report) ||
+        report.identity.headSha !== head || !isTrustedFinalVerdictAnomaly(report) ||
         original.reportStatus !== report.generation.status ||
         original.scopeStatus !== report.generation.scopeFulfillment ||
         original.planStatus !== report.generation.planFulfillment.status)

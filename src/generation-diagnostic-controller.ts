@@ -1,5 +1,6 @@
 /** C05 diagnosis-to-adapter admission. This is a pure controller projection;
  * the original C03 assessor and source-specific adapters own every effect. */
+import { isDeepStrictEqual } from "node:util";
 import type { GenerationGraphState } from "./generation.js";
 import type { RecoveryCase, RecoveryDecision, RecoveryEvidence } from "./generation-recovery-contract.js";
 import type { RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
@@ -62,8 +63,16 @@ export function authorizeDiagnosticStrategy(s: GenerationGraphState, c: Recovery
       s.ideaTask || s.crossDomainCloseout || s.causalAmendment || s.escalation ||
       proposal.owner !== null || proposal.scopeRef !== null ||
       s.inventory?.headSha !== c.origin.sourceHeadSha ||
-      !diagnostic.evidence.at(-1)?.digest)
+      s.planVersion !== c.origin.planVersion ||
+      s.request.job !== c.origin.jobId ||
+      s.request.turnPlanDigest !== c.origin.turnDigest ||
+      diagnostic.caseId !== c.id ||
+      diagnostic.checkedSourceHeadSha !== c.origin.sourceHeadSha ||
+      !isDeepStrictEqual(diagnostic.evidence.slice(0, -1), c.evidence))
     return null;
+  const proof = diagnostic.evidence.at(-1);
+  if (!proof?.digest || proposal.sourceRef !==
+      [proof.store, proof.ref, proof.digest].join(":")) return null;
   const scheduling = c.origin.operation === "scheduling" && !s.active && !s.result;
   const review = c.origin.operation === "independent-review" &&
     !!s.active && s.active.id === c.origin.assignmentId &&

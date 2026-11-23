@@ -43,7 +43,7 @@ const siteNames = [
  * in docs/generation-recovery-contract.md rather than silent test regeneration. */
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:12",
-  assess_recovery: "returns:20,status:8,blocked:3,throws:10",
+  assess_recovery: "returns:18,status:7,blocked:1,throws:9",
   author_update_intake: "returns:20,status:2,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
@@ -60,7 +60,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
-  recoveryNode: "returns:20,status:14,throws:4",
+  recoveryNode: "returns:20,status:14,throws:10",
 };
 const operations = [
   "adaptive-admission",
@@ -407,8 +407,8 @@ test("an existing blocked exit cannot change to running without changing its sou
   const altered = exitSites(bypass).assess_recovery!.filter((r) => r.id.includes("/return#"));
   assert.equal(altered.length, original.length, "Return count deliberately unchanged");
   assert.notEqual(
-    altered[13]!.fingerprint,
-    original[13]!.fingerprint,
+    altered[16]!.fingerprint,
+    original[16]!.fingerprint,
     "Source-specific fingerprint catches bypass even with the same return count",
   );
 });

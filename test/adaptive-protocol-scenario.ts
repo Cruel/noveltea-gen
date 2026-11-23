@@ -20,6 +20,8 @@ import { planWholeStory } from "../web/src/lib/turn-plan.js";
 
 export async function exerciseAdaptiveRecoveryGraph(input: {
   exhaust: boolean; preCallStop?: boolean; completedStop?: boolean; tamperCompleted?: boolean;
+  /** C05: a valid, settled Pi response that controller admission rejects. */
+  rejectProposal?: boolean;
   preCallRefusal?: "head" | "model" | "pause" | "cancel";
   story: string; id: string; task: string; source: string; scoped: string; contract: CompletionContract;
   provider: string; model: string; calls: Array<{ tools: string[]; messages: readonly unknown[] }>;
@@ -44,6 +46,24 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
     if (i === 0 || i === 2) return reads;
     if (i === 1) return JSON.stringify({ sourceSha: job.baseSha, turnDigest: turn.digest,
       assignments: turn.assignments.map(a => ({ id: a.id, reason: "Verified scoped assignment" })) });
+    if (input.rejectProposal && i === 3) return JSON.stringify({
+      sourceSha: point.commitSha, turnDigest: turn.digest, beforeVersion: 1,
+      reason: "Original adaptive response proposed an invalid, empty pending order",
+      actions: [], order: [],
+    });
+    if (input.rejectProposal && i === 4) {
+      assert.deepEqual(calls[i]!.tools, [], "C05 diagnostic is independent and read-only");
+      const serialized = JSON.stringify(calls[i]!.messages);
+      const signature = serialized.match(/signature=([0-9a-f]{64})/)?.[1];
+      const sourceRef = serialized.match(/sourceRef=([^;]+); category=/)?.[1];
+      assert.ok(signature && sourceRef, "Diagnostic must cite its exact original adaptive receipt");
+      return JSON.stringify({ schema: "noveltea-recovery-diagnostic-proposal/v1",
+        signature, sourceRef, category: "invalid-assignment",
+        diagnosis: "The original adaptive response requested an invalid assignment ordering.",
+        strategy: "unsafe", owner: null, scopeRef: null,
+        prerequisites: ["Inspect the sealed original admission rejection"],
+        uncertainty: "No independently granted new adaptive work scope exists." });
+    }
     if ((input.preCallStop || input.completedStop) && i === 3) {
       const messages = calls[i]!.messages as Array<{ role: string; content?: Array<{ text?: string }> }>;
       const content = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text).join("\n");
@@ -79,6 +99,37 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       { stage: "foundation", status: "committed", headSha: job.baseSha },
       { stage: "architecture", status: "architecture-committed", headSha: point.commitSha, planVersion: 1 },
     ], planVersion: 1 }, "schedule");
+    if (input.rejectProposal) {
+      const admitted = await withJobModelRuntime(rt, () => graph.invoke(null,
+        { ...config, interruptBefore: ["assess_recovery"] }));
+      assert.equal(admitted.recoveryLifecycle?.active?.origin.operation, "adaptive-admission",
+        JSON.stringify({ status: admitted.status, reason: admitted.reason,
+          lifecycle: admitted.recoveryLifecycle }));
+      const original = (await readAdaptiveState(job, turn.digest, 1))!;
+      assert.equal(original.attempts.at(-1)?.phase, "rejected");
+      assert.equal(original.attempts.at(-1)?.effect?.phase, "responded");
+      assert.ok(original.attempts.at(-1)?.session, "Original accepted Pi response must be authenticated");
+      const selected = await withJobModelRuntime(rt, () => graph.invoke(null,
+        { ...config, interruptAfter: ["assess_recovery"] }));
+      assert.equal(selected.recoveryLifecycle?.decision?.action, "diagnostic",
+        JSON.stringify({ status: selected.status, reason: selected.reason,
+          lifecycle: selected.recoveryLifecycle }));
+      assert.equal(calls.length, 4, "Assessor selection is not a second Pi operation");
+      const diagnosed = await withJobModelRuntime(rt, () => graph.invoke(null, config));
+      assert.equal(diagnosed.recoveryLifecycle?.decision?.action, "diagnostic-stop",
+        JSON.stringify({ status: diagnosed.status, reason: diagnosed.reason,
+          lifecycle: diagnosed.recoveryLifecycle }));
+      assert.equal(diagnosed.recoveryLifecycle?.attempt?.phase, "settled");
+      assert.equal(calls.length, 5, "One read-only C05 Pi diagnostic, no adaptive writer retry");
+      for (let restart = 0; restart < 2; restart++) {
+        const inspected = await runStoryGeneration({ action: "inspect", story, job: id });
+        assert.equal(inspected.recoveryInspection?.phase, "fenced");
+        assert.equal(calls.length, 5);
+      }
+      assert.equal((await inspectPiPolicy(job)).budget.modelCalls, 5,
+        "Original source planner and C05 diagnosis must both be metered once");
+      return;
+    }
     if (input.completedStop) {
       // The parent graph checkpoint has not yet published this operation's
       // reconciliation. Preserve and restore the exact PRE-node state rather

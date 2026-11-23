@@ -58,11 +58,13 @@ const diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }> = {
   action: "diagnostic", adapter: "unknown-diagnostic", mode: "read-only", attemptRef: null,
 };
 const state = { active: null, result: null, ideaTask: null, crossDomainCloseout: null,
-  causalAmendment: null, escalation: null, inventory: { headSha: origin.sourceHeadSha },
+  causalAmendment: null, escalation: null, planVersion: origin.planVersion,
+  request: { job: origin.jobId, turnPlanDigest: origin.turnDigest },
+  inventory: { headSha: origin.sourceHeadSha },
 } as unknown as GenerationGraphState;
 
 test("C05 model recommendations are admitted only when the original controller adapter is independently eligible", () => {
-  const proposal = { ...example };
+  const proposal = { ...example, sourceRef: "graph-checkpoint:thread-242:original:" + "b".repeat(64) };
   const approved = authorizeDiagnosticStrategy(state, c, diagnostic, proposal);
   assert.equal(approved?.action, "reconcile-effects");
   if (approved?.action === "reconcile-effects") {
@@ -84,6 +86,29 @@ test("C05 model recommendations are admitted only when the original controller a
   ]) assert.equal(authorizeDiagnosticStrategy(badState as GenerationGraphState, c, diagnostic, proposal), null);
   assert.equal(authorizeDiagnosticStrategy(state, { ...c,
     origin: { ...origin, operation: "specialist-dispatch" } }, diagnostic, proposal), null);
+  assert.equal(authorizeDiagnosticStrategy(state, c, { ...diagnostic, caseId: "f".repeat(64) }, proposal), null);
+  assert.equal(authorizeDiagnosticStrategy(state, c, diagnostic, { ...proposal, sourceRef: "unverified" }), null);
+  assert.equal(authorizeDiagnosticStrategy({ ...state, planVersion: 3 } as GenerationGraphState,
+    c, diagnostic, proposal), null);
+  assert.equal(authorizeDiagnosticStrategy({ ...state, request: {job: "another", turnPlanDigest: origin.turnDigest} } as GenerationGraphState,
+    c, diagnostic, proposal), null);
+});
+
+test("C05 previously passed independent Review transport exception admits original-receipt-only reconciliation", () => {
+  const reviewOrigin = { ...origin, operation: "independent-review" as const,
+    check: "assignment-review.v1", assignmentId: "composition:milestone.disclosure" };
+  const reviewCase = { ...c, origin: reviewOrigin, id: recoveryCaseId(reviewOrigin) };
+  const reviewDiagnostic = { ...diagnostic, caseId: reviewCase.id };
+  const reviewState = { ...state,
+    active: {id: reviewOrigin.assignmentId}, result: {headSha: origin.sourceHeadSha},
+    inventory: {headSha: origin.sourceHeadSha, items:[{id:reviewOrigin.assignmentId}]} } as GenerationGraphState;
+  const proposal = { ...example, sourceRef: "graph-checkpoint:thread-242:original:" + "b".repeat(64) };
+  assert.equal(authorizeDiagnosticStrategy(reviewState, reviewCase, reviewDiagnostic, proposal)?.action,
+    "reconcile-effects");
+  assert.equal(authorizeDiagnosticStrategy({ ...reviewState, result: {headSha:"f".repeat(40)} },
+    reviewCase, reviewDiagnostic, proposal), null);
+  assert.equal(authorizeDiagnosticStrategy({ ...reviewState, active: {id: "wrong-owner"} } as GenerationGraphState,
+    reviewCase, reviewDiagnostic, proposal), null);
 });
 
 test("C05 bounded diagnostic packet carries authenticated original scope without author-only inbox", () => {
