@@ -213,6 +213,9 @@ const Channels = Annotation.Root({
   completedStages: Annotation<GenerationEvidence[]>({ reducer: (_, next) => next, default: () => [] }),
   status: Annotation<Status>(),
   reason: Annotation<string | null>(),
+  /** One-shot author-intake handoff after an independently reviewed correction.
+   * Graph routing must never use a user-facing reason string as authority. */
+  reviewSteeringHandoff: Annotation<boolean>({ reducer: (_, next) => next, default: () => false }),
   result: Annotation<{ status: string; headSha?: string } | null>(),
   planVersion: Annotation<number | null>(),
   pauseAfter: Annotation<Stage | null>(),
@@ -822,7 +825,7 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
             finalizeReviewEventDependency(job, point.commitSha));
         }
         if (progress.next === "steering-boundary")
-          return { reason: REPAIR_STEERING_BOUNDARY };
+          return { reviewSteeringHandoff: true, reason: REPAIR_STEERING_BOUNDARY };
         if (progress.next === "controller-replan" && progress.state.outOfAuthority) {
           try {
             const source = await (await import("./checkpoint-assurance.js")).inspectCheckpointReview(job, point);
@@ -845,7 +848,8 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
             });
             if (request.action !== "controller-amendment-required" ||
                 request.classification !== "other-owner")
-              return { status: "blocked", reason: "Protected or unapproved prerequisite requires " +
+              return { nonsemanticStop: "author-boundary" as const,
+                status: "blocked", reason: "Protected or unapproved prerequisite requires " +
                 "an explicit author-approved source-bound amendment; no unrelated writer may dispatch.",
                 escalation: {
                   kind: "protected-approval" as const, requiresTrustedApproval: true,
@@ -1038,6 +1042,7 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
         // resume yet. Expose an actionable blocked escalation, never a
         // misleading paused Thread with no saved question or answer path.
         status: "blocked",
+        ...(requiresTrustedApproval ? { nonsemanticStop: "author-boundary" as const } : {}),
         reason: error.message,
         escalation: {
           kind: requiresTrustedApproval ? "protected-approval" : "dependency-replan",
@@ -1866,7 +1871,8 @@ export function createGenerationGraph(
                   if (boundary) return boundary;
                 }
               }
-              return s.reason === REPAIR_STEERING_BOUNDARY ? { reason: null } : {};
+              return s.reviewSteeringHandoff ?
+                { reviewSteeringHandoff: false, reason: null } : {};
             }
             // A Foundation may have committed its exact authored bytes
             // before publishing the final receipt. The ORIGINAL Foundation
@@ -2465,7 +2471,7 @@ export function createGenerationGraph(
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("independent_assignment_review", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
-      s.reason === REPAIR_STEERING_BOUNDARY ? "author_update_intake" :
+      s.reviewSteeringHandoff ? "author_update_intake" :
       s.result ? "verify_committed_work" : "specialist_dispatch"), [END, "assess_recovery", "author_update_intake", "verify_committed_work", "specialist_dispatch"])
     .addConditionalEdges("verify_committed_work", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
@@ -2508,7 +2514,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
           orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-legacy" : "explicit" };
         state = { request, recoveryLifecycle: emptyRecoveryLifecycle(), recoverySources: [],
           recovery: null, unknownRecovery: null, operationRecovery: null, fixPickup: null,
-          cursor: 0, completedStages: [], status: "running", reason: null, result: null, planVersion: null,
+          cursor: 0, completedStages: [], status: "running", reason: null,
+          reviewSteeringHandoff: false, result: null, planVersion: null,
           pauseAfter: options.pauseAfter ?? null, inventory: null, active: null, failures: {},
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,

@@ -178,7 +178,7 @@ const approvedEdgeSignatures: Record<string, string> = {
   completion_decision: "75726d85064f0f9b1eb31b89fad2856bbcdfc7f02748f590116cb30fd2148df5",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   idea_integration: "2a18b888743ce1be5a7c8e570b8c1e903874e38bec4fd2c9531d7826bb930235",
-  independent_assignment_review: "31df641ec3ac30f6ced3f0a9584607eae707dec055b280620f5e0f500a259262",
+  independent_assignment_review: "f87aeaf6ff6b7d83e855614fce024415bc395e9b7de258c5a4f6e25dde3d87a5",
   schedule: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   specialist_dispatch: "fb238e11658e9aec770037118d2a8a2e08bed03d1c5e822d993125e9337a9286",
   verify_committed_work: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",

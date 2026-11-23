@@ -2074,6 +2074,112 @@ test("production generation graph refuses another owner's recovery without advan
   assert.deepEqual(next.completedStages, []);
 });
 
+test("C03 production Review steering handoff is routed by a checkpointed flag, never the reason string", {
+  skip: !available,
+}, async () => {
+  const f = setup("c03-typed-review-steering");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Keep the original approved Story objective while processing live author steering."]);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+  assert.ok(foundation);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const before = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const graph = createGenerationGraph(saver, "cli", async s => ({
+      reviewSteeringHandoff: true,
+      reason: "An arbitrary display message that is NOT a graph route selector.",
+      result: s.result,
+    }));
+    const cfg = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(cfg, {
+      status: "running", reason: null, active: foundation,
+      result: { status: "committed", headSha: head }, pauseAfter: null,
+    }, "specialist_dispatch");
+    const handed = await graph.invoke(null, {
+      ...cfg, interruptBefore: ["author_update_intake"],
+    });
+    assert.equal(handed.reviewSteeringHandoff, true);
+    assert.equal((await graph.getState(cfg)).next[0], "author_update_intake",
+      "The typed post-Review handoff must take precedence over another reviewer dispatch");
+    assert.equal(handed.recoveryLifecycle.active, null);
+    const resumed = await graph.invoke(null, {
+      ...cfg, interruptBefore: ["independent_assignment_review"],
+    });
+    assert.equal(resumed.reviewSteeringHandoff, false,
+      "The original author-intake node consumes the pending typed handoff exactly once");
+    assert.equal(resumed.reason, null);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("C03 production Review author-only refusal stays a nonsemantic stop while an ordinary refusal enters assessment", {
+  skip: !available,
+}, async () => {
+  const outcomes = [
+    { name: "protected", requiresTrustedApproval: true, expected: "author-only" },
+    { name: "unprotected", requiresTrustedApproval: false, expected: "assessment" },
+  ] as const;
+  for (const scenario of outcomes) {
+    const f = setup("c03-review-refusal-" + scenario.name);
+    saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+      ["Retain the original protected objective and independent semantic Review."]);
+    const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+    assert.equal(paused.status, "paused");
+    await sealFixtureGenerationCheckpoint(f, "foundation");
+    const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+    assert.ok(foundation);
+    const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, f.env);
+    const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    try {
+      const graph = createGenerationGraph(saver, "cli", async () => ({
+        status: "blocked" as const,
+        ...(scenario.requiresTrustedApproval ? { nonsemanticStop: "author-boundary" as const } : {}),
+        reason: "Original independent Review cannot authorize a protected source change.",
+        escalation: { kind: scenario.requiresTrustedApproval ? "protected-approval" as const :
+          "dependency-replan" as const, requiresTrustedApproval: scenario.requiresTrustedApproval,
+          sources: [], action: "Requires an independently authorized amendment" },
+      }));
+      const cfg = { configurable: { thread_id: paused.threadId } };
+      await graph.updateState(cfg, {
+        status: "running", reason: null, active: foundation,
+        result: { status: "committed", headSha: head },
+        pauseAfter: null,
+      }, "specialist_dispatch");
+      const examined = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+      if (scenario.expected === "author-only") {
+        assert.equal(examined.status, "blocked");
+        assert.equal(examined.recoveryLifecycle.active, null);
+        assert.equal(examined.recoveryLifecycle.attempt, null);
+        assert.equal(examined.recoverySources.length, 0);
+      } else {
+        assert.equal(examined.recoveryLifecycle.active?.origin.operation, "independent-review");
+        assert.equal(examined.recoveryLifecycle.phase, "assessing");
+        assert.equal(examined.recoveryLifecycle.attempt, null);
+      }
+    } finally {
+      saver.db.close();
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("authenticated owner refusal executes a read-only diagnostic once across assessor restart", { skip: !available }, async () => {
   const { f, next, before, log } = await runFixtureRecoveryGraph("owner-refusal-diagnostic", "diagnostic");
   assert.equal(next.status, "blocked");
