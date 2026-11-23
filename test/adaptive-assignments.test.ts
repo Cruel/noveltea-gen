@@ -323,6 +323,29 @@ test("adaptive amendment revalidates exact persisted actions after unrelated ver
   assert.throws(() => revalidateAdaptiveAmendment(seal, { ...continued,
     plan: { ...continued.plan, version: 2 } }), /plan|version/i);
 });
+test("#244 C07 completed adaptive narrowing replays without reopening final Review or admitting scope", () => {
+  const p = proposal([{ kind: "narrow", item: "interactive:milestone.discovery",
+    sourcePath: "milestones/discovery.md", sourceHash: hashes["milestones/discovery.md"]!,
+    outcome: "Preserve observed source evidence without unnecessary interaction." }],
+  ["interactive:milestone.discovery", "composition:milestone.discovery", "review"]);
+  const admitted = admitAdaptiveAssignments(base(p));
+  const after = base(p);
+  for (const item of after.inventory.items) {
+    item.status = "verified";
+    item.verifiedSha = head;
+  }
+  after.carried = after.inventory.items.map(item => ({ id: item.id, sha: head }));
+  const restored = revalidateAdaptiveAmendment(admitted, after);
+  assert.deepEqual(restored.order, []);
+  assert.equal(restored.inventory.items.every(item => item.status === "verified"), true);
+  assert.equal(restored.inventory.items.find(item => item.id === "review")?.status, "verified");
+  // A previously completed final review cannot become a new write grant.
+  const expanded = proposal([{ kind: "add", stage: "event",
+    milestone: "milestone.choice", dependsOn: ["foundations"] }], ["event:milestone.choice"]);
+  assert.throws(() => admitAdaptiveAssignments({ ...after, proposal: expanded }),
+    /review|pending|order|unchanged|version/i);
+});
+
 test("narrative-led no-Puzzle omission needs independent source-bound evidence; global review remains", () => {
   const p = proposal([{ kind: "omit", item: "interactive:milestone.discovery" }],
     ["composition:milestone.discovery", "review"]);

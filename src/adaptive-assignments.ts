@@ -290,7 +290,12 @@ function project(input: AdaptiveAdmission, omissions: AdaptiveOmissionProof[]): 
   // Every new terminal Milestone must still feed the independent whole-Story
   // review; split replacements preserve the original descendant dependencies.
   const review = byId.get("review");
-  if (!review || review.stage !== "review" || review.status !== "pending")
+  // Historical plan replay after the final independently verified review is
+  // read-only. It may retain an already completed Turn, but cannot create
+  // assignments or promote a pending final goal check without its reviewer.
+  const closed = review?.status === "verified" && !input.proposal.actions.length &&
+    items.every(item => item.status === "verified");
+  if (!review || review.stage !== "review" || review.status !== "pending" && !closed)
     throw Error("Adaptive assignments require an unchanged pending final goal review.");
   for (const id of added) {
     const item = byId.get(id)!;
@@ -577,7 +582,9 @@ export function applyAdaptiveAssignments(inventory: GenerationInventory,
     } else throw Error("Unknown adaptive action.");
   }
   const review = byId.get("review");
-  if (!review || review.status !== "pending") throw Error("Adaptive receipt lost final review.");
+  if (!review || review.status !== "pending" && !(review.status === "verified" &&
+      !amendment.actions.length && items.every(item => item.status === "verified")))
+    throw Error("Adaptive receipt lost final review.");
   for (const action of amendment.actions) if (action.kind === "add") {
     const id = action.stage + ":" + action.milestone;
     if (!items.some(i => i.dependencies.includes(id))) review.dependencies.push(id);

@@ -788,7 +788,10 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
   if (allowHistoricalDescendant) git(job, "merge-base", "--is-ancestor", choice.beforeHead, head);
   const reportHash = choiceConflictReportDigest(receipt, choice, sessionPath, sessionHash);
   if (choice.digest !== reportHash) throw Error("Original Choice negative report digest changed");
-  return { relative, reportDigest: reportHash, expectedHead: head,
+  // Historical inspection authenticates the original no-write revision,
+  // not the later descendant currently at HEAD. A post-recovery Composition
+  // commit must not rewrite the negative Pi report's source identity.
+  return { relative, reportDigest: reportHash, expectedHead: choice.beforeHead,
     worker: receipt.worker, planVersion: receipt.planVersion,
     milestoneId, unitId: choice.id, conflicts: choice.conflicts,
     obligations: choice.obligations!, piSessionFile: sessionPath };

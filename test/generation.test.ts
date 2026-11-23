@@ -1732,6 +1732,30 @@ test("#240 original staged Event is authentically authored by a scripted Pi agen
         (observed.length - beforeSelectionCalls - 5) % 2 === 0,
         "One bounded writer, its independent reviewer and fresh read-only affected-dependent reviews must settle");
       const afterCorrectionCalls = observed.length;
+      const beforeReplayBudget = (await inspectPiPolicy(f.job)).budget.modelCalls;
+      // Emulate a process dying after the original Event owner's commit,
+      // independent Review and dependent revalidation were published but
+      // before the parent assessor checkpoint became durable. Reapply ONLY
+      // the previously persisted selected graph state: receipts/Git remain
+      // authoritative, and replay must not dispatch a replacement writer.
+      await graph.updateState(config, selected, "assess_recovery");
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
+        config.configurable.thread_id), selected.recoveryLifecycle,
+        "The original selected case must remain admissible after its verified Git successor");
+      const replayed = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+        ...config, interruptAfter: ["assess_recovery"],
+      }));
+      assert.equal(replayed.status, "running", replayed.reason ?? undefined);
+      assert.equal(replayed.recoveryLifecycle.active, null);
+      assert.deepEqual(replayed.recoveryLifecycle.discharged,
+        corrected.recoveryLifecycle.discharged,
+        "Replayed correction must record the same single original disposition");
+      assert.equal(observed.length, afterCorrectionCalls,
+        "Crash replay must not repeat the corrective writer or any Pi reviewer");
+      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, beforeReplayBudget,
+        "Crash replay must not double-meter the same original corrective Pi invocation");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), successor,
+        "Crash replay must not create a duplicate Git commit");
       const reentered = await graph.invoke(null, { ...config,
         interruptBefore: ["specialist_dispatch"] });
       assert.equal(reentered.active?.stage, "composition", JSON.stringify({
@@ -4270,8 +4294,10 @@ test("C04 Review strategy demands the original sealed failed Pi cycle before any
 });
 
 
-for (const mode of ["event-only", "required-interactive", "story-wide-required"] as const)
-test("#243 C06 original-Thread historical Choice " + mode + " uses independently authenticated owner correction", {
+for (const mode of ["event-only", "required-interactive", "story-wide-required", "event-only-complete"] as const)
+test(mode === "event-only-complete"
+  ? "#244 C07 original-Thread Event-only correction reaches reviewed Composition and completed Turn"
+  : "#243 C06 original-Thread historical Choice " + mode + " uses independently authenticated owner correction", {
   skip: !available, timeout: 180_000,
 }, async () => {
   const mandatory = mode === "required-interactive";
@@ -4305,7 +4331,9 @@ test("#243 C06 original-Thread historical Choice " + mode + " uses independently
     : storyWide ? ["The Story must include consequential player Choices; the only Interactive Milestone cannot be dropped without another approved owner."]
     : ["A later consequential disclosure Choice remains possible, without requiring one at every Milestone."];
   writeFileSync(f.contract, JSON.stringify(contract));
-  const task = "First verify a falsified transfer credit from signed records, then allow later player decisions.";
+  const task = mode === "event-only-complete"
+    ? "Verify the falsified transfer credit from the signed primary ledger; show the corroborated discovery without inventing a player choice."
+    : "First verify a falsified transfer credit from signed records, then allow later player decisions.";
   f.start[3] = task;
   saveFixtureTurn(f.job, contract, task, mandatory
     ? ["Implement the playable release/withhold decision at this Milestone; retain the original evidence."]
@@ -4423,6 +4451,97 @@ test("#243 C06 original-Thread historical Choice " + mode + " uses independently
         schema: "noveltea-milestone-blueprint-review/v5",
         status: "pass", findings: [], prior: [],
       }), reason: "stop" };
+      if (mode === "event-only-complete") {
+        const currentStory = () => git(f.job.worktreeRoot, "ls-files", "--", "story/")
+          .split("\n").filter(p => p.endsWith(".md")).map(p => p.slice(6));
+        if (i === 13) return { content: scriptedReadCalls([
+          ...boundedPinnedSources("nt-narrative-composition").map(p => "skill://" + p),
+          "skill://nt-catalog/references/glossary.md", ...currentStory(),
+        ], i), reason: "toolUse" };
+        if (i === 14) return { content: [{ type: "toolCall", id: "c07-real-pi-composition",
+          name: "write", arguments: { path: "authored-content/disclose-ledger-scene.md",
+            content: ["---", "schema: '0.1'", "type: authored-content",
+              "id: authored-content.disclose-ledger-scene",
+              "title: \"The signed transfer\"", "status: draft", "decisions: []",
+              "events: [event.disclose-ledger]", "revelations: []", "---", "",
+              "## Observed discovery", "",
+              "Neri opens the preserved transfer ledger on the archive table. Ada compares each dated entry against the independent register and checks the witness attribution. The two signed sources match: the witness was transferred, but Neri concealed who authorized the movement. Ada takes the corroborated record into custody and explains the discovery. No player Choice or confession beyond the witnessed evidence is enacted.", "",
+            ].join("\n") } }], reason: "toolUse" };
+        if (i === 15) return { content: scriptedText({
+          modifiedRecords: ["authored-content/disclose-ledger-scene.md"],
+          architecturalConflicts: [], laterObligations: [],
+        }), reason: "stop" };
+        if (i === 16) return { content: scriptedReadCalls([
+          ...boundedPinnedSources("nt-narrative-composition").map(p => "skill://" + p),
+          "skill://nt-catalog/references/glossary.md",
+          ...currentStory(), "authored-content/disclose-ledger-scene.md",
+        ], i), reason: "toolUse" };
+        if (i === 17) return { content: scriptedText({
+          schema: "noveltea-composition-review/v2", status: "pass",
+          findings: [], prior: [],
+          sourceEvidence: ["event.disclose-ledger#disclose/inspect: signed ledger and independent register corroborate the transfer"],
+        }), reason: "stop" };
+        if (i >= 18 && i < 30 && i % 2 === 0) return {
+          content: scriptedReadCalls([
+            ...boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p),
+            "skill://nt-catalog/references/glossary.md", ...currentStory(),
+          ], i), reason: "toolUse",
+        };
+        if (i >= 19 && i < 30 && i % 2 === 1) {
+          const user = (ctx.messages as any[]).filter(m => m.role === "user")
+            .flatMap(m => m.content.map((p: { text?: string }) => p.text ?? ""))
+            .findLast((p: string) => p.includes("ASSIGNMENT:\n"));
+          const planPrompt = (ctx.messages as any[]).filter(m => m.role === "user")
+            .flatMap(m => m.content.map((part: { text?: string }) => part.text ?? ""))
+            .findLast((text: string) => text.includes("PLAN-LEVEL PACKET:\n"));
+          if (planPrompt) {
+            const packet = JSON.parse(planPrompt.slice(planPrompt.lastIndexOf("PLAN-LEVEL PACKET:\n") +
+              "PLAN-LEVEL PACKET:\n".length)) as {
+                digest: string; objectives: Array<{ id: string; text: string }>;
+                canonical: Array<{ path: string }>;
+              };
+            const objectivePath = (id: string) => {
+              if (id === "delivery:architecture" || id.includes(":architecture:"))
+                return "arcs/truth.md";
+              if (["delivery:composition", "delivery:complete-story", "delivery:payoff"].includes(id) ||
+                  id.includes(":composition:"))
+                return "authored-content/disclose-ledger-scene.md";
+              if (id === "delivery:interactive" || id.startsWith("delivery:branch:") ||
+                  id.includes(":interactive:") || id.includes(":event:") ||
+                  id.includes(":local-event:"))
+                return "events/disclose-ledger.md";
+              return "authored-content/disclose-ledger-scene.md";
+            };
+            return { content: scriptedText({ digest: packet.digest, verdict: "complete",
+              checks: packet.objectives.map(objective => ({ objectiveId: objective.id,
+                fulfilled: true, evidence: [{
+                  path: packet.canonical.some(path => path.path === objectivePath(objective.id))
+                    ? objectivePath(objective.id) : packet.canonical[0]!.path,
+                  line: 1, explanation: "Original source satisfies " + objective.text,
+                }],
+              })), findings: [] }), reason: "stop" };
+          }
+          assert.ok(user, "The independent reviewer must receive its original source-bound assignment");
+          const assignment = JSON.parse(user.slice(user.lastIndexOf("ASSIGNMENT:\n") +
+            "ASSIGNMENT:\n".length)) as {
+              specialistAssignments?: Array<{ authority: { existingPaths: string[] } }>;
+              routes: Array<{ event: string; step: string; branch: string }>;
+              milestoneRoutes: Array<{ milestone: string; alternative: number }>;
+              puzzleRoutes: Array<{ puzzle: string; event: string }>;
+            };
+          return { content: scriptedText({ verdict: "pass", findings: [], evidence: [
+            ...currentStory().map(path => path + ":11"),
+            ...(assignment.specialistAssignments ?? []).flatMap(a =>
+              a.authority.existingPaths.map(path => path + ":11")),
+            ...assignment.routes.map(r => r.event + "#" + r.step + "/" + r.branch +
+              ": events/disclose-ledger.md:23"),
+            ...assignment.milestoneRoutes.map(r => r.milestone + "#" + r.alternative +
+              ": milestones/disclosure.md:11"),
+            ...assignment.puzzleRoutes.map(r => r.puzzle + "/" + r.event +
+              ": events/disclose-ledger.md:23"),
+          ] }), reason: "stop" };
+        }
+      }
       throw Error("Unscripted #243 independent correction turn: " + i + " " +
         JSON.stringify(ctx.messages.slice(-2)).slice(0, 1400));
     });
@@ -4715,6 +4834,43 @@ test("#243 C06 original-Thread historical Choice " + mode + " uses independently
         i.id === "interactive:milestone.disclosure")?.status, "verified");
       assert.equal(observed.length, 13,
         "retrying the original graph must not start another Choice/Blueprint/reviewer Pi call");
+      if (mode === "event-only-complete") {
+        const composed = await withJobModelRuntime(runtime, () => graph.invoke(null,
+          { ...cfg, interruptBefore: ["independent_assignment_review"] }));
+        assert.equal(composed.result?.status, "composition-committed", JSON.stringify({
+          status: composed.status, reason: composed.reason, result: composed.result,
+          lifecycle: composed.recoveryLifecycle, modelCalls: observed.length,
+        }));
+        assert.equal(composed.active?.stage, "composition");
+        assert.equal(composed.recoveryLifecycle.active, null);
+        assert.equal((await inspectInteractiveConflict(f.job,
+          "milestone.disclosure", true)).expectedHead, head,
+          "Historical Pi no-write source remains its original HEAD after later Composition");
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
+          cfg.configurable.thread_id), composed.recoveryLifecycle,
+          "After subsequent Composition, C07 must authenticate the historical no-write correction against actual signed successor commits");
+        const finalGate = await withJobModelRuntime(runtime, () => graph.invoke(null,
+          { ...cfg, interruptBefore: ["completion_decision"] }));
+        assert.equal(finalGate.status, "running", JSON.stringify({
+          status: finalGate.status, reason: finalGate.reason,
+          active: finalGate.active, recovery: finalGate.recoveryLifecycle,
+          inventory: finalGate.inventory?.items.map((item: any) => ({
+            id: item.id, status: item.status, reason: item.blockingReason,
+          })), calls: observed.length,
+        }));
+        assert.equal(finalGate.recoveryLifecycle.active, null);
+        const final = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+        assert.equal(final.status, "completed", JSON.stringify({
+          status: final.status, reason: final.reason,
+          recovery: final.recoveryLifecycle, calls: observed.length,
+          inventory: final.inventory?.items.map((item: any) => ({ id: item.id,
+            status: item.status, reason: item.blockingReason })),
+        }));
+        assert.equal(final.recoveryLifecycle.active, null);
+        assert.ok(final.inventory?.items.every((item: any) => item.status === "verified"));
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
+          cfg.configurable.thread_id), final.recoveryLifecycle);
+      }
     } finally { saver.db.close(); }
   } finally {
     restoreSandbox();

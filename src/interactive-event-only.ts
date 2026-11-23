@@ -347,8 +347,12 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
         "Original author request: " + turn.originalRequest + ". Original author goal: " + turn.goal,
       omission: { assignmentId: "interactive:" + milestone, headSha: reviewHead },
     };
+    // This verdict becomes an immutable no-write authorization. A later
+    // Narrative/Turn review at the same HEAD must not append to the sealed
+    // omission transcript through the shared Pi context group.
     const reviewed = await reviewNarrative(job, snapshot, assignment, input.provider, input.model,
-      undefined, async file => { session = file; });
+      undefined, async file => { session = file; },
+      "event-only-" + milestone + ":" + reviewHead);
     if (reviewed.verdict !== "pass") rejectedFindings = reviewed.findings;
     else evidence = reviewed.evidence;
     for (const record of (rejectedFindings ? [] : records.filter(r =>
