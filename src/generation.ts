@@ -18,7 +18,7 @@ import { projectRecoveryInspection, authenticateOriginalFailure,
 import { selectOperationStrategy, executeOperationStrategy,
   authenticateSealedDiagnosticStop } from "./generation-operation-strategy.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
-  resumePausedRecovery } from "./generation-recovery-lifecycle.js";
+  finishRecovery, recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
@@ -757,7 +757,7 @@ async function authorBoundary(job: JobStartResult, s: State): Promise<Partial<St
  * read-only; the rejected original writer gets only a bounded repair lease.
  * Preserve s.result across pauses, otherwise LangGraph could replay the
  * already-committed specialist on resume. */
-async function independentAssignmentBoundary(s: State): Promise<Partial<State>> {
+async function independentAssignmentBoundary(s: State, correctionSelected = false): Promise<Partial<State>> {
   if (s.request.fixture || !s.result || !s.active ||
       s.result.status !== "review-handoff" &&
       !accepted[s.active.stage].includes(s.result.status)) return {};
@@ -811,6 +811,17 @@ async function independentAssignmentBoundary(s: State): Promise<Partial<State>> 
       if (!reviewed || reviewed.semanticReview === "required-pending")
         throw Error("Independent semantic reviewer did not seal a source-linked decision.");
       if (reviewed.semanticReview === "failed") {
+        if (!correctionSelected ||
+            s.recoveryLifecycle.active?.origin.sourceHeadSha !== point.commitSha) {
+          // C04: the original independent verdict is a settled semantic
+          // failure. Admit it to C01 BEFORE an original-session corrective
+          // Pi call. The assessor must select the existing Review/Repair
+          // controller rather than permitting this node to self-dispatch.
+          return operationFailure(s, job, "independent-review",
+            "Original independently reviewed assignment has source-linked negative findings.",
+            { reference: "review-checkpoints", assignmentId: s.active.id },
+            "returned-failure");
+        }
         const progress = await advanceRejectedRepair(job, point.commitSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider,
           model: s.request.model,
@@ -1347,7 +1358,9 @@ export function recoveryNode(
       return { status: "running", reason: null,
         recoveryLifecycle: { ...prior.recoveryLifecycle, assessorPending: false } };
     if (node === "assess_recovery" && prior.recoveryLifecycle.assessorPending &&
-        ["diagnostic", "plan-amendment"].includes(prior.recoveryLifecycle.decision?.action ?? "") &&
+        (["diagnostic", "plan-amendment"].includes(prior.recoveryLifecycle.decision?.action ?? "") ||
+          prior.recoveryLifecycle.decision?.action === "known-correction" &&
+          prior.recoveryLifecycle.decision.adapter === "review-cycle") &&
         prior.recoverySources.some(x => x.caseId === prior.recoveryLifecycle.active?.id && x.channel === "operationRecovery")) {
       const job = await openJob(state);
       const action = await executeOperationStrategy(job, state, prior.recoveryLifecycle);
@@ -1447,7 +1460,7 @@ export function createGenerationGraph(
   checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server",
   // Deterministic transport-boundary substitution for graph-level tests.
   // Production callers always use the real sealed review/repair adapter.
-  reviewBoundary: (state: State) => Promise<Partial<State>> = independentAssignmentBoundary,
+  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>> = independentAssignmentBoundary,
 ) {
   return new StateGraph(Channels, { input: GenerationInputSchema })
     .addNode("schedule", recoveryNode("schedule", async (s, config) => {
@@ -2263,7 +2276,57 @@ export function createGenerationGraph(
       }
     }))
     .addNode("independent_assignment_review", recoveryNode("independent_assignment_review", async s => {
-      const reviewed = await reviewBoundary(s);
+      const selected = s.recoveryLifecycle;
+      const correction = selected.phase === "correcting" &&
+        !selected.assessorPending && selected.active?.origin.operation === "independent-review" &&
+        selected.decision?.action === "known-correction" &&
+        selected.decision.adapter === "review-cycle";
+      if (correction) {
+        const job = await openJob(s);
+        const { authenticateOperationReviewProof } =
+          await import("./generation-operation-strategy.js");
+        if (!await authenticateOperationReviewProof(job, s, selected.active!, selected.decision!))
+          throw Error("Saved Review correction lost its original failed verdict");
+      }
+      const reviewed = await reviewBoundary(s, correction);
+      if (correction) {
+        if (reviewed.reviewSteeringHandoff)
+          return reviewed; // Preserve original Review-to-author intake boundary.
+        if (reviewed.status === "paused" || reviewed.status === "cancelled" ||
+            reviewed.status === "blocked")
+          return reviewed; // Retain original correction decision and receipts.
+        const job = await openJob(s);
+        const head = await trustedHead(job);
+        const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const { resolvedCheckpointReviews } = await import("./checkpoint-assurance.js");
+        const statuses = await resolvedCheckpointReviews(job, points);
+        const original = selected.active!;
+        // A passing successor alone is not proof that the original rejected
+        // writer was actually corrected. Walk the source-linked repair chain,
+        // requiring the terminal original-session repair receipt and its
+        // independently reviewed, exact committed successor.
+        const successor = points.find(p => p.commitSha === head && p.assurance &&
+          p.workItem.startsWith("repair-") &&
+          ["passed", "not-required"].includes(statuses.get(p.commitSha) ?? p.semanticReview));
+        let repairVerified = false;
+        if (successor) {
+          const sourceSha = successor.workItem.slice("repair-".length);
+          const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
+          const receipt = await inspectRejectedRepair(job, sourceSha);
+          repairVerified = receipt.phase === "passed" && receipt.repairedCommitSha === head &&
+            receipt.rootFailureSha === original.origin.sourceHeadSha;
+        }
+        const verified = repairVerified &&
+          statuses.get(original.origin.sourceHeadSha) === "not-required";
+        if (!verified)
+          return { status: "blocked" as const,
+            reason: "Original failed independent Review has no independently passing corrective successor." };
+        return { ...reviewed,
+          recoveryLifecycle: finishRecovery(recordRecoveryOutcome(selected, {
+            status: "verified", caseId: original.id, sourceHeadSha: head,
+            assurance: { store: "review-checkpoint", ref: head },
+          }, true)), status: "running" as const, reason: null };
+      }
       // A trusted negative Review disposition must reach the same typed
       // assessment as a thrown reviewer failure. Keep the existing persistent
       // Review cycle and original writer receipts; do not retry that writer.

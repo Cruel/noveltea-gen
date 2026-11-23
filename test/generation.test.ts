@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -20,6 +20,11 @@ import { reviewedMilestoneHandoff } from "../src/milestone-obligation-handoff.js
 import { inspectBlockedOriginalThreadCorrection } from "../src/original-thread-continuation.js";
 import { captureVerificationFailure, verifyCorrectedOriginalResult } from "../src/commit-verification-continuation.js";
 import { assessGenerationOperation } from "../src/generation-operation-recovery.js";
+import { originalFailedReviewProof, selectOperationStrategy } from "../src/generation-operation-strategy.js";
+import { bindPostcommitReviewCycle, acceptPostcommitReviewRound } from "../src/postcommit-review-cycle.js";
+import type { GenerationGraphState } from "../src/generation.js";
+import type { RecoveryCase } from "../src/generation-recovery-contract.js";
+import type { SkillSnapshot } from "../src/snapshot.js";
 import { safeToResume } from "../web/src/lib/generation-controls.server.js";
 import { inspectPiPolicy } from "../src/job-pi-policy.js";
 import { setJobControl } from "../src/job-control.js";
@@ -3757,6 +3762,143 @@ test("second no-write report and protected prerequisite remain honestly blocked"
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
     assert.equal(readFileSync(receiptPath, "utf8"), JSON.stringify(receipt, null, 2) + "\n");
+  }
+});
+
+test("C04 Review strategy demands the original sealed failed Pi cycle before any correction attempt", { skip: !available }, async () => {
+  const f = setup("c04-original-review-gate");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Do not let an independent reviewer authorize its own writer or erase a negative finding."]);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const prior = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  try {
+    const job = await startStoryJob({ story: f.story, job: "single" }, false);
+    const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      p.eligible && p.workItem === "foundation");
+    assert.ok(point?.assurance);
+    const { packet, verdict } = await reviewBoundedAssignments(job, [point], async p => {
+      const item = p.items[0]!;
+      const path = item.assurance.changedPaths[0]!;
+      return { sourceDigest: p.sourceDigest, verdict: "fail" as const, findings: [{
+        commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+        path, line: 1, kind: "missing-requirement" as const,
+        message: "The source-bound witness is still absent.",
+        requiredCorrection: "Correct the existing source's witness evidence.",
+        affectedPaths: [path],
+      }], evidence: [] };
+    }, "independent-pi-assignment-review", true);
+    const origin = {
+      jobId: job.jobId, jobThreadId: job.threadId,
+      graphThreadId: job.threadId + ":generation", turnDigest: point.assurance.turnDigest,
+      planVersion: point.planVersion, sourceHeadSha: point.commitSha,
+      assignmentId: "foundation", operation: "independent-review",
+      check: "independent-assignment-review.v1", checkVersion: 1,
+      failureAnchor: { store: "graph-checkpoint", ref: "original-review-task",
+        failedCheckInstanceId: "original-review-check" },
+    } as RecoveryCase["origin"];
+    const failure = { id: "a".repeat(64), origin, observation: "returned-failure",
+      kind: "semantic", effect: "read-only", evidence: [{
+        store: "graph-checkpoint", ref: "original-review-task" }] } as RecoveryCase;
+    const state = {
+      request: { ...paused.request, job: job.jobId, fixture: false,
+        turnPlanDigest: point.assurance.turnDigest },
+      planVersion: point.planVersion,
+      active: { id: "foundation" }, result: { status: "committed", headSha: point.commitSha },
+      escalation: null, recoverySources: [{ caseId: failure.id, channel: "operationRecovery",
+        input: { operation: "independent-review", outcome: "returned-failure",
+          evidence: { reference: "review-checkpoints", assignmentId: "foundation" } } }],
+    } as unknown as GenerationGraphState;
+    assert.equal(await originalFailedReviewProof(job, state, failure), null,
+      "Even a plausible stored negative verdict cannot impersonate an invoked reviewer");
+    assert.equal(await selectOperationStrategy(job, state, failure), null);
+    const sessionId = "c04-independent-review";
+    const sessionFile = join(job.stateDir, "review-sessions", "assignment-fidelity", "c04-original.jsonl");
+    mkdirSync(join(job.stateDir, "review-sessions", "assignment-fidelity"), { recursive: true });
+    writeFileSync(sessionFile, JSON.stringify({ type: "session", id: sessionId }) + "\n");
+    const method = { id: "b".repeat(64), path: join(job.stateDir, "pinned-review-skills") } as SkillSnapshot;
+    const cycle = await bindPostcommitReviewCycle(job, packet, method,
+      "openai", "gpt-6", undefined, { id: sessionId, file: sessionFile });
+    assert.ok(cycle);
+    appendFileSync(sessionFile, JSON.stringify({ type: "message", message: {
+      role: "assistant", stopReason: "stop",
+      content: [{ type: "text", text: JSON.stringify(verdict) }],
+    } }) + "\n");
+    await acceptPostcommitReviewRound(job, packet, verdict, cycle);
+    const selected = await selectOperationStrategy(job, state, failure);
+    assert.equal(selected?.action, "known-correction");
+    assert.equal(selected?.action === "known-correction" ? selected.adapter : null, "review-cycle");
+    assert.equal(selected?.evidence.at(-1)?.store, "review-checkpoint");
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), point.commitSha,
+      "Strategy selection alone cannot mutate Story or start a correction writer");
+    const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    try {
+      let correctionCalls = 0;
+      const graph = createGenerationGraph(saver, "cli", async (s, authorized) => {
+        if (!authorized) return { operationRecovery: await assessGenerationOperation({
+          job, threadId: paused.threadId, turnDigest: s.request.turnPlanDigest ?? undefined,
+          planVersion: s.planVersion, operation: "independent-review",
+          outcome: "returned-failure", reason: "Original independent failed review",
+          evidence: { reference: "review-checkpoints", assignmentId: "foundation" },
+        }) };
+        correctionCalls++;
+        return { result: s.result,
+          reason: "A mock adapter claims progress without a corrective Pi/Review receipt." };
+      });
+      const cfg = { configurable: { thread_id: paused.threadId } };
+      const initial = (await graph.getState(cfg)).values;
+      await graph.updateState(cfg, {
+        status: "running", reason: null, active: paused.inventory.items.find((i: { id: string }) =>
+          i.id === "foundation"), result: { status: "committed", headSha: point.commitSha },
+        request: { ...initial.request, fixture: false, turnPlanDigest: point.assurance.turnDigest },
+        planVersion: point.planVersion, pauseAfter: null,
+      }, "specialist_dispatch");
+      const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "independent-review");
+      assert.equal(admitted.recoveryLifecycle.attempt, null);
+      assert.equal(correctionCalls, 0);
+      const approved = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+      assert.equal(approved.recoveryLifecycle.decision?.action, "known-correction");
+      assert.equal(approved.recoveryLifecycle.decision?.adapter, "review-cycle");
+      assert.equal(approved.recoveryLifecycle.assessorPending, true);
+      assert.equal(correctionCalls, 0, "Controller decision checkpoints before any correction agent");
+      assert.deepEqual(await inspectModernGenerationRecovery(job, saver, paused.threadId),
+        approved.recoveryLifecycle, "Restart inspection authenticates the source-selected Review correction");
+      const execution = await graph.invoke(null, { ...cfg,
+        interruptBefore: ["independent_assignment_review"] });
+      assert.equal(execution.recoveryLifecycle.assessorPending, false);
+      assert.equal(execution.recoveryLifecycle.phase, "correcting");
+      assert.equal(correctionCalls, 0, "Assessor executes no replacement writer or reviewer");
+      const stopped = await graph.invoke(null, {
+        ...cfg, interruptAfter: ["independent_assignment_review"],
+      });
+      assert.equal(stopped.status, "blocked");
+      assert.match(stopped.reason ?? "", /no independently passing corrective successor/i,
+        "A forged adapter-success return cannot discharge an uncorrected original Review");
+      assert.equal(correctionCalls, 1, "Only the selected original Review adapter is entered");
+      assert.equal(stopped.recoveryLifecycle.active?.id, admitted.recoveryLifecycle.active?.id);
+    } finally {
+      saver.db.close();
+    }
+    const reviewFile = join(job.stateDir, "independent-reviews", point.commitSha + ".json");
+    const reviewBytes = readFileSync(reviewFile, "utf8");
+    const falsified = JSON.parse(reviewBytes);
+    falsified.findings[0].message = "A plausible but unreviewed new semantic finding.";
+    writeFileSync(reviewFile, JSON.stringify(falsified));
+    assert.equal(await originalFailedReviewProof(job, state, failure), null,
+      "A mutated verdict cannot borrow a valid independent Pi cycle and old transcript");
+    writeFileSync(reviewFile, reviewBytes);
+    const originalBytes = readFileSync(sessionFile, "utf8");
+    writeFileSync(sessionFile, originalBytes.replace(
+      '"id":"c04-independent-review"', '"id":"forged-independent-review"'));
+    await assert.rejects(originalFailedReviewProof(job, state, failure), /transcript|identity|session/i,
+      "Tampered reviewer session must invalidate the selected original operation");
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 

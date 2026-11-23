@@ -28,7 +28,8 @@ export const reviewedReturnExits = {
   specialist_dispatch:
     "e4b08665b2511bc8:G 1b68a6bf68ff6ba6:R 0d9e6ec6e5934712:G 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G 68f520279c4733e1:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
   dependency_amendment: "cfba761fff836f54:S 0a126b3a9f0f9f2b:G 179232cd4e6294bf:S 0769876482d9a3e7:R",
-  independent_assignment_review: "9fe665d7fe799027:R 418d3dec6f744971:S",
+  independent_assignment_review:
+    "418d3dec6f744971:S 418d3dec6f744971:S 4d0c3b0ac80f6dc6:B afdf1326cc4166fc:V 9fe665d7fe799027:R 418d3dec6f744971:S",
   verify_committed_work:
     "1de161a5ffd576bc:G 3585ea4da1b9e523:B 4c68a7532035bcf2:G 46be02fd000dbeda:R 54958ad74d3d985c:G a93c92edb8171d44:G 179232cd4e6294bf:S a426d6990d0699f1:R",
   completion_decision:
@@ -37,14 +38,14 @@ export const reviewedReturnExits = {
     "5c2dc0f716c2e00c:U 10e0fa08a73f0cd1:G 762eb69f256bc89b:G 20b3e7613a8cf602:G 7fe0c8e63b1d8e9c:G dcaa1003311bc401:G 12d1365c8abe492a:F a50fde7ff0ca158a:G 7ebc05b087226ab6:F d50ceb7ab7d09978:F 5bb2c217c856ce98:G 25babe207591ae89:R c466c41573ac9b2b:G",
   authorBoundary: "134790b58185ccb6:B f3d245fe979f76f5:R 4ad2292cb6c5c2d3:G 06748905e0dd39db:S",
   independentAssignmentBoundary:
-    "e4b08665b2511bc8:G ede50e860b01d548:G c322025b59aa4a61:U fbe7de8cb0b6bb76:G 055a868fb3d29604:G 9c29b16df80db4bc:G ad04cd9e6f4a2e84:U c1e2b51230f953d6:F 1eedebbff7959374:O 96abdde40833c509:G ebbaf6e315bb4cf8:G 7f712b647c7a1bb8:S 055a868fb3d29604:G 7165a972ba3f6817:G 8eb7bb64a16007bd:U c5718e40eb1f47d6:F 386f961b881b5212:B 5d687f16a5596c4f:R",
+    "e4b08665b2511bc8:G 1a607abb82d66b8b:R ede50e860b01d548:G c322025b59aa4a61:U fbe7de8cb0b6bb76:G 055a868fb3d29604:G 9c29b16df80db4bc:G ad04cd9e6f4a2e84:U c1e2b51230f953d6:F 1eedebbff7959374:O 96abdde40833c509:G ebbaf6e315bb4cf8:G 7f712b647c7a1bb8:S 055a868fb3d29604:G 7165a972ba3f6817:G 8eb7bb64a16007bd:U c5718e40eb1f47d6:F 386f961b881b5212:B 5d687f16a5596c4f:R",
   operationFailure: "d7c8939bedacfd7d:B 6f8e137a514dd144:F d44d809a12edfc48:R",
   blocked: "b3b5e10959cccbdb:B",
   runStoryGeneration:
     "171d1dd23ca768bb:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B b00891ce57d109ec:V",
   observeNodeOutcome: "cafa5b26a70d2f15:S 457eb16703d85c3e:R 791c12224fd3d55c:F",
   recoveryNode:
-    "951535636dfdc9d9:F 1b2bfd3978e6627c:F d62792531537fa8b:F a510809dc74cc215:F 0edadc4c8151f4c0:F 533e9704b50c7d64:G 45f4af1e86ee7162:U 1e00488edc815471:G 7e5396dcc912a986:U b30aaa267d235346:G 4d083c13dcc1e236:G 54818287e8077341:G 48472d6f8dc29579:F 0e0f7e47153d103a:R ae4b8b3ed4e09466:F ac12745831f57568:G e42edb38568b51ce:S 952bd06592f1d376:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
+    "42d24c078f3b08aa:F 1b2bfd3978e6627c:F d62792531537fa8b:F a510809dc74cc215:F 0edadc4c8151f4c0:F 533e9704b50c7d64:G 45f4af1e86ee7162:U 1e00488edc815471:G 7e5396dcc912a986:U b30aaa267d235346:G 4d083c13dcc1e236:G 54818287e8077341:G 48472d6f8dc29579:F 0e0f7e47153d103a:R ae4b8b3ed4e09466:F ac12745831f57568:G e42edb38568b51ce:S 952bd06592f1d376:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
 } as const;
 
 export const reviewedThrowExits = {
@@ -57,7 +58,7 @@ export const reviewedThrowExits = {
   verify_idea_integration: "308c430973f6b74e 43e1138180314eb1 a4b0709f69a7c2f3 63cc21025b2defc5",
   specialist_dispatch: "b306d96cffbf864c 3a1b6fa85817a0d3 44903bac895ce58d 95fa1456013e2d48 a1beda487210eb50",
   dependency_amendment: "31c32f029ac15a97 4b99521c61fca4d0",
-  independent_assignment_review: "",
+  independent_assignment_review: "e646f3af90c171bf",
   verify_committed_work: "302ad04127f5c981 8c468a57ba68bc74 a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",
   completion_decision: "a71c76f34850a2b8 07a14758d9e6bb2b",
   reconcile:
@@ -85,7 +86,7 @@ export const reviewedStatusExits = {
   verify_idea_integration: "1ef03b815a1070ca:G",
   specialist_dispatch: "fb8dc871bfe4bc06:G",
   dependency_amendment: "",
-  independent_assignment_review: "",
+  independent_assignment_review: "e0394fa2f3847b80:B a357bcfe02e9302a:V f309314d6c8adbdd:G",
   verify_committed_work: "e0394fa2f3847b80:B f309314d6c8adbdd:G 7eabfb98aa4c295e:G 64104e1034916182:U f309314d6c8adbdd:G 64104e1034916182:U",
   completion_decision:
     "e0394fa2f3847b80:F f309314d6c8adbdd:G e0394fa2f3847b80:F f309314d6c8adbdd:G 650759c538e40764:V",

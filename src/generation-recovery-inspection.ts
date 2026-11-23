@@ -318,7 +318,10 @@ export async function inspectModernGenerationRecovery(
         case "reconcile-effects":
           return source.channel === "operationRecovery" && d.originalRef?.ref === active.evidence[0]?.ref;
         case "known-correction":
-          return source.channel === "recovery" && d.adapter === "response-contract";
+          if (source.channel === "recovery") return d.adapter === "response-contract";
+          if (source.channel !== "operationRecovery" || d.adapter !== "review-cycle") return false;
+          return await (await import("./generation-operation-strategy.js"))
+            .authenticateOperationReviewProof(job, values as GenerationGraphState, active, d);
         case "plan-amendment": {
           const graphState = values as GenerationGraphState;
           const pending = graphState.crossDomainCloseout;

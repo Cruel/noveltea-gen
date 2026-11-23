@@ -15,6 +15,8 @@ import { readJobControl } from "./job-control.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { inspectCheckpointReview } from "./checkpoint-assurance.js";
+import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { inspectRejectedRepair } from "./rejected-review-repair.js";
 import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
@@ -152,6 +154,66 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
   if (point.semanticReview !== "passed" && point.semanticReview !== "not-required") return null;
   return { store: "review-checkpoint", ref: head, digest: point.proofDigest };
 }
+/** The sealed failed independent verdict, not a reviewer string, grants
+ * reentry to the ORIGINAL Review/Repair controller after assessor selection.
+ * This is read-only and cannot increment a Pi correction attempt. */
+export async function originalFailedReviewProof(job: JobStartResult, s: State,
+  c: RecoveryCase): Promise<RecoveryEvidence | null> {
+  if (c.origin.operation !== "independent-review" ||
+      c.observation !== "returned-failure" || s.request.fixture ||
+      !s.request.turnPlanDigest || s.escalation?.requiresTrustedApproval ||
+      !s.active || !s.result || s.active.id !== c.origin.assignmentId ||
+      s.result.headSha !== c.origin.sourceHeadSha ||
+      s.planVersion !== c.origin.planVersion)
+    return null;
+  const source = s.recoverySources.find(r => r.caseId === c.id && r.channel === "operationRecovery");
+  const op = source?.input as GenerationOperationRecovery | undefined;
+  if (op?.outcome !== "returned-failure" || op.operation !== "independent-review" ||
+      op.evidence.reference !== "review-checkpoints" ||
+      op.evidence.assignmentId !== s.active.id) return null;
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+    p.commitSha === c.origin.sourceHeadSha &&
+    p.assurance?.turnDigest === c.origin.turnDigest &&
+    p.assurance?.reviewSelection.status === "required-pending" &&
+    p.semanticReview === "failed" && p.validation.status === "passed");
+  if (!point?.assurance) return null;
+  const reviewed = await inspectCheckpointReview(job, point);
+  if (!reviewed || reviewed.status !== "failed" || reviewed.result?.status !== "failed" ||
+      reviewed.result.reviewer !== "independent-pi-assignment-review" ||
+      !reviewed.result.findings.length) return null;
+  const cycle = await inspectPostcommitReviewCycle(job, point.commitSha, point.assurance.assignmentDigest);
+  const round = cycle?.rounds.find(r => r.commitSha === point.commitSha);
+  if (!cycle || cycle.turnDigest !== c.origin.turnDigest || !round) return null;
+  // The per-checkpoint result file is mutable private state, not a signature.
+  // Reconstruct its accepted verdict from the *original settled Pi transcript*
+  // and compare both the review-cycle digest and controller-sealed findings.
+  // Later independent correction rounds may append to the same conversation.
+  const { prepareSemanticReview, independentReviewResults } =
+    await import("./semantic-assignment-review.js");
+  const { assignmentVerdictResponseContract } =
+    await import("./narrative-review-specialist.js");
+  const packet = await prepareSemanticReview(job, [point]);
+  if (packet.sourceDigest !== round.packetDigest) return null;
+  const transcript = (await readFile(cycle.reviewer.file)).subarray(0, round.transcriptBytes)
+    .toString("utf8").trim().split("\n").map(line => JSON.parse(line) as {
+      type?: string; message?: { role?: string; stopReason?: string;
+        content?: Array<{ type?: string; text?: string }> } });
+  const accepted = transcript.filter(r => r.type === "message" && r.message?.role === "assistant" &&
+    r.message.stopReason === "stop").at(-1)?.message;
+  if (!accepted) return null;
+  const text = (accepted.content ?? []).filter(c => c.type === "text")
+    .map(c => c.text ?? "").join("\n");
+  const verdict = assignmentVerdictResponseContract(packet).parse(text);
+  if (verdict.verdict !== "fail" ||
+      createHash("sha256").update(JSON.stringify(verdict)).digest("hex") !== round.verdictDigest ||
+      !isDeepStrictEqual(independentReviewResults(packet, verdict,
+        "independent-pi-assignment-review")[0], reviewed.result))
+    return null;
+  return { store: "review-checkpoint", ref: point.commitSha,
+    digest: createHash("sha256").update(JSON.stringify({
+      assurance: point.assurance, verdict: reviewed.result,
+    })).digest("hex") };
+}
 export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonNullable<State["crossDomainCloseout"]>): boolean {
   const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
   const evidence = source?.input.evidence as GenerationOperationRecovery["evidence"] | undefined;
@@ -162,6 +224,12 @@ export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonN
 }
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  const reviewProof = await originalFailedReviewProof(job, s, c);
+  if (reviewProof) {
+    await assertSource(job, s, c);
+    return { ...base(c, reviewProof), action: "known-correction",
+      adapter: "review-cycle", receipt: reviewProof };
+  }
   const pending = s.crossDomainCloseout;
   if (pending && matchesOriginalCloseout(s, c, pending) && c.origin.operation === "dependency-amendment" && s.active?.stage === "composition" &&
       pending.milestoneId === s.active.milestone && pending.planVersion === c.origin.planVersion &&
@@ -181,6 +249,13 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
 /** The saved decision may identify a real accepted Pi response yet have lost
  * the ORIGINAL selected source proof (e.g. an altered review/repair receipt).
  * Re-read that proof at the same HEAD; never let checkpoint data rebind it. */
+export async function authenticateOperationReviewProof(job: JobStartResult, s: State,
+  c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
+  if (d.action !== "known-correction" || d.adapter !== "review-cycle") return false;
+  const original = await originalFailedReviewProof(job, s, c);
+  return !!original && isDeepStrictEqual(original, d.receipt) &&
+    isDeepStrictEqual(d.evidence, [...c.evidence, original]);
+}
 export async function authenticateOperationDiagnosticProof(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   const original = await diagnosticEvidence(job, s, c);
@@ -218,7 +293,17 @@ export async function authenticateSealedDiagnosticStop(job: JobStartResult, s: S
 export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle): Promise<Partial<State> | null> {
   const c = lifecycle.active!, d = lifecycle.decision!;
   if (!lifecycle.assessorPending || !d || !c || !s.recoverySources.some(x => x.caseId === c.id && x.channel === "operationRecovery") ||
-      (d.action !== "diagnostic" && !(d.action === "plan-amendment" && d.adapter === "cross-domain-closeout"))) return null;
+      (d.action !== "diagnostic" &&
+        !(d.action === "plan-amendment" && d.adapter === "cross-domain-closeout") &&
+        !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
+  if (d.action === "known-correction") {
+    await assertSource(job, s, c);
+    if (!await authenticateOperationReviewProof(job, s, c, d))
+      throw Error("Original failed Review source no longer matches the saved correction decision");
+    // The graph will reenter the existing Review controller with the selected
+    // lifecycle. No writer is invoked by assessment itself.
+    return { recoveryLifecycle: { ...lifecycle, assessorPending: false }, status: "running" };
+  }
   const settled = { ...lifecycle, assessorPending: false };
   const stop = (decision: RecoveryDecision, reason: string, status: State["status"] = "blocked"): Partial<State> => ({
     recoveryLifecycle: decideRecovery(settled, decision), reason, status,
