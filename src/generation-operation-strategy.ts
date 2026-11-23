@@ -20,6 +20,7 @@ import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { inspectRejectedRepair } from "./rejected-review-repair.js";
 import { inspectJobReport } from "./job-report.js";
+import { isTrustedFinalVerdictAnomaly } from "./generation-final-verdict.js";
 import { authorizedInventoryComplete } from "./generation-plan.js";
 import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
@@ -150,8 +151,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
       p.eligible && p.commitSha === head && p.workItem === original?.checkpoint &&
       (p.semanticReview === "passed" || p.semanticReview === "not-required"));
     if (op?.evidence.reference !== "completion-report" || !original || !point ||
-        report.generation.status === "completed" ||
-        report.evidence.deferredIdeas.scopedOutstanding.length ||
+        !isTrustedFinalVerdictAnomaly(report) ||
         original.reportStatus !== report.generation.status ||
         original.scopeStatus !== report.generation.scopeFulfillment ||
         original.planStatus !== report.generation.planFulfillment.status)

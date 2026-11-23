@@ -1216,7 +1216,7 @@ test("one authorized Choice assignment can certify multiple meaningful Choices w
  * This is a routing regression, not a substitute for a live Pi certification.
  */
 async function runFixtureRecoveryGraph(
-  name: string, refused: boolean | "exception" | "diagnostic" | "exception-diagnostic",
+  name: string, refused: boolean | "exception" | "diagnostic" | "exception-diagnostic" | "exception-actionable",
   controlAfterSelection?: "paused" | "cancelled" | "budget",
   corruptCompletedAttempt: false | "invocation" | "original-proof" = false,
 ) {
@@ -1248,7 +1248,7 @@ async function runFixtureRecoveryGraph(
       if (state.active?.id !== "foundation") return {}; // Later fixture stages require no Pi review.
       assert.equal(state.active?.id, "foundation");
       assert.equal(state.result?.headSha, before);
-      if (refused === "exception" || refused === "exception-diagnostic") {
+      if (refused === "exception" || refused === "exception-diagnostic" || refused === "exception-actionable") {
         log.push("review-transport-failed");
         throw Error("Injected review transport failure");
       }
@@ -1296,8 +1296,10 @@ async function runFixtureRecoveryGraph(
       return { result: state.result };
     });
     const config = { configurable: { thread_id: paused.threadId } };
-    const transport = refused === "diagnostic" || refused === "exception-diagnostic"
-      ? await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel() : null;
+    const transport = refused === "diagnostic" || refused === "exception-diagnostic" ||
+      refused === "exception-actionable"
+      ? await (await import("./scripted-recovery-model.js")).scriptedRecoveryModel(
+          refused === "exception-actionable" ? "reconcile-original" : "unsafe") : null;
     const initial = (await graph.getState(config)).values;
     if (transport) await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
       profile: { provider: transport.model.provider, model: transport.model.id }, limits: { modelCalls: 2 } });
@@ -1311,7 +1313,7 @@ async function runFixtureRecoveryGraph(
       const admitted = await graph.invoke(null, { ...config, interruptBefore: ["assess_recovery"] });
       assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "independent-review");
       assert.equal(admitted.recoveryLifecycle.active?.observation,
-        refused === "exception" || refused === "exception-diagnostic" ? "exception" : "returned-failure");
+        ["exception", "exception-diagnostic", "exception-actionable"].includes(String(refused)) ? "exception" : "returned-failure");
       assert.equal(admitted.recoveryLifecycle.attempt, null, "A refusal is not a correction attempt");
       const selected = await graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
       assert.equal(selected.recoveryLifecycle.decision?.caseId, admitted.recoveryLifecycle.active?.id);
@@ -1323,11 +1325,33 @@ async function runFixtureRecoveryGraph(
           profile: { provider: transport!.model.provider, model: transport!.model.id },
           limits: { modelCalls: 0 } });
       } else if (controlAfterSelection) await setJobControl(f.job, controlAfterSelection);
-      assert.deepEqual(log, [refused === "exception" || refused === "exception-diagnostic"
-        ? "review-transport-failed" : "refuse-other-owner-write"]);
+      assert.deepEqual(log, [refused === "exception" || refused === "exception-diagnostic" ||
+        refused === "exception-actionable" ? "review-transport-failed" : "refuse-other-owner-write"]);
     }
     let next = transport ? await (await import("../src/model-runtime.js")).withJobModelRuntime(transport.rt,
-      () => createGenerationGraph(saver, "cli").invoke(null, config)) : await graph.invoke(null, config);
+      () => createGenerationGraph(saver, "cli").invoke(null,
+        refused === "exception-actionable" ? { ...config, interruptAfter: ["assess_recovery"] } : config)) :
+      await graph.invoke(null, config);
+    if (refused === "exception-actionable" && transport) {
+      assert.equal(next.recoveryLifecycle.decision?.action, "reconcile-effects",
+        JSON.stringify({ status: next.status, reason: next.reason, lifecycle: next.recoveryLifecycle }));
+      assert.equal(next.recoveryLifecycle.attempt?.phase, "settled");
+      assert.equal(transport.calls.length, 1);
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+        next.recoveryLifecycle);
+      const resolved = await createGenerationGraph(saver, "cli").invoke(null,
+        { ...config, interruptAfter: ["assess_recovery"] });
+      assert.equal(resolved.recoveryLifecycle.active, null,
+        JSON.stringify({ status: resolved.status, reason: resolved.reason, lifecycle: resolved.recoveryLifecycle }));
+      assert.equal(resolved.recoveryLifecycle.phase, "idle");
+      assert.equal(resolved.status, "running");
+      assert.equal(transport.calls.length, 1, "No second Pi diagnosis or reviewer on C05 reconciliation");
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+        resolved.recoveryLifecycle);
+      assert.deepEqual((await graph.getState(config)).next, ["author_update_intake"],
+        "After authenticated source repair, the original generation graph resumes");
+      next = resolved;
+    }
     if (controlAfterSelection && transport) {
       assert.equal(next.status, controlAfterSelection === "budget" ? "paused" : controlAfterSelection);
       assert.equal(next.recoveryLifecycle.decision?.action, "pause");
@@ -1350,7 +1374,7 @@ async function runFixtureRecoveryGraph(
         assert.equal(transport.calls.length, 0);
       }
     }
-    if (transport && controlAfterSelection !== "cancelled") {
+    if (transport && controlAfterSelection !== "cancelled" && refused !== "exception-actionable") {
       assert.equal(next.recoveryLifecycle.decision?.action, "diagnostic-stop", next.reason ?? undefined);
       assert.equal(next.recoveryLifecycle.attempt?.phase, "settled");
       assert.equal(next.recoveryLifecycle.attempt?.caseId, next.recoveryLifecycle.active?.id);
@@ -1873,7 +1897,7 @@ test("C03 production graph diagnoses a source-authenticated unknown scheduling e
   }
 });
 
-test("C05 read-only reconciliation refuses missing original objective seal without replaying a writer", {
+test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation", {
   skip: !available, timeout: 100_000,
 }, async () => {
   const f = setup("c05-source-bound-reconciliation");
@@ -1882,7 +1906,13 @@ test("C05 read-only reconciliation refuses missing original objective seal witho
   assert.equal(paused.status, "paused");
   saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
     ["Preserve existing verified checkpoints and reconcile any transient scheduler failure."]);
-  const digest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  // A pre-#149 approved Turn has no mandatory objective-planner subreceipt.
+  const legacyFile = join(f.job.stateDir, "turn-plan.json");
+  const legacy = JSON.parse(readFileSync(legacyFile, "utf8"));
+  delete legacy.objective;
+  delete legacy.digest;
+  const digest = createHash("sha256").update(JSON.stringify(legacy)).digest("hex");
+  writeFileSync(legacyFile, JSON.stringify({ ...legacy, digest }, null, 2));
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const tasksFile = join(f.job.stateDir, "idea-placement-tasks.json");
   const originalTasks = existsSync(tasksFile) ? readFileSync(tasksFile) : null;
@@ -1925,15 +1955,18 @@ test("C05 read-only reconciliation refuses missing original objective seal witho
     if (originalTasks) writeFileSync(tasksFile, originalTasks);
     else unlinkSync(tasksFile);
     const reconciled = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
-    assert.equal(reconciled.recoveryLifecycle.decision?.action, "integrity-fence",
-      "An advisory recommendation does not bypass original plan attestation");
-    assert.equal(reconciled.recoveryLifecycle.phase, "fenced");
-    assert.match(reconciled.reason ?? "", /Original objective planning has no sealed graph result/);
+    assert.equal(reconciled.recoveryLifecycle.active, null,
+      JSON.stringify({ status: reconciled.status, reason: reconciled.reason,
+        lifecycle: reconciled.recoveryLifecycle }));
+    assert.equal(reconciled.recoveryLifecycle.phase, "idle");
+    assert.equal(reconciled.status, "running");
+    assert.deepEqual((await graph.getState(cfg)).next, ["author_update_intake"],
+      "The original graph resumes after independently verified read-only reconciliation");
     assert.equal(transport.calls.length, 1);
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
       "Neither the diagnosis nor original read-only reconciliation can commit");
-    assert.equal((await inspectModernGenerationRecovery(f.job, saver, paused.threadId))?.phase,
-      "fenced");
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
+      reconciled.recoveryLifecycle);
   } finally {
     saver.db.close();
     for (const [key, value] of Object.entries(previous)) {
@@ -2297,6 +2330,18 @@ test("C03 independently reviewed original commit permits one read-only Pi diagno
   assert.deepEqual(log, ["review-transport-failed"]);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before,
     "The original specialist writer is not replayed after Review infrastructure failure");
+});
+
+test("C05 original independently reviewed result is reconciled after unfamiliar Review transport failure", {
+  skip: !available, timeout: 100_000,
+}, async () => {
+  const { f, next, before, log } = await runFixtureRecoveryGraph(
+    "c05-review-accepted-original", "exception-actionable");
+  assert.equal(next.status, "running");
+  assert.equal(next.recoveryLifecycle.phase, "idle");
+  assert.equal(next.recoveryLifecycle.active, null);
+  assert.deepEqual(log, ["review-transport-failed"]);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before);
 });
 
 test("C03 Review exception diagnostic refuses altered original independently reviewed commit proof", {

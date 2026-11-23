@@ -44,28 +44,32 @@ export function diagnosticPacket(s: GenerationGraphState, c: RecoveryCase,
       failure: c.origin.assignmentId ? s.failures[c.origin.assignmentId]?.slice(0, 1200) ?? null : null },
     previousAttempts: s.recoveryLifecycle.attempt ? [{ id: s.recoveryLifecycle.attempt.id,
       phase: s.recoveryLifecycle.attempt.phase }] : [],
-    availableAdapters: c.origin.operation === "scheduling" && c.observation === "exception"
-      ? ["checkpoint-reconciliation"] : [],
+    availableAdapters: ["scheduling", "independent-review"].includes(c.origin.operation) &&
+      c.observation === "exception" ? ["checkpoint-reconciliation"] : [],
   };
 }
 
-/** A proposal is never its own authority. Only a verified no-writer original
- * scheduling exception currently has an existing safe C03 adapter that can be
- * directly selected by unfamiliar advice. Future C04/C06 adapters must be
- * integrated here with their original receipts before being available. */
+/** A proposal is not authority. Admit only original no-write scheduling
+ * reconciliation or an already independently accepted reviewer receipt;
+ * never replay the reviewer/writer from model advice. Actual resolution
+ * still requires the source-specific original check and verifier. */
 export function authorizeDiagnosticStrategy(s: GenerationGraphState, c: RecoveryCase,
   diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>,
   proposal: RecoveryDiagnosticProposal): RecoveryDecision | null {
   if (proposal.strategy !== "reconcile-original" ||
       !["infrastructure", "protocol"].includes(proposal.category) ||
-      proposal.prerequisites.length !== 0 ||
-      c.origin.operation !== "scheduling" || c.observation !== "exception" ||
-      s.active || s.result || s.ideaTask ||
-      s.crossDomainCloseout || s.causalAmendment || s.escalation ||
+      proposal.prerequisites.length !== 0 || c.observation !== "exception" ||
+      s.ideaTask || s.crossDomainCloseout || s.causalAmendment || s.escalation ||
       proposal.owner !== null || proposal.scopeRef !== null ||
       s.inventory?.headSha !== c.origin.sourceHeadSha ||
       !diagnostic.evidence.at(-1)?.digest)
     return null;
+  const scheduling = c.origin.operation === "scheduling" && !s.active && !s.result;
+  const review = c.origin.operation === "independent-review" &&
+    !!s.active && s.active.id === c.origin.assignmentId &&
+    !!s.result && s.result.headSha === c.origin.sourceHeadSha &&
+    !!s.inventory?.items.some(i => i.id === s.active?.id);
+  if (!scheduling && !review) return null;
   return { ...base(c, diagnostic.evidence), action: "reconcile-effects",
     adapter: "checkpoint-reconciliation", originalRef: c.evidence[0]! };
 }

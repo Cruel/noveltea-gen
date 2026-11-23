@@ -16,7 +16,10 @@ import { inspectBlockedOriginalThreadCorrection } from "./original-thread-contin
 import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
 import { selectOperationStrategy, executeOperationStrategy,
-  authenticateSealedDiagnosticStop } from "./generation-operation-strategy.js";
+  authenticateSealedDiagnosticStop, diagnosticCaseForDecision,
+  authenticateOperationDiagnosticProof } from "./generation-operation-strategy.js";
+import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
+import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
   finishRecovery, recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
@@ -63,6 +66,7 @@ import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
 import { claimServerGeneration, ensureNotServerOwned } from "./generation-owner.js";
 import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
+import { isTrustedFinalVerdictAnomaly } from "./generation-final-verdict.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints, reconcileRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { sealReviewedOmissionBatch } from "./recovery-review-batch.js";
@@ -1422,6 +1426,53 @@ export function recoveryNode(
         await authenticate(current.origin, current.evidence)) {
       assurance.originalEffect = current.evidence[0];
     }
+    // A C05 proposal alone never closes a case. Only the same original
+    // read-only operation, independently re-executed above and reattested
+    // here against its settled Pi transcript, can discharge the failed check.
+    if (current && node === "assess_recovery" && domain.operationRecovery === null &&
+        prior.recoveryLifecycle.decision?.action === "reconcile-effects" &&
+        prior.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
+        prior.recoveryLifecycle.attempt.phase === "settled") {
+      try {
+        await withStoryJobLock(job, "generation-c05-resolution-proof", async () => {
+          const previous = prior.recoveryLifecycle.decision!;
+          const original = await selectOperationStrategy(job, state as State, current);
+          if (original?.action !== "diagnostic" ||
+              !await authenticateOperationDiagnosticProof(job, state as State, current, original))
+            throw Error("Original diagnostic admission is no longer eligible");
+          const target = diagnosticCaseForDecision(current, original);
+          const proposal = await inspectOriginalUnknownDiagnosis(job, target);
+          if (!("strategy" in proposal) || !isDeepStrictEqual(previous,
+                authorizeDiagnosticStrategy(state as State, current, original, proposal)) ||
+              !isDeepStrictEqual(prior.recoveryLifecycle.attempt,
+                await inspectDiagnosticAttempt(job, target, current.id)))
+            throw Error("Original diagnostic proposal or Pi attempt changed");
+          clean(job);
+          const head = await trustedHead(job);
+          if (head !== current.origin.sourceHeadSha) throw Error("Original Story revision changed");
+          await checkPlan(job, state.request, state.planVersion);
+          let receipt: RecoveryEvidence;
+          if (current.origin.operation === "scheduling") {
+            if (!state.request.turnPlanDigest ||
+                !await readTurnEvidence(job, state.request.contract,
+                  state.request.task, state.request.turnPlanDigest))
+              throw Error("Original author objective proof is missing");
+            receipt = original.evidence.at(-1)!;
+          } else if (current.origin.operation === "independent-review") {
+            const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+              p.eligible && p.commitSha === head && p.workItem === state.active?.id &&
+              p.validation.status === "passed" && p.semanticReview === "passed" &&
+              p.assurance?.turnDigest === state.request.turnPlanDigest);
+            if (!point || state.result?.headSha !== head)
+              throw Error("Original independent Review pass cannot be reauthenticated");
+            receipt = { store: "review-checkpoint", ref: point.commitSha,
+              digest: point.proofDigest };
+          } else throw Error("No authenticated read-only resolution adapter");
+          assurance.verifiedHead = head;
+          assurance.verifiedReceipt = receipt;
+        });
+      } catch { /* Missing source/adapter proof is fenced by applyDomainRecovery. */ }
+    }
     if (current && domain.recovery?.phase === "completed") {
       try {
         const { verifyAdaptiveRecoveryProof } = await import("./adaptive-protocol.js");
@@ -1666,11 +1717,40 @@ export function createGenerationGraph(
                 await scheduleIdeasAtBoundary(job, "parent-generation");
               }
             });
+            // After the original read-only check succeeds, discharge only a
+            // settled C05 diagnostic proposal. The wrapper independently
+            // authenticates its Pi attempt and original source once more.
+            if (s.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
+                s.recoveryLifecycle.attempt.phase === "settled")
+              return { status: "running" as const, reason: null, operationRecovery: null };
             return { status: "running" as const, reason: null,
               operationRecovery: { ...op, phase: "continued" as const } };
           } catch (error) {
             return fence("Read-only recovery remains unresolved: " +
               (error instanceof Error ? error.message : String(error)));
+          }
+        }
+        if (op.operation === "independent-review" && op.outcome === "exception" &&
+            s.recoveryLifecycle.decision?.action === "reconcile-effects" &&
+            s.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
+            s.recoveryLifecycle.attempt.phase === "settled") {
+          try {
+            await withStoryJobLock(job, "generation-review-reconciliation", async () => {
+              clean(job);
+              const head = await trustedHead(job);
+              if (head !== op.source.headSha || !s.active ||
+                  op.evidence.assignmentId !== s.active.id || s.result?.headSha !== head)
+                throw Error("Original independent Review source or assignment changed.");
+              await checkPlan(job, s.request, s.planVersion);
+              const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+                p.eligible && p.commitSha === head && p.workItem === s.active!.id &&
+                p.validation.status === "passed" && p.semanticReview === "passed" &&
+                p.assurance?.turnDigest === s.request.turnPlanDigest);
+              if (!point) throw Error("No independently sealed original Review pass exists for the failed assignment.");
+            });
+            return { status: "running" as const, reason: null, operationRecovery: null };
+          } catch (error) {
+            return fence("Original Review reconciliation lacks independent pass evidence: " + String(error));
           }
         }
         if (op.operation === "specialist-dispatch" &&
@@ -2477,8 +2557,7 @@ export function createGenerationGraph(
           // tuple and verified checkpoint; never issue a second diagnosis because
           // the report merely rewrote its error prose.
           if (!complete && !escalation && !s.request.fixture && s.planVersion &&
-              authorizedInventoryComplete(s.inventory) &&
-              !report.evidence.deferredIdeas.scopedOutstanding.length) {
+              authorizedInventoryComplete(s.inventory) && isTrustedFinalVerdictAnomaly(report)) {
             const headSha = await trustedHead(job);
             const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
               point.eligible && point.commitSha === headSha &&
