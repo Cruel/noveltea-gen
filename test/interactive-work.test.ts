@@ -150,6 +150,35 @@ const inspect = (x: ReturnType<typeof setup>) => {
   return JSON.parse(result.stdout);
 };
 
+test("C04 a settled Choice no-write is preserved as an authenticated negative assignment, not replayed or fabricated", { skip: !available }, async () => {
+  const x = setup("choice-conflict-c04");
+  const originalHead = x.prepare();
+  const first = x.interactive("choice-conflict");
+  assert.equal(first.status, 0, first.stderr);
+  const report = JSON.parse(first.stdout);
+  assert.equal(report.status, "interactive-conflict-reported");
+  assert.equal(report.headSha, originalHead);
+  assert.equal(report.prerequisite?.expectedHead, originalHead);
+  assert.match(report.specialistUnits[0].conflicts.join(" "), /no causal Choice point/);
+  assert.equal(report.specialistUnits[0].phase, "conflicted");
+  assert.equal(report.specialistUnits[1].phase, "pending",
+    "A negative Choice cannot authorize the dependent Puzzle writer");
+  const saved = join(x.job.stateDir, "interactive-items/disclosure.json");
+  const sealed = readFileSync(saved, "utf8");
+  assert.equal(JSON.parse(sealed).units[0].digest, report.prerequisite.reportDigest);
+  assert.equal(inspect(x).status, "interactive-conflict-reported");
+  const repeated = x.interactive("choice-conflict");
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.equal(JSON.parse(repeated.stdout).prerequisite.reportDigest, report.prerequisite.reportDigest);
+  assert.equal(readFileSync(saved, "utf8"), sealed, "Restart cannot invoke another Choice or mutate the receipt");
+  const tampered = JSON.parse(sealed);
+  tampered.units[0].conflicts[0] = "Fabricated new finding";
+  writeFileSync(saved, JSON.stringify(tampered));
+  const denied = x.interactive("choice-conflict");
+  assert.notEqual(denied.status, 0, "Tampering must fence original negative source");
+  assert.match(denied.stderr, /negative report digest changed/i);
+});
+
 test("adaptive Choice/Puzzle dispatch uses one original receipt, never replays Choice, and rejects a premature Puzzle",
   { skip: !available }, async () => {
     const x = setup("adaptive-split");

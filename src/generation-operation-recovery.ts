@@ -40,6 +40,9 @@ export interface GenerationOperationRecovery {
     closeout?: { milestoneId: string; proposalDigest: string; repairId: string };
     /** Original settled Event no-write report, never a replacement Event writer lease. */
     eventNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string };
+    /** Settled Choice contradiction from the original pinned specialist Pi session. */
+    interactiveNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string;
+      domain: "choice" };
     /** Controller-captured verifier input; its source and correction baseline are not model claims. */
     verifier?: { assignmentId: string; stage: string; resultStatus: string;
       resultHeadSha: string; failureHeadSha: string;

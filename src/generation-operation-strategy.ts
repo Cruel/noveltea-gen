@@ -60,7 +60,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         op.evidence?.reference === "generation-checkpoint" &&
         !op.evidence.assignmentId && !op.evidence.priorHead &&
         !op.evidence.verifier && !op.evidence.closeout &&
-        !op.evidence.eventNoWrite &&
+        !op.evidence.eventNoWrite && !op.evidence.interactiveNoWrite &&
         op.source.jobId === job.jobId && op.source.threadId === c.origin.graphThreadId &&
         op.source.turnDigest === turnDigest && op.source.planVersion === planVersion &&
         op.source.headSha === head) {
@@ -101,6 +101,30 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
       return null;
     await authenticateEventNoWrite(job, original);
     return { store: "specialist-receipt", ref: relative, digest: report.reportDigest };
+  }
+  // A settled clean Choice contradiction is different from an interrupted
+  // writer or a malformed Pi response. The pinned interactive receipt and
+  // original session prove no edits; diagnosis never authorizes a replacement
+  // Choice or an upstream Plan mutation.
+  if (operation === "specialist-result" && c.observation === "returned-failure" &&
+      !s.active && !s.result && !s.causalAmendment &&
+      s.inventory?.headSha === head && c.origin.assignmentId) {
+    const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+    const op = source?.input as GenerationOperationRecovery | undefined;
+    const reported = op?.evidence.interactiveNoWrite;
+    if (op?.evidence.resultStatus === "interactive-conflict-reported" &&
+        reported?.domain === "choice" && reported.expectedHead === head &&
+        op.evidence.assignmentId === c.origin.assignmentId &&
+        c.origin.assignmentId === "interactive:" + reported.milestoneId &&
+        s.inventory.items.some(item => item.id === c.origin.assignmentId && item.status === "blocked") &&
+        s.failures[c.origin.assignmentId]) {
+      const { inspectInteractiveConflict } = await import("./interactive-work.js");
+      const original = await inspectInteractiveConflict(job, reported.milestoneId);
+      if (original.reportDigest === reported.reportDigest &&
+          original.expectedHead === head && original.planVersion === s.planVersion &&
+          original.worker === (s.request.fixture ? "fixture" : "pi"))
+        return { store: "specialist-receipt", ref: original.relative, digest: original.reportDigest };
+    }
   }
   if (operation === "adaptive-admission" && planVersion) {
     const state = await readAdaptiveState(job, turnDigest, planVersion);

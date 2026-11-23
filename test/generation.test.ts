@@ -3760,6 +3760,26 @@ test("second no-write report and protected prerequisite remain honestly blocked"
   }
 });
 
+test("C04 production graph admits a settled Choice contradiction as specialist-result and never replays the writer", { skip: !available }, () => {
+  const f = setup("c04-choice-negative");
+  Object.assign(f.env, { NT_INTERACTIVE_FIXTURE_CASE: "choice-conflict" });
+  const result = f.cli(f.start);
+  assert.equal(result.status, "blocked");
+  const op = currentOperationRecovery(result);
+  assert.equal(op?.operation, "specialist-result");
+  assert.equal(op?.outcome, "returned-failure");
+  assert.equal(op?.evidence.resultStatus, "interactive-conflict-reported");
+  assert.equal(op?.evidence.interactiveNoWrite?.domain, "choice");
+  const original = join(f.job.stateDir, "interactive-items/disclosure.json");
+  const saved = readFileSync(original, "utf8");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const again = f.cli(["generate", "resume"]);
+  assert.equal(again.status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(original, "utf8"), saved, "Negative report is never replayed or rewritten");
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
+});
+
 test("a clean local cluster block does not stop independent work or spin on resume", { skip: !available }, () => {
   const f = setup("local-block", story => plannedCluster(story, "z-optional", "aaa-optional"));
   Object.assign(f.env, { NT_FOUNDATIONS_FIXTURE_CASE: "one-arc-only" });

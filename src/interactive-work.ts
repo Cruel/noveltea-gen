@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { authorInteractive, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
+import { authorInteractive, parseInteractiveManifest, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
 import { eventCompletionDigest, currentMilestoneChoiceBinding } from "./event-work.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -30,13 +30,15 @@ import { correctPendingBlueprint } from "./milestone-blueprint-correction.js";
 import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import type { EventAssignment } from "./event-specialist.js";
 
-type Phase = "pending" | "writing" | "authored" | "committed" | "not-applicable";
+type Phase = "pending" | "writing" | "authored" | "committed" | "not-applicable" | "conflicted";
 interface Unit {
   id: string; domain: InteractiveDomain; phase: Phase;
   beforeHead?: string; commitSha?: string; paths?: string[]; digest?: string;
   claimedPaths?: string[]; piSessionFile?: string; skillReads?: string[];
   conflicts?: string[]; obligations?: string[]; failure?: string;
   noWrite?: PuzzleNoWriteRef;
+  /** Original settled negative report; never a new writer lease. */
+  piSessionSha256?: string;
   eventOnly?: EventOnlyRef;
   validation?: { status: "passed"; validatorVersion: string; protectionBase: string;
     choices: ChoiceEvidence[]; puzzles: PuzzleEvidence[]; downstreamObligations: string[]; searchTruncated: boolean };
@@ -684,6 +686,96 @@ function verifyCommit(job: JobStartResult, receipt: Receipt, unit: Unit, parent:
     throw new Error("Interactive commit includes unauthorized files.");
   }
 }
+/** One immutable provenance digest for the negative result, not for an
+ * independent approval or a permission to edit. */
+function choiceConflictReportDigest(receipt: Receipt, choice: Unit,
+  sessionPath: string | null, sessionHash: string | null) {
+  return digest(JSON.stringify({
+    jobId: receipt.jobId, worker: receipt.worker,
+    workItemId: receipt.workItemId, milestoneId: receipt.milestoneId,
+    baseSha: receipt.baseSha, planVersion: receipt.planVersion,
+    planDigest: receipt.planDigest, eventHead: receipt.eventHead,
+    provider: receipt.provider, model: receipt.model,
+    thinking: receipt.thinking ?? null, eventSource: receipt.eventSource ?? null,
+    head: choice.beforeHead, snapshotId: receipt.snapshot?.id,
+    unitId: choice.id, paths: choice.claimedPaths, conflicts: choice.conflicts,
+    obligations: choice.obligations, skillReads: choice.skillReads,
+    piSessionFile: sessionPath, piSessionSha256: sessionHash,
+  }));
+}
+/** Reauthenticate a settled Choice contradiction at the original unchanged
+ * HEAD. The negative report is evidence, never an authority to revise canon. */
+export async function inspectInteractiveConflict(job: JobStartResult, milestoneId: string) {
+  if (!validMilestone.test(milestoneId)) throw Error("Invalid Interactive conflict Milestone");
+  const relative = "interactive-items/" + milestoneId.slice(10) + ".json";
+  const receipt = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as Receipt;
+  const choice = receipt.units?.[0];
+  const puzzle = receipt.units?.[1];
+  const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as {
+    jobId?: string; phase?: string; plan?: Plan };
+  const head = await trustedHead(job);
+  if (receipt.jobId !== job.jobId || receipt.milestoneId !== milestoneId ||
+      architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
+      !architecture.plan || architecture.plan.version !== receipt.planVersion ||
+      digest(JSON.stringify(architecture.plan)) !== receipt.planDigest ||
+      !puzzle || puzzle.domain !== "puzzle" || puzzle.phase !== "pending" ||
+      !!puzzle.beforeHead || !!puzzle.commitSha || !!puzzle.paths?.length ||
+      !["pi", "fixture"].includes(receipt.worker) || !receipt.snapshot?.id ||
+      !choice || choice.phase !== "conflicted" || choice.domain !== "choice" ||
+      choice.id !== "interactive-choice-" + milestoneId.slice(10) ||
+      !choice.beforeHead || choice.beforeHead !== head ||
+      !receipt.eventHead || !receipt.planDigest || !receipt.planVersion ||
+      choice.paths?.length || choice.claimedPaths?.length || choice.commitSha ||
+      !choice.conflicts?.length || !choice.conflicts.every(x => !!x.trim()) ||
+      !Array.isArray(choice.obligations) ||
+      (receipt.worker === "pi" && (!choice.piSessionFile || !choice.piSessionSha256)) ||
+      (receipt.worker === "fixture" && (choice.piSessionFile || choice.piSessionSha256)) ||
+      !choice.digest || dirty(job).length)
+    throw Error("Original Choice no-write source or receipts cannot be authenticated");
+  const directory = join(job.stateDir, "interactive-sessions", receipt.workItemId, "choice");
+  const sessionPath = receipt.worker === "pi" ? await realpath(choice.piSessionFile!) : null;
+  if (sessionPath && (!sessionPath.startsWith(directory + "/") ||
+      choice.piSessionFile !== sessionPath || !sessionPath.endsWith(".jsonl")))
+    throw Error("Original Choice session is outside its assigned directory");
+  const sessionStat = sessionPath ? await lstat(sessionPath) : null;
+  if (sessionStat && (!sessionStat.isFile() || sessionStat.size > 64 * 1024 * 1024))
+    throw Error("Original Choice Pi session is not a bounded regular file");
+  const sessionBytes = sessionPath ? await readFile(sessionPath) : null;
+  const sessionHash = sessionBytes ? digest(sessionBytes) : null;
+  if ((choice.piSessionSha256 ?? null) !== sessionHash) throw Error("Original Choice Pi session changed");
+  if (sessionBytes) {
+    const records = sessionBytes.toString("utf8").trim().split("\n").map(line =>
+      JSON.parse(line) as { type?: string; id?: string;
+        message?: { role?: string; stopReason?: string;
+          content?: Array<{ type?: string; text?: string }> } });
+    if (records[0]?.type !== "session" || !records[0].id)
+      throw Error("Original Choice Pi session lost its identity");
+    const messages = records.filter(r => r.type === "message" && r.message?.role === "assistant")
+      .map(r => r.message!);
+    const last = messages.at(-1);
+    if (!last || last.stopReason !== "stop")
+      throw Error("Original Choice Pi report lacks a settled final assistant response");
+    const reported = parseInteractiveManifest((last.content ?? [])
+      .filter(c => c.type === "text").map(c => c.text ?? "").join("\n"), "choice");
+    if (reported.paths.length ||
+        JSON.stringify(reported.conflicts) !== JSON.stringify(choice.conflicts) ||
+        JSON.stringify(reported.obligations) !== JSON.stringify(choice.obligations))
+      throw Error("Original Choice report differs from the settled Pi transcript");
+  }
+  const event = JSON.parse(await readFile(join(job.stateDir,
+    "event-items", milestoneId.slice(10) + ".json"), "utf8")) as SourceReceipt;
+  if (event.jobId !== receipt.jobId || event.milestoneId !== milestoneId ||
+      event.phase !== "committed" || event.commitSha !== receipt.eventHead ||
+      event.planVersion !== receipt.planVersion)
+    throw Error("Original Choice source no longer matches its verified Event receipt");
+  git(job, "merge-base", "--is-ancestor", receipt.eventHead, choice.beforeHead);
+  const reportHash = choiceConflictReportDigest(receipt, choice, sessionPath, sessionHash);
+  if (choice.digest !== reportHash) throw Error("Original Choice negative report digest changed");
+  return { relative, reportDigest: reportHash, expectedHead: head,
+    worker: receipt.worker, planVersion: receipt.planVersion,
+    milestoneId, unitId: choice.id, conflicts: choice.conflicts,
+    obligations: choice.obligations!, piSessionFile: sessionPath };
+}
 function completed(receipt: Receipt) {
   return (receipt.units[0].phase === "committed" &&
     ["committed", "not-applicable"].includes(receipt.units[1].phase)) ||
@@ -695,8 +787,14 @@ function completed(receipt: Receipt) {
 function output(job: JobStartResult, receipt: Receipt, unit?: InteractiveDomain) {
   const choiceDone = receipt.units[0].phase === "committed" ||
     receipt.units[0].phase === "not-applicable" && completed(receipt);
-  return { status: unit === "choice" ? choiceDone ? "interactive-choice-committed" : "in-progress"
+  const conflict = receipt.units.find(u => u.phase === "conflicted");
+  return { status: conflict ? "interactive-conflict-reported" :
+    unit === "choice" ? choiceDone ? "interactive-choice-committed" : "in-progress"
     : completed(receipt) ? "interactive-slice-committed" : "in-progress",
+    ...(conflict ? { prerequisite: { milestoneId: receipt.milestoneId,
+      expectedHead: conflict.beforeHead!, reportDigest: conflict.digest!,
+      domain: conflict.domain }, conflicts: conflict.conflicts ?? [],
+      obligations: conflict.obligations ?? [] } : {}),
     jobId: job.jobId, milestoneId: receipt.milestoneId,
     worktreeStoryRoot: job.worktreeStoryRoot, headSha: receipt.units[1].commitSha ??
       (receipt.units[1].phase === "not-applicable" ? receipt.units[1].beforeHead :
@@ -746,6 +844,12 @@ async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
   const arc = assignment.arcIds[0]!;
   const event = assignment.eventIds.includes(cluster.text("event.disclose-ledger"))
     ? cluster.path("events/disclose-ledger.md") : "events/" + assignment.eventIds[0]!.slice(6) + ".md";
+  if (domain === "choice" && variant === "choice-conflict") {
+    return { modifiedRecords: [], conflicts: [
+      "The approved Event-only source has no causal Choice point; inventing a Choice would contradict its outcome."
+    ], obligations: ["Request a controller-approved Milestone Blueprint correction before new Choice work."],
+    skillReads: [] };
+  }
   if (domain === "puzzle" && variant === "puzzle-no-write") {
     return { modifiedRecords: [], conflicts: [
       "The original Turn promises branch consequences and fair-play clues, not a formal Puzzle. " +
@@ -1113,7 +1217,11 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       if (dirty(job).length) throw Error("Event-only omission cannot resume a dirty Story worktree.");
       return output(job, receipt, input.unit);
     }
-    if (input.action === "inspect") return output(job, receipt, input.unit);
+    if (input.action === "inspect") {
+      if (receipt.units[0].phase === "conflicted")
+        await inspectInteractiveConflict(job, input.milestone);
+      return output(job, receipt, input.unit);
+    }
     if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
         receipt.units.every(unit => unit.phase === "pending" && !unit.beforeHead ||
           unit.phase === "committed" && commitOrigin(job, unit.id, unit.commitSha!).jobId !== job.jobId)) {
@@ -1152,7 +1260,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       .addNode("choice_design", async ({ receipt }) => { await executeUnit(receipt.units[0]!, receipt); return { receipt }; })
       .addNode("puzzle_design", async ({ receipt }) => { await executeUnit(receipt.units[1]!, receipt); return { receipt }; })
       .addConditionalEdges(START, () => input.unit === "puzzle" ? "puzzle_design" : "choice_design")
-      .addConditionalEdges("choice_design", () => input.unit === "choice" ? END : "puzzle_design")
+      .addConditionalEdges("choice_design", ({ receipt }) =>
+        input.unit === "choice" || receipt.units[0].phase === "conflicted" ? END : "puzzle_design")
       .addEdge("puzzle_design", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
@@ -1162,6 +1271,11 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         ? await verifiedNarrativeSuccessor(job, sourceHead) : sourceHead);
       if (!before) throw new Error("Puzzle specialist is blocked until the Choice work item is committed.");
       if (unit.beforeHead && unit.beforeHead !== before) throw new Error("Interactive unit authority head changed.");
+      if (unit.phase === "conflicted") {
+        if (unit.domain !== "choice") throw Error("Only Choice has an unresolved no-write contradiction");
+        await inspectInteractiveConflict(job, state.milestoneId);
+        return; // No second Pi invocation after a settled negative result.
+      }
       if (unit.phase === "not-applicable") {
         if (index !== 1 || unit.domain !== "puzzle" || !unit.beforeHead ||
             unit.paths?.length !== 0 || unit.claimedPaths?.length !== 0)
@@ -1237,6 +1351,15 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         await persist(file, state);
         try {
           const verifyDraft = async (evidence: InteractiveEvidence) => {
+            if (unit.domain === "choice" && evidence.modifiedRecords.length === 0) {
+              if (!evidence.conflicts.length) throw Error("Choice negative report has no explicit conflict");
+              assertHead(job, before);
+              if (dirty(job).length)
+                throw Error("Negative Choice report disagrees with the actual Story worktree");
+              // A truthful claim remains negative until controller review;
+              // the author cannot fill the missing Choice with an invented one.
+              return [];
+            }
             if (unit.domain === "puzzle" && evidence.modifiedRecords.length === 0) {
               if (puzzleDecision?.required !== false || !evidence.conflicts.length)
                 throw new Error("Required Puzzle has no solvable output; the approved goal remains blocked.");
@@ -1307,6 +1430,27 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           unit.obligations = evidence.obligations;
           unit.skillReads = evidence.skillReads;
           unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
+          if (unit.domain === "choice" && evidence.modifiedRecords.length === 0) {
+            if (!evidence.conflicts.length || !state.snapshot?.id ||
+                (state.worker === "pi" && !unit.piSessionFile))
+              throw Error("Choice no-write has no original completed worker and pinned assignment");
+            assertHead(job, before);
+            if (dirty(job).length) throw Error("Choice negative report left Story edits");
+            const sessionPath = unit.piSessionFile ? await realpath(unit.piSessionFile) : null;
+            const directory = join(job.stateDir, "interactive-sessions", state.workItemId, "choice");
+            if (sessionPath && (!sessionPath.startsWith(directory + "/") ||
+                unit.piSessionFile !== sessionPath || !sessionPath.endsWith(".jsonl")))
+              throw Error("Choice no-write session is outside its original assignment");
+            unit.piSessionSha256 = sessionPath ? digest(await readFile(sessionPath)) : undefined;
+            unit.paths = [];
+            unit.digest = choiceConflictReportDigest(state, unit,
+              sessionPath, unit.piSessionSha256 ?? null);
+            unit.phase = "conflicted";
+            delete unit.failure;
+            await persist(file, state);
+            await inspectInteractiveConflict(job, state.milestoneId);
+            return;
+          }
           if (unit.domain === "puzzle" && evidence.modifiedRecords.length === 0) {
             if (puzzleDecision?.required !== false || !puzzleDecision.turnDigest ||
                 !evidence.conflicts.length || !state.snapshot?.id)
@@ -1397,6 +1541,12 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
     }
     const result = await graph.invoke({ receipt });
+    if (result.receipt.units[0].phase === "conflicted") {
+      // No next-stage or deferred-idea authorization follows a negative
+      // original assignment. The generation controller owns its disposition.
+      await inspectInteractiveConflict(job, input.milestone);
+      return output(job, result.receipt, input.unit);
+    }
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "interactive-work");

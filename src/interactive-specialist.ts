@@ -71,13 +71,12 @@ export function parseInteractiveManifest(text: string, domain: InteractiveDomain
       "Interactive specialist must return complete modifiedRecords, architecturalConflicts and laterObligations JSON.",
     );
   }
-  if (domain === "choice" && obj.modifiedRecords.length === 0) {
-    if (obj.architecturalConflicts.length) {
-      throw new Error("Interactive Choice source conflict (no Story edits): " +
-        obj.architecturalConflicts.join("; "));
-    }
+  // A clean, explicit contradiction is a negative specialist result, not a
+  // malformed protocol response. The controller must verify its source and
+  // route it through Repair; it cannot fabricate a Choice to satisfy the task.
+  if (domain === "choice" && obj.modifiedRecords.length === 0 &&
+      obj.architecturalConflicts.length === 0)
     throw new Error("Interactive Choice cannot report no Story edits without a verified Event-only omission.");
-  }
   return {
     paths: obj.modifiedRecords,
     conflicts: obj.architecturalConflicts,
@@ -309,12 +308,10 @@ export async function authorInteractive(
       );
       if (data.paths.length === 0) {
         if (
-          domain !== "puzzle" ||
-          assignment.puzzleObligation?.required !== false ||
-          edits.length ||
-          !data.conflicts.length
+          !data.conflicts.length ||
+          (domain === "puzzle" && (assignment.puzzleObligation?.required !== false || edits.length))
         )
-          throw new Error("Only an optional Puzzle may return a genuine, untouched no-write report.");
+          throw new Error("A genuine negative Interactive report requires an untouched Story and specific conflicts; only an optional Puzzle can be not-applicable.");
       } else if (!edits.length) {
         throw new Error("Interactive specialist made no canonical Story edits.");
       }

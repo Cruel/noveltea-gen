@@ -43,9 +43,11 @@ test("a deliberate empty Choice report names its source conflict instead of requ
     architecturalConflicts: ["Verified source is an Event-only observation with no missing Choice."],
     laterObligations: ["Author a consequential Choice at a separate decision Milestone."],
   });
-  assert.throws(() => parseInteractiveManifest(conflict, "choice"),
-    /Interactive Choice source conflict.*Event-only observation/,
-    "The controller must not disguise a truthful no-write conflict as malformed JSON");
+  assert.deepEqual(parseInteractiveManifest(conflict, "choice"), {
+    paths: [],
+    conflicts: ["Verified source is an Event-only observation with no missing Choice."],
+    obligations: ["Author a consequential Choice at a separate decision Milestone."],
+  }, "A truthful negative result is not a format error; the controller owns its Repair disposition.");
   assert.deepEqual(parseInteractiveManifest(conflict, "puzzle"), {
     paths: [],
     conflicts: ["Verified source is an Event-only observation with no missing Choice."],

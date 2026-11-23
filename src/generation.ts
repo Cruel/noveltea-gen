@@ -1920,16 +1920,21 @@ export function createGenerationGraph(
                   repair: "protected" }],
                 action: "Request the original author’s approval through the existing scope/decision workflow." },
             };
-            if (decision.kind === "refuse") return {
-              ...next, status: "blocked" as const,
-              reason: "Composition prerequisite preflight refused: " + decision.reason,
-              escalation: { kind: "dependency-replan" as const,
-                requiresTrustedApproval: false,
-                sources: [{ source: next.active.milestone, message: decision.reason,
-                  repair: "event" }],
-                action: "Inspect original Event/Choice proofs and authorize only a verified " +
-                  "bounded prerequisite amendment. Do not dispatch Composition or fabricate fulfillment." },
-            };
+            if (decision.kind === "refuse") {
+              const failure = "Composition prerequisite preflight refused: " + decision.reason;
+              return {
+                ...next,
+                ...await operationFailure({ ...s, ...next }, job, "dependency-amendment",
+                  failure, { reference: "dependency-plan", assignmentId: next.active.id,
+                    resultStatus: "preflight-refused" }, "returned-failure"),
+                escalation: { kind: "dependency-replan" as const,
+                  requiresTrustedApproval: false,
+                  sources: [{ source: next.active.milestone, message: decision.reason,
+                    repair: "event" }],
+                  action: "Inspect original Event/Choice proofs and authorize only a verified " +
+                    "bounded prerequisite amendment. Do not dispatch Composition or fabricate fulfillment." },
+              };
+            }
             if (decision.kind === "repair") return { ...next,
               ...await operationFailure({ ...s, ...next }, job, "dependency-amendment", "Verified Composition prerequisite requires its source-bound owner.",
                 { reference: "dependency-plan", assignmentId: next.active.id, closeout: {
@@ -2085,6 +2090,49 @@ export function createGenerationGraph(
       if (s.result) return {};
       try {
         let result = await dispatch(s);
+        if (result.status === "interactive-conflict-reported") {
+          const evidence = result as typeof result & { prerequisite?: {
+            milestoneId: string; expectedHead: string; reportDigest: string; domain: string };
+            conflicts?: string[]; obligations?: string[] };
+          const report = evidence.prerequisite;
+          if (!report || report.domain !== "choice" ||
+              s.active?.stage !== "choice" && s.active?.stage !== "interactive" ||
+              !s.active.milestone || s.active.milestone !== report.milestoneId ||
+              s.active.id !== "choice:" + report.milestoneId &&
+              s.active.id !== "interactive:" + report.milestoneId ||
+              !/^[0-9a-f]{64}$/.test(report.reportDigest) ||
+              !evidence.conflicts?.length)
+            throw Error("Choice negative result lacks its original bounded assignment and report");
+          const job = await openJob(s);
+          const { inspectInteractiveConflict } = await import("./interactive-work.js");
+          const original = await inspectInteractiveConflict(job, report.milestoneId);
+          if (original.expectedHead !== report.expectedHead ||
+              original.reportDigest !== report.reportDigest ||
+              original.worker !== (s.request.fixture ? "fixture" : "pi") ||
+              original.planVersion !== s.planVersion ||
+              JSON.stringify(original.conflicts) !== JSON.stringify(evidence.conflicts) ||
+              JSON.stringify(original.obligations) !== JSON.stringify(evidence.obligations))
+            throw Error("Interactive contradiction no longer matches its sealed Pi source");
+          const failure = "Original Choice returned a settled no-write architectural contradiction: " +
+            original.conflicts.join("; ") + ". Deferred obligations: " +
+            original.obligations.join("; ") +
+            ". Controller-owned Repair must inspect the original Blueprint and assignment before authorizing another owner.";
+          const assessment = await operationFailure(s, job, "specialist-result", failure,
+            { reference: "specialist-receipt", assignmentId: s.active.id,
+              resultStatus: result.status, interactiveNoWrite: {
+                milestoneId: report.milestoneId, expectedHead: report.expectedHead,
+                reportDigest: report.reportDigest, domain: "choice" } }, "returned-failure");
+          return { ...assessment, failures: { ...s.failures, [s.active.id]: failure },
+            inventory: blockedAssignmentInventory(s, failure), active: null, result: null,
+            escalation: { kind: "dependency-replan" as const, requiresTrustedApproval: false,
+              sources: original.conflicts.slice(0, 8).map(message => ({
+                source: report.milestoneId + "@" + report.expectedHead,
+                message, repair: "controller-plan-review" })),
+              action: "Independently review the original approved Milestone Blueprint, " +
+                "Choice assignment and sealed negative Pi report. Propose a separate, " +
+                "source-authenticated owner/plan amendment if warranted; no replacement " +
+                "Choice, protected decision or new specialist scope is authorized." } };
+        }
         if (result.status === "event-prerequisite-reported") {
           let evidence = result as typeof result & {
             prerequisite?: { reportDigest: string; expectedHead: string };
@@ -2215,7 +2263,18 @@ export function createGenerationGraph(
       }
     }))
     .addNode("independent_assignment_review", recoveryNode("independent_assignment_review", async s => {
-      return reviewBoundary(s);
+      const reviewed = await reviewBoundary(s);
+      // A trusted negative Review disposition must reach the same typed
+      // assessment as a thrown reviewer failure. Keep the existing persistent
+      // Review cycle and original writer receipts; do not retry that writer.
+      if (reviewed.status === "blocked" && reviewed.escalation?.kind === "dependency-replan" &&
+          !reviewed.nonsemanticStop && s.active && s.result) {
+        const assessed = await operationFailure(s, await openJob(s), "independent-review",
+          reviewed.reason ?? "Unresolved source-linked independent review",
+          { reference: "review-checkpoints", assignmentId: s.active.id }, "returned-failure");
+        return { ...reviewed, ...assessed };
+      }
+      return reviewed;
     }))
     .addNode("verify_committed_work", recoveryNode("verify_committed_work", async s => {
       const job = await openJob(s);

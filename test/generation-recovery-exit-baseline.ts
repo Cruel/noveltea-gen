@@ -20,15 +20,15 @@ export const reviewedReturnExits = {
   assess_recovery:
     "42d07008d2732334:F 0ba054199a4fae36:B c672741a55275f3c:U 37ac0fcf81593fde:U a82ee6005950dfd8:F 1b1e92b10da0f4a4:F 847377c251391777:F 4b1fc97521b4c16b:S bb65f63e263b2fe8:F 0d98a4d66450cb87:G 128687fb2b296bcd:F 0d98a4d66450cb87:G c6a6c70112e77cf8:F 27fe5712f50f7abb:F 0a1d512a1ea80f42:F 709ddcba4378d1e8:G 709ddcba4378d1e8:G 170918fa99798bda:F 5d2896d748d553b3:B 591823c6f3985766:G",
   author_update_intake:
-    "9e5909eb90d71edf:G cfba761fff836f54:S e4b08665b2511bc8:G 5d687f16a5596c4f:R e4b08665b2511bc8:G e4b08665b2511bc8:G fdbf39f3b7061801:R a260befd39f85294:S 747b91dd0e6c2dc8:G 73bc16b555ae8f07:G f49f72da98546066:R 4d083c13dcc1e236:G 42867d567e1d95c1:G fceab62ae26516ee:R 5567ab42da73df08:U 51f0c83f7f252518:F 63a353783d128fb6:R e4840f27212ca310:R 3ea9cb6dd42763ac:G fe3e9d5287d5503f:R",
+    "da64e9326ac96ae9:G cfba761fff836f54:S e4b08665b2511bc8:G 5d687f16a5596c4f:R e4b08665b2511bc8:G e4b08665b2511bc8:G fdbf39f3b7061801:R a260befd39f85294:S 747b91dd0e6c2dc8:G 73bc16b555ae8f07:G f49f72da98546066:R 4d083c13dcc1e236:G 42867d567e1d95c1:G fceab62ae26516ee:R 5567ab42da73df08:U 9e0f30ee86075453:R 63a353783d128fb6:R e4840f27212ca310:R 3ea9cb6dd42763ac:G fe3e9d5287d5503f:R",
   idea_integration:
     "e4b08665b2511bc8:G 20f588fb0567918e:G 525b4f362005f993:G 525b4f362005f993:G 6d21786f048a0f8f:R",
   verify_idea_integration:
     "fc4216fab4e774f4:G a8f06f34fb2636b9:R 3455306dafdc433b:G c373186eff1403b1:G 85e672986fb4d591:R",
   specialist_dispatch:
-    "e4b08665b2511bc8:G 0d9e6ec6e5934712:G 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G 68f520279c4733e1:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
+    "e4b08665b2511bc8:G 1b68a6bf68ff6ba6:R 0d9e6ec6e5934712:G 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G 68f520279c4733e1:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
   dependency_amendment: "cfba761fff836f54:S 0a126b3a9f0f9f2b:G 179232cd4e6294bf:S 0769876482d9a3e7:R",
-  independent_assignment_review: "9c7ec85aecee7718:S",
+  independent_assignment_review: "9fe665d7fe799027:R 418d3dec6f744971:S",
   verify_committed_work:
     "1de161a5ffd576bc:G 3585ea4da1b9e523:B 4c68a7532035bcf2:G 46be02fd000dbeda:R 54958ad74d3d985c:G a93c92edb8171d44:G 179232cd4e6294bf:S a426d6990d0699f1:R",
   completion_decision:
@@ -55,7 +55,7 @@ export const reviewedThrowExits = {
   author_update_intake: "0abd139e9b6f45a4",
   idea_integration: "5c212deb6b599f1b 2e0ec52402b79d11 8e87eec152864718 c98f90ca62ed64ed c7c8d830407dd1e5",
   verify_idea_integration: "308c430973f6b74e 43e1138180314eb1 a4b0709f69a7c2f3 63cc21025b2defc5",
-  specialist_dispatch: "b306d96cffbf864c 95fa1456013e2d48 a1beda487210eb50",
+  specialist_dispatch: "b306d96cffbf864c 3a1b6fa85817a0d3 44903bac895ce58d 95fa1456013e2d48 a1beda487210eb50",
   dependency_amendment: "31c32f029ac15a97 4b99521c61fca4d0",
   independent_assignment_review: "",
   verify_committed_work: "302ad04127f5c981 8c468a57ba68bc74 a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",
@@ -80,7 +80,7 @@ export const reviewedStatusExits = {
     "f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G e0394fa2f3847b80:F f309314d6c8adbdd:G f309314d6c8adbdd:G",
   assess_recovery:
     "e0394fa2f3847b80:F 28b465f0a9b56ebd:U 64104e1034916182:U e0394fa2f3847b80:F 2b78ad3f49b1ead6:F 088baada343b4451:S f309314d6c8adbdd:G f309314d6c8adbdd:G",
-  author_update_intake: "f309314d6c8adbdd:G 64104e1034916182:U e0394fa2f3847b80:F",
+  author_update_intake: "f309314d6c8adbdd:G 64104e1034916182:U",
   idea_integration: "b2a1ee45d94f53be:G",
   verify_idea_integration: "1ef03b815a1070ca:G",
   specialist_dispatch: "fb8dc871bfe4bc06:G",
