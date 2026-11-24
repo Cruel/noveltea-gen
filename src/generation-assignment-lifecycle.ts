@@ -121,6 +121,13 @@ function lifecycleChannels<I extends LifecycleIdentity>() {
 }
 type LifecycleState<I extends LifecycleIdentity> = ReturnType<typeof lifecycleChannels<I>>["State"];
 
+/** Verification may publish a native commit after the checkpointed Pi round.
+ * Keep its actual committed receipt alongside the outcome for parent replay. */
+export type AssignmentVerifiedSubmission<I extends LifecycleIdentity> = Readonly<{
+  outcome: AssignmentOutcome<I>;
+  submission: AssignmentSubmission;
+}>;
+
 export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> = Readonly<{
   /** Reauthenticate the parent authorization, source and uncertain effects. */
   preflight: (state: LifecycleState<I>, config: RunnableConfig) =>
@@ -132,7 +139,7 @@ export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> 
   /** Run native validation and independent read-only Review; return references
    * only to real trusted receipts. Never certify solely from the child state. */
   verify: (state: LifecycleState<I>, config: RunnableConfig) =>
-    Promise<AssignmentOutcome<I> | AssignmentCorrection>;
+    Promise<AssignmentOutcome<I> | AssignmentCorrection | AssignmentVerifiedSubmission<I>>;
   /** Reconcile the exact rejected submission and authorized correction before
    * a new model attempt. The adapter retains original external receipts. */
   correct?: (state: LifecycleState<I>, config: RunnableConfig) =>
@@ -213,7 +220,16 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
     })
     .addNode("verify_original", async (state, config) => {
       if (state.outcome || !state.submission) return {};
-      const outcome = await adapter.verify(state, config);
+      if (state.submissionKey !== logicalAssignmentKey(state.identity))
+        throw Error("Verification cannot use a foreign assignment submission.");
+      const verified = await adapter.verify(state, config);
+      if ("submission" in verified) {
+        if (!verified.submission.receiptRef || !verified.submission.status)
+          throw Error("Verification lost the committed submission receipt.");
+        assertAssignmentOutcome(state.identity, verified.outcome);
+        return { outcome: verified.outcome, submission: verified.submission, correction: null };
+      }
+      const outcome = verified;
       if ("correctionRef" in outcome) {
         if (!adapter.correct || !outcome.correctionRef ||
             outcome.rejectedReceiptRef !== state.submission.receiptRef)

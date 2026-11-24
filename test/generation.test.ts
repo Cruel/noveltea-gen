@@ -5783,13 +5783,15 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
   skip: !available, timeout: 240_000,
 }, async () => {
   const owner = scenario === "cli" ? "cli" : "server";
   const terminal = scenario === "protocol-exhausted" || scenario === "nonconverging";
   const realReview = scenario.startsWith("review-");
+  const crashRounds = scenario.startsWith("crash-");
+  const actualReviewer = realReview || crashRounds;
   const stalled = scenario === "review-stalled" || scenario === "review-stalled-continue";
   const dispute = scenario === "review-dispute";
   const scopeRevision = scenario === "review-scope";
@@ -5881,7 +5883,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }, ...(i === 5 ? [{ type: "toolCall" as const, name: "write", id: "r02-foreign-write",
         arguments: { path: "events/foreign.md", content: "Unauthorized" } }] : [])], reason: "toolUse" };
       if (i === 6 || i === 8) return { content: scriptedText(report), reason: "stop" };
-      if (realReview && i === 9)
+      if (actualReviewer && i === 9)
         return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
           .map(path => "skill://" + path), i), reason: "toolUse" };
       if (scopeRevision && i === 11)
@@ -5927,14 +5929,14 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           arguments: { path: target, content: authored + "\n" + revisions.slice(0, correction).join("\n") + "\n" } }], reason: "toolUse" };
       if (revising && correction && correctionStep === 1)
         return { content: scriptedText("Corrected the source-linked witness obligation."), reason: "stop" };
-      if (realReview && (i === 10 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15)) {
+      if (actualReviewer && (i === 10 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15)) {
         const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
         const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
           .map(c => c.text ?? "").findLast(text => text.includes("\nIMMUTABLE REVIEW PACKET\n"));
         assert.ok(prompt, "Original reviewer receives the source-bound packet");
         const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
         const item = packet.items[0];
-        const pass = correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
+        const pass = crashRounds || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
         const finding = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: target, line: 1, kind: "missing-requirement",
           message: "The witness causal connection still needs the next specific link.",
@@ -5951,14 +5953,15 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }
       throw Error("R01 writer replayed or called another model unexpectedly: " + i);
     });
-    const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "r01-generation.sqlite"));
+    const checkpointFile = join(f.job.stateDir, "r01-generation.sqlite");
+    let saver = SqliteSaver.fromConnString(checkpointFile);
     const config = { configurable: { thread_id: f.job.threadId +
       (owner === "server" ? ":generation:web" : ":generation") },
       recursionLimit: 10000 };
     try {
       let reviewCalls = 0;
       let reviewerError: string | null = null;
-      const graph = createGenerationGraph(saver, owner, realReview ? undefined : async s => {
+      const makeGraph = () => createGenerationGraph(saver, owner, actualReviewer ? undefined : async s => {
         const job = await startStoryJob({ story: f.story, job: "single" }, false);
         const point = (await inspectRecoveryCheckpoints(job)).find(p =>
           p.eligible && p.workItem === "foundation");
@@ -5978,6 +5981,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         }
         return { result: s.result };
       });
+      let graph = makeGraph();
       const input = { request: {
         story: f.story, job: "single", task: f.start[3]!,
         contract, turnPlanDigest: pinnedDigest,
@@ -5990,8 +5994,82 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         version: 1, profile: { provider: scriptedModel.provider, model: scriptedModel.id },
         limits: { modelCalls: 7 },
       });
+      if (crashRounds) {
+        // Lose the actual child write checkpoint, not the worker receipt.
+        // Stop the parent as well, as a process failure would; no exception
+        // may be classified as a fresh specialist failure by the assessor.
+        const cuts = [
+          { kind: "submission", ordinal: 0, calls: 7 },
+          { kind: "correction", ordinal: 0, calls: 7 },
+          { kind: "submission", ordinal: 1, calls: 9 },
+        ] as const;
+        let sessionId: string | undefined;
+        for (const cut of scenario === "crash-rounds" ? cuts : [cuts[1]]) {
+          const abort = new AbortController();
+          const originalPut = saver.put.bind(saver);
+          const originalWrites = saver.putWrites.bind(saver);
+          let crashed = false;
+          const crashError = Error("Injected checkpoint loss: " + cut.kind + ":" + cut.ordinal);
+          saver.put = async (...args) => {
+            if (crashed) throw crashError;
+            return originalPut(...args);
+          };
+          saver.putWrites = async (cfg, writes, task) => {
+            if (crashed) throw crashError;
+            const entry = writes.find(([channel]) => channel === cut.kind)?.[1] as
+              { receiptRef?: string; rejectedReceiptRef?: string; status?: string } | undefined;
+            const ref = entry?.receiptRef ?? entry?.rejectedReceiptRef;
+            if (cfg.configurable?.checkpoint_ns?.includes("assignment-") &&
+                ref?.split(":")[1] === String(cut.ordinal)) {
+              crashed = true;
+              abort.abort(crashError);
+              throw crashError;
+            }
+            return originalWrites(cfg, writes, task);
+          };
+          await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(
+            sessionId ? null : input, { ...config, signal: abort.signal, durability: "sync" })));
+          assert.ok(crashed, "Fault must reach the requested SQLite child boundary: " + cut.kind);
+          assert.equal(observed.length, cut.calls, "No next substantive Pi turn before its checkpoint");
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+          const state = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+          if (sessionId) assert.equal(state.piSessionId, sessionId);
+          sessionId = state.piSessionId;
+          const dir = join(f.job.stateDir, "foundation-invocations", sessionId!);
+          assert.ok(existsSync(join(dir, cut.ordinal + ".settled.json")));
+          if (cut.kind === "correction")
+            assert.ok(existsSync(join(dir, (cut.ordinal + 1) + ".grant.json")));
+          assert.ok(!existsSync(join(dir, (cut.ordinal + 1) + ".started.json")));
+          // New saver and graph, same persisted Generation thread. Neither
+          // model admission nor an in-memory adapter result can survive here.
+          saver.db.close();
+          saver = SqliteSaver.fromConnString(checkpointFile);
+          graph = makeGraph();
+        }
+      }
+      if (crashRounds && scenario !== "crash-rounds") {
+        const receiptFile = join(f.job.stateDir, "foundation.json");
+        const receipt = JSON.parse(readFileSync(receiptFile, "utf8"));
+        const grantFile = join(f.job.stateDir, "foundation-invocations", receipt.piSessionId, "1.grant.json");
+        if (scenario === "crash-grant-tamper") {
+          const grant = JSON.parse(readFileSync(grantFile, "utf8"));
+          writeFileSync(grantFile, JSON.stringify({ ...grant, defects: [] }));
+        } else if (scenario === "crash-assignment-tamper") {
+          writeFileSync(receiptFile, JSON.stringify({ ...receipt, assignmentKey: "f".repeat(64) }));
+        } else await setJobControl(f.job, "cancelled");
+        const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+        assert.equal(stopped.status, scenario === "crash-cancel" ? "cancelled" : "blocked",
+          JSON.stringify({ reason: stopped.reason, recovery: stopped.recoveryLifecycle }));
+        if (scenario !== "crash-cancel")
+          assert.ok(stopped.recoveryLifecycle.inspectionFences.length ||
+            stopped.recoveryLifecycle.decision?.action === "integrity-fence", JSON.stringify(stopped.recoveryLifecycle));
+        assert.equal(observed.length, 7, "No further Pi call on an invalid admission or cancellation");
+        assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+        assert.equal(stopped.completedStages.length, 0);
+        return;
+      }
       let first = await withJobModelRuntime(runtime, () =>
-        graph.invoke(input, { ...config, interruptAfter: ["specialist_dispatch"] }));
+        graph.invoke(crashRounds ? null : input, { ...config, interruptAfter: ["specialist_dispatch"] }));
       if (realReview) {
         const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
         assert.equal(first.result?.headSha, head,
@@ -6204,8 +6282,10 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
       assert.notEqual(head, f.initial, "The child must commit real Story bytes to Git");
       assert.equal(first.result.headSha, head);
-      assert.equal(reviewCalls, 1);
-      assert.equal(observed.length, 11, "One pinned planning session and one original writer session with distinct corrections settled");
+      const expectedReviews = actualReviewer ? 0 : 1;
+      const expectedCalls = actualReviewer ? 13 : 11;
+      assert.equal(reviewCalls, expectedReviews);
+      assert.equal(observed.length, expectedCalls, "One pinned planning session and one original writer session with distinct corrections settled");
       assert.deepEqual(observed[6]!.tools, [], "Format-only correction must not have tools");
       assert.ok(observed[7]!.tools.includes("write"));
       assert.ok(observed[9]!.tools.includes("write"));
@@ -6218,8 +6298,42 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       const points = await inspectRecoveryCheckpoints(f.job);
       assert.equal(points.find(p => p.workItem === "foundation")?.semanticReview, "passed");
       const namespaces = new Set<string>();
-      for await (const tuple of saver.list({ configurable: { thread_id: config.configurable.thread_id } }))
-        namespaces.add(tuple.config.configurable?.checkpoint_ns ?? "");
+      const settledRounds = new Set<number>();
+      const correctiveGrants = new Set<number>();
+      const foundationReceipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+      const invocations = join(f.job.stateDir, "foundation-invocations", foundationReceipt.piSessionId);
+      for await (const tuple of saver.list({ configurable: { thread_id: config.configurable.thread_id } })) {
+        const ns = tuple.config.configurable?.checkpoint_ns ?? "";
+        namespaces.add(ns);
+        if (!ns.includes("assignment-")) continue;
+        const { submission, correction } = tuple.checkpoint.channel_values as {
+          submission?: { status: string; receiptRef: string };
+          correction?: { correctionRef: string; rejectedReceiptRef: string };
+        };
+        if (submission?.status === "writer-round") {
+          const [source, ordinal, digest] = submission.receiptRef.split(":");
+          const grant = JSON.parse(readFileSync(join(invocations, ordinal + ".grant.json"), "utf8"));
+          const settled = JSON.parse(readFileSync(join(invocations, ordinal + ".settled.json"), "utf8"));
+          assert.equal(grant.source, source);
+          assert.equal(grant.sessionId, foundationReceipt.piSessionId);
+          assert.equal(createHash("sha256").update(JSON.stringify(settled)).digest("hex"), digest);
+          settledRounds.add(Number(ordinal));
+        }
+        if (correction) {
+          const ordinal = Number(correction.rejectedReceiptRef.split(":")[1]);
+          const grant = JSON.parse(readFileSync(join(invocations, (ordinal + 1) + ".grant.json"), "utf8"));
+          assert.equal(createHash("sha256").update(JSON.stringify(grant)).digest("hex"), correction.correctionRef);
+          correctiveGrants.add(ordinal);
+        }
+      }
+      assert.deepEqual([...settledRounds].sort(), [0, 1, 2]);
+      assert.deepEqual([...correctiveGrants].sort(), [0, 1]);
+      if (actualReviewer) {
+        assert.ok(observed.slice(-2).every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
+        const { inspectPiPolicy } = await import("../src/job-pi-policy.js");
+        const policy = await inspectPiPolicy(f.job);
+        assert.equal(policy.budget.modelCalls, expectedCalls);
+      }
       assert.ok(namespaces.size >= 2, "Parent and production Foundation child need distinct SQLite namespaces");
       // Reopen the parent checkpoint immediately before child dispatch after
       // the physical child already reached END. The original Pi/Git/Review
@@ -6233,14 +6347,14 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         ...pendingDispatch!.config, recursionLimit: 10000, interruptAfter: ["specialist_dispatch"],
       }));
       assert.equal(replay.result?.headSha, head);
-      assert.equal(observed.length, 11, "Child END before parent publication cannot replay Pi");
-      assert.equal(reviewCalls, 1);
+      assert.equal(observed.length, expectedCalls, "Child END before parent publication cannot replay Pi");
+      assert.equal(reviewCalls, expectedReviews);
       assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
       // Only the controller's original next edges may accept the child result.
       const next = await withJobModelRuntime(runtime, () =>
         graph.invoke(null, { ...config, interruptAfter: ["verify_committed_work"] }));
-      assert.equal(observed.length, 11, "Parent verification cannot repeat the Foundation writer");
-      assert.equal(reviewCalls, 1, "Already-sealed review must not require another reviewer");
+      assert.equal(observed.length, expectedCalls, "Parent verification cannot repeat the Foundation writer");
+      assert.equal(reviewCalls, expectedReviews, "Already-sealed review must not require another reviewer");
       assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
       assert.ok(next.completedStages.some((item: { stage: string }) => item.stage === "foundation"),
         "Only the production parent's verified-work node advances completedStages");

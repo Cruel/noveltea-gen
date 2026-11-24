@@ -12,7 +12,7 @@ import ts from "typescript";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const modelCalls = new Set([
   "createAgentSession", "promptStorySpecialist", "prompt", "completeSimple",
-  "streamSimple", "stream", "recoverSubmittedAssignment", "recoverResponseContract",
+  "streamSimple", "stream", "recoverSubmittedAssignment", "executeAssignmentRound", "recoverResponseContract",
   "recoverWithOneFreshSession", "resumeExhaustedFreshProtocol", "realInference", "infer",
 ]);
 const printer = ts.createPrinter({ removeComments: true });
@@ -66,7 +66,7 @@ const reviewed: Record<string, string> = {
   "src/architecture-blueprint.ts:createReviewedBlueprint": "7:cda6dbcd756fcfd79fdffc3f",
   "src/architecture-draft-review.ts:createArchitectureDraftReviewCycle": "7:d647236f1406c9995cc06401",
   "src/architecture-specialist.ts:authorArchitecture": "6:639aa1ec267e574f87acda99",
-  "src/assignment-metadata-recovery.ts:recoverSubmittedAssignment": "2:5b9ced4e946031e9fb6374fc",
+  "src/assignment-metadata-recovery.ts:runAssignmentReceipts": "2:28f2f9fc649e92cf97133cc9",
   "src/character-world-specialist.ts:authorCharacterWorld": "3:eb2b552be239c8368b7a228d",
   "src/composition-specialist.ts:createSession": "1:f18acfc0fd3f82673a9a2626",
   "src/composition-specialist.ts:authorComposition": "2:c17fd7fb9dae5660409d117a",
@@ -78,7 +78,7 @@ const reviewed: Record<string, string> = {
   "src/dependent-correction-specialist.ts:authorDependentCorrection": "2:a4c94c75e79027e58be00491",
   "src/event-specialist.ts:authorEventCluster": "3:3bc94cb8f00f461a6ee5c16a",
   "src/focused-work.ts:writeWithPi": "3:2ebb0f59a48a725526919f3f",
-  "src/foundation.ts:piAuthor": "3:30c85e4a9b2a6f59ee6be855",
+  "src/foundation.ts:piAuthor": "3:a0277b19706e1a754da4b32c",
   "src/foundation.ts:discoverQuestions": "2:682a8e7748244e04ea525e6e",
   "src/idea-placement.ts:piWork": "4:c54673be05cced07b95826e1",
   "src/interactive-specialist.ts:authorInteractive": "3:499f85d0951d67b771382c85",

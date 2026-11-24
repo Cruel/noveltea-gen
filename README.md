@@ -851,19 +851,19 @@ validation and version-compatibility tests.
 
 ## Git-backed Creative Direction generation (#15)
 
-Once a Story job has been started, run a pinned Creative Direction work item:
+Production Pi Foundation writing now requires the authenticated Generation assignment child (R14A). Use Story Chat / Generation with an admitted Turn; the standalone command below is for deterministic fixture certification only. Existing approved Chat baseline materialization and explicit receipt inspection/reconciliation remain supported.
 
 ```sh
 pnpm dev job start --story /path/to/git-repo/story --job draft-1
 pnpm dev job foundation --story /path/to/git-repo/story --job draft-1 \
-  --mode autonomous \
+  --fixture --mode autonomous \
   --task "A mystery aboard a stranded midnight train; invent unspecified details" \
   --envelope "Dialogue-led visual novel, compact cast, reusable locations"
 ```
 
 Configure `.local/config.json` to point to the `noveltea-skills` checkout first, or specify `--skills-source /path/to/noveltea-skills` for a new job. A new foundation item pins the exact skills snapshot; validation independently pins the native NovelTea executable. Ordinary execution requires Pi credentials. Set `--provider` and `--model` to override the default. Only `--fixture` uses a deterministic non-model specialist; fixture outcomes are **not** Pi evidence.
 
-For collaborative discovery, start with `--mode collaborative --task "..." --envelope "..."`. The first invocation reads pinned guidance (real Pi, or a deterministic fixture) and returns `status: awaiting-author`, a set of author questions and a durable handoff **without writing the Story**. Resume with the same `--story` and `--job` plus `--author-input "Your decisions; delegate everything else"` (and `--fixture` if testing). The worker mode and model/provider are persisted and cannot change silently on continuation. Explicit author constraints become user-protected decisions; delegated choices remain agent-origin. The work item can be reopened without creating another commit.
+For deterministic collaborative discovery fixtures, start with `--fixture --mode collaborative --task "..." --envelope "..."`. The first fixture invocation uses deterministic pinned guidance and returns `status: awaiting-author`, a set of author questions and a durable handoff **without writing the Story**. Resume with the same `--story` and `--job` plus `--author-input "Your decisions; delegate everything else"` (and `--fixture` if testing). The worker mode and model/provider are persisted and cannot change silently on continuation. Explicit author constraints become user-protected decisions; delegated choices remain agent-origin. The work item can be reopened without creating another commit.
 
 The writing specialist works inside the isolated job Story directory, reads the actual pinned `nt-story-discovery` and `nt-catalog` skill files and uses ordinary Pi read/write/edit, search and Git inspection tools. There is no structured-record writer. **LangGraph** owns the separate validation/commit node, checks the exact file diff, unexpected staged/out-of-scope changes, branch HEAD and canonical validator report, and makes a single agent-attributed commit with `NovelTea-Job` and `NovelTea-Work-Item` trailers. A job with one existing tracked Creative Direction edits that file; an empty Story creates `creative-direction/foundation.md`. Ambiguous multiple foundations, unauthorized protected changes, missing readiness and unexpected edits block committing. Existing edits are preserved for manual inspection, not automatically reset.
 
@@ -871,14 +871,7 @@ The writing specialist works inside the isolated job Story directory, reads the 
 
 The job's `foundation.json` (brief, provenance, handoff, target, commit and validation identity) lives beside `job.json` outside the author's checkout. Read-only discovery transcripts are stored in `foundation-discovery-sessions/`; real writing sessions in `foundation-sessions/` in that same job-state directory. Current-format Foundation writers use a shared tool-free structured-report correction contract and source-bound native metadata/provenance correction in the same Pi session. Private `foundation-invocations/` receipts bind each started invocation, authored draft, protocol result and final settlement to the original assignment; safe unstarted corrections may continue after budget replenishment. After an ambiguous interrupted partial edit, inspect the preserved worktree instead of blindly restarting the specialist. If the commit completed before its receipt, a one-commit provenance check can recover it. Future tickets expand job-wide checkpoints, approval management and planning.
 
-To certify the public CLI deterministically, run `pnpm exec tsx --test test/foundation.test.ts`; it includes a real canonical-catalog integration case when the sibling skills checkout is present. To certify **real Pi** authoring using your configured Pi credentials, explicitly opt in:
-
-```sh
-NT_LIVE_FOUNDATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
-  pnpm exec tsx --test test/foundation-live.test.ts
-```
-
-The opt-in test inspects the Pi session's actual pinned skill reads and Markdown editing tool calls, the validated output and the Git branch. It can incur model charges. Neither fixture passing nor a model's own completion claim substitutes for this evidence.
+To certify the standalone fixture CLI, run `pnpm exec tsx --test test/foundation.test.ts`. For the production Foundation child, run the focused R01 production Foundation tests in `test/generation.test.ts`; they use scripted Pi transport, actual SQLite checkpoints, the native validator and Git. The previous standalone paid Pi certification route is no longer an authorized writer entrypoint.
 
 ## Scoped Story architecture and work-item DAG (#17)
 

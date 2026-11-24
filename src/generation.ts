@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, usesSharedAssignmentReview,
   type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
-  type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
+  type AssignmentSubmission, type AssignmentCorrection } from "./generation-assignment-lifecycle.js";
 import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { readRecoveryFork, verifyReadyRecoveryFork, resolvedInheritedRecoveryReviews } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
@@ -42,7 +42,7 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
 import { runFoundationJob, inspectPendingFoundationInvocation, inspectFoundationFailure } from "./foundation.js";
-import { AssignmentNonconvergenceError, AssignmentAuthorPauseError } from "./assignment-metadata-recovery.js";
+import { AssignmentNonconvergenceError, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob, inspectCharacterWorldFailure, inspectPendingCharacterWorldInvocation, inspectRecoverableCharacterWorldCommit } from "./character-world.js";
 import { runEventWorkItem, inspectEventFailure, inspectPendingEventInvocation } from "./event-work.js";
@@ -763,7 +763,7 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
   const guidedTask = adaptiveDispatchTask(steering ? input.task + "\n\nSAFE-BOUNDARY AUTHOR PLAN AMENDMENT:\n" + steering : input.task, s.active!);
   const milestone = s.active?.milestone!;
   switch (s.active?.stage) {
-    case "foundation": return runFoundationJob({ ...input, envelope: JSON.stringify(input.contract.envelope) });
+    case "foundation": throw Error("Foundation dispatch requires the checkpointed assignment child.");
     case "architecture": return runArchitectureJob({ ...input, action: "run" });
     case "foundations": return runCharacterWorldJob({ ...input, steering, action: "run", unit: foundationUnit });
     case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
@@ -846,136 +846,184 @@ async function runFoundationAssignmentChild(
     return !!s.recoveryLifecycle.decision &&
       await authenticateOperationReviewProof(job, s, correction, s.recoveryLifecycle.decision);
   };
+  const preflight = async () => {
+    const control = await readJobControl(job);
+    if (control === "cancelled") {
+      const error = Error("Original Turn was cancelled before Foundation dispatch.");
+      error.name = "StoryCancelledError"; throw error;
+    }
+    if (control === "paused")
+      return outcome("paused", "job-control", { controlRef: "job-control" });
+    // The original specialist owns dirty/authored-byte reconciliation. A
+    // crash after model completion may leave its authenticated target dirty;
+    // a blanket clean-worktree gate here would prevent safe verification.
+    await checkPlan(job, s.request, s.planVersion);
+    if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
+    if (correctionSelected) {
+      if (!await authenticateCorrection())
+        throw Error("Foundation correction lacks its original admitted Review case.");
+      return null;
+    }
+    const currentHead = jobGit(job, "rev-parse", "HEAD");
+    if (currentHead !== sourceHead) {
+      // Two distinct crash windows: committed Git before the Foundation
+      // receipt was finalized (inspectOriginalSpecialistCommitForResume),
+      // and finalized native receipt before the parent task was checkpointed
+      // (the already-published recovery checkpoint). Both remain bound to
+      // the original source parent and *same* work-item identity.
+      const finalized = (await inspectRecoveryCheckpoints(job)).some(point =>
+        point.eligible && point.workItem === "foundation" &&
+        point.commitSha === currentHead && point.parentSha === sourceHead &&
+        point.planVersion === (s.planVersion ?? null) &&
+        point.validation.status === "passed");
+      if (!finalized && !await inspectOriginalSpecialistCommitForResume(s, job))
+        throw Error("Foundation source advanced without an authenticated original commit.");
+    } else if (!existsSync(join(job.stateDir, "foundation.json"))) {
+      if (await trustedHead(job) !== sourceHead)
+        throw Error("Foundation source does not match the admitted parent HEAD.");
+      clean(job);
+    }
+    return null;
+  };
+  const roundRef = (proof: AssignmentInvocationProof) =>
+    [proof.sourceDigest, proof.ordinal, proof.settlementDigest].join(":");
+  const roundProof = (submission: AssignmentSubmission): AssignmentInvocationProof => {
+    const [sourceDigest, ordinal, settlementDigest, extra] = submission.receiptRef.split(":");
+    if (submission.status !== "writer-round" || extra !== undefined ||
+        !/^[a-f0-9]{64}$/.test(sourceDigest ?? "") || !/^(0|[1-9][0-9]*)$/.test(ordinal ?? "") ||
+        !/^[a-f0-9]{64}$/.test(settlementDigest ?? "") || !Number.isSafeInteger(Number(ordinal)))
+      throw new ProtocolIntegrityBlockedError("Invalid checkpointed Foundation writer round reference.");
+    return { sourceDigest: sourceDigest!, ordinal: Number(ordinal), settlementDigest: settlementDigest! };
+  };
+  const runRound = async (command: AssignmentRoundCommand): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
+    // Foundation's own started/settled Pi and Git receipt reconciliation
+    // prevents duplicate model turns, charges and commits after a crash.
+    try {
+      const stopped = await preflight();
+      if (stopped) return stopped;
+      const result = await runFoundationJob({ ...s.request, envelope: JSON.stringify(s.request.contract.envelope),
+        round: { assignmentKey: key, command } });
+      if ("round" in result && result.round) {
+        const ref = roundRef(result.round.proof);
+        if (result.round.status === "correction")
+          return { correctionRef: result.round.grantDigest, rejectedReceiptRef: ref };
+        return { receiptRef: ref, status: "writer-round" };
+      }
+      if (!result.status)
+        throw Error("Foundation returned no settled specialist status.");
+      return { receiptRef: "foundation.json", status: result.status, headSha: result.headSha };
+    } catch (error) {
+      if (error instanceof AssignmentAuthorPauseError)
+        return outcome("paused", "job-control", { controlRef: "job-control" });
+      if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError))
+        throw error;
+      const terminal = await inspectFoundationFailure(job, sourceHead);
+      const kind = error instanceof ProtocolExhaustedError ? "protocol-exhausted" : "nonconverging";
+      if (!terminal || terminal.proof.kind !== kind)
+        throw Error("Original assignment terminal receipt does not match its typed failure.");
+      return outcome("unresolved", terminal.proof.receiptDigest, { dispositionRef: kind });
+    }
+  };
+  const assertChildIdentity = (saved: AssignmentIdentity) => {
+    if (logicalAssignmentKey(saved) !== key)
+      throw new ProtocolIntegrityBlockedError("Foundation checkpoint belongs to another admitted logical assignment.");
+  };
+  const invokeRound = async (command: AssignmentRoundCommand) => {
+    const result = await runRound(command);
+    if ("correctionRef" in result) throw Error("Foundation invocation cannot select its own correction.");
+    return result;
+  };
+  const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
+    const candidate: State = { ...s,
+      result: { status: submission.status, headSha: submission.headSha } };
+    if (!accepted.foundation.includes(submission.status))
+      return outcome("unresolved", submission.receiptRef,
+        { dispositionRef: "foundation.json" });
+    try {
+      reviewPatch = await reviewBoundary(candidate, correctionSelected);
+    } catch (error) {
+      // Review runs within the shared child, but its original failed check
+      // is STILL independent-review, never the adjacent specialist writer.
+      // Admit it through the existing RecoveryLifecycle with its original
+      // source and receipt, not a second child-local recovery case.
+      reviewPatch = await operationFailure(candidate, job, "independent-review",
+        error, { reference: "review-checkpoints", assignmentId: identity.assignmentId });
+      return outcome("unresolved", "review-checkpoints",
+        { dispositionRef: "review-checkpoints" });
+    }
+    if (reviewPatch.status === "paused")
+      return outcome("paused", "review-checkpoints", { controlRef: "review-checkpoints" });
+    if (reviewPatch.reviewAssessmentRequested)
+      return outcome("unresolved", "review-checkpoints", { dispositionRef: "assess-review" });
+    if (reviewPatch.status === "blocked" || reviewPatch.status === "cancelled" ||
+        reviewPatch.escalation || reviewPatch.operationRecovery || reviewPatch.recovery ||
+        reviewPatch.unknownRecovery)
+      return outcome("unresolved", "review-checkpoints", { dispositionRef: "review-checkpoints" });
+    if (reviewPatch.reviewSteeringHandoff)
+      return outcome("paused", "author-updates", { controlRef: "author-updates" });
+    const actual = reviewPatch.result === undefined ? candidate.result : reviewPatch.result;
+    if (!actual || !accepted.foundation.includes(actual.status) || !actual.headSha)
+      return outcome("unresolved", "review-checkpoints",
+        { dispositionRef: "review-checkpoints" });
+    try {
+      const head = await trustedHead(job);
+      if (actual.headSha !== head)
+        throw Error("Original Foundation result differs from independently reviewed Git HEAD.");
+      if (correction) {
+        const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+        if (!await verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
+          throw Error("Foundation correction has no independently passing original-session successor.");
+        return outcome("verified", "recovery-checkpoints:" + head,
+          { headSha: head, reviewRef: "review-checkpoints:" + head });
+      }
+      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const reviews = await resolvedCheckpointReviews(job, points);
+      const reviewed = points.find(p => p.workItem === "foundation" &&
+        p.commitSha === head && p.parentSha === sourceHead &&
+        (s.request.fixture
+          ? p.validation.status === "passed"
+          : p.assurance?.turnDigest === s.request.turnPlanDigest &&
+            ["passed", "not-required"].includes(reviews.get(p.commitSha) ?? p.semanticReview)));
+      if (!reviewed) {
+        reviewPatch = await operationFailure(candidate, job, "independent-review",
+          "Foundation has no authenticated passing independent Review.",
+          { reference: "review-checkpoints", assignmentId: identity.assignmentId }, "returned-failure");
+        return outcome("unresolved", "review-checkpoints",
+          { dispositionRef: "review-checkpoints" });
+      }
+      return outcome("verified", "recovery-checkpoints:" + head,
+        { headSha: head, reviewRef: "review-checkpoints:" + head });
+    } catch (error) {
+      // The child must not relabel source/commit verification failures as a
+      // specialist-write error merely because verification is nested.
+      reviewPatch = await operationFailure(candidate, job, "commit-verification",
+        error, { reference: "generation-checkpoints", assignmentId: identity.assignmentId });
+      return outcome("unresolved", "recovery-checkpoints",
+        { dispositionRef: "generation-verification" });
+    }
+  };
   const child = createAssignmentLifecycleGraph({
     authenticateContinuation: async state =>
       state.continuationRef === correction?.id && await authenticateCorrection(),
-    preflight: async () => {
-      const control = await readJobControl(job);
-      if (control === "cancelled") {
-        const error = Error("Original Turn was cancelled before Foundation dispatch.");
-        error.name = "StoryCancelledError"; throw error;
-      }
-      if (control === "paused")
-        return outcome("paused", "job-control", { controlRef: "job-control" });
-      // The original specialist owns dirty/authored-byte reconciliation. A
-      // crash after model completion may leave its authenticated target dirty;
-      // a blanket clean-worktree gate here would prevent safe verification.
-      await checkPlan(job, s.request, s.planVersion);
-      if (correctionSelected) {
-        if (!await authenticateCorrection())
-          throw Error("Foundation correction lacks its original admitted Review case.");
-        return null;
-      }
-      const currentHead = jobGit(job, "rev-parse", "HEAD");
-      if (currentHead !== sourceHead) {
-        // Two distinct crash windows: committed Git before the Foundation
-        // receipt was finalized (inspectOriginalSpecialistCommitForResume),
-        // and finalized native receipt before the parent task was checkpointed
-        // (the already-published recovery checkpoint). Both remain bound to
-        // the original source parent and *same* work-item identity.
-        const finalized = (await inspectRecoveryCheckpoints(job)).some(point =>
-          point.eligible && point.workItem === "foundation" &&
-          point.commitSha === currentHead && point.parentSha === sourceHead &&
-          point.planVersion === (s.planVersion ?? null) &&
-          point.validation.status === "passed");
-        if (!finalized && !await inspectOriginalSpecialistCommitForResume(s, job))
-          throw Error("Foundation source advanced without an authenticated original commit.");
-      } else if (!existsSync(join(job.stateDir, "foundation.json"))) {
-        if (await trustedHead(job) !== sourceHead)
-          throw Error("Foundation source does not match the admitted parent HEAD.");
-        clean(job);
-      }
-      return null;
-    },
-    invoke: async () => {
-      // Foundation's own started/settled Pi and Git receipt reconciliation
-      // prevents duplicate model turns, charges and commits after a crash.
-      try {
-        const result = await dispatch(s);
-        if (!result.status)
-          throw Error("Foundation returned no settled specialist status.");
-        return { receiptRef: "foundation.json", status: result.status, headSha: result.headSha };
-      } catch (error) {
-        if (error instanceof AssignmentAuthorPauseError)
-          return outcome("paused", "job-control", { controlRef: "job-control" });
-        if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError))
-          throw error;
-        const terminal = await inspectFoundationFailure(job, sourceHead);
-        const kind = error instanceof ProtocolExhaustedError ? "protocol-exhausted" : "nonconverging";
-        if (!terminal || terminal.proof.kind !== kind)
-          throw Error("Original assignment terminal receipt does not match its typed failure.");
-        return outcome("unresolved", terminal.proof.receiptDigest, { dispositionRef: kind });
-      }
+    preflight: async state => { assertChildIdentity(state.identity); return preflight(); },
+    invoke: async state => { assertChildIdentity(state.identity); return invokeRound({ phase: "invoke" }); },
+    correct: async state => {
+      assertChildIdentity(state.identity);
+      return invokeRound({ phase: "correct", proof: roundProof(state.submission!),
+        grantDigest: state.correction!.correctionRef });
     },
     verify: async state => {
-      const submission = state.submission!;
-      const candidate: State = { ...s,
-        result: { status: submission.status, headSha: submission.headSha } };
-      if (!accepted.foundation.includes(submission.status))
-        return outcome("unresolved", submission.receiptRef,
-          { dispositionRef: "foundation.json" });
-      try {
-        reviewPatch = await reviewBoundary(candidate, correctionSelected);
-      } catch (error) {
-        // Review runs within the shared child, but its original failed check
-        // is STILL independent-review, never the adjacent specialist writer.
-        // Admit it through the existing RecoveryLifecycle with its original
-        // source and receipt, not a second child-local recovery case.
-        reviewPatch = await operationFailure(candidate, job, "independent-review",
-          error, { reference: "review-checkpoints", assignmentId: identity.assignmentId });
-        return outcome("unresolved", "review-checkpoints",
-          { dispositionRef: "review-checkpoints" });
+      assertChildIdentity(state.identity);
+      let submission = state.submission!;
+      const stopped = await preflight();
+      if (stopped) return stopped;
+      if (submission.status === "writer-round") {
+        const verified = await runRound({ phase: "verify", proof: roundProof(submission) });
+        if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
+        if (verified.status === "writer-round") throw Error("Foundation verification did not settle the round.");
+        submission = verified;
       }
-      if (reviewPatch.status === "paused")
-        return outcome("paused", "review-checkpoints", { controlRef: "review-checkpoints" });
-      if (reviewPatch.reviewAssessmentRequested)
-        return outcome("unresolved", "review-checkpoints", { dispositionRef: "assess-review" });
-      if (reviewPatch.status === "blocked" || reviewPatch.status === "cancelled" ||
-          reviewPatch.escalation || reviewPatch.operationRecovery || reviewPatch.recovery ||
-          reviewPatch.unknownRecovery)
-        return outcome("unresolved", "review-checkpoints", { dispositionRef: "review-checkpoints" });
-      if (reviewPatch.reviewSteeringHandoff)
-        return outcome("paused", "author-updates", { controlRef: "author-updates" });
-      const actual = reviewPatch.result === undefined ? candidate.result : reviewPatch.result;
-      if (!actual || !accepted.foundation.includes(actual.status) || !actual.headSha)
-        return outcome("unresolved", "review-checkpoints",
-          { dispositionRef: "review-checkpoints" });
-      try {
-        const head = await trustedHead(job);
-        if (actual.headSha !== head)
-          throw Error("Original Foundation result differs from independently reviewed Git HEAD.");
-        if (correction) {
-          const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
-          if (!await verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
-            throw Error("Foundation correction has no independently passing original-session successor.");
-          return outcome("verified", "recovery-checkpoints:" + head,
-            { headSha: head, reviewRef: "review-checkpoints:" + head });
-        }
-        const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
-        const reviews = await resolvedCheckpointReviews(job, points);
-        const reviewed = points.find(p => p.workItem === "foundation" &&
-          p.commitSha === head && p.parentSha === sourceHead &&
-          (s.request.fixture
-            ? p.validation.status === "passed"
-            : p.assurance?.turnDigest === s.request.turnPlanDigest &&
-              ["passed", "not-required"].includes(reviews.get(p.commitSha) ?? p.semanticReview)));
-        if (!reviewed) {
-          reviewPatch = await operationFailure(candidate, job, "independent-review",
-            "Foundation has no authenticated passing independent Review.",
-            { reference: "review-checkpoints", assignmentId: identity.assignmentId }, "returned-failure");
-          return outcome("unresolved", "review-checkpoints",
-            { dispositionRef: "review-checkpoints" });
-        }
-        return outcome("verified", "recovery-checkpoints:" + head,
-          { headSha: head, reviewRef: "review-checkpoints:" + head });
-      } catch (error) {
-        // The child must not relabel source/commit verification failures as a
-        // specialist-write error merely because verification is nested.
-        reviewPatch = await operationFailure(candidate, job, "commit-verification",
-          error, { reference: "generation-checkpoints", assignmentId: identity.assignmentId });
-        return outcome("unresolved", "recovery-checkpoints",
-          { dispositionRef: "generation-verification" });
-      }
+      return { outcome: await verifyCommitted(submission), submission };
     },
   });
   // LangGraph passes the parent's persistent SQLite checkpointer to the
@@ -985,11 +1033,11 @@ async function runFoundationAssignmentChild(
       ? { receiptRef: "foundation.json", status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction ? key : null,
     outcome: null, continuationRef: correction?.id ?? null,
-  }, assignmentChildConfig(config, identity, correction ? "correction" : "original"));
+  }, { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome)
     throw Error("Foundation child has a genuine pending author interrupt; return to parent control.");
   if (finished.outcome.assignmentKey !== key)
-    throw Error("Foundation child returned a foreign assignment.");
+    throw new ProtocolIntegrityBlockedError("Foundation child returned a foreign assignment.");
   // A completed child does not self-authorize a parent Work-plan change.
   // The existing independent-assignment and commit-verification parent nodes
   // will independently reauthenticate the review, Git and plan before advancing.
@@ -3563,8 +3611,14 @@ export function createGenerationGraph(
         throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
       // Every admitted Foundation assignment uses the shared child. A missing
       // production Turn proof is fenced by the common execution boundary.
-      if (s.active?.stage === "foundation" && !s.result)
-        return runFoundationAssignmentChild(s, config, reviewBoundary);
+      if (s.active?.stage === "foundation" && !s.result) {
+        try { return await runFoundationAssignmentChild(s, config, reviewBoundary); }
+        catch (error) {
+          if (!(error instanceof ProtocolIntegrityBlockedError)) throw error;
+          return operationFailure(s, await openJob(s), "specialist-dispatch", error,
+            { reference: "specialist-receipt", assignmentId: s.active.id });
+        }
+      }
       // A saved dispatch result means the external stage completed before a parent
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
       // including a commit published before its receipt; never invent a new writer.

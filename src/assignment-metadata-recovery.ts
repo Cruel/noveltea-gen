@@ -378,7 +378,15 @@ export async function inspectAssignmentFailure(options: {
   return { proof: { kind, sourceDigest, ordinal, receiptDigest: digest(terminal) }, defects: terminal.defects };
 }
 
-export async function recoverSubmittedAssignment(options: {
+export type AssignmentRoundCommand =
+  | { phase: "invoke" }
+  | { phase: "verify"; proof: AssignmentInvocationProof }
+  | { phase: "correct"; proof: AssignmentInvocationProof; grantDigest: string };
+export type AssignmentRoundResult =
+  | { status: "settled" | "accepted"; proof: AssignmentInvocationProof }
+  | { status: "correction"; proof: AssignmentInvocationProof; grantDigest: string };
+
+type AssignmentRecoveryOptions = {
   session: ResponseContractSession;
   directory: string;
   sourceDigest: string;
@@ -392,11 +400,33 @@ export async function recoverSubmittedAssignment(options: {
   verify: (manifest: Record<string, unknown>) => Promise<readonly AssignmentDefect[]>;
   beforeTurn: () => Promise<void>;
   prompt: (text: string) => Promise<void>;
-}): Promise<AssignmentInvocationProof> {
+};
+
+/** One child transition at a time. The immutable existing grant and settlement
+ * are the only authorities, including after loss of a physical child task. */
+export async function executeAssignmentRound(options: AssignmentRecoveryOptions,
+  command: AssignmentRoundCommand): Promise<AssignmentRoundResult> {
+  return runAssignmentReceipts(options, command);
+}
+
+/** Temporary adapter for not-yet-migrated specialist lanes. Foundation must
+ * never call this entry point. */
+export async function recoverSubmittedAssignment(options: AssignmentRecoveryOptions): Promise<AssignmentInvocationProof> {
+  const result = await runAssignmentReceipts(options);
+  if (result.status !== "accepted") throw Error("Whole assignment did not reach acceptance");
+  return result.proof;
+}
+
+async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
+  command?: AssignmentRoundCommand): Promise<AssignmentRoundResult> {
   const { session, directory, sourceDigest, sessionRoots } = options;
   const policy = responsePolicy(options.responseKind);
   const sessionFile = session.sessionManager.getSessionFile();
   if (!sessionFile || !hex.test(sourceDigest)) throw new ProtocolIntegrityBlockedError("Missing assignment invocation identity");
+  if (command && command.phase !== "invoke" &&
+      (command.proof.sourceDigest !== sourceDigest || !hex.test(command.proof.settlementDigest) ||
+       !Number.isSafeInteger(command.proof.ordinal) || command.proof.ordinal < 0))
+    throw new ProtocolIntegrityBlockedError("Foreign assignment round reference");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await options.authorize();
   const inspectTerminal = async () => inspectAssignmentFailure({ directory, sourceDigest,
@@ -427,6 +457,14 @@ export async function recoverSubmittedAssignment(options: {
     const started = await optionalJson(startedPath);
     let submitted = await optionalJson<Submission>(submissionPath);
     let settled = await optionalJson<Settlement>(settlementPath);
+    const next = await optionalJson<Grant>(join(directory, String(ordinal + 1)) + ".grant.json");
+    const requested = command?.phase === "verify" ? command.proof.ordinal :
+      command?.phase === "correct" ? command.proof.ordinal + 1 : null;
+    if (requested !== null && ordinal > requested)
+      throw new ProtocolIntegrityBlockedError("Assignment advanced beyond the requested round");
+    if (command && ((command.phase === "verify" || next || requested !== null && ordinal < requested) && !settled ||
+        requested !== null && ordinal <= requested && !grant))
+      throw new ProtocolIntegrityBlockedError("Requested round lost its settled effect or admitted grant");
     if (!grant && (started || submitted || settled || await optionalJson(protocolPath)))
       throw new ProtocolIntegrityBlockedError("Original assignment attempt lost its grant");
     if (grant) {
@@ -447,6 +485,9 @@ export async function recoverSubmittedAssignment(options: {
       await seal(grantPath, grant);
     }
     const grantDigest = digest(grant);
+    if (command?.phase === "correct" && ordinal === requested &&
+        (grant.previous !== command.proof.settlementDigest || grantDigest !== command.grantDigest))
+      throw new ProtocolIntegrityBlockedError("Corrective grant differs from its checkpointed admission");
     if (submitted && (!started || submitted.grant !== grantDigest ||
         submitted.start !== hash(await readFile(startedPath))))
       throw new ProtocolIntegrityBlockedError("Submitted draft differs from its original invocation grant");
@@ -458,6 +499,8 @@ export async function recoverSubmittedAssignment(options: {
     if (settled) await attestPrefix(sessionFile, settled);
     if (!submitted) {
       if (started) throw new ProtocolIntegrityBlockedError("Original writer started without a sealed effect; never replay");
+      if (command && (command.phase === "verify" || ordinal > 0 && command.phase !== "correct"))
+        throw new ProtocolIntegrityBlockedError("No child transition authorized this substantive writer invocation");
       if (!precedingProtocol && session.messages.some(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") &&
           (!options.initialTranscriptSha256 || (await transcriptPrefix(sessionFile)).transcriptSha256 !== options.initialTranscriptSha256))
         throw new ProtocolIntegrityBlockedError("Original writer transcript already contains an invocation; never replay");
@@ -543,8 +586,37 @@ export async function recoverSubmittedAssignment(options: {
     effectBefore = settled.effect;
     // Later attempts in this same conversation append to the earlier transcript.
     // Authenticate their predecessor receipt before inspecting the latest reply.
-    const next = await optionalJson<Grant>(join(directory, String(ordinal + 1)) + ".grant.json");
-    if (next) {
+    const proof = { sourceDigest, ordinal, settlementDigest: digest(settled) };
+    const attestCurrent = async () => {
+      const prefix = await transcriptPrefix(sessionFile);
+      if (prefix.transcriptBytes !== settled!.transcriptBytes ||
+          prefix.transcriptSha256 !== settled!.transcriptSha256)
+        throw new ProtocolIntegrityBlockedError("Settled original writer has an unreceipted transcript suffix");
+    };
+    // A newly entered physical child can reconcile settled rounds, but an
+    // unstarted successor still needs verify_original -> correct_original.
+    if (requested !== null && ordinal < requested && !next)
+      throw new ProtocolIntegrityBlockedError("Requested round lost its predecessor chain");
+    if (command?.phase === "invoke" && (!next ||
+        !await optionalJson(join(directory, String(ordinal + 1)) + ".started.json"))) {
+      await attestCurrent();
+      await inspectCompletedProtocolResponse({ receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots });
+      if (await options.effect() !== settled.effect)
+        throw new ProtocolIntegrityBlockedError("Settled original Story effect changed");
+      return { status: "settled", proof };
+    }
+    if (command?.phase === "correct" && ordinal === requested) {
+      if (next || await options.effect() !== settled.effect)
+        throw new ProtocolIntegrityBlockedError("Correction advanced beyond its admitted round");
+      await attestCurrent();
+      await inspectCompletedProtocolResponse({ receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots });
+      return { status: "settled", proof };
+    }
+    if (command?.phase === "verify" && ordinal === requested) {
+      if (proof.settlementDigest !== command.proof.settlementDigest ||
+          next && await optionalJson(join(directory, String(ordinal + 1)) + ".started.json"))
+        throw new ProtocolIntegrityBlockedError("Verification differs from its checkpointed settlement");
+    } else if (next) {
       await inspectCompletedProtocolResponse({
         receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots,
         sealedPrefix: settled,
@@ -559,11 +631,15 @@ export async function recoverSubmittedAssignment(options: {
     }
     if (await options.effect() !== settled.effect)
       throw new ProtocolIntegrityBlockedError("Settled original Story effect changed");
+    await attestCurrent();
     const manifest = await inspectCompletedProtocolResponse({
       receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots,
     });
     defects = await options.verify(manifest);
-    if (!defects.length) return { sourceDigest, ordinal, settlementDigest: digest(settled) };
+    if (!defects.length) {
+      if (next) throw new ProtocolIntegrityBlockedError("Accepted round has an unauthorized successor grant");
+      return { status: "accepted", proof };
+    }
     // A changed draft alone is not proof of progress: compare independently
     // observed defects. Distinct metadata/provenance findings are not one
     // structural counter. Two nonproductive rounds or actual oscillation
@@ -582,6 +658,16 @@ export async function recoverSubmittedAssignment(options: {
       await inspectTerminal();
       throw new AssignmentNonconvergenceError();
     }
+    if (command?.phase === "verify") {
+      const successor: Grant = { version: 1, ordinal: ordinal + 1, source: sourceDigest,
+        sessionId: session.sessionId, sessionFile, previous: proof.settlementDigest,
+        effectBefore: settled.effect, defects };
+      if (next && digest(next) !== digest(successor))
+        throw new ProtocolIntegrityBlockedError("Saved corrective grant no longer matches native/source diagnostics");
+      if (!next) await seal(join(directory, String(ordinal + 1)) + ".grant.json", successor);
+      return { status: "correction", proof, grantDigest: digest(successor) };
+    }
+    if (command) throw new ProtocolIntegrityBlockedError("Round must settle before verification");
     seen.add(finding);
     precedingProtocol = { base, grantDigest, settlement: settled };
   }

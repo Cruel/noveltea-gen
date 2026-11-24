@@ -162,16 +162,15 @@ nativeTest("public foundation CLI pauses before writer start and resumes after r
   assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
 });
 
-nativeTest("missing required model fails before starting any foundation writer", () => {
+nativeTest("R14A unadmitted standalone Pi Foundation fails before creating writer state", () => {
   const { story, baseline } = repository("model-unavailable");
   const job = start(story, "model-unavailable");
   const attempt = launch(["foundation", "--story", story, "--job", "first",
     "--task", "An uncertain mystery", "--provider", "not-a-provider",
     "--model", "unavailable-model"], "model-unavailable");
   assert.notEqual(attempt.status, 0);
-  assert.match(attempt.stderr, /Required Pi model\/capabilities unavailable/);
-  const state = JSON.parse(readFileSync(join(job.worktreeRoot, "../foundation.json"), "utf8"));
-  assert.equal(state.writerStarted, false);
+  assert.match(attempt.stderr, /requires the admitted Generation assignment child/);
+  assert.equal(existsSync(join(job.worktreeRoot, "../foundation.json")), false);
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), baseline);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 });

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentDefect, type AssignmentResponseKind } from "../src/assignment-metadata-recovery.js";
-import { ProtocolExhaustedError, type ResponseContractSession } from "../src/response-contract-recovery.js";
+import { nativeMetadataDefects, executeAssignmentRound, type AssignmentRoundCommand, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentDefect, type AssignmentResponseKind } from "../src/assignment-metadata-recovery.js";
+import { ProtocolExhaustedError, ProtocolIntegrityBlockedError, type ResponseContractSession } from "../src/response-contract-recovery.js";
 import type { ValidationResult } from "../src/validator.js";
 
 const path = "creative-direction/foundation.md";
@@ -63,7 +63,7 @@ async function harness(t: import("node:test").TestContext, replies: Reply[], res
     messages.push(message);
     await appendFile(file, JSON.stringify({ type: "message", message }) + "\n");
   };
-  const run = () => recoverSubmittedAssignment({
+  const options = () => ({
     session, directory: receiptDir, sessionRoots: [dir], sourceDigest, responseKind,
     initialPrompt: "Original authorized assignment",
     authorize: async () => { if (!permission) throw Error("Permission changed"); },
@@ -83,7 +83,7 @@ async function harness(t: import("node:test").TestContext, replies: Reply[], res
     beforeTurn: async () => {
       if (++admissions === pauseAt) throw Error("Injected safe budget pause");
     },
-    prompt: async prompt => {
+    prompt: async (prompt: string) => {
       calls.push({ prompt, tools: [...tools] });
       await add({ role: "user", content: prompt });
       const reply = replies.shift();
@@ -96,7 +96,9 @@ async function harness(t: import("node:test").TestContext, replies: Reply[], res
       await add({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: reply.text }] });
     },
   });
-  return { dir, file, receiptDir, run, calls,
+  const run = () => recoverSubmittedAssignment(options());
+  const round = (command: AssignmentRoundCommand) => executeAssignmentRound(options(), command);
+  return { dir, file, receiptDir, run, round, calls,
     pauseAt: (n: number) => { pauseAt = n; },
     changeEffect: (value: string) => { effect = value; },
     changeSource: () => { sourceDigest = "b".repeat(64); },
@@ -264,4 +266,56 @@ test("repeated unchanged metadata defects hand off to assessment, not a protocol
   assert.ok(h.calls.every(c => c.tools.includes("write")));
   await assert.rejects(h.run(), /did not make verified progress/);
   assert.equal(h.calls.length, 3);
+});
+
+test("R14A verifies, admits and settles exactly one substantive round per child transition", async t => {
+  const h = await harness(t, [
+    { text: "malformed", effect: "invalid metadata" }, { text: report },
+    { text: report, effect: "invalid provenance" }, { text: report, effect: "valid" },
+  ]);
+  const first = await h.round({ phase: "invoke" });
+  assert.equal(first.status, "settled");
+  assert.equal(h.calls.length, 2);
+  assert.deepEqual(h.calls[1]!.tools, []);
+  assert.equal(h.verifyCalls(), 0);
+  const admission = await h.round({ phase: "verify", proof: first.proof });
+  assert.equal(admission.status, "correction");
+  assert.equal(h.calls.length, 2);
+  assert.deepEqual(await h.round({ phase: "invoke" }), first);
+  assert.deepEqual(await h.round({ phase: "verify", proof: first.proof }), admission);
+  const second = await h.round({ phase: "correct", proof: first.proof, grantDigest: admission.grantDigest });
+  assert.equal(second.status, "settled");
+  assert.equal(second.proof.ordinal, 1);
+  assert.equal(h.calls.length, 3);
+  assert.deepEqual(await h.round({ phase: "correct", proof: first.proof, grantDigest: admission.grantDigest }), second);
+  const next = await h.round({ phase: "verify", proof: second.proof });
+  assert.equal(next.status, "correction");
+  const third = await h.round({ phase: "correct", proof: second.proof, grantDigest: next.grantDigest });
+  assert.equal(third.proof.ordinal, 2);
+  assert.equal(h.calls.length, 4);
+  assert.equal((await h.round({ phase: "verify", proof: third.proof })).status, "accepted");
+  assert.equal(h.calls.length, 4);
+});
+
+for (const damage of ["grant", "source", "transcript", "effect", "missing-settlement", "ambiguous-start"] as const)
+test("R14A child round refuses " + damage + " without another prompt", async t => {
+  const h = await harness(t, [{ text: report, effect: "invalid metadata" },
+    { text: report, effect: "invalid provenance", fail: damage === "ambiguous-start" }]);
+  const first = await h.round({ phase: "invoke" });
+  const admitted = await h.round({ phase: "verify", proof: first.proof });
+  assert.equal(admitted.status, "correction");
+  const correction = { phase: "correct" as const, proof: first.proof, grantDigest: admitted.grantDigest };
+  if (damage === "grant") {
+    const file = join(h.receiptDir, "1.grant.json");
+    await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, "utf8")), defects: [provenance] }));
+  } else if (damage === "source") h.changeSource();
+  else if (damage === "transcript") await appendFile(h.file, '{"type":"unreceipted"}\n');
+  else if (damage === "effect") h.changeEffect("changed externally");
+  else if (damage === "missing-settlement") await rm(join(h.receiptDir, "0.settled.json"));
+  else await assert.rejects(h.round(correction), /uncertain writer effect/);
+  const calls = h.calls.length;
+  await assert.rejects(h.round(correction), ProtocolIntegrityBlockedError);
+  if (damage !== "grant") await assert.rejects(h.round({ phase: "invoke" }), ProtocolIntegrityBlockedError);
+  else await assert.rejects(h.round({ phase: "verify", proof: first.proof }), ProtocolIntegrityBlockedError);
+  assert.equal(h.calls.length, calls);
 });

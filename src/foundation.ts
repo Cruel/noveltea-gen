@@ -1,3 +1,4 @@
+import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -21,7 +22,7 @@ import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { preparePiContext, preflightPiAssignment, guardPiBudget, recordPiSession, registerPendingPiSession, inspectPiPolicy } from "./job-pi-policy.js";
-import { ASSIGNMENT_REPORT, nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { ASSIGNMENT_REPORT, nativeMetadataDefects, executeAssignmentRound, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -64,6 +65,7 @@ interface FoundationState {
   writerStarted?: boolean;
   /** Current-format original writer invocation receipts. */
   invocationVersion?: 1;
+  assignmentKey?: string;
   invocationProof?: AssignmentInvocationProof;
   /** Exact authored bytes pinned before validation/commit, for safe commit recovery. */
   authoredSha256?: string;
@@ -92,6 +94,7 @@ export interface FoundationJobOptions {
   fixture?: boolean;
   inspect?: boolean;
   recoveryDigest?: string;
+  round?: { assignmentKey: string; command: AssignmentRoundCommand };
 }
 
 function gitRaw(job: JobStartResult, ...args: string[]): string {
@@ -193,7 +196,7 @@ async function fixtureAuthor(job: JobStartResult, state: FoundationState, target
 }
 
 async function piAuthor(job: JobStartResult, state: FoundationState, target: string, provider: string, modelId: string,
-  onSession: (id: string, path: string) => Promise<void>, validatorSource?: string) {
+  onSession: (id: string, path: string) => Promise<void>, round: AssignmentRoundCommand, validatorSource?: string) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: state.snapshot.path,
     skillDirs: [], requiredSkills: ["nt-story-discovery", "nt-catalog"] };
@@ -265,7 +268,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       throw Error("Foundation recovery opened a different Pi session.");
     await onSession(session.sessionId, sessionFile);
     const granted = await authorizedFoundationException(job);
-    const invocationProof = await recoverSubmittedAssignment({
+    const roundResult = await executeAssignmentRound({
       session, directory: foundationInvocationDirectory(job, session.sessionId),
       sourceDigest, sessionRoots: [sessionDir], authorize,
       effect: async () => existsSync(authoredFile) ? foundationDigest(job, target) : null,
@@ -342,7 +345,9 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
           return [{ kind: "provenance", path: target, code: "missing-author-provenance" }];
         return [];
       },
-    });
+    }, round);
+    if (roundResult.status !== "accepted") return { round: roundResult };
+    const invocationProof = roundResult.proof;
     const calls = session.messages.flatMap(message => message.role === "assistant"
       ? message.content.filter((item): item is Extract<typeof item, { type: "toolCall" }> => item.type === "toolCall")
       : []);
@@ -449,6 +454,7 @@ async function foundationSourceDigest(job: JobStartResult, state: FoundationStat
   return createHash("sha256").update(JSON.stringify({
     job: job.jobId, thread: job.threadId, base: job.baseSha, head: workHead(state),
     target, snapshot: state.snapshot.id, provider: state.provider, modelId: state.model, task: state.task,
+    ...(state.assignmentKey ? { assignmentKey: state.assignmentKey } : {}),
     selectedModel: resolved.selected.provider + "/" + resolved.selected.model, thinking: resolved.thinking,
     mode: state.mode, authorInput: state.authorInput, envelope: state.envelope,
     validator: job.validatorVersion, exception: await foundationExceptionContext(job),
@@ -640,6 +646,12 @@ export async function runFoundationJob(input: FoundationJobOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
+    if (input.round && state?.assignmentKey && input.round.assignmentKey !== state.assignmentKey)
+      throw new ProtocolIntegrityBlockedError("Foundation round belongs to a different logical assignment.");
+    if (!input.round && !input.fixture && !input.inspect && !input.recoveryDigest &&
+        state?.workerMode !== "fixture" && state?.stage !== "committed" && !state?.authoredSha256 && !state?.chatApprovalDigest &&
+        !await readChatApprovedFoundation(job))
+      throw new ProtocolIntegrityBlockedError("Foundation Pi writer requires the admitted Generation assignment child.");
     if (state?.stage === "writing" && state.writerStarted && !state.authoredSha256 &&
         !state.chatApprovalDigest) {
       // A completed, clean no-write specialist is not a partially authored
@@ -795,6 +807,14 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         (!state.invocationVersion || hasStartedFoundationInvocation(job, state) || state.authoredSha256)) {
       await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
     }
+    if (input.round && state.invocationProof &&
+        state.invocationProof.sourceDigest !== await foundationSourceDigest(job, state, target))
+      throw new ProtocolIntegrityBlockedError("Foundation committed invocation source differs from its current admission.");
+    if (input.round && input.round.command.phase !== "invoke" && state.invocationProof &&
+        JSON.stringify(input.round.command.proof) !== JSON.stringify(state.invocationProof))
+      throw new ProtocolIntegrityBlockedError("Foundation round reference differs from its final authored invocation.");
+    if (input.round && input.round.command.phase === "correct" && state.authoredSha256)
+      throw new ProtocolIntegrityBlockedError("A committed Foundation cannot admit another metadata correction.");
     if (state.stage === "committed") {
       if (recovered !== state.commitSha) throw new Error("Saved foundation commit differs from job HEAD.");
       await verifyFoundationInvocation(job, state);
@@ -802,7 +822,19 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       await finalizeRecoveryCheckpoint(job, WORK_ITEM, workHead(state), state.commitSha!);
       return output(job, state);
     }
-    state = await executeFoundationGraph(job, state, input, recovered);
+    if (state.workerMode === "pi" && !state.chatApprovalDigest && !state.authoredSha256 && !recovered) {
+      if (!input.round || !/^[a-f0-9]{64}$/.test(input.round.assignmentKey))
+        throw Error("Foundation Pi writer requires a checkpointed assignment round.");
+      if (!state.assignmentKey) {
+        if (state.writerStarted || input.round.command.phase !== "invoke")
+          throw new ProtocolIntegrityBlockedError("Obsolete Foundation writer lacks the original logical assignment identity.");
+        state.assignmentKey = input.round.assignmentKey;
+        await saveState(stateFile(job), state);
+      }
+    }
+    const step = await executeFoundationGraph(job, state, input, recovered);
+    state = step.foundation;
+    if (step.round) return { ...output(job, state), status: "writer-round", round: step.round };
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     return { ...output(job, state), authorUpdates };
   });
@@ -813,10 +845,11 @@ export async function runFoundationJob(input: FoundationJobOptions) {
  * provides crash reconciliation until broader checkpointing lands.
  */
 async function executeFoundationGraph(job: JobStartResult, initial: FoundationState,
-  input: FoundationJobOptions, recovered?: string): Promise<FoundationState> {
+  input: FoundationJobOptions, recovered?: string) {
   const Channels = Annotation.Root({
     foundation: Annotation<FoundationState>(),
     recovered: Annotation<string | undefined>(),
+    round: Annotation<AssignmentRoundResult | null>({ reducer: (_, next) => next, default: () => null }),
   });
   const graph = new StateGraph(Channels)
     .addNode("write_foundation", async ({ foundation, recovered }) => {
@@ -838,7 +871,8 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
             foundation.piSessionId = id;
             foundation.piSessionFile = path;
             await saveState(stateFile(job), foundation);
-          }, input.validatorSource ?? input.skillsSource);
+          }, input.round!.command, input.validatorSource ?? input.skillsSource);
+        if ("round" in authored && authored.round) return { round: authored.round };
         const next = { ...foundation, ...authored, authoredSha256: await foundationDigest(job, target) };
         await saveState(stateFile(job), next);
         return { foundation: next };
@@ -909,7 +943,8 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
             foundation.piSessionId = id;
             foundation.piSessionFile = path;
             await saveState(stateFile(job), foundation);
-          }, input.validatorSource ?? input.skillsSource);
+          }, input.round!.command, input.validatorSource ?? input.skillsSource);
+      if ("round" in authored && authored.round) return { round: authored.round };
       const next = { ...foundation, ...authored, authoredSha256: await foundationDigest(job, target) };
       await saveState(stateFile(job), next);
       assertHead(job, workHead(foundation));
@@ -952,11 +987,12 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       return { foundation: next };
     })
     .addEdge(START, "write_foundation")
-    .addEdge("write_foundation", "validate_and_commit_foundation")
+    .addConditionalEdges("write_foundation", state => state.round ? END : "validate_and_commit_foundation",
+      [END, "validate_and_commit_foundation"])
     .addEdge("validate_and_commit_foundation", END)
     .compile();
   const result = await graph.invoke({ foundation: initial, recovered });
-  return result.foundation;
+  return result;
 }
 
 function assertOnlyTargetForCommit(job: JobStartResult, target: string, recovered?: string) {
