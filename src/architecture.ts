@@ -960,6 +960,18 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
             await persist(file, receipt);
             throw error;
           }
+          // A completed child effect may have published its immutable boundary
+          // before SQLite acknowledged the transition. Authenticate that
+          // boundary, not the exception text, before permitting reconciliation.
+          const settled = await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
+            receipt.provider, receipt.model, receipt.blueprintTask, head).catch(() => null);
+          const boundary = settled ? null : await inspectPausedBlueprint(job, receipt.plan!, receipt.snapshot!,
+            receipt.provider, receipt.model, receipt.blueprintTask, head).catch(() => null);
+          if (settled || boundary && boundary.boundary !== "diagnostic" && boundary.boundary !== "replacement") {
+            delete receipt.blueprintFailure;
+            await persist(file, receipt);
+            throw error;
+          }
           const reason = error instanceof Error ? error.message : String(error);
           receipt.blueprintFailure = {
             kind: classifyBlueprintFailure(reason),

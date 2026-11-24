@@ -282,9 +282,10 @@ const plannerAdmissionPausePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-pause-planner-admission.json");
 const initialReviewStartedPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-initial-review-started.json");
-async function obligationSources(job: JobStartResult, plan: Plan, task: string, head: string): Promise<ObligationSources> {
+async function obligationSources(job: JobStartResult, plan: Plan, task: string, historicalHead?: string): Promise<ObligationSources> {
+  if (!historicalHead) return { foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"), contract: plan.contract, task };
   const path = relative(job.worktreeRoot, join(job.worktreeStoryRoot, "creative-direction/foundation.md")).split(sep).join("/");
-  return { foundation: execFileSync("git", ["show", head + ":" + path], { cwd: job.worktreeRoot, encoding: "utf8" }),
+  return { foundation: execFileSync("git", ["show", historicalHead + ":" + path], { cwd: job.worktreeRoot, encoding: "utf8" }),
     contract: plan.contract, task };
 }
 export function parseInitialBlueprint(text: string, sources: ObligationSources) {
@@ -564,7 +565,7 @@ async function readReplacement(job: JobStartResult, plan: Plan, version: number,
 }
 async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
   provider: string, model: string, task: string, head: string,
-  pausedPin?: BlueprintPin, pendingDiagnostic = false): Promise<{
+  pausedPin?: BlueprintPin, pendingDiagnostic = false, historicalSource = false): Promise<{
     blueprint: CausalBlueprint; pin: BlueprintPin; rounds: ReviewRound[]; stalled: number;
   } | null> {
   const path = approvedPath(job, plan.version);
@@ -595,7 +596,7 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
       (start as Record<string, unknown>).plannerSessionId !== record.plannerSessionId ||
       (start as Record<string, unknown>).plannerSessionFile !== record.plannerSessionFile)
     throw Error("Causal blueprint source-bound planner start receipt is stale or absent.");
-  const sources = await obligationSources(job, plan, task, head);
+  const sources = await obligationSources(job, plan, task, historicalSource ? head : undefined);
   const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const { initial } = await verifyStageChain(job, plan, record.stagesDigest);
   if (initial.schema === "noveltea-causal-blueprint/v2")
@@ -720,8 +721,8 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
 }
 
 export async function readApprovedBlueprint(job: JobStartResult, plan: Plan, snapshot: SkillSnapshot,
-  provider: string, model: string, task: string, head: string): Promise<{ blueprint: CausalBlueprint; pin: BlueprintPin } | null> {
-  const verified = await readRecordedBlueprint(job, plan, snapshot, provider, model, task, head);
+  provider: string, model: string, task: string, head: string, historicalSource = false): Promise<{ blueprint: CausalBlueprint; pin: BlueprintPin } | null> {
+  const verified = await readRecordedBlueprint(job, plan, snapshot, provider, model, task, head, undefined, false, historicalSource);
   return verified ? { blueprint: verified.blueprint, pin: verified.pin } : null;
 }
 
@@ -821,7 +822,7 @@ async function readInitialReviewPause(job: JobStartResult, plan: Plan, snapshot:
         !outline || (stages as { schema?: string }).schema !== "noveltea-blueprint-stages/v3") ||
       sha(initial) !== marker.draftDigest)
     throw Error("Initial Blueprint draft or stage chain differs from paused receipt.");
-  const sources = await obligationSources(job, plan, task, head);
+  const sources = await obligationSources(job, plan, task);
   const rawManifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const manifest = initial.schema === "noveltea-causal-blueprint/v2" ?
     validateCompactBlueprintSources(rawManifest, sources) :
@@ -914,7 +915,7 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
       (diagnosisBoundary && !existsSync(verdictPath(job, plan.version, version))))
     throw Error("Causal blueprint budget pause does not end at a sealed negative verdict.");
   if (diagnosisBoundary) {
-    const sources = await obligationSources(job, plan, task, head);
+    const sources = await obligationSources(job, plan, task);
     const cycleId = verified.pin.reviewCycleId!;
     const original = await safeRead(reviewSessionPath(job, plan.version, version), root(job)) as
       { sessionId: string };
@@ -1695,7 +1696,7 @@ async function advanceStoryBlueprint(input: StoryBlueprintInput, expected: Story
   if (!isDeepStrictEqual(current.step, expected))
     throw Error("Story Blueprint effect does not match its authenticated boundary.");
   const { paused, initial: initialPause } = current;
-  const sources = await obligationSources(job, plan, task, head);
+  const sources = await obligationSources(job, plan, task);
   const version = expected.version;
   const cycleId = reviewCycleId(sameLineage(job, plan, snapshot, provider, model, task, head));
   if (expected.boundary === "initial" && !existsSync(admittedPath(job, plan.version)))

@@ -1162,9 +1162,9 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
           assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
           const pin = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture-blueprints", "plan-1-approved.json"), "utf8"));
           assert.ok(pin.reviewerSessionId);
-          assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY STORY BLUEPRINT DIAGNOSIS")).length <= 1, true);
+          assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW.") && c.lastRole === "toolResult").length, 1);
         } else if (!stalled) {
-          const cuts = ["initial", "admitted", "corrected", "accepted", "committed"] as const;
+          const cuts = ["blueprint-draft", "blueprint-negative", "blueprint-pin", "initial", "admitted", "corrected", "accepted", "committed"] as const;
           let writer: string | undefined;
           for (const cut of cuts) {
             const abort = new AbortController();
@@ -1181,7 +1181,14 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
               const child = cfg.configurable?.checkpoint_ns?.includes("assignment-");
               const entry = (key: string) => writes.find(([channel]) => channel === key)?.[1] as any;
               const submission = entry("submission"), correction = entry("correction"), receipt = entry("receipt");
-              if (cut === "initial" && child && submission?.status === "writer-round" && submission.receiptRef.split(":")[1] === "0" ||
+              const approvalFile = join(parentJob.stateDir, "architecture-blueprints", "plan-1-approved.json");
+              const blueprintPin = cut === "blueprint-pin" && existsSync(approvalFile)
+                ? JSON.parse(readFileSync(approvalFile, "utf8")) : null;
+              if (cut === "blueprint-draft" && child && submission?.status === "story-blueprint-review" && submission.receiptRef.startsWith("0:") ||
+                  cut === "blueprint-negative" && child && correction?.rejectedReceiptRef.startsWith("0:review:") ||
+                  cut === "blueprint-pin" && child && blueprintPin && entry("outcome")?.status === "verified" &&
+                    entry("outcome").evidenceRef === createHash("sha256").update(JSON.stringify(blueprintPin)).digest("hex") ||
+                  cut === "initial" && child && submission?.status === "writer-round" && submission.receiptRef.split(":")[1] === "0" ||
                   cut === "admitted" && child && correction?.rejectedReceiptRef.split(":")[1] === "0" ||
                   cut === "corrected" && child && submission?.status === "writer-round" && submission.receiptRef.split(":")[1] === "1" ||
                   cut === "accepted" && cfg.configurable?.thread_id?.includes(":architecture:") && receipt?.phase === "authored" ||
@@ -1190,20 +1197,37 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
               }
               return originalWrites.call(this, cfg, writes, taskId);
             };
-            try { await assert.rejects(invoke({signal: abort.signal})); }
-            finally { SqliteSaver.prototype.put = originalPut; SqliteSaver.prototype.putWrites = originalWrites; }
+            try {
+              await assert.rejects(invoke({signal: abort.signal}), "Expected checkpoint loss at " + cut);
+              // Aborting the parent can reject before the specialist's async
+              // lease cleanup finishes. Wait for release, never remove its lock.
+              const deadline = Date.now() + 5000;
+              while (existsSync(join(parentJob.stateDir, ".story-job-running")) && Date.now() < deadline)
+                await new Promise(resolve => setTimeout(resolve, 10));
+              assert.equal(existsSync(join(parentJob.stateDir, ".story-job-running")), false);
+            } finally { SqliteSaver.prototype.put = originalPut; SqliteSaver.prototype.putWrites = originalWrites; }
             started = true;
             assert.ok(crashed, "Must lose the actual checkpoint at " + cut);
             const receipt = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture.json"), "utf8"));
-            if (writer) assert.equal(receipt.piSessionId, writer);
-            writer = receipt.piSessionId;
-            assert.ok(writer);
+            if (cut.startsWith("blueprint-")) {
+              const blueprintDir = join(parentJob.stateDir, "architecture-blueprints");
+              assert.ok(existsSync(join(blueprintDir, "plan-1-draft-0.json")));
+              if (cut !== "blueprint-draft") assert.equal(JSON.parse(readFileSync(join(blueprintDir, "plan-1-verdict-0.json"), "utf8")).status, "revise");
+              if (cut === "blueprint-pin") assert.ok(existsSync(join(blueprintDir, "plan-1-approved.json")));
+              assert.equal(receipt.piSessionId, undefined, "No canonical writer before private Blueprint approval");
+            } else {
+              if (writer) assert.equal(receipt.piSessionId, writer);
+              writer = receipt.piSessionId;
+              assert.ok(writer);
+            }
             if (cut !== "committed") assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
             else assert.notEqual(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
             saver.db.close();
             saver = SqliteSaver.fromConnString(file);
             graph = createGenerationGraph(saver, "server");
           }
+          assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW") &&
+            c.lastRole === "toolResult").length, 4, "Lost Blueprint checkpoints must not replay independent reviews");
           const beforeResume = calls.length;
           const finished = await invoke({interruptAfter: ["verify_committed_work"]});
           assert.equal(calls.length, beforeResume, "Committed original child resumes without another model call");

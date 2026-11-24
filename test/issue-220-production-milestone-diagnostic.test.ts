@@ -88,6 +88,7 @@ function scripted(
   diagnosticAction: "escalate" | "replace" | "continue" = "escalate",
   twoDistinctCases = false,
   downstreamCorrection = false,
+  productive = false,
 ): Provider {
   let reviewerRound = 0;
   let writerRound = 0;
@@ -104,6 +105,34 @@ function scripted(
     correction: "Remove the false Interactive owner and retain required Composition work",
     evidence: { target: "downstream", index: 0, field: "obligation", quote: falseOwner, repair: "replace" },
   };
+  const materialChanges = [
+    { field: "knowledge", before: knowledge, after: correctedKnowledge },
+    { field: "purpose", before: "Infer the clerk's location from an undated mark.", after: "Compare the register and its dated entry." },
+    { field: "evidence", before: JSON.stringify([{ ...draft.events[0]!.evidence[0]!, establishes: "Yesterday's visit is proved by a mark without a date." }]),
+      after: JSON.stringify(draft.events[0]!.evidence) },
+  ] as const;
+  const productiveDraft = (round: number) => {
+    const event = { ...draft.events[0]! };
+    for (const [index, change] of materialChanges.entries()) {
+      const value = index < round ? change.after : change.before;
+      if (change.field === "evidence") event.evidence = JSON.parse(value);
+      else event[change.field] = value;
+    }
+    return { ...draft, events: [event] };
+  };
+  const productiveReview = (round: number) => ({
+    schema: "noveltea-milestone-blueprint-review/v5",
+    status: round === 3 ? "pass" : "revise",
+    findings: round === 3 ? [] : [{ ...finding,
+      requirement: "Only source-grounded " + materialChanges[round]!.field,
+      reason: "An unsupported claim remains in " + materialChanges[round]!.field,
+      correction: "Replace the unsupported claim with observable register evidence.",
+      evidence: { field: materialChanges[round]!.field, quote: materialChanges[round]!.before, repair: "replace" } }],
+    prior: materialChanges.slice(0, round).map((change, index) => ({
+      round: index, findingIndex: 0, status: "resolved", reason: "The specific unsupported source claim was replaced.",
+      evidence: { kind: "revised", eventId: "arrival", field: change.field, before: change.before, after: change.after },
+    })),
+  });
   const reads = ["skill://nt-event-design/SKILL.md", "skill://nt-catalog/SKILL.md", milestonePath];
   const stream = (_model: Model, ctx: TranscriptContext, _opts?: SimpleStreamOptions) => {
     const result = createAssistantMessageEventStream();
@@ -147,7 +176,9 @@ function scripted(
         },
       ];
     } else if (isReview) {
-      if (downstreamCorrection) {
+      if (productive) {
+        content = [{ type: "text", text: JSON.stringify(productiveReview(reviewerRound++)) }];
+      } else if (downstreamCorrection) {
         content = [
           {
             type: "text",
@@ -210,7 +241,9 @@ function scripted(
         reviewerRound++;
       }
     } else {
-      if (downstreamCorrection) {
+      if (productive) {
+        content = [{ type: "text", text: JSON.stringify(productiveDraft(writerRound++)) }];
+      } else if (downstreamCorrection) {
         content = [{ type: "text", text: JSON.stringify(writerRound++ === 0 ? falseDownstream : draft) }];
       } else {
         const corrected = diagnosticAction === "continue" && writerRound >= (twoDistinctCases ? 5 : 3);
@@ -315,6 +348,7 @@ test("#220: three stalled Milestone reviews actually dispatch a fresh independen
   let server: ReturnType<typeof createControllerServer> | undefined;
   let jobId: string | undefined;
   let replacementJobId: string | undefined;
+  let productiveJobId: string | undefined;
   let continuationJobId: string | undefined;
   let secondCaseJobId: string | undefined;
   let downstreamJobId: string | undefined;
@@ -526,11 +560,66 @@ The guard finds a dated register, but no evidence of a prior visit.
       version: 1, profile: { provider: model.provider, model: model.id },
       limits: { modelCalls: 24 },
     });
-    const replace = () => withJobModelRuntime(replacementRuntime, () =>
+    // Lose the actual child checkpoint at the independently diagnosed reviewer
+    // transition and at its verified pin, not just a simulated adapter return.
+    const replacementPath = join(replacementJob.stateDir, "replacement-assignment.sqlite");
+    let replacementSaver = SqliteSaver.fromConnString(replacementPath);
+    const replacementChannels = Annotation.Root({
+      result: Annotation<Awaited<ReturnType<typeof ensureMilestoneBlueprint>> | null>(),
+    });
+    const replacementGraph = () => new StateGraph(replacementChannels)
+      .addNode("event_admission", async () => ({
+        result: await ensureMilestoneBlueprint(replacementJob, plan, assignment, snapshot,
+          model.provider, model.id, task, head, false),
+      }))
+      .addEdge(START, "event_admission")
+      .addEdge("event_admission", END)
+      .compile({ checkpointer: replacementSaver });
+    let replacementParent = replacementGraph();
+    let replacementStarted = false;
+    const replace = (signal?: AbortSignal) => withJobModelRuntime(replacementRuntime, () =>
       withStoryJobLock(replacementJob, "event-sample", () =>
-        ensureMilestoneBlueprint(replacementJob, plan, assignment, snapshot,
-          model.provider, model.id, task, head, false)));
-    const result = await replace();
+        replacementParent.invoke(replacementStarted ? null : {result: null}, {
+          configurable: {thread_id: replacementJob.threadId + ":blueprint-replacement"},
+          recursionLimit: 10000, durability: "sync", signal,
+        })));
+    for (const boundary of ["replacement", "pin"] as const) {
+      const abort = new AbortController();
+      const originalPut = replacementSaver.put.bind(replacementSaver);
+      const originalWrites = replacementSaver.putWrites.bind(replacementSaver);
+      const failure = Error("Injected replacement checkpoint loss: " + boundary);
+      let lost = false;
+      replacementSaver.put = async (...args) => {
+        if (lost) throw failure;
+        return originalPut(...args);
+      };
+      replacementSaver.putWrites = async (cfg, writes, taskId) => {
+        if (lost) throw failure;
+        const child = cfg.configurable?.checkpoint_ns?.includes("assignment-");
+        const submission = writes.find(([key]) => key === "submission")?.[1] as
+          {status?: string; receiptRef?: string} | undefined;
+        const outcome = writes.find(([key]) => key === "outcome")?.[1] as {status?: string} | undefined;
+        if (child && (boundary === "replacement"
+          ? submission?.status === "milestone-blueprint-draft" && submission.receiptRef?.startsWith("3:")
+          : outcome?.status === "verified")) {
+          lost = true; abort.abort(failure); throw failure;
+        }
+        return originalWrites(cfg, writes, taskId);
+      };
+      await assert.rejects(replace(abort.signal), (error: unknown) => { if (!lost) throw error; return true; });
+      assert.ok(lost, "Must lose actual " + boundary + " checkpoint");
+      replacementStarted = true;
+      assert.equal(replacementCalls.filter(call =>
+        call.prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC") &&
+        call.lastRole === "toolResult").length, 1);
+      replacementSaver.db.close();
+      replacementSaver = SqliteSaver.fromConnString(replacementPath);
+      replacementParent = replacementGraph();
+    }
+    const replacementCompleted = await replace();
+    replacementSaver.db.close();
+    const result = replacementCompleted.result!;
+    assert.ok(result);
     assert.equal(result.blueprint.milestoneId, milestoneId);
     assert.equal((await readReviewedMilestoneBlueprint(replacementJob,
       result.pin, assignment)).milestoneId, milestoneId);
@@ -560,6 +649,30 @@ The guard finds a dated register, but no evidence of a prior visit.
       call.lastRole === "toolResult").length, 1);
     assert.equal(execFileSync("git", ["status", "--porcelain"],
       { cwd: replacementJob.worktreeRoot, encoding: "utf8" }).trim(), "");
+
+    // Three real material corrections in the original read-only sessions.
+    productiveJobId = randomUUID();
+    const productiveDb = new DatabaseSync(join(app, "studio.sqlite"));
+    try { productiveDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+      .run(productiveJobId, owner, "story", head, null); } finally { productiveDb.close(); }
+    const productiveJob = await startStoryJob({ story, job: productiveJobId, worktreeCacheRoot: scoped });
+    const productiveCalls: Call[] = [];
+    const productiveRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    productiveRuntime.registerNativeProvider(scripted(productiveCalls, "escalate", false, false, true));
+    await productiveRuntime.refresh({ allowNetwork: false });
+    await configurePiPolicy(productiveJob, { version: 1, profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: 24 } });
+    const material = await withJobModelRuntime(productiveRuntime, () =>
+      withStoryJobLock(productiveJob, "event-sample", () => ensureMilestoneBlueprint(productiveJob,
+        plan, assignment, snapshot, model.provider, model.id, task, head, false)));
+    const materialReceipt = JSON.parse(readFileSync(join(productiveJob.stateDir, "milestone-blueprints", "sample.json"), "utf8"));
+    assert.deepEqual(materialReceipt.rounds.map((r: any) => r.review.status), ["revise", "revise", "revise", "pass"]);
+    assert.equal(new Set(materialReceipt.rounds.map((r: any) => r.draftDigest)).size, 4);
+    assert.equal(materialReceipt.reviewerHistory?.length ?? 0, 0);
+    assert.equal(materialReceipt.diagnostics?.length ?? 0, 0);
+    assert.deepEqual(await readReviewedMilestoneBlueprint(productiveJob, material.pin, assignment), material.blueprint);
+    assert.equal(productiveCalls.filter(c => c.prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") && c.lastRole === "toolResult").length, 4);
+    assert.equal(productiveCalls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") && c.lastRole === "toolResult").length, 4);
 
     // A CONTINUE diagnosis must retain the exact original reviewer and writer
     // identities. One real field-specific correction then receives a v4 PASS
@@ -816,6 +929,7 @@ The guard finds a dated register, but no evidence of a prior visit.
     if (controller && downstreamJobId) await controller.dispose(downstreamJobId);
     if (controller && secondCaseJobId) await controller.dispose(secondCaseJobId);
     if (controller && continuationJobId) await controller.dispose(continuationJobId);
+    if (controller && productiveJobId) await controller.dispose(productiveJobId);
     if (controller && replacementJobId) await controller.dispose(replacementJobId);
     if (controller && jobId) await controller.dispose(jobId);
     if (server) await new Promise<void>(done => server!.close(() => done()));

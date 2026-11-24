@@ -101,7 +101,7 @@ export async function verifyBlueprintAssessmentResolution(job: JobStartResult, r
   if (!assignment) {
     if (correction.ref !== "architecture-blueprints/plan-" + plan.version + "-approved.json") return false;
     const { readApprovedBlueprint } = await import("./architecture-blueprint.js");
-    const approved = await readApprovedBlueprint(job, plan, snapshot, provider, model, task, sourceHead);
+    const approved = await readApprovedBlueprint(job, plan, snapshot, provider, model, task, sourceHead, true);
     return !!approved && hash(approved.pin) === correction.digest;
   }
   const { readAssessmentMilestoneApproval } = await import("./milestone-blueprint.js");
