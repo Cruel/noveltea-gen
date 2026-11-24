@@ -620,7 +620,9 @@ The scripted production World regression covers a real interrupt, restart
 before and after answer, and lost checkpoint after the resumed writer settles,
 including original session and independent Review. The public CLI answer-file
 variant resumes into the next Character question and checks terminal
-cancellation. The Studio variant uses a registered owner and Story Chat,
+cancellation and a cumulative-budget pause after answer submission. The original
+interrupt remains pending while the accepted answer is resource-blocked. The
+Studio variant uses a registered owner and Story Chat,
 reloads the draft from reopened persistence, submits through the authenticated
 HTTP boundary, and executes the queued production worker to the next Character
 question. Event and Focused direct transport regressions are not established

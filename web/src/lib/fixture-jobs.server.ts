@@ -26,7 +26,7 @@ import type { RecoveryLifecycle } from '../../../src/generation-recovery-contrac
 import { forkSourceSummary, verifyReadyRecoveryFork } from '../../../src/recovery-fork-state'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-credentials.server'
-import type { PiPolicy } from '../../../src/job-pi-policy'
+import { inspectPiPolicy, type PiPolicy } from '../../../src/job-pi-policy'
 import { readJobControl } from '../../../src/job-control'
 import { inspectFoundationConflict } from '../../../src/foundation-conflict'
 import { queueGeneration, queueRecord } from './generation-queue.server'
@@ -305,6 +305,8 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
       workItem: string | null; files: string[]; candidateDigest: string | null;
       guidance: string } | null = null
     const waitingForChoice = pendingQuestion?.phase === 'interrupt'
+    const acceptedChoice = waitingForChoice && pendingQuestion.choice.phase === 'answered'
+    const answerBudgetPause = acceptedChoice ? (await inspectPiPolicy(job)).budget.pause : null
     if (['blocked', 'paused'].includes(row.status) && !revisionVerified && !waitingForChoice) {
       if (state.active?.stage === 'foundations' && existsSync(join(job.stateDir, 'character-world.json'))) {
         // The specialist owns the reconciliation contract. Inspect only; its
@@ -365,7 +367,9 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
         recommendation: inspectedUnknownRecovery.recommendation ?? null,
       } : null,
       reason: interrupted ? 'The graph did not finish before the server stopped; manual reconciliation is required.'
-        : waitingForChoice ? 'The specialist is waiting for your answer in Chat or Author questions and approvals. After saving the answer, use Resume.'
+        : answerBudgetPause ? 'Pi budget exhausted at safe boundary: ' + answerBudgetPause.reason + '. Increase the job budget and resume.'
+        : acceptedChoice ? 'Your answer is saved. Resume the original specialist when ready.'
+        : waitingForChoice ? 'The specialist is waiting for your answer in Chat or Author questions and approvals.'
         : authorReady ? 'Foundation exception approved; use Resume to request its first verified retry.'
         : handoff && handoff.status === 'rejected'
           ? 'Author rejected the requested Foundation exception. The protected decision remains binding.'
