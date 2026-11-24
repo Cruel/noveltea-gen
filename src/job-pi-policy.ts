@@ -12,6 +12,7 @@ import { createStoryContextTool, StoryContextReader, type StoryContextRequest } 
 import { readSandboxContextFile, sandboxToolsRequired } from "./sandbox-pi-tools.js";
 import { parseJobLimits, type JobLimits } from "./job-limits.js";
 import { observedActiveSeconds } from "./job-active-time.js";
+import { readDiscoveryHandoff } from "./discovery-generation-handoff.js";
 
 /** Private, job-local Pi optimization state. The Git Story remains authoritative. */
 export interface PiPolicy {
@@ -93,10 +94,16 @@ function checkPolicy(policy: PiPolicy): void {
         !policy.profile.optionalFallback.model))) throw new Error("Invalid Pi job profile or budget.");
   parseJobLimits(policy.limits);
 }
+async function initialPolicy(job: JobStartResult): Promise<PiPolicy> {
+  const handoff = await readDiscoveryHandoff(job);
+  return handoff ? { version: 1, profile: { provider: handoff.model.provider,
+    model: handoff.model.id, thinking: handoff.model.thinking }, limits: handoff.limits } : defaultPolicy();
+}
 export async function inspectPiPolicy(job: JobStartResult) {
+  const initial = await initialPolicy(job);
   const resolved = await json<Resolution>(resolutionPath(job));
   const policy = (await json<PiPolicy>(policyPath(job))) ?? {
-    ...defaultPolicy(), profile: { ...(resolved?.requested ?? defaultProfile),
+    ...initial, profile: { ...initial.profile, ...(resolved?.requested ?? {}),
       ...(resolved?.thinking ? { thinking: resolved.thinking } : {}) },
   };
   checkPolicy(policy);
@@ -106,6 +113,16 @@ export async function inspectPiPolicy(job: JobStartResult) {
 /** Configuration is explicit, before first resolution. Increasing budgets does not reset usage. */
 export async function configurePiPolicy(job: JobStartResult, next: PiPolicy): Promise<void> {
   checkPolicy(next);
+  const handoff = await readDiscoveryHandoff(job);
+  if (handoff && (next.profile.provider !== handoff.model.provider ||
+      next.profile.model !== handoff.model.id || next.profile.thinking !== handoff.model.thinking ||
+      next.profile.optionalFallback)) throw Error("Discovery pinned the original Turn model.");
+  if (handoff) {
+    const previous = (await json<PiPolicy>(policyPath(job)))?.limits ?? handoff.limits;
+    if (Object.entries(previous).some(([key, value]) =>
+        next.limits[key as keyof JobLimits] === undefined || next.limits[key as keyof JobLimits]! < value))
+      throw Error("The cumulative Turn budget cannot decrease or reset.");
+  }
   const old = await json<Resolution>(resolutionPath(job));
   if (old && (old.requested.provider !== next.profile.provider ||
       old.requested.model !== next.profile.model ||
@@ -130,7 +147,8 @@ export async function resolvePiModel(job: JobStartResult, runtime: ModelRuntime,
   requestedProvider: string, requestedModel: string, thinking?: "low" | "medium" | "high"):
   Promise<{ model: NonNullable<ReturnType<ModelRuntime["getModel"]>>; resolution: Resolution }> {
   const configured = await json<PiPolicy>(policyPath(job));
-  const policy = configured ?? { ...defaultPolicy(), profile: { provider: requestedProvider, model: requestedModel } };
+  const handoff = await readDiscoveryHandoff(job);
+  const policy = configured ?? (handoff ? await initialPolicy(job) : { ...defaultPolicy(), profile: { provider: requestedProvider, model: requestedModel } });
   checkPolicy(policy);
   // Work-item CLIs still supply the historical default when no override was
   // provided. In that case the configured job profile is authoritative.
@@ -236,8 +254,9 @@ async function loadedStoryPaths(file: string, root: string): Promise<string[]> {
   }
   return [...new Set(reads)].sort();
 }
-async function usageFromSession(file: string, seen: Set<string>, summary: PiBudgetUsage) {
-  const content = await readFile(file, "utf8");
+/** Shared transcript meter. A Discovery receipt can provide a verified prefix
+ * rather than allowing later appends to alter the sealed phase's usage. */
+export function accumulatePiUsage(content: string, file: string, seen: Set<string>, summary: PiBudgetUsage) {
   let index = 0;
   for (const line of content.split("\n").filter(Boolean)) {
     let entry: any;
@@ -264,10 +283,15 @@ async function usageFromSession(file: string, seen: Set<string>, summary: PiBudg
     else summary.unknownTokenCalls++;
   }
 }
+export function emptyPiUsage(): PiBudgetUsage {
+  return { steps: 0, modelCalls: 0, costUsd: 0, unpricedCalls: 0,
+    activeSeconds: 0, tokens: emptyTokens(), unknownTokenCalls: 0 };
+}
 async function sessionUsage(job: JobStartResult, state: BudgetState): Promise<PiBudgetUsage> {
-  const summary: PiBudgetUsage = { steps: state.steps.length,
-    modelCalls: 0, costUsd: 0, unpricedCalls: 0, activeSeconds: 0, tokens: emptyTokens(),
-    unknownTokenCalls: 0, ...(state.pause ? { pause: state.pause } : {}) };
+  const inherited = await readDiscoveryHandoff(job);
+  const summary: PiBudgetUsage = inherited ? structuredClone(inherited.usage) : emptyPiUsage();
+  summary.steps += state.steps.length;
+  if (state.pause) summary.pause = state.pause;
   const seen = new Set<string>();
   for (const file of new Set([...state.sessions, ...(state.pendingSessions ?? [])])) {
     if (!file.startsWith(stateDir(job) + sep) || !file.endsWith(".jsonl"))
@@ -277,14 +301,15 @@ async function sessionUsage(job: JobStartResult, state: BudgetState): Promise<Pi
       throw new Error("Missing registered Pi budget transcript.");
     }
     if (await realpath(file) !== file) throw new Error("Unsafe Pi budget session path.");
-    await usageFromSession(file, seen, summary);
+    accumulatePiUsage(await readFile(file, "utf8"), file, seen, summary);
   }
   return summary;
 }
 async function budgetUsage(job: JobStartResult): Promise<PiBudgetUsage> {
   const state = (await json<BudgetState>(budgetPath(job))) ??
     { version: 1 as const, steps: [], sessions: [] };
-  return { ...await sessionUsage(job, state), activeSeconds: await observedActiveSeconds(job) };
+  const usage = await sessionUsage(job, state);
+  return { ...usage, activeSeconds: usage.activeSeconds + await observedActiveSeconds(job) };
 }
 export class PiBudgetPause extends Error {
   constructor(readonly reason: string, readonly usage: Awaited<ReturnType<typeof budgetUsage>>) {
@@ -293,7 +318,7 @@ export class PiBudgetPause extends Error {
   }
 }
 export async function guardPiBudget(job: JobStartResult, step: string, sessionFile?: string): Promise<void> {
-  const policy = (await json<PiPolicy>(policyPath(job))) ?? defaultPolicy();
+  const policy = (await json<PiPolicy>(policyPath(job))) ?? await initialPolicy(job);
   checkPolicy(policy);
   const state: BudgetState = (await json<BudgetState>(budgetPath(job))) ??
     { version: 1, steps: [], sessions: [] };
@@ -302,14 +327,14 @@ export async function guardPiBudget(job: JobStartResult, step: string, sessionFi
   // scoped to the job, not its Story or parent Thread.
   const observed = await sessionUsage(job, state);
   const { modelCalls, costUsd, unpricedCalls } = observed;
-  const activeSeconds = await observedActiveSeconds(job);
+  const activeSeconds = observed.activeSeconds + await observedActiveSeconds(job);
   // An interrupted external Pi call may have unreported usage. The original
   // operation must reconcile its exact session first; never spend another
   // invocation from an unsettled budget registration.
   if (state.pendingSessions?.length)
     throw Error("Unsettled original Pi invocation usage; reconcile its transcript before another model call.");
   const freshStep = !state.steps.includes(step);
-  const reason = freshStep && policy.limits.steps !== undefined && state.steps.length >= policy.limits.steps
+  const reason = freshStep && policy.limits.steps !== undefined && observed.steps >= policy.limits.steps
     ? "steps" : policy.limits.modelCalls !== undefined && modelCalls >= policy.limits.modelCalls
     ? "modelCalls" : policy.limits.costUsd !== undefined && unpricedCalls > 0
     ? "cost-unavailable" : policy.limits.costUsd !== undefined && costUsd >= policy.limits.costUsd

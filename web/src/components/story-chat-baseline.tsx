@@ -37,7 +37,7 @@ export function StoryChatBaseline({ storyId, threadId }: {
     onSaved: saved => client.setQueryData(key, (previous: typeof query.data) =>
       previous ? { ...previous, session: saved } : { session: saved }),
   })
-  const act = async (action: BaselineAction) => {
+  const act = async (action: BaselineAction, limits?: import('../../../src/job-limits').JobLimits) => {
     // Recovery and exact approval are session actions, not Question Set draft
     // actions. A ref maintained only during questions can be null or stale
     // after reload, polling, and a proposed/blocked/approved transition.
@@ -57,6 +57,7 @@ export function StoryChatBaseline({ storyId, threadId }: {
       if (action === 'answer' && !set) throw new Error('The Question Set is unavailable or has changed.')
       const response = await actStoryChatDiscovery({ data: {
         storyId, firstTurnId, action, revision: current.revision,
+        ...(limits ? { limits } : {}),
         ...(action === 'answer' && set ? { setId: set.id,
           setRevision: set.revision, responses } : {}),
         ...(action === 'revise' ? { text: answer } : {}),
@@ -80,7 +81,7 @@ export function StoryChatBaseline({ storyId, threadId }: {
     onDraftChange={drafts => { if (!busy) draftState.change(drafts) }}
     busy={busy || draftState.conflict}
     error={error ?? draftState.error ?? (query.error instanceof Error ? query.error.message : null)}
-    onAction={action => void act(action)} />
+    onAction={(action, limits) => void act(action, limits)} />
     <RecoverableQuestionDraftsView recovery={draftState.recovery}
       onDismiss={draftState.dismissRecovery} />
   </>

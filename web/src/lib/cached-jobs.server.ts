@@ -6,6 +6,8 @@ import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { acquireCachedStory, GitCacheError, initialStoryDocument, initializeStoryBranch } from './git-cache.server'
 import { ensureRootThreads } from './threads.server'
 
+import type { ProviderHandoffEffect } from './discovery-handoff-effects.server'
+
 type Provider = 'github' | 'gitlab'
 
 /** Only a provider-verified reopening of the *single exact* unpublished
@@ -63,6 +65,7 @@ type VerifiedSource =
 export async function prepareCachedJob(
   store: StudioDatabase, ownerId: string, token: string, provider: Provider, request: Request,
   verifySource: (row: CachedCatalogStory, commit: string, existingJob: boolean) => Promise<VerifiedSource>,
+  effect?: ProviderHandoffEffect,
 ) {
   await store.assertReady()
   const input = await request.json().catch(() => null)
@@ -89,6 +92,7 @@ export async function prepareCachedJob(
   // Provider membership/repository identity and the same pinned Story's size
   // and LFS properties are reverified immediately before every acquisition.
   const verified = await verifySource(row, pinned, Boolean(existing))
+  await effect?.('provider-verified')
   const cacheDirectory = process.env.NT_GIT_CACHE_DIR
   if (!cacheDirectory) {
     throw new GitCacheError(503, 'Studio Git cache is not configured. Set NT_GIT_CACHE_DIR to a dedicated absolute cache volume.')
@@ -115,6 +119,7 @@ export async function prepareCachedJob(
   // The first write is always independently reopened against the committed
   // blob digest before a trusted-head marker is published. No Git filter,
   // symlink or unexpected file may silently change the initial draft bytes.
+  await effect?.('worktree-started')
   if (verified.initializeDraft) {
     await initializeStoryBranch({ ...initialization!, foundationMarkdown:
       verified.foundationMarkdown ?? initialStoryDocument(row.title) })
@@ -141,6 +146,7 @@ export async function prepareCachedJob(
   // Preserve that safe predecessor for the subsequent approved writer.
   if (verified.reopenDraft || verified.initializeDraft) await attestInitializedHead(job)
   await ensureRootThreads(store, ownerId, row.id)
+  await effect?.('worktree-settled')
   return { id: input.jobId, storyId: row.id, status: 'paused' as const,
     baseSha: job.baseSha, headSha: job.headSha }
 }

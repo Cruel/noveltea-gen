@@ -4,11 +4,12 @@ import { auth, database } from './runtime.server'
 import { readAuthConfig } from './auth'
 import { storyChatDiscoveryRequest } from './story-chat-discovery.server'
 import type { DiscoverySessionView } from './onboarding-pi.server'
+import type { JobLimits } from '../../../src/job-limits'
 
 type Identity = { storyId: string; firstTurnId: string }
 type Action = Identity & { action: 'answer' | 'draft' | 'restart' | 'revise' | 'approve' | 'retry' | 'reconcile' | 'continue';
   revision: number; text?: string; digest?: string; setId?: string; setRevision?: number;
-  drafts?: unknown; responses?: unknown }
+  drafts?: unknown; responses?: unknown; limits?: JobLimits }
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 function valid(input: Identity) {
   if (!input || !uuid.test(input.storyId) || !uuid.test(input.firstTurnId))

@@ -21,6 +21,11 @@ import { foundationOnlyObjective } from './foundation-intent'
 import { parseCreativePolicy } from '../../../src/creative-policy'
 import { verifiedReusableStoryFoundation } from './story-foundation-reuse.server'
 import type { FoundationDraft } from '../../../src/foundation-record'
+import { createHash } from 'node:crypto'
+import { pinDiscoveryHandoff, readDiscoveryHandoff, sealDiscoveryHandoff, type DiscoveryHandoff } from '../../../src/discovery-generation-handoff'
+import { pinnedRequest, selectedJob } from './fixture-jobs.server'
+import { requireGenerationTurn } from '../../../src/generation'
+import { handoffEffects } from './discovery-handoff-effects.server'
 
 export type ApprovedChatContinuation = {
   chat: { storyId: string; firstTurnId: string; repositoryId: string; directory: string
@@ -29,6 +34,9 @@ export type ApprovedChatContinuation = {
   skillId: string
   model: PiSelection
   foundation: FoundationDraft
+  proof: Pick<DiscoveryHandoff, 'owner' | 'graphEpoch' | 'approvalOperation' |
+    'reviewedProposalDigest' | 'authorEvidenceDigest' | 'reviewDigest' | 'foundationDigest' |
+    'limits' | 'usage' | 'usageEvidenceDigest'>
 }
 
 export type ContinuationStatus = { state: 'queued' | 'pending' | 'blocked' | 'completed'
@@ -73,7 +81,7 @@ async function admitWholeApprovedStory(auth: StudioAuth, store: StudioStore,
   await responseData(await generationConfigurationRequest(auth, store, internalRequest(
     baseURL, headers, '/api/jobs/' + chat.firstTurnId + '/configuration', 'PUT', {
       version: 1, headSha: job.headSha, task: objective.plan.task,
-      contract: objective.plan.contract, limits: {}, model: approval.model,
+      contract: objective.plan.contract, limits: approval.proof.limits, model: approval.model,
     }), chat.firstTurnId, baseURL))
   await responseData(await generationJobRequest(auth, store, internalRequest(
     baseURL, headers, '/api/jobs/' + chat.firstTurnId, 'POST', {
@@ -94,6 +102,9 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
   const actor = await requireUser(auth, headers)
   if (!actor) return { state: 'blocked', message: 'Sign in again to continue the approved Story.' }
   const { chat } = approval
+  if (approval.proof.owner !== actor.id ||
+      approval.proof.foundationDigest !== createHash('sha256').update(JSON.stringify(approval.foundation)).digest('hex'))
+    return { state: 'blocked', message: 'The authenticated Discovery approval changed.' }
   const first = await store.persistence.messages.owned(actor.id,
     'root:' + chat.firstTurnId, chat.firstTurnId)
   const story = await store.persistence.naturalStory.story(actor.id, chat.storyId)
@@ -102,9 +113,33 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       first.content !== chat.originalObjective || first.role !== 'user' ||
       first.phase === 'cancelled' || first.jobId && first.jobId !== chat.firstTurnId)
     return { state: 'blocked', message: 'The pinned Story or first Turn changed. Inspect its saved revision.' }
-  if (first.phase === 'finished') return { state: 'completed' }
+  const foundationOnly = foundationOnlyObjective(chat.originalObjective)
+  const objective = interpretFirstObjective(chat.originalObjective, undefined, chat.sourceSha,
+    undefined, undefined, parseCreativePolicy(first.creativePolicyJson))
+  const receipt = sealDiscoveryHandoff({
+    ...approval.proof, ...chat, threadId: 'root:' + chat.firstTurnId,
+    approvedProposalDigest: approval.digest, skillId: approval.skillId,
+    model: approval.model, turnPlanDigest: foundationOnly ? null : objective.turnPlan?.digest ?? null,
+  })
+  const effects = await handoffEffects(store, receipt)
+  const verifyHandoff = async () => {
+    const job = await authorizedStoryJob(store, actor.id, chat.firstTurnId)
+    if ((await readDiscoveryHandoff(job))?.digest !== receipt.digest)
+      throw Error('The original Discovery-to-Generation handoff differs.')
+    return job
+  }
+  if (first.phase === 'finished') {
+    try { await verifyHandoff(); return { state: 'completed' } }
+    catch { return { state: 'blocked', message: 'Completed Turn handoff evidence is missing or changed.' } }
+  }
   const queued = await store.persistence.generation.queue.record(chat.firstTurnId)
   if (queued) {
+    try {
+      const job = await verifyHandoff()
+      const request = pinnedRequest(await selectedJob(store, actor.id, chat.firstTurnId), job)
+      if (queued.ownerId !== actor.id || !request) throw Error('Original queue identity changed.')
+      await requireGenerationTurn(job, request, true)
+    } catch { return { state: 'blocked', message: 'The original queued handoff cannot be authenticated.' } }
     if (queued.phase === 'interrupted')
       return { state: 'blocked', message: 'The original writer was interrupted. Inspect its saved execution before recovery.' }
     if (first.phase !== 'running') {
@@ -116,8 +151,8 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     return { state: 'queued' }
   }
   if (first.phase === 'preparing')
-    return { state: 'pending', message: 'Admission is already reserved. Inspect its state; an uncertain writer is never replayed.' }
-  const foundationOnly = foundationOnlyObjective(chat.originalObjective)
+    return { state: 'pending', message: 'Admission is already reserved at ' +
+      ((await effects.read())?.stage ?? 'first-Turn reservation') + '. Inspect its original effect; an uncertain writer is never replayed.' }
   if (!foundationOnly && isExistingStoryModificationRequest(chat.originalObjective))
     return { state: 'blocked', message:
       'A request to revise existing canon needs a native-verified focused Turn, not an approved whole-Story Foundation continuation.' }
@@ -140,61 +175,45 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
   if (claim.state === 'admitted') return { state: 'queued' }
   if (claim.state === 'pending')
     return { state: 'pending', message: 'Another admission request owns this first Turn.' }
-  // Crash after the approved foundation commit but before Studio settlement:
-  // the original GitHub initialization adapter must not be asked to recreate
-  // its one-commit placeholder on top of later verified specialist history.
-  // Only a matching, finalized work item at trusted HEAD may settle the Turn;
-  // no writer, model, or second provider worktree is run during recovery.
   try {
-    const job = await authorizedStoryJob(store, actor.id, chat.firstTurnId)
-    const approved = await readChatApprovedFoundation(job)
-    if (approved?.scope === (foundationOnly ? 'foundation-only' : 'whole-story') &&
-        approved.sourceSha === chat.sourceSha &&
-        approved.originalObjective === chat.originalObjective &&
-        approved.proposalDigest === approval.digest &&
-        approved.skillId === approval.skillId) {
-      const inspected = await runFoundationJob({ story: job.storyRoot,
-        job: job.jobId, task: chat.originalObjective, inspect: true })
-      if (inspected.status === 'committed' &&
-          inspected.commitSha === await trustedHead(job)) {
-        if (!foundationOnly) {
-          return await admitWholeApprovedStory(auth, store, actor.id, headers,
-            baseURL, approval, first.creativePolicyJson)
-        }
-        await store.persistence.naturalStory.associateRoot(actor.id, chat.storyId,
-          chat.firstTurnId, chat.originalObjective.slice(0, 120), new Date().toISOString())
-        await store.persistence.naturalStory.finishFoundationOnly(
-          actor.id, chat.storyId, chat.firstTurnId)
-        return { state: 'completed' }
-      }
+    const prior = await effects.read()
+    await effects.advance('prepared')
+    const identity = await store.persistence.generation.jobs.identity(chat.firstTurnId)
+    if (identity && (identity.ownerId !== actor.id || identity.storyId !== chat.storyId ||
+        identity.commitSha !== chat.sourceSha))
+      throw Error('The original job registration differs from the approved source.')
+    // A lost response after registration must use the original worktree, not
+    // rerun provider initialization. Before registration, a started worktree
+    // effect without a receipt is ambiguous and may not be recreated.
+    if (!identity && prior && !['prepared', 'provider-started', 'provider-verified'].includes(prior.stage))
+      throw Error('Original worktree acquisition is unresolved.')
+    let providerHead: string | undefined
+    if (!identity || !prior) {
+      await effects.advance('provider-started')
+      const prepared = await responseData(await (story.provider === 'github'
+        ? (gateways.github ?? githubJobRequest)(auth, store, internalRequest(baseURL, headers,
+          '/api/github/jobs', 'POST', { storyId: chat.storyId, jobId: chat.firstTurnId,
+            commit: chat.sourceSha }), baseURL, effects.advance)
+        : (gateways.gitlab ?? gitlabJobRequest)(auth, store, internalRequest(baseURL, headers,
+          '/api/gitlab/jobs', 'POST', { storyId: chat.storyId, jobId: chat.firstTurnId,
+            commit: chat.sourceSha }), baseURL, effects.advance)))
+      providerHead = (prepared.job as { headSha?: string } | undefined)?.headSha
+      if (!providerHead) throw Error('Missing original provider acquisition result.')
     }
-  } catch {
-    // Incomplete work is not replayed. The provider path below may reopen
-    // only the exact initial commit and fails closed on a changed branch.
-  }
-  try {
-    const prepared = await responseData(await (story.provider === 'github'
-      ? (gateways.github ?? githubJobRequest)(auth, store, internalRequest(baseURL, headers,
-        '/api/github/jobs', 'POST', { storyId: chat.storyId, jobId: chat.firstTurnId,
-          commit: chat.sourceSha }), baseURL)
-      : (gateways.gitlab ?? gitlabJobRequest)(auth, store, internalRequest(baseURL, headers,
-        '/api/gitlab/jobs', 'POST', { storyId: chat.storyId, jobId: chat.firstTurnId,
-          commit: chat.sourceSha }), baseURL)))
-    const jobResult = prepared.job as { headSha?: string } | undefined
     const job = await authorizedStoryJob(store, actor.id, chat.firstTurnId)
     const earlierApproval = await readChatApprovedFoundation(job)
     const inheritedInitialization = await isVerifiedInitializedDraft(job)
-    if (!jobResult || jobResult.headSha !== job.headSha ||
-        (job.headSha !== chat.sourceSha &&
-          !inheritedInitialization &&
-          (!earlierApproval || earlierApproval.scope !== 'foundation-only' ||
-            await trustedHead(job) !== job.headSha)) ||
+    if (providerHead && providerHead !== job.headSha ||
+        (!earlierApproval && job.headSha !== chat.sourceSha && !inheritedInitialization) ||
         await trustedHead(job) !== job.headSha)
-      throw new Error('The provider acquired a different or untrusted Story revision.')
+      throw Error('The provider acquired a different or untrusted Story revision.')
+    await effects.advance('worktree-settled')
+    await pinDiscoveryHandoff(job, receipt)
+    await effects.advance('foundation-started')
     const explorer = await validatedExplorer(auth, store,
       new Request(baseURL + '/api/story-explorer', { headers }), chat.firstTurnId)
     const existingFoundation = await verifiedReusableStoryFoundation(job, explorer.result)
-    if (!existingFoundation) {
+    if (earlierApproval || !existingFoundation) {
       if (!approval.digest || !approval.skillId)
         throw new Error('The exact Chat foundation approval is missing.')
       await pinChatApprovedFoundation(job, {
@@ -208,7 +227,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     } else if (foundationOnly) {
       await pinReusedFoundation(job, chat.originalObjective)
     }
-    if (!existingFoundation) {
+    if (earlierApproval || !existingFoundation) {
       const completed = await runFoundationJob({
         story: job.storyRoot, job: job.jobId, task: chat.originalObjective,
         envelope: JSON.stringify(plan.contract.envelope),
@@ -218,6 +237,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       if (completed.status !== 'committed')
         throw new Error('The approved foundation did not reach a verified commit.')
     }
+    await effects.advance('foundation-settled')
     if (foundationOnly) {
       await store.persistence.naturalStory.associateRoot(actor.id, chat.storyId,
         chat.firstTurnId, chat.originalObjective.slice(0, 120), new Date().toISOString())
@@ -225,8 +245,11 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
         actor.id, chat.storyId, chat.firstTurnId)
       return { state: 'completed' }
     }
-    return await admitWholeApprovedStory(auth, store, actor.id, headers,
+    await effects.advance('queue-started')
+    const admitted = await admitWholeApprovedStory(auth, store, actor.id, headers,
       baseURL, approval, first.creativePolicyJson)
+    await effects.advance('queue-settled')
+    return admitted
   } catch {
     const finished = await store.persistence.messages.owned(actor.id,
       'root:' + chat.firstTurnId, chat.firstTurnId)
@@ -235,6 +258,11 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     // Never convert admitted work back into a blocked re-runnable message.
     if (await store.persistence.generation.queue.record(chat.firstTurnId)) {
       try {
+        const job = await verifyHandoff()
+        const request = pinnedRequest(await selectedJob(store, actor.id, chat.firstTurnId), job)
+        if (!request) throw Error('Missing queued handoff request.')
+        await requireGenerationTurn(job, request, true)
+        await effects.advance('queue-settled')
         await store.persistence.naturalStory.finishFirstTurn(
           actor.id, chat.storyId, chat.firstTurnId, true)
         return { state: 'queued' }
@@ -246,6 +274,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       } catch { /* Preserve the actual durable status. */ }
     }
     return { state: 'blocked', message:
-      'Generation setup was blocked. Check repository access, native Story validation and saved job details; the approved Turn is preserved for explicit retry.' }
+      'Generation setup stopped at ' + ((await effects.read().catch(() => null))?.stage ?? 'handoff verification') +
+      '. Inspect the original effect and saved job; the approved Turn is preserved.' }
   }
 }

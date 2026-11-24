@@ -4,6 +4,7 @@ import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { inspectCompletedProtocolResponse } from '../../../src/response-contract-recovery'
+import { accumulatePiUsage, emptyPiUsage } from '../../../src/job-pi-policy'
 
 /** Discovery happens before a Story job exists. Store its immutable response
  * evidence in private controller state, not the Git worktree or public logs.
@@ -51,6 +52,7 @@ export function discoveryEvidence(dir: string) {
   return {
     dir,
     piDirectory,
+    async requestReceiptDigest() { return hash(await readFile(join(dir, 'request.json'))) },
     async response(raw: string, piSessionFile?: string, reference?: DiscoveryPiReference) {
       await write('response.json', {
         version: 1, raw, sha256: createHash('sha256').update(raw).digest('hex'),
@@ -92,6 +94,9 @@ export type DiscoveryAttempt = Readonly<{
   status: 'started' | 'not-started'
   role: DiscoveryPiReference['role']
   responseDigest?: string
+  sourceDigest?: string
+  requestReceiptDigest?: string
+  fixture?: boolean
 }>
 
 /** Verify an immutable response receipt and the original transcript prefix.
@@ -151,7 +156,7 @@ export async function readDiscoveryResponse(attempt: DiscoveryAttempt, sourceDig
     if (original !== receipt.raw)
       throw Error('Discovery response differs from its original Pi output.')
   }
-  return { text: receipt.raw as string, reference: ref, piSessionFile: ref?.file, responseDigest: hash(contents) }
+  return { text: receipt.raw as string, reference: ref, piSessionFile: ref?.file, responseDigest: hash(contents), savedAt: receipt.savedAt as string }
 }
 
 /** Source-bound, private reference to the exact settled Pi conversation.
@@ -192,6 +197,59 @@ export async function sealDiscoveryPiReference(manager: SessionManager, sourceDi
 
 /** Pi's ordinary open() can allocate a new session for a missing input.
  * Require exact source, role and settled transcript bytes BEFORE opening. */
+/** Meter the same authenticated Pi transcript prefixes used by recovery.
+ * Several attempts may append to one original session; stable Pi message IDs
+ * deduplicate cumulative transcript prefixes across the entire first Turn. */
+export async function meterDiscoveryAttempts(attempts: readonly DiscoveryAttempt[],
+  current?: { reference: DiscoveryPiReference; startedAt: number }) {
+  const summary = emptyPiUsage()
+  const seen = new Set<string>()
+  const directories = new Set<string>()
+  for (const attempt of attempts) {
+    if (directories.has(attempt.dir)) throw Error('Duplicate Discovery attempt identity.')
+    directories.add(attempt.dir)
+    if (attempt.status === 'not-started') continue
+    if (!attempt.responseDigest || !attempt.sourceDigest)
+      throw Error('Discovery usage has an unsettled original attempt.')
+    const response = await readDiscoveryResponse(attempt, attempt.sourceDigest, attempt.role, !attempt.fixture)
+    const requestBytes = await readFile(join(attempt.dir, 'request.json'))
+    if (hash(requestBytes) !== attempt.requestReceiptDigest)
+      throw Error('Discovery request metering evidence changed.')
+    const request = JSON.parse(requestBytes.toString('utf8'))
+    const started = Date.parse(request.startedAt)
+    let finished = Date.parse(response.savedAt)
+    summary.steps++
+    if (response.reference) {
+      const { bytes } = await exactTranscript(response.reference.file)
+      const prefix = bytes.subarray(0, response.reference.bytes).toString('utf8')
+      // Pi's original append timestamp predates any delayed HTTP reconciliation.
+      const entries = prefix.trimEnd().split('\n').map(line => JSON.parse(line))
+      const completion = entries.filter(entry => entry.type === 'message' &&
+        entry.message?.role === 'assistant').at(-1)
+      finished = Date.parse(completion?.timestamp)
+      accumulatePiUsage(prefix, response.reference.file, seen, summary)
+    } else {
+      // Controlled deterministic transport has no provider usage receipt.
+      // Do not claim it was a priced or token-metered call.
+      summary.modelCalls++
+      summary.unpricedCalls++
+      summary.unknownTokenCalls++
+    }
+    const elapsed = (finished - started) / 1000
+    if (!Number.isFinite(elapsed) || elapsed < 0)
+      throw Error('Discovery usage timestamps are invalid.')
+    summary.activeSeconds += elapsed
+  }
+  if (current) {
+    const { bytes } = await exactTranscript(current.reference.file)
+    if (bytes.length !== current.reference.bytes || hash(bytes) !== current.reference.digest)
+      throw Error('Current Discovery correction transcript changed.')
+    accumulatePiUsage(bytes.toString('utf8'), current.reference.file, seen, summary)
+    summary.activeSeconds += Math.max(0, (Date.now() - current.startedAt) / 1000)
+  }
+  return summary
+}
+
 export async function reopenDiscoveryPiReference(ref: DiscoveryPiReference,
   sourceDigest: string, role: DiscoveryPiReference['role']): Promise<SessionManager> {
   if (ref.sourceDigest !== sourceDigest || ref.role !== role)

@@ -3,6 +3,7 @@ import { AuthorQuestionSetView, AuthorQuestionHistory,
   type AcceptedQuestionRound } from './author-question-set'
 import type { QuestionSet, QuestionDraft } from '../../../src/author-question-set'
 import type { StoryPlanning } from '../../../src/story-planning'
+import type { JobLimits } from '../../../src/job-limits'
 import { creativeDirectionNarrativeBody,
   type PlanningInterpretation } from '../../../src/planning-interpretation'
 import { PlanningInterpretationsView, creativeDecisionAttribution } from './planning-interpretations'
@@ -21,6 +22,7 @@ export type StoryChatBaselineSession = {
   accepted?: AcceptedQuestionRound[]
   proposal: { foundation: Foundation; task: string; interpretations?: PlanningInterpretation[] } | null
   digest: string | null; skillId: string; startedAt: number | null
+  limits?: JobLimits; recoveryReason?: string | null
   turns: Array<{ role: 'user' | 'assistant'; text: string }>
   chat: { storyId: string; firstTurnId: string; sourceSha: string; directory: string }
 }
@@ -36,7 +38,7 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
   drafts: Record<string, QuestionDraft>
   onDraftChange: (drafts: Record<string, QuestionDraft>) => void
   busy: boolean; error: string | null
-  onAction: (action: BaselineAction) => void
+  onAction: (action: BaselineAction, limits?: JobLimits) => void
 }) {
   if (!session && !error) return null
   if (session?.legacyQuestions) return <section aria-label="Story baseline discovery"
@@ -123,12 +125,26 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
     {session?.phase === 'running' && <div><Button size="sm" variant="outline"
       disabled={busy || !session.startedAt || Date.now() - session.startedAt < 600_000}
       onClick={() => onAction('reconcile')}>Reconcile interrupted turn</Button></div>}
-    {session?.phase === 'blocked' && <>
+    {session?.phase === 'blocked' && (session.recoveryReason === 'budget' ? <>
+      <p role="status" className="m-0">The original Turn budget is exhausted. Previous usage is retained.</p>
+      <div className="flex flex-wrap gap-2">
+        {(['activeSeconds', 'modelCalls', 'steps', 'costUsd'] as const).map(key => {
+          const current = session.limits?.[key]
+          if (current === undefined || current >= 1_000_000) return null
+          const amount = Math.min(1_000_000 - current, key === 'activeSeconds' ? 1800 :
+            key === 'costUsd' ? 1 : 10)
+          const label = key === 'activeSeconds' ? amount + ' seconds' :
+            key === 'costUsd' ? '$' + amount : amount + (key === 'steps' ? ' steps' : ' model calls')
+          return <Button key={key} size="sm" variant="outline" disabled={busy}
+            onClick={() => onAction('retry', { [key]: current + amount })}>Add {label} and retry</Button>
+        })}
+      </div>
+    </> : <>
       <p role="status" className="m-0">Discovery was interrupted. The saved input and
         session remain intact; a retry may incur another model call.</p>
       <div><Button size="sm" variant="outline" disabled={busy}
         onClick={() => onAction('retry')}>Retry discovery</Button></div>
-    </>}
+    </>)}
     {error && <p role="alert" className="m-0 text-destructive">{error}</p>}
   </section>
 }

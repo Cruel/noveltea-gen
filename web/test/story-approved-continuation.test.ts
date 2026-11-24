@@ -104,11 +104,20 @@ test('approved original Story Turn queues one owner-scoped execution, while foun
         'The Last Bell', sha, new Date().toISOString())
       await db.persistence.conversations.reconcileRoots(owner, storyId)
     }
+    const proof = (draft: unknown) => ({
+      owner, graphEpoch: 'a'.repeat(64), approvalOperation: 5,
+      reviewedProposalDigest: 'b'.repeat(64), authorEvidenceDigest: 'd'.repeat(64),
+      reviewDigest: 'e'.repeat(64), foundationDigest: hash(JSON.stringify(draft)),
+      usageEvidenceDigest: 'f'.repeat(64), limits: { modelCalls: 3 },
+      usage: { steps: 2, modelCalls: 3, costUsd: 0.5, unpricedCalls: 0,
+        activeSeconds: 10, unknownTokenCalls: 0,
+        tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 } },
+    })
     const approval = (jobId: string, objective: string) => ({
       chat: { storyId, firstTurnId: jobId, repositoryId: repoId,
         directory: 'story', sourceSha: sha, originalObjective: objective },
       digest: 'b'.repeat(64), skillId: 'c'.repeat(64),
-      model: { provider: model.provider, id: model.id }, foundation,
+      model: { provider: model.provider, id: model.id }, foundation, proof: proof(foundation),
     })
     let providerCalls = 0
     const gateway = async (_auth: unknown, _store: unknown, request: Request) => {
@@ -138,6 +147,10 @@ test('approved original Story Turn queues one owner-scoped execution, while foun
     assert.equal(providerCalls, 1)
     const run = await db.persistence.generation.queue.record(fullId)
     assert.equal(run?.phase, 'queued')
+    const { inspectPiPolicy, guardPiBudget, configurePiPolicy, PiBudgetPause } = await import('../../src/job-pi-policy')
+    const fullJob = await startStoryJob({ story, job: fullId, worktreeCacheRoot: cache }, false)
+    assert.deepEqual((await inspectPiPolicy(fullJob)).budget, proof(foundation).usage,
+      'the Generation meter inherits the settled Discovery usage exactly once')
     const thread = await openStoryThread(db, owner, storyId, 'root:' + fullId)
     assert.deepEqual(thread.state.turns, [{ id: fullId, executionIds: [fullId] }])
     assert.equal(thread.state.messages[0]?.content, objective)
@@ -146,6 +159,15 @@ test('approved original Story Turn queues one owner-scoped execution, while foun
     assert.equal((await continueApprovedStoryChat(auth, db,
       headers, origin, approval(fullId, objective), { github: gateway })).state, 'queued')
     assert.equal(providerCalls, 1, 'reconnect must never admit another writer')
+    assert.deepEqual((await inspectPiPolicy(fullJob)).budget, proof(foundation).usage)
+    const policy = (await inspectPiPolicy(fullJob)).policy
+    await assert.rejects(configurePiPolicy(fullJob, { ...policy, limits: { modelCalls: 2 } }), /budget/i)
+    await assert.rejects(guardPiBudget(fullJob, 'first-generation-assignment'), PiBudgetPause)
+    await configurePiPolicy(fullJob, { ...policy, limits: { ...policy.limits, modelCalls: 4 } })
+    await guardPiBudget(fullJob, 'first-generation-assignment')
+    const inherited = (await inspectPiPolicy(fullJob)).budget
+    assert.equal(inherited.modelCalls, 3)
+    assert.equal(inherited.steps, 3)
 
     const limitedId = randomUUID(), limited = 'Only the existing premise'
     await prepare(limitedId, limited)
@@ -225,16 +247,39 @@ test('approved original Story Turn queues one owner-scoped execution, while foun
         sourceSha: newSha, originalObjective: objective },
       digest: 'b'.repeat(64), skillId: snapshot.id,
       model: { provider: model.provider, id: model.id },
-      foundation: newFoundation,
+      foundation: newFoundation, proof: proof(newFoundation),
     }
     let newProviderCalls = 0
     const newGateway = async () => {
       newProviderCalls++
       return Response.json({ job: { headSha: newSha } })
     }
+    // Interrupt the original admission after the exact native Foundation
+    // commit but before queue admission. Retry must not reopen the provider
+    // or create another commit.
+    const save = db.persistence.onboarding.saveConversation
+    let interrupted = false
+    db.persistence.onboarding.saveConversation = async (...args) => {
+      if (!interrupted && args[2].startsWith('story-discovery-handoff,') &&
+          JSON.parse(args[4]).stage === 'queue-started') {
+        interrupted = true
+        throw Error('Injected interruption after Foundation commit')
+      }
+      return save(...args)
+    }
+    try {
+      const stopped = await continueApprovedStoryChat(auth, db,
+        headers, origin, newApproval, { github: newGateway })
+      assert.equal(stopped.state, 'blocked', stopped.message)
+      assert.equal(await db.persistence.generation.queue.record(newJobId), null)
+    } finally { db.persistence.onboarding.saveConversation = save }
+    assert.ok(interrupted)
+    const committed = await trustedHead(newJob)
+    assert.notEqual(committed, newSha)
     const started = await continueApprovedStoryChat(auth, db,
       headers, origin, newApproval, { github: newGateway })
     assert.equal(started.state, 'queued', started.message)
+    assert.equal(await trustedHead(newJob), committed)
     assert.equal(newProviderCalls, 1)
     assert.equal((await db.persistence.generation.queue.record(newJobId))?.phase, 'queued')
     assert.notEqual(await trustedHead(newJob), newSha)

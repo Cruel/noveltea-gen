@@ -22,7 +22,9 @@ import { parseProposedQuestionSet, parseQuestionDrafts, parseQuestionResponses,
   type QuestionSet, type QuestionResponse, type QuestionDraft } from '../../../src/author-question-set'
 import { continueApprovedStoryChat, type ContinuationStatus, type ProviderJobGateways } from './story-approved-continuation.server'
 import { createDiscoveryEvidence, discoveryEvidence, readDiscoveryResponse, reopenDiscoveryPiReference, sealDiscoveryPiReference,
-  type DiscoveryAttempt, type DiscoveryEvidence, type DiscoveryPiReference } from './discovery-evidence.server'
+  meterDiscoveryAttempts, type DiscoveryAttempt, type DiscoveryEvidence, type DiscoveryPiReference } from './discovery-evidence.server'
+import { parseJobLimits, type JobLimits } from '../../../src/job-limits'
+import type { DiscoveryHandoff } from '../../../src/discovery-generation-handoff'
 import type { RunnableConfig } from '@langchain/core/runnables'
 import { createAssignmentLifecycleGraph, logicalAssignmentKey, type AssignmentAdapter, type AssignmentOutcome, type DiscoveryAssignmentIdentity } from '../../../src/generation-assignment-lifecycle'
 import { beginProtocolInvocation, recoverResponseContract, ProtocolExhaustedError } from '../../../src/response-contract-recovery'
@@ -87,6 +89,10 @@ type Session = { phase: Phase; revision: number; model: PiSelection; skillId: st
   discoveryEvidencePaths?: string[];
   /** Original operation's admitted external attempts; each response is an immutable receipt. */
   activeAttempts?: DiscoveryAttempt[];
+  /** Settled earlier author rounds are retained for cumulative Turn metering. */
+  settledAttempts?: DiscoveryAttempt[];
+  limits?: JobLimits;
+  approval?: { principal: string; reviewedProposalDigest: string; operationId: number };
   /** Exact proposal/reviewer digest binding, never included in API projection. */
   semanticReview?: { proposalDigest: string; packetDigest: string; verdictDigest: string };
   /** Private resumable draft. A user-initiated retry never needs to regenerate a
@@ -131,6 +137,7 @@ function scope(input: Session) {
     legacyQuestions: !currentGraph(input),
     drafts: input.drafts ?? {}, accepted: input.accepted ?? [], proposal: input.proposal ?? null,
     digest: input.digest ?? null, skillId: input.skillId, startedAt: input.startedAt ?? null,
+    limits: input.limits ?? {}, recoveryReason: input.recovery?.reason ?? null,
     ...(input.chat ? { chat: input.chat } : {}) }
 }
 export type DiscoverySessionView = ReturnType<typeof scope>
@@ -236,8 +243,9 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
   instructions: string, evidence: DiscoveryEvidence,
   sourceDigest: string, invocationSource: string, role: DiscoveryPiReference['role'], previous?: DiscoveryPiReference,
   payload?: object, validateFormat?: (raw: string) => void,
-  beforePrompt?: () => Promise<void>):
+  beforePrompt?: (current?: { reference: DiscoveryPiReference; startedAt: number }) => Promise<void>):
   Promise<{ text: string; piSessionFile: string; reference: DiscoveryPiReference }> {
+  const startedAt = Date.now()
   const { runtime, model } = await (async () => {
     await assertUserPiSelection(store, owner, session.model)
     const runtime = await createUserPiRuntime(store, owner)
@@ -294,7 +302,10 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     }
     const text = await recoverResponseContract({ session: agent, contract,
       sourceDigest: invocationSource, receiptFile: receiptFile + '.initial.json',
-      validate, parse: raw => raw, prompt, beforeCorrection: beforePrompt,
+      validate, parse: raw => raw, prompt, sealTranscript: true,
+      beforeCorrection: async () => {
+        await beforePrompt?.({ reference: await sealDiscoveryPiReference(agent.sessionManager, sourceDigest, role), startedAt })
+      },
       feedback: failures => 'RESPONSE-CONTRACT CORRECTION ONLY. ' + failures.map(failure => failure.expected).join('; ') +
         '. Return the complete previous response as valid JSON ' +
         'in this same tool-less conversation. Preserve the proposed decisions, exact author sources and ' +
@@ -452,7 +463,8 @@ function gateFor(state: Session): DiscoveryGate {
       authorEvidenceDigest: sha({ turns: state.turns, accepted: state.accepted }),
       review: state.semanticReview,
       pendingDigest: state.pendingDiscovery ? sha(state.pendingDiscovery) : undefined,
-      recovery: state.recovery, activeAttempts: state.activeAttempts }) }
+      recovery: state.recovery, activeAttempts: state.activeAttempts,
+      settledAttempts: state.settledAttempts, limits: state.limits, approval: state.approval }) }
 }
 function discoveryAssignmentSource(state: Session): string {
   return sha({ graph: state.graphEpoch, turns: state.turns,
@@ -460,7 +472,8 @@ function discoveryAssignmentSource(state: Session): string {
 }
 function operationInputDigest(state: Session): string {
   return sha({ turns: state.turns, accepted: state.accepted, proposalDigest: state.digest,
-    review: state.semanticReview, pendingDiscovery: state.pendingDiscovery, recovery: state.recovery })
+    review: state.semanticReview, pendingDiscovery: state.pendingDiscovery, recovery: state.recovery,
+    settledAttempts: state.settledAttempts, limits: state.limits, approval: state.approval })
 }
 function sameOperation(saved: Session, operation: DiscoveryOperation) {
   const candidate = saved.graphOperation
@@ -525,6 +538,9 @@ async function openDiscoveryGraph(store: StudioDatabase, owner: string, repo: st
       await assertClaim()
       const settled: Session = { ...result, revision: currentClaim.revision + 1,
         activeAttempts: result.phase === 'blocked' ? currentClaim.activeAttempts : undefined,
+        settledAttempts: operation.kind !== 'approve' && result.phase !== 'blocked'
+          ? [...(claimed.settledAttempts ?? []), ...(currentClaim.activeAttempts ?? [])]
+          : claimed.settledAttempts,
         graphOperation: { ...operation, status: 'settled' } }
       await save(store, owner, repo, workspace, settled, currentClaim.revision)
       return gateFor(settled)
@@ -546,6 +562,29 @@ function approvedProposal(state: Session): Proposal {
   } }
 }
 
+async function approvedContinuation(state: Session, owner: string) {
+  const approval = state.approval
+  if (!state.chat || state.phase !== 'approved' || !state.proposal || !state.digest ||
+      state.digest !== sha(state.proposal) || approval?.principal !== owner ||
+      approval.operationId !== state.graphOperation?.id || state.graphOperation.status !== 'settled' ||
+      state.graphOperation.kind !== 'approve' ||
+      state.semanticReview?.proposalDigest !== approval.reviewedProposalDigest ||
+      !state.settledAttempts || !state.limits || !state.graphEpoch)
+    throw new DiscoveryError(409, 'The exact authenticated Discovery handoff is unavailable.')
+  const proof: Pick<DiscoveryHandoff, 'owner' | 'graphEpoch' | 'approvalOperation' |
+    'reviewedProposalDigest' | 'authorEvidenceDigest' | 'reviewDigest' | 'foundationDigest' |
+    'limits' | 'usage' | 'usageEvidenceDigest'> = {
+    owner, graphEpoch: state.graphEpoch, approvalOperation: approval.operationId,
+    reviewedProposalDigest: approval.reviewedProposalDigest,
+    authorEvidenceDigest: sha({ turns: state.turns, accepted: state.accepted }),
+    reviewDigest: sha(state.semanticReview), foundationDigest: sha(state.proposal.foundation),
+    limits: state.limits, usage: await meterDiscoveryAttempts(state.settledAttempts),
+    usageEvidenceDigest: sha(state.settledAttempts),
+  }
+  return { chat: state.chat, digest: state.digest, skillId: state.skillId,
+    model: state.model, foundation: state.proposal.foundation, proof }
+}
+
 async function settleInterruptedApproval(store: StudioDatabase, owner: string, repo: string,
   workspace: string, saved: Session, verifyAuthority: () => Promise<void>) {
   await verifyAuthority()
@@ -555,6 +594,9 @@ async function settleInterruptedApproval(store: StudioDatabase, owner: string, r
       operation.status === 'settled' || operation.inputDigest !== operationInputDigest(saved))
     throw new DiscoveryError(409, 'Saved approval operation is inconsistent.')
   const proposal = approvedProposal(saved)
+  if (saved.approval?.principal !== owner || saved.approval.operationId !== operation.id ||
+      saved.approval.reviewedProposalDigest !== saved.digest)
+    throw new DiscoveryError(409, 'Original author approval evidence is missing.')
   const settled: Session = { ...saved, phase: 'approved', proposal, digest: sha(proposal),
     revision: saved.revision + 1, graphOperation: { ...operation, status: 'settled' } }
   await save(store, owner, repo, workspace, settled, saved.revision)
@@ -761,6 +803,14 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         await reconcileDiscoveryGraph(store, actor.id, repo, workspace, blocked, verifyAuthority)
       return reply({ session: scope(blocked) })
     }
+    if (action === 'approve' && saved?.phase === 'approved' &&
+        saved.approval?.principal === actor.id &&
+        data.revision === saved.approval.operationId - 1 &&
+        data.digest === saved.approval.reviewedProposalDigest) {
+      const handoff = chat ? await continueApprovedStoryChat(auth, store, request.headers,
+        baseURL, await approvedContinuation(saved, actor.id), gateways) : undefined
+      return reply({ session: scope(saved), continuation: handoff })
+    }
     if (action === 'approve') {
       if (!saved || saved.questionContract !== 'structured-v1' ||
           saved.phase !== 'proposed' || data.revision !== saved.revision ||
@@ -772,9 +822,12 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const digest = sha(proposal)
       // Exact review is durable before any provider, worktree or queue effect.
       if (chat) await validateNewStory(candidate(proposal.foundation).file)
-      const operation: DiscoveryOperation = { id: saved.revision + 1, kind: 'approve',
-        from: gateFor(saved).ref, inputDigest: operationInputDigest(saved) }
-      const reserved: Session = { ...saved, phase: 'running', startedAt: Date.now(),
+      const approval = { principal: actor.id, reviewedProposalDigest: saved.digest,
+        operationId: saved.revision + 1 }
+      const approvedSource = { ...saved, approval }
+      const operation: DiscoveryOperation = { id: approval.operationId, kind: 'approve',
+        from: gateFor(saved).ref, inputDigest: operationInputDigest(approvedSource) }
+      const reserved: Session = { ...approvedSource, phase: 'running', startedAt: Date.now(),
         revision: operation.id, graphOperation: { ...operation, status: 'reserved' } }
       await save(store, actor.id, repo, workspace, reserved, saved.revision)
       const graph = await openDiscoveryGraph(store, actor.id, repo, workspace, reserved,
@@ -784,20 +837,15 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const settled = (await load(store, actor.id, repo, workspace))!
       await reconcileDiscoveryGraph(store, actor.id, repo, workspace, settled, verifyAuthority)
       const handoff = chat ? await continueApprovedStoryChat(auth, store,
-        request.headers, baseURL, {
-          chat, digest: settled.digest!, skillId: settled.skillId,
-          model: settled.model, foundation: settled.proposal!.foundation,
-        }, gateways) : undefined
+        request.headers, baseURL, await approvedContinuation(settled, actor.id), gateways) : undefined
       return reply({ session: scope(settled), continuation: handoff })
     }
     if (action === 'continue') {
       if (!chat || !saved || saved.phase !== 'approved' ||
           data.revision !== saved.revision || data.digest !== saved.digest)
         throw new DiscoveryError(409, 'Approved foundation continuation is stale or unavailable')
-      const handoff = await continueApprovedStoryChat(auth, store, request.headers, baseURL, {
-        chat, digest: saved.digest!, skillId: saved.skillId,
-        model: saved.model, foundation: saved.proposal!.foundation,
-      }, gateways)
+      const handoff = await continueApprovedStoryChat(auth, store, request.headers, baseURL,
+        await approvedContinuation(saved, actor.id), gateways)
       return reply({ session: scope(saved), continuation: handoff })
     }
     if (!['start', 'answer', 'revise', 'retry', 'restart'].includes(String(action))) throw new DiscoveryError(400, 'Invalid discovery action')
@@ -817,9 +865,28 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     if (action === 'retry' && (!saved || saved.questionContract !== 'structured-v1' ||
         saved.phase !== 'blocked' || data.revision !== saved.revision))
       throw new DiscoveryError(409, 'Blocked discovery revision changed or requires explicit restart')
-    if (action === 'retry' && (saved!.recovery?.status !== 'paused' ||
-        saved!.recovery.reason !== 'not-started'))
-      throw new DiscoveryError(409, 'Discovery has no proven unstarted invocation; inspect the original receipts instead of replaying it')
+    let retryLimits: JobLimits | undefined
+    if (action === 'retry') {
+      if (saved!.recovery?.status !== 'paused' ||
+          !['not-started', 'budget'].includes(saved!.recovery.reason))
+        throw new DiscoveryError(409, 'Discovery has no proven safe invocation boundary; inspect the original receipts instead of replaying it')
+      if (saved!.recovery.reason === 'budget') {
+        // No new entitlement can authorize replay of an uncertain prompt.
+        if (saved!.activeAttempts?.some(attempt => attempt.status === 'started' && !attempt.responseDigest))
+          throw new DiscoveryError(409, 'Original model invocation usage is unsettled; reconcile it before replenishment.')
+        let requested: JobLimits
+        try { requested = parseJobLimits(data.limits) }
+        catch { throw new DiscoveryError(422, 'Explicitly increase the original Turn budget before retrying.') }
+        const previous = saved!.limits ?? {}
+        const changes = Object.entries(requested) as [keyof JobLimits, number][]
+        if (!changes.length || changes.some(([key, value]) =>
+            previous[key] === undefined || value < previous[key]!) ||
+            !changes.some(([key, value]) => value > previous[key]!))
+          throw new DiscoveryError(422, 'At least one existing Turn limit must increase; none may decrease.')
+        retryLimits = { ...previous, ...requested }
+      } else if (data.limits !== undefined)
+        throw new DiscoveryError(422, 'Budget replenishment requires a resource pause.')
+    }
     if (action === 'answer' && saved?.questionContract !== 'structured-v1')
       throw new DiscoveryError(409, 'Unsupported old question format. Restart discovery explicitly.')
     if (action !== 'retry' && action !== 'restart' && action !== 'answer' &&
@@ -843,6 +910,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       session = { phase: 'running', revision: 1, model: data.model, skillId: snapshot.id,
         questionContract: 'structured-v1',
         startedAt: Date.now(), brief: (data.text as string).trim(),
+        limits: parseJobLimits(data.limits ?? { activeSeconds: 5400 }), settledAttempts: [],
         turns: [{ role: 'user', text: chat?.originalObjective ?? (data.text as string).trim() }],
         ...(chat ? { chat } : {}) }
     } else if (action === 'restart') {
@@ -861,6 +929,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         accepted: undefined, proposal: undefined, digest: undefined, pendingDiscovery: undefined,
         semanticReview: undefined, graphEpoch: undefined, graphStartRevision: undefined,
         graphOperation: undefined, discoveryEvidencePaths: undefined, activeAttempts: undefined, recovery: undefined,
+        approval: undefined, limits: parseJobLimits(data.limits ?? { activeSeconds: 5400 }), settledAttempts: [],
         turns: [{ role: 'user', text: saved!.chat?.originalObjective ?? saved!.brief }] }
     } else {
       let userTurn: Turn | undefined
@@ -889,6 +958,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         questions: undefined, drafts: undefined, proposal: undefined, digest: undefined,
         pendingDiscovery: action === 'retry' ? saved!.pendingDiscovery : undefined,
         recovery: action === 'retry' ? saved!.recovery : undefined,
+        ...(retryLimits ? { limits: retryLimits } : {}),
         activeAttempts: action === 'retry' ? saved!.activeAttempts : undefined,
         ...(accepted ? { accepted } : {}),
         turns: userTurn ? [...saved!.turns, userTurn] : saved!.turns }
@@ -933,10 +1003,19 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         return { evidence: discoveryEvidence(prior.dir), prior, requestDigest }
       }
       await admitPrompt()
+      const usage = await meterDiscoveryAttempts([...(session.settledAttempts ?? []), ...attempts])
+      const limits = session.limits ?? {}
+      if ((limits.steps !== undefined && usage.steps >= limits.steps) ||
+          (limits.modelCalls !== undefined && usage.modelCalls >= limits.modelCalls) ||
+          (limits.costUsd !== undefined && (usage.unpricedCalls > 0 || usage.costUsd >= limits.costUsd)) ||
+          (limits.activeSeconds !== undefined && usage.activeSeconds >= limits.activeSeconds))
+        throw new DiscoveryBudgetPaused()
       const opened = await createDiscoveryEvidence({ owner: actor.id, repositoryId: repo, workspace,
         revision: session.revision, stage, model: session.model, skillId: session.skillId, instructions: prompt })
       const role = stage === 'semantic-review' ? 'reviewer' : stage.endsWith('-diagnostic') ? 'diagnostic' : 'writer'
-      const attempt: DiscoveryAttempt = { dir: opened.dir, requestDigest, status: 'started', role }
+      const attempt: DiscoveryAttempt = { dir: opened.dir, requestDigest, status: 'started', role,
+        sourceDigest: assignmentSource, requestReceiptDigest: await opened.requestReceiptDigest(),
+        ...(infer ? { fixture: true } : {}) }
       attempts.push(attempt)
       await persistAttempts(attempts)
       evidencePaths.push(opened.dir)
@@ -955,9 +1034,17 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       attempts[index] = { ...attempts[index]!, status: 'not-started' }
       await persistAttempts(attempts)
     }
-    const admitPrompt = async () => {
+    const admitPrompt = async (current?: { reference: DiscoveryPiReference; startedAt: number }) => {
       await assertClaim()
-      if (Date.now() - (session.startedAt ?? 0) > 15 * 60_000)
+      if (!current) return
+      // No correction dispatch may bypass the Turn budget. The protocol
+      // receipt has sealed the invalid original reply before this callback.
+      const usage = await meterDiscoveryAttempts([...(session.settledAttempts ?? []),
+        ...attempts.filter(attempt => attempt.responseDigest || attempt.status === 'not-started')], current)
+      const limits = session.limits ?? {}
+      if ((limits.modelCalls !== undefined && usage.modelCalls >= limits.modelCalls) ||
+          (limits.costUsd !== undefined && (usage.unpricedCalls > 0 || usage.costUsd >= limits.costUsd)) ||
+          (limits.activeSeconds !== undefined && usage.activeSeconds >= limits.activeSeconds))
         throw new DiscoveryBudgetPaused()
     }
     const failureResult = (error: unknown): Session => {
@@ -969,7 +1056,8 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         : error instanceof DiscoveryNonconverging ? 'nonconverging' as const
         : error instanceof DiscoveryReviewerDrift ? 'reviewer-drift' as const
         : 'uncertain-effect' as const
-      const status = reason === 'not-started' || reason === 'budget' ? 'paused' as const
+      const status = reason === 'not-started' || (reason === 'budget' &&
+        attempts.every(attempt => attempt.status === 'not-started' || attempt.responseDigest)) ? 'paused' as const
         : reason === 'protocol-exhausted' || reason === 'nonconverging' ? 'unresolved' as const : 'fenced' as const
       if (process.env.NT_TEST_WEB_PI_DIAGNOSTIC === '1')
         console.error('Trusted local Story discovery failure:', JSON.stringify({

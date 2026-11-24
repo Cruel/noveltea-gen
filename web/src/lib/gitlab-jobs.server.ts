@@ -2,6 +2,7 @@ import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { StudioSchemaError } from '../db/schema-error'
 import { prepareCachedJob } from './cached-jobs.server'
+import type { ProviderHandoffEffect } from './discovery-handoff-effects.server'
 import { GitCacheError } from './git-cache.server'
 import { actor, failure, ProviderFailure, reply } from './gitlab-repositories.server'
 import { verifyGitlabStorySelection } from './gitlab-stories.server'
@@ -11,6 +12,7 @@ import { repositoryForStory, requireUser } from './access.server'
 // as GitHub, with its own OAuth membership and pinned metadata preflight.
 export async function gitlabJobRequest(
   auth: StudioAuth, store: StudioDatabase, request: Request, baseURL: string,
+  effect?: ProviderHandoffEffect,
 ): Promise<Response> {
   if (request.method !== 'POST') return reply({ error: 'Method not allowed' }, 405)
   if (request.headers.get('origin') !== baseURL) return reply({ error: 'Cross-origin write refused' }, 403)
@@ -27,7 +29,7 @@ export async function gitlabJobRequest(
       const preflight = await verifyGitlabStorySelection(current.token, projectId, row.repository, commit, row.directory)
       return { remoteUrl: `https://gitlab.com/${row.repository}.git`,
         sizeBytes: preflight.sizeBytes, blobCount: preflight.blobCount }
-    })
+    }, effect)
     return reply({ job })
   } catch (error) {
     if (error instanceof StudioSchemaError) return reply({ error: error.message }, 503)

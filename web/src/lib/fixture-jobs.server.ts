@@ -7,7 +7,9 @@ import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { requireUser } from './access.server'
 import { startStoryJob, type JobStartResult } from '../../../src/job'
-import { parseGenerationContract, type GenerationRequest } from '../../../src/generation'
+import { parseGenerationContract, requireGenerationTurn, type GenerationRequest } from '../../../src/generation'
+import { readDiscoveryHandoff } from '../../../src/discovery-generation-handoff'
+import { readHandoffEffect } from './discovery-handoff-effects.server'
 import { assertServerClaimPermitted, sameGenerationRequest } from '../../../src/generation-owner'
 import { trustedHead } from '../../../src/revision'
 import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
@@ -452,6 +454,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       throw new JobError(409, 'Job already has a different pinned generation request.')
     const queued = (await queueRecord(store, id))
     if (existing) {
+      if (existing.discoveryHandoffDigest) await requireGenerationTurn(job, existing, true)
       return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
     if (row.status !== 'paused') throw new JobError(409, 'Only a prepared job can start generation.')
@@ -483,13 +486,26 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
     if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
       cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     }).trim()) throw new JobError(409, 'Uncommitted files require manual reconciliation.')
+    const handoff = await readDiscoveryHandoff(job)
+    const story = await store.persistence.naturalStory.story(user.id, row.storyId)
+    const effect = story && await readHandoffEffect(store, user.id, story.repositoryId, row.storyId, row.id)
+    const discovery = story && await store.persistence.onboarding.conversation(user.id, story.repositoryId,
+      'story-chat,' + row.storyId + ',' + row.id)
+    if ((discovery || effect || handoff) && (!handoff || !effect || effect.digest !== handoff.digest ||
+        !['queue-started', 'queue-settled'].includes(effect.stage)))
+      throw new JobError(409, 'Approved Discovery has not settled its original foundation and queue admission.')
+    if (handoff && (handoff.owner !== user.id || handoff.storyId !== row.storyId ||
+        !row.configJson || JSON.stringify(JSON.parse(row.configJson).limits) !== JSON.stringify(handoff.limits)))
+      throw new JobError(409, 'Generation admission differs from the original Discovery Turn envelope.')
     const pinned: GenerationRequest = {
       story: job.storyRoot, job: row.id, task: input.task, contract: input.contract, fixture: !selected,
       orchestrationPolicy: selected || process.env.NT_STUDIO_SKILLS_SOURCE ? 'explicit' : 'fixture-test',
       ...(turn ? { turnPlanDigest: turn.digest } : {}),
+      ...(handoff ? { discoveryHandoffDigest: handoff.digest } : {}),
       ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
       ...(selected ? { provider: selected.provider, model: selected.id } : {}),
     }
+    await requireGenerationTurn(job, pinned)
     try { await assertServerClaimPermitted(job, job.threadId + ':generation:web', pinned) }
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
     await queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),

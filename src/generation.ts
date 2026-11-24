@@ -101,7 +101,7 @@ export { generationStages, type GenerationEvidence } from "./generation-plan.js"
 export interface GenerationRequest {
   story: string; job: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string;
-  provider?: string; model?: string; turnPlanDigest?: string;
+  provider?: string; model?: string; turnPlanDigest?: string; discoveryHandoffDigest?: string;
   /** Fixtures may omit the model planner, never the shared assignment lifecycle. */
   orchestrationPolicy?: "explicit" | "fixture-test";
 }
@@ -206,6 +206,7 @@ export const GenerationInputSchema = z.object({
     provider: z.string().optional(),
     model: z.string().optional(),
     turnPlanDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    discoveryHandoffDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     orchestrationPolicy: z.enum(["explicit", "fixture-test"]).optional(),
   }),
   pauseAfter: z.enum(generationStages).nullable().optional(),
@@ -296,6 +297,15 @@ export function parseGenerationContract(value: unknown): CompletionContract {
  * isolated from live Pi authority; a missing live Turn is never a fallback. */
 export async function requireGenerationTurn(job: JobStartResult, request: GenerationRequest,
   admitted = false) {
+  const { readDiscoveryHandoff } = await import("./discovery-generation-handoff.js");
+  const handoff = await readDiscoveryHandoff(job);
+  if (handoff || request.discoveryHandoffDigest) {
+    if (!handoff || request.discoveryHandoffDigest !== handoff.digest ||
+        handoff.turnPlanDigest !== request.turnPlanDigest ||
+        handoff.originalObjective !== request.task || handoff.model.provider !== request.provider ||
+        handoff.model.id !== request.model || request.fixture)
+      throw Error("Generation request differs from its authenticated Discovery handoff.");
+  }
   if (request.orchestrationPolicy !== undefined && request.orchestrationPolicy !== "explicit" &&
       request.orchestrationPolicy !== "fixture-test")
     throw Error("Obsolete Generation execution format; inspect or start a current Turn.");

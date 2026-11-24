@@ -7,6 +7,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { startStoryJob } from '../../src/job'
+import { readDiscoveryHandoff } from '../../src/discovery-generation-handoff'
+import { inspectPiPolicy } from '../../src/job-pi-policy'
+import { requireGenerationTurn } from '../../src/generation'
+import { readHandoffEffect } from '../src/lib/discovery-handoff-effects.server'
 import { initialStoryDocument } from '../src/lib/git-cache.server'
 import { openStoryThread } from '../src/lib/story-threads.server'
 import { removeTestTree } from '../../test/helpers'
@@ -393,7 +397,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.equal(blockedContinuation.body.continuation.state, 'blocked')
     assert.equal((await req(storyIds[0]!, firstId, 'POST', {
       action: 'approve', revision: proposed.revision, digest: proposed.digest,
-    })).status, 409)
+    })).status, 200, 'identical approval submission is idempotent')
     assert.equal((await req(storyIds[0]!, firstId, 'POST', {
       action: 'revise', revision: proposed.revision, text: 'Tamper',
     })).status, 409)
@@ -740,15 +744,20 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       }))
       process.env.NT_CONFIG_FILE = configPath
       let gatewayCalls = 0
-      const gateway = async (_auth: unknown, _store: unknown, request: Request) => {
+      const gateway = async (_auth: unknown, _store: unknown, request: Request,
+        _url: string, effect?: import('../src/lib/discovery-handoff-effects.server').ProviderHandoffEffect) => {
         gatewayCalls++
+        if (gatewayCalls === 1) return Response.json({ error: 'Provider temporarily unavailable' }, { status: 503 })
         const input = await request.json() as { storyId: string; jobId: string; commit: string }
         assert.deepEqual(input, { storyId: storyIds[4], jobId: conflictId, commit: correctedSource })
+        await effect?.('provider-verified')
+        await effect?.('worktree-started')
         await startStoryJob({ story: correctedStory, job: conflictId, worktreeCacheRoot: cache })
         await store.persistence.generation.jobs.register(alice, conflictId, storyIds[4]!,
           'The Last Bell', correctedSource, new Date().toISOString())
         await store.persistence.conversations.reconcileRoots(alice, storyIds[4]!)
-        return Response.json({ job: { headSha: correctedSource } })
+        // Lose the response after the registration, before recording settlement.
+        return Response.json({ error: 'Lost acquisition response' }, { status: 503 })
       }
       const continueRequest = (action: 'approve' | 'continue', revision: number, digest: string) =>
         storyChatDiscoveryRequest(auth, store,
@@ -760,16 +769,30 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       const approved = await continueRequest('approve', resolvedProposal.revision, resolvedProposal.digest)
       const approval = await approved.json() as any
       assert.equal(approved.status, 200, JSON.stringify(approval))
-      assert.equal(approval.continuation.state, 'queued', JSON.stringify(approval.continuation))
+      assert.equal(approval.continuation.state, 'blocked')
+      const lost = await continueRequest('continue', approval.session.revision, approval.session.digest)
+      assert.equal((await lost.json() as any).continuation.state, 'blocked')
+      const recovered = await continueRequest('continue', approval.session.revision, approval.session.digest)
+      const continued = await recovered.json() as any
+      assert.equal(continued.continuation.state, 'queued', JSON.stringify(continued.continuation))
+      const job = await startStoryJob({ story: correctedStory, job: conflictId, worktreeCacheRoot: cache }, false)
+      const handoff = await readDiscoveryHandoff(job)
+      assert.ok(handoff && handoff.usage.modelCalls > 1, 'prior Discovery rounds contribute to the shared meter')
+      assert.deepEqual((await inspectPiPolicy(job)).budget, handoff.usage)
+      assert.equal((await readHandoffEffect(store, alice, repositoryId, storyIds[4]!, conflictId))?.stage, 'queue-settled')
+      const request = JSON.parse((await store.persistence.generation.jobs.state(alice, conflictId))!.requestJson!)
+      await requireGenerationTurn(job, request)
+      await assert.rejects(requireGenerationTurn(job, { ...request, discoveryHandoffDigest: '0'.repeat(64) }), /handoff/)
       assert.equal((await store.persistence.generation.queue.record(conflictId))?.phase, 'queued')
       const thread = await openStoryThread(store, alice, storyIds[4]!, 'root:' + conflictId)
       assert.deepEqual(thread.state.turns, [{ id: conflictId, executionIds: [conflictId] }])
       assert.equal(thread.state.messages[0]?.content, initial)
       assert.equal(thread.state.messages[0]?.phase, 'running')
-      assert.equal(gatewayCalls, 1)
+      assert.equal(gatewayCalls, 2)
       const duplicate = await continueRequest('continue', approval.session.revision, approval.session.digest)
       assert.equal((await duplicate.json() as any).continuation.state, 'queued')
-      assert.equal(gatewayCalls, 1)
+      assert.equal(gatewayCalls, 2)
+      assert.deepEqual((await inspectPiPolicy(job)).budget, handoff.usage)
       assert.equal(git('rev-parse', 'HEAD'), correctedSource)
     } finally {
       for (const [name, value] of Object.entries(executionEnv)) {

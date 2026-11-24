@@ -5,6 +5,7 @@ import { actorFor, errorResponse, GithubError, json, matchingRepository } from '
 import { verifyGithubStorySelection } from './github-stories.server'
 import { verifiedGithubInitialFoundation } from './github-initial-foundation.server'
 import { prepareCachedJob } from './cached-jobs.server'
+import type { ProviderHandoffEffect } from './discovery-handoff-effects.server'
 import { GitCacheError, initialStoryDocument } from './git-cache.server'
 import { repositoryForStory, requireUser } from './access.server'
 
@@ -15,6 +16,7 @@ import { repositoryForStory, requireUser } from './access.server'
 // remote path alone.
 export async function githubJobRequest(
   auth: StudioAuth, store: StudioDatabase, request: Request, baseURL: string,
+  effect?: ProviderHandoffEffect,
 ): Promise<Response> {
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
   if (request.headers.get('origin') !== baseURL) return json({ error: 'Cross-origin write refused' }, 403)
@@ -53,7 +55,7 @@ export async function githubJobRequest(
             throw error
           return { remoteUrl, reopenDraft: true as const }
         }
-      })
+      }, effect)
     return json({ job })
   } catch (error) {
     return errorResponse(error instanceof GitCacheError ? new GithubError(error.status, error.message) : error)
