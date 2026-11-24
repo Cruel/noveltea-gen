@@ -198,12 +198,10 @@ export async function launchNaturalStory(auth: StudioAuth, store: StudioDatabase
   const available = await modelOptions(store, actor.id)
   const model = input.model === undefined ? available.defaultModel : input.model
   if (model !== null && !validPiSelection(model)) throw new Error('Invalid model selection.')
-  if (input.fixture === true && model !== null)
-    throw new Error('Fixture execution cannot select a real model.')
-  if (model === null && input.fixture !== true)
-    throw new Error('Connect a model in Settings, or explicitly choose a fixture test run.')
-  if (model) await assertUserPiSelection(store, actor.id, model)
-  verifyWebExecution(!model)
+  if (input.fixture === true) throw new Error('Fixture execution is retired.')
+  if (model === null) throw new Error('Connect a model in Settings before starting Generation.')
+  verifyWebExecution(false)
+  await assertUserPiSelection(store, actor.id, model)
 
   const previous = await store.persistence.naturalStory.previousJob(actor.id, input.jobId)
   if (previous && (previous.storyId !== story.storyId ||

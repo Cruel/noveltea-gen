@@ -10,6 +10,8 @@ import { forkSourceSummary, type RecoveryForkBundle } from '../../../src/recover
 import type { GenerationDraft } from './generation-config.server'
 import { ensureRootThreads } from './threads.server'
 import { snapshotForkBoundaryHistory } from './thread-fork-history.server'
+import { prepareReplacementTurn } from './replacement-turn.server'
+import { requireGenerationTurn } from '../../../src/generation'
 
 const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'private, no-store' } })
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
@@ -113,7 +115,9 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
     }
     if (!intent) {
       const original = pinnedRequest(row, parent)
-      if (!original) throw new GitCacheError(409, 'Source has no pinned generation request.')
+      if (!original || original.fixture || !original.turnPlanDigest)
+        throw new GitCacheError(409, 'Source has no current authenticated Generation request.')
+      await requireGenerationTurn(parent, original, true)
       const bundle = await collectRecoveryFork(parent, input.childId, input.commitSha,
         original.contract, original.skillsSource, sameThread ? 'same-thread' : 'isolated')
       if (bundle.checkpoint.proofDigest !== input.proofDigest)
@@ -138,7 +142,12 @@ async function checkpointRecoveryRequest(auth: StudioAuth, store: StudioDatabase
       if (!matches(intent)) throw new GitCacheError(409, 'Child ID was reserved concurrently.')
 
     }
-    const child = await forkCachedStory(parent, JSON.parse(intent!.bundle) as RecoveryForkBundle)
+    const bundle = JSON.parse(intent!.bundle) as RecoveryForkBundle
+    if (!bundle.reviewTurn)
+      throw new GitCacheError(409, 'Historical checkpoint has no authenticated current Turn; inspection only.')
+    const child = await forkCachedStory(parent, bundle)
+    await prepareReplacementTurn(child, JSON.parse(intent!.draft) as GenerationDraft,
+      sourceId, bundle.reviewTurn.creativePolicy)
     const now = new Date().toISOString()
     if (sameThread) {
       await store.persistence.advancedThreads.registerRecoveryContinuation({

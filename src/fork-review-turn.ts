@@ -69,7 +69,8 @@ export function readInheritedReviewTurn(job: JobStartResult): TurnEvidence | nul
           jobId: fork.sourceJobId,
           baseSha: fork.sourceBaseSha,
         } as JobStartResult);
-  if (fork.checkpoint.assurance && fork.checkpoint.assurance.turnDigest !== sourceTurn.digest)
+  if (fork.checkpoint.assurance && fork.checkpoint.assurance.turnDigest !== original.digest &&
+      fork.checkpoint.assurance.turnDigest !== sourceTurn.digest)
     throw Error("Fork source checkpoint review attribution differs from inherited Turn.");
   return projectReviewTurn(original, job);
 }

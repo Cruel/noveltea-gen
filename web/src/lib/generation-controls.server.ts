@@ -225,6 +225,8 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
   threadId: string, pinned: string, retry: boolean, originalStatus?: string, principal?: string):
   Promise<{ intent: QueueIntent; resumeKind: ResumeKind | null }> {
   const request = JSON.parse(pinned) as GenerationRequest
+  if (request.fixture || !request.turnPlanDigest)
+    throw Error('Generation requires an authenticated current-format Turn plan and selected model; fixture execution is retired.')
   await requireGenerationTurn(job, request, true)
   return withStoryJobLock(job, 'studio-control-recovery', async () => {
     const env = { ...process.env }

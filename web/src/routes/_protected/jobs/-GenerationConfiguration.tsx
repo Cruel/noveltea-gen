@@ -269,12 +269,12 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
     <h3>Model and budgets</h3>
     <p>Manage <a href="/settings#ai-models">model credentials and defaults</a> in Settings.</p>
     <p role="status">{data.modelAvailability} Selected models run through the isolated Story sandbox.
-      Without a model, the job uses deterministic fixtures.</p>
+      A connected model is required to start generation.</p>
     <div className="generation-controls">
       <label>Model
         <StudioSelect aria-label="Generation model" disabled={busy} value={selectedModel}
           onValueChange={value => { setSelectedModel(value); setThinking(''); setSaved(false) }}
-          options={[{ value: '', label: 'No model (deterministic fixture)' },
+          options={[{ value: '', label: 'Select a model' },
             ...(selectedModel && !data.models.some(m => m.provider + '/' + m.id === selectedModel)
               ? [{ value: selectedModel, label: selectedModel + ' (disconnected — reconnect)' }] : []),
             ...data.models.map(model => ({ value: model.provider + '/' + model.id,
@@ -334,8 +334,8 @@ export function GenerationConfiguration({ jobId, onStarted, immutableContract = 
       <Button type="button" disabled={busy || !task.trim()} onClick={() => void persist(false)}>
         {busy ? 'Validating…' : 'Validate and save'}
       </Button>
-      <Button type="button" disabled={busy || !task.trim()} onClick={() => void persist(true)}>
-        {busy ? 'Starting…' : selectedModel ? 'Save and start generation' : 'Save and start fixture generation'}
+      <Button type="button" disabled={busy || !task.trim() || !selectedModel} onClick={() => void persist(true)}>
+        {busy ? 'Starting…' : 'Save and start generation'}
       </Button>
     </div>
   </section>

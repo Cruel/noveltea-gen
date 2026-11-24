@@ -10,6 +10,9 @@ import { forkCachedStory, continueCachedStory, GitCacheError } from './git-cache
 import { revisionFromSource } from './story-revision.server'
 import { selectedJob, restoreJob, pinnedRequest } from './fixture-jobs.server'
 import { snapshotForkBoundaryHistory, recordForkBoundaryHistory, type ForkHistoryMessage } from './thread-fork-history.server'
+import { prepareReplacementTurn } from './replacement-turn.server'
+import { saveJobTurnPlan } from './turn-plan-receipt.server'
+import { requireGenerationTurn } from '../../../src/generation'
 import type { GenerationDraft } from './generation-config.server'
 
 const SHA = /^[a-f0-9]{40}$/
@@ -221,6 +224,10 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
   if (intent && !matches(intent) || existing && !intent)
     throw new ThreadEditError(409, 'Child identity is already reserved for a different operation.')
   if (!intent) {
+    if (!revision) {
+      if (original.fixture || !original.turnPlanDigest) throw new ThreadEditError(409, 'Historical checkpoint has no authenticated current Turn; inspection only.')
+      await requireGenerationTurn(source, original, true)
+    }
     const bundle = revision ? { mode: 'fresh-revision' as const, digest: revision.digest,
       sourceSha: revision.headSha, targets: revision.targets, paths: revision.writePaths } :
       await collectRecoveryFork(source, data.childId, point.commitSha,
@@ -254,6 +261,16 @@ export async function branchEditedThreadMessage(store: StudioDatabase, owner: st
   const fresh = 'mode' in savedBundle && savedBundle.mode === 'fresh-revision'
   const child = fresh ? await continueCachedStory(source, data.childId, point.commitSha) :
     await forkCachedStory(source, savedBundle as RecoveryForkBundle)
+  if (fresh) {
+    if (!revision?.turnPlan || revision.digest !== (savedBundle as { digest: string }).digest)
+      throw new ThreadEditError(409, 'Fresh edit no longer has its approved Turn.')
+    await saveJobTurnPlan(child, revision.turnPlan)
+  } else {
+    const bundle = savedBundle as RecoveryForkBundle
+    if (!bundle.reviewTurn) throw new ThreadEditError(409, 'Historical checkpoint cannot authorize a continuation.')
+    await prepareReplacementTurn(child, JSON.parse(intent!.draft) as GenerationDraft,
+      preview.sourceJobId, bundle.reviewTurn.creativePolicy)
+  }
   const now = new Date().toISOString(), childThread = 'fork:' + child.jobId
   await store.persistence.advancedThreads.registerChild({
     childId: child.jobId, owner, storyId: row.storyId, title: row.title + ' (edited message)',

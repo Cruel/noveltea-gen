@@ -21,7 +21,13 @@ import { selectedJob, restoreJob, pinnedRequest } from '../src/lib/fixture-jobs.
 import { advanceThread, readThreadChat, cancelQueuedThreadMessage,
   settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
-import { readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { withJobModelRuntime } from '../../src/model-runtime'
+import { revisionRuntime } from './support/scripted-revision-provider'
+import { scriptedModel, fixtureSandboxClient } from '../../test/c03-scripted-story-helpers'
+import { installScriptedArchiveProvider } from './support/scripted-archive-provider'
+import { planWholeStory } from '../src/lib/turn-plan'
+import { userPiCredentials } from '../src/lib/pi-credentials.server'
+import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { recordSteeringConsideration, prepareSteeringBoundaryReviews,
   attributeApprovedReplanCheckpoint } from '../src/lib/thread-steering-replan.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
@@ -58,16 +64,37 @@ const catalog = [
 async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'dependency' | 'steering' | 'steering-protected' | 'steering-stale' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE',
-    'NT_FOCUS_FIXTURE_DEPENDENCY', 'NT_SKILL_CACHE_DIR']
+    'NT_FOCUS_FIXTURE_DEPENDENCY', 'NT_SKILL_CACHE_DIR', 'NT_REQUIRE_USER_PI_RUNTIME', 'NT_PI_CREDENTIAL_KEY', 'PI_OFFLINE', 'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN']
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STATE_DIR = join(root, 'state')
   delete process.env.NT_STUDIO_SKILLS_SOURCE
+  process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+  process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 19).toString('base64')
+  process.env.PI_OFFLINE = '1'
+  process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:1'
+  process.env.NT_AGENT_RPC_TOKEN = 'local-revision-test-token-not-used-for-network'
+  let restoreProvider: (() => void) | undefined
+  const execute = ['dependency', 'steering', 'steering-protected', 'steering-stale'].includes(kind)
+  let restoreSandbox: (() => void) | undefined
+  const fixtureDir = resolve(import.meta.dirname, '../../test/fixtures/archive-witness')
+  const canonical = (record: typeof catalog[number]) => {
+    const id = record.metadata.id
+    if (id === 'creative-direction.direction') return readFileSync(join(fixtureDir, 'creative-direction/foundation.md'), 'utf8').replace('id: creative-direction.foundation', 'id: creative-direction.direction')
+    const meta = id === 'arc.trust' ? 'dramatic_question: Can Nia rebuild trust?\ncharacters: [character.nia]' :
+      id === 'character.nia' ? 'motivation: Regain trust by explaining the concealed letter\ninitial_knowledge: []' :
+      id === 'milestone.confession' ? 'change: The sealed letter becomes a shared responsibility\narcs: [arc.trust]\nfulfillment: {any_of: [[event.confession]]}' :
+      id.startsWith('event.') ? 'participants: [character.nia]\narcs: [arc.trust]\nconsequences: ["Nia confesses to concealing the letter"]\nafter: []\nprerequisites: {any_of: [{completed: [], not_completed: [], conditions: []}]}\nsteps: []' :
+      'events: [event.confession]\nrevelations: []'
+    return "---\nschema: '0.1'\ntype: " + record.metadata.type + '\nid: ' + id + '\ntitle: ' +
+      JSON.stringify(record.metadata.title) + '\nstatus: draft\ndecisions: []\n' + meta + '\n---\n\n# ' +
+      record.metadata.title + '\n\nNia sets the sealed letter on the table. "I kept this from you," she says. She waits for an answer.\n'
+  }
   const remote = join(root, 'remote')
   for (const record of catalog) {
     const target = join(remote, 'story', record.path)
     mkdirSync(join(target, '..'), { recursive: true })
-    writeFileSync(target, '# ' + record.metadata.title + '\n')
+    writeFileSync(target, execute ? canonical(record) : '# ' + record.metadata.title + '\n')
   }
   git(remote, 'init', '-q')
   git(remote, 'config', 'user.name', 'Author')
@@ -99,7 +126,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
   diagnostics: [], ...report}));
 `)
   chmodSync(cli, 0o755)
-  process.env.NT_NATIVE_CLI = cli
+  if (!execute) process.env.NT_NATIVE_CLI = cli
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
   try {
     await migrateStudio(store, config)
@@ -118,15 +145,23 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     const originalContract = { scope: { kind: 'full-story' as const,
       depth: 'composition' as const, targets: [], branches: [] },
       constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
+    const parentTurn = planWholeStory('Build the story', originalContract, parent.baseSha)
+    await saveJobTurnPlan(parent, parentTurn)
+    const provider = await installScriptedArchiveProvider(parent, parentTurn)
+    restoreProvider = provider.restore
+    await userPiCredentials(store, owner).modify(scriptedModel.provider,
+      async () => ({ type: 'api_key', key: 'in-process-only' }))
+    const model = { provider: scriptedModel.provider, id: scriptedModel.id }
     const sourceRequest = { story: parent.storyRoot, job: parent.jobId,
-      task: 'Build the story', contract: originalContract, fixture: true }
+      task: 'Build the story', contract: originalContract, fixture: false, provider: model.provider, model: model.id,
+      turnPlanDigest: parentTurn.digest }
     ;(await seed.job({ id: sourceId, ownerUserId: owner, storyId, title: 'Source Story',
       sourceCommitSha: sha, status: 'completed', createdAt: 'now', updatedAt: 'now',
       generationRequestJson: JSON.stringify(sourceRequest),
       generationThreadId: parent.threadId + ':generation:web',
       generationConfigJson: JSON.stringify({
         version: 1, headSha: sha, task: sourceRequest.task, contract: originalContract,
-        limits: { steps: 6 }, model: null,
+        limits: { steps: 6 }, model,
       }) }))
     ;(await seed.queue({ jobId: sourceId, ownerUserId: owner, intent: 'start',
       phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
@@ -173,19 +208,19 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         ['authored-content/confession.md'])
       assert.equal(preview.plan.reviewRequired, false)
       const started = await launchNaturalStory(auth, store, headers, config.baseURL, {
-        storyId, jobId: firstJobId, headSha: sha, prompt: request, fixture: true, model: null,
+        storyId, jobId: firstJobId, headSha: sha, prompt: request, fixture: false, model,
       })
       assert.equal(started.jobId, firstJobId)
       assert.equal((await launchNaturalStory(auth, store, headers, config.baseURL, {
-        storyId, jobId: firstJobId, headSha: sha, prompt: request, fixture: true, model: null,
+        storyId, jobId: firstJobId, headSha: sha, prompt: request, fixture: false, model,
       })).jobId, firstJobId, 'idempotent first-Turn retry reuses the saved scope')
       await assert.rejects(launchNaturalStory(auth, store, headers, config.baseURL, {
         storyId, jobId: firstJobId, headSha: sha,
-        prompt: 'Make the story more suspenseful', fixture: true, model: null,
+        prompt: 'Make the story more suspenseful', fixture: false, model,
       }), /different original objective/i)
       await assert.rejects(launchNaturalStory(auth, store, headers, config.baseURL, {
         storyId, jobId: firstJobId, headSha: sha, prompt: request,
-        edits: { constraints: ['Forged scope from an HTTP retry'] }, fixture: true, model: null,
+        edits: { constraints: ['Forged scope from an HTTP retry'] }, fixture: false, model,
       }), /different original objective/i)
       const admitted = await readJobTurnPlan(first)
       assert.equal(admitted?.kind, 'revision')
@@ -193,6 +228,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
       assert.deepEqual(admitted?.objective?.requestedTargets, ['authored-content.confession'])
       assert.equal(pinnedRequest(await selectedJob(store, owner, firstJobId), first)?.contract.scope.kind,
         'partial', 'first Chat Turn must not enqueue seven global stages')
+      const runtime = execute ? await revisionRuntime(first, admitted!, kind === 'dependency') : null
+      if (execute) restoreSandbox = fixtureSandboxClient(first.jobId, first.worktreeStoryRoot)
       if (kind === 'steering' || kind === 'steering-protected' || kind === 'steering-stale') {
         const negative = kind !== 'steering'
         const ownerThreadId = await store.persistence.continuation.runThread(owner, firstJobId)
@@ -232,7 +269,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
               return store.persistence.steering.settleBoundary(owner, firstJobId,
                 ownerThreadId, decision, new Date().toISOString())
             },
-          }, () => running.graph.invoke({ request: pinned, pauseAfter: 'focus' }, graphConfig))
+          }, () => withJobModelRuntime(runtime!.runtime, () => running.graph.invoke({ request: pinned, pauseAfter: 'focus' }, graphConfig)))
           assert.equal(result.status, 'paused', result.reason ?? JSON.stringify(result))
           if (negative) {
             assert.match(result.reason ?? '', /author approval required/i)
@@ -274,7 +311,7 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         const restarted = openWebGenerationGraph(checkpoint)
         try {
           const state = await restarted.graph.getState(graphConfig)
-          await restarted.graph.invoke({ ...state.values, request: pinned, pauseAfter: null }, graphConfig)
+          await withJobModelRuntime(runtime!.runtime, () => restarted.graph.invoke({ ...state.values, request: pinned, pauseAfter: null }, { ...graphConfig, interruptBefore: ['completion_decision'] }))
         } finally { restarted.saver.db.close() }
         assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), committed,
           'resume cannot replay an independently verified specialist')
@@ -286,21 +323,11 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         const row = await selectedJob(store, owner, firstJobId)
         await assert.rejects(selectedJob(store, stranger, firstJobId), /not connected to this account/i)
         const pinned = pinnedRequest(row, first)!
-        const event = readFileSync(join(first.worktreeStoryRoot, 'events/confession.md'), 'utf8')
-        process.env.NT_FOCUS_FIXTURE_DEPENDENCY = JSON.stringify({
-          sourceSha: first.baseSha, turnDigest: admitted!.digest,
-          assignmentId: 'focus:authored-content.confession',
-          obligation: admitted!.objective!.obligations[0],
-          missing: 'Clarify the necessary causal preparation for the confession',
-          affectedIds: ['authored-content.confession', 'event.confession'],
-          sources: [{ path: 'events/confession.md', sha256: sourceDigest(event), quote: '# Confession event' }],
-          likelySpecialist: 'nt-event-design', authorDecisionRequired: false,
-        })
         const checkpoint = join(first.stateDir, 'web-generation.sqlite')
         const graphConfig = { configurable: { thread_id: first.threadId + ':generation:web' }, recursionLimit: 100 }
         const running = openWebGenerationGraph(checkpoint)
         try {
-          const result = await running.graph.invoke({ request: pinned, pauseAfter: 'focus' }, graphConfig)
+          const result = await withJobModelRuntime(runtime!.runtime, () => running.graph.invoke({ request: pinned, pauseAfter: 'focus' }, graphConfig))
           assert.equal(result.status, 'paused', result.reason ?? JSON.stringify(result))
         } finally { running.saver.db.close() }
         const amendments = await inspectDependencyPlan(first)
@@ -315,12 +342,12 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
         const restarted = openWebGenerationGraph(checkpoint)
         try {
           const state = await restarted.graph.getState(graphConfig)
-          await restarted.graph.invoke({ ...state.values, request: pinned, pauseAfter: null }, graphConfig)
+          await withJobModelRuntime(runtime!.runtime, () => restarted.graph.invoke({ ...state.values, request: pinned, pauseAfter: null }, { ...graphConfig, interruptBefore: ['completion_decision'] }))
           assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), head)
           const foreign = await restarted.graph.invoke({ request: pinned },
             { configurable: { thread_id: 'another-owner-thread' } })
           assert.equal(foreign.status, 'blocked')
-          assert.match(foreign.reason!, /another thread|pinned request|second writer/)
+          assert.match(foreign.reason!, /another thread|pinned (queue )?request|second writer/)
           assert.equal(git(first.worktreeRoot, 'rev-parse', 'HEAD'), head)
         } finally { restarted.saver.db.close() }
         assert.deepEqual(await inspectDependencyPlan(first), amendments)
@@ -762,6 +789,8 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
     assert.equal(git(parent.worktreeRoot, 'rev-parse', 'HEAD'), sha)
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally {
+    restoreSandbox?.()
+    restoreProvider?.()
     store.close()
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key]

@@ -131,11 +131,21 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   // a successor Thread; it is NOT transplanted into child turn-plan.json and
   // never conveys approvals or authoring grants. Every parent checkpoint with
   // assurance must match that review-only Turn before a fork is admitted.
-  if (selected.assurance && (!parentReviewTurn ||
-      !inherited && parentReviewTurn.digest !== selected.assurance.turnDigest))
+  // New checkpoints from a current child are attributable to its own Turn.
+  // For an unchanged inherited anchor, retain the sealed ancestor's exact
+  // review identity rather than silently relabeling the old effect.
+  const reviewTurn = inheritedAnchor
+    ? inherited!.reviewTurn
+    : parentReviewTurn?.digest === selected.assurance?.turnDigest &&
+        existsSync(join(parent.stateDir, "turn-plan.json"))
+      ? parentReviewTurn
+      : inherited?.reviewTurn ?? parentReviewTurn;
+  if (selected.assurance && (!reviewTurn ||
+      (inheritedAnchor
+        ? inherited!.checkpoint.assurance?.turnDigest !== selected.assurance.turnDigest
+        : parentReviewTurn?.digest !== selected.assurance.turnDigest)))
     throw new RecoveryCompatibilityError("invalid-evidence",
       "Historical independent review has lost its original authorized Turn evidence.");
-  const reviewTurn = inherited?.reviewTurn ?? parentReviewTurn;
   // Each source reviewer decision is resolved exactly at fork admission. The
   // child retains that versioned status and cannot inherit a later pass.
   const previousCoverage = inherited?.reviewCoverage ?? [];

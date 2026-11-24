@@ -29,6 +29,11 @@ import { interpretNaturalStoryPrompt } from '../src/lib/natural-story-plan'
 import { associateNaturalThread } from '../src/lib/natural-story.server'
 import { ensureRootThreads } from '../src/lib/threads.server'
 import { readThreadChat } from '../src/lib/thread-chat.server'
+import { planWholeStory } from '../src/lib/turn-plan'
+import { saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { userPiCredentials } from '../src/lib/pi-credentials.server'
+import { scriptedModel } from '../../test/c03-scripted-story-helpers'
+import { installScriptedArchiveProvider } from './support/scripted-archive-provider'
 
 const secret = 'stable-test-secret-0123456789abcdefghijklmnopqrstuvwxyz'
 const config = {
@@ -52,22 +57,29 @@ function git(cwd: string, ...args: string[]) {
   return result.stdout.trim()
 }
 
-test('authenticated fixture start binds one checkpoint and returns it after a database restart', {
+test('authenticated scripted Pi start binds one checkpoint and returns it after a database restart', {
   skip: !available, timeout: 180_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-studio-fixture-'))
   const old = Object.fromEntries(['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_STUDIO_SKILLS_SOURCE',
     'NT_CONFIG_FILE',
-    'NT_SKILL_CACHE_DIR', 'NT_LIVE_GENERATION_IDEA'].map(key => [key, process.env[key]]))
+    'NT_SKILL_CACHE_DIR', 'NT_LIVE_GENERATION_IDEA', 'NT_REQUIRE_USER_PI_RUNTIME', 'NT_PI_CREDENTIAL_KEY',
+    'PI_OFFLINE', 'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN'].map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'durable')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
   delete process.env.NT_LIVE_GENERATION_IDEA
+  process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+  process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 17).toString('base64')
+  process.env.PI_OFFLINE = '1'
+  process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:1'
+  process.env.NT_AGENT_RPC_TOKEN = 'scripted-archive-test-token-not-used-for-network'
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
   let store = openStudioDatabase(join(root, 'studio.sqlite'))
   let worker: ChildProcess | undefined
+  let restoreProvider: (() => void) | undefined
   try {
     const maintenance = openStudioSchemaConnection({ backend: 'sqlite', path: join(root, 'studio.sqlite') })
     try { await migrateStudioKysely(maintenance, config) }
@@ -104,6 +116,14 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       commit: pinned, directory: 'story', jobId,
       verifiedSizeBytes: 0, verifiedBlobCount: 1,
     })
+    const turn = planWholeStory(payload.task, parseGenerationContract(contract), acquired.baseSha)
+    const workerInput = join(root, 'scripted-worker.json')
+    writeFileSync(workerInput, JSON.stringify({ job: acquired, turn }), { mode: 0o600 })
+    const provider = await installScriptedArchiveProvider(acquired, turn)
+    restoreProvider = provider.restore
+    await userPiCredentials(store, alice.id).modify(scriptedModel.provider,
+      async () => ({ type: 'api_key', key: 'in-process-only' }))
+    const model = { provider: scriptedModel.provider, id: scriptedModel.id }
     const seed = studioSeed(store)
     ;(await seed.repository({ id: repoId, ownerUserId: alice.id, provider: 'github',
       providerRepositoryId: '123', name: 'Acme/Private', createdAt: '2026-11-01' }))
@@ -156,9 +176,17 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal((await api('GET', undefined, aliceCookie)).body.job.status, 'prepared')
     assert.equal((await api('POST', payload, aliceCookie)).status, 409)
     git(acquired.worktreeRoot, 'reset', '--hard', pinned)
-    process.env.NT_LIVE_GENERATION_IDEA = '1'
-    assert.equal((await api('POST', payload, aliceCookie)).status, 503)
-    delete process.env.NT_LIVE_GENERATION_IDEA
+    const obsolete = await api('POST', payload, aliceCookie)
+    assert.equal(obsolete.status, 409)
+    assert.equal(await queueRecord(store, jobId), undefined)
+    assert.equal(existsSync(join(acquired.stateDir, 'generation-server-owner.json')), false)
+    assert.equal(provider.observed.length, 0)
+    await saveJobTurnPlan(acquired, turn)
+    assert.equal((await api('POST', payload, aliceCookie)).status, 409, 'A Turn alone cannot select fixture execution')
+    await store.persistence.generation.jobs.saveConfiguration(alice.id, jobId,
+      JSON.stringify({ version: 1, headSha: acquired.headSha, ...payload,
+        contract: parseGenerationContract(contract), limits: { steps: 30 }, pauseAfter: 'foundation', model }),
+      new Date().toISOString())
     // A preexisting CLI checkpoint must be fenced BEFORE publishing a web
     // request to the application database, not only in LangGraph schedule.
     const cliCheckpoint = join(acquired.stateDir, 'generation.sqlite')
@@ -176,7 +204,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     ;(await store.testing.records.update('studio_sessions', { id: jobId }, {
       generationConfigJson: JSON.stringify({ version: 1, headSha: acquired.headSha,
         task: payload.task, contract: parseGenerationContract(contract),
-        limits: { steps: 30 }, model: null }),
+        limits: { steps: 30 }, pauseAfter: 'foundation', model }),
     }))
     assert.equal((await api('POST', { ...payload, task: 'Widen the task' }, aliceCookie)).status, 409)
     assert.equal((await api('POST', { ...payload, contract: { ...contract,
@@ -187,7 +215,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     // adopt the same claim without a second thread or CLI writer.
     await claimServerGeneration(acquired, acquired.threadId + ':generation:web', {
       story: acquired.storyRoot, job: jobId, task: payload.task,
-      contract: parseGenerationContract(contract), fixture: true, skillsSource: skills, orchestrationPolicy: 'explicit',
+      contract: parseGenerationContract(contract), fixture: false, skillsSource: skills, orchestrationPolicy: 'explicit',
+      turnPlanDigest: turn.digest, provider: model.provider, model: model.id,
     })
     const orphaned = await api('GET', undefined, aliceCookie)
     assert.equal(orphaned.body.job.status, 'interrupted')
@@ -218,10 +247,10 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     const port = portAddress.port
     await new Promise<void>((resolve, reject) => portProbe.close(error => error ? reject(error) : resolve()))
     const token = randomBytes(48).toString('hex')
-    worker = spawn(process.execPath, ['--import', 'tsx', resolve('src/agent-worker.ts')], {
+    worker = spawn(process.execPath, ['--import', 'tsx', resolve('test/support/scripted-archive-worker.ts')], {
       cwd: resolve('.'), stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, NT_STUDIO_DB_PATH: join(root, 'studio.sqlite'), NT_AGENT_PORT: String(port),
-        NT_AGENT_RPC_TOKEN: token, NT_SANDBOX_SOCKET: join(root, 'fixture-controller.sock'),
+        NT_TEST_ARCHIVE_WORKER_INPUT: workerInput, NT_AGENT_RPC_TOKEN: token, NT_SANDBOX_SOCKET: join(root, 'fixture-controller.sock'),
         NT_SANDBOX_TOKEN_FILE: join(root, 'fixture-controller-token'), NT_REQUIRE_SANDBOX_TOOLS: '1',
       },
     })
@@ -257,7 +286,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(started.body.job.completedStages.length, 1)
     assert.equal(git(repo, 'rev-parse', 'HEAD'), pinned)
     assert.equal(started.body.job.threadId, acquired.threadId + ':generation:web')
-    assert.equal(started.body.job.fixture, true)
+    assert.equal(started.body.job.fixture, false)
     const chat = (await readThreadChat(store, alice.id, 'root:' + jobId))
     assert.equal(chat.messages[0]?.content, naturalPlan.task)
     assert.match(chat.messages.at(-1)?.content ?? '', /paused/i)
@@ -422,10 +451,10 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     }), /Invalid trusted post-approval activity/);
     const pinnedRequest = JSON.parse((await store.testing.records.first<{ generationRequestJson: string }>(
       'studio_sessions', { id: jobId }))!.generationRequestJson)
-    assert.equal(pinnedRequest.fixture, true)
+    assert.equal(pinnedRequest.fixture, false)
     assert.equal(pinnedRequest.story, acquired.storyRoot)
-    assert.equal(pinnedRequest.model, undefined)
-    assert.equal(pinnedRequest.provider, undefined)
+    assert.equal(pinnedRequest.model, model.id)
+    assert.equal(pinnedRequest.provider, model.provider)
 
     // An obsolete plain paused status and question receipt cannot authorize
     // an answer or writer continuation without a pending nested checkpoint.
@@ -561,6 +590,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
       worker.kill('SIGKILL')
       await once(worker, 'exit')
     }
+    restoreProvider?.()
     await store.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]

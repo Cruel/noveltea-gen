@@ -831,12 +831,12 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/agent-runner.ts",
       "runPersistedGeneration",
-      "46da81b37712a60655f72f2a1a8ff5bf7548b2eb223763b7cc44b6dc25f3b30c"
+      "f359e0ef11f54d06e88b00e86147ff6dcbfd627fc755b3e1d548bf9354196f3b"
     ],
     [
       "web/src/lib/generation-controls.server.ts",
       "verifiedResumeAdmission",
-      "d8c9ec622485190e7035f9077136f6bed40a447bdb8760adffe23f0e7710669c"
+      "a92e9a86e0536bcc193a3d8d0d3b656234fa001d246d7c674b5792c691406381"
     ],
     [
       "web/src/lib/author-interactions.server.ts",

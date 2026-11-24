@@ -9,7 +9,6 @@ import { execFileSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
 import { join } from 'node:path'
 import type { StudioStore as StudioDatabase } from './persistence/store'
-import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
 import { requireGenerationTurn, type GenerationEvidence } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
 import { assertServerClaimPermitted, claimServerGeneration } from '../../src/generation-owner'
@@ -62,7 +61,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     throw new Error('Unsupported pinned generation stage pause.')
   const selected = config?.model ?? null
   if (selected && !validPiSelection(selected)) throw new Error('Saved Pi model is invalid.')
-  if (pinned.fixture === !!selected) throw new Error('Saved Pi model disagrees with pinned execution.')
+  if (pinned.fixture || !selected || !pinned.turnPlanDigest) throw new Error('Obsolete Generation: selected model and authenticated current-format Turn plan required.')
   await requireGenerationTurn(job, pinned)
   verifyWebExecution(pinned.fixture, true)
   await verifyTrustedRevision(job)
@@ -114,26 +113,23 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       }
     } finally { saver.db.close() }
   }
-  let runtime: ModelRuntime | undefined
-  if (selected) {
-    // This is an entirely read-only preflight: no Pi call, Git write, sandbox
-    // writer, graph stream, or server generation claim has occurred yet.
-    const verify = async () => {
-      const state = await store.persistence.generation.jobs.state(item.ownerId, row.id)
-      const lease = await queueRecord(store, row.id)
-      if (state?.status !== 'paused' || state.requestJson !== row.requestJson ||
-          state.threadId !== row.threadId || lease?.phase !== 'running' ||
-          lease.workerId !== item.workerId || await trustedHead(job) !== job.headSha ||
-          (!await questionAtDispatch() && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
-            cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-          }).trim()))
-        throw new Error('Preflight source changed; retain job for explicit reconciliation.')
-    }
-    runtime = await retryReadOnlyPreflight(async () => {
-      await assertUserPiSelection(store, item.ownerId, selected)
-      return createUserPiRuntime(store, item.ownerId)
-    }, verify)
+  // This is an entirely read-only preflight: no Pi call, Git write, sandbox
+  // writer, graph stream, or server generation claim has occurred yet.
+  const verify = async () => {
+    const state = await store.persistence.generation.jobs.state(item.ownerId, row.id)
+    const lease = await queueRecord(store, row.id)
+    if (state?.status !== 'paused' || state.requestJson !== row.requestJson ||
+        state.threadId !== row.threadId || lease?.phase !== 'running' ||
+        lease.workerId !== item.workerId || await trustedHead(job) !== job.headSha ||
+        (!await questionAtDispatch() && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+          cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim()))
+      throw new Error('Preflight source changed; retain job for explicit reconciliation.')
   }
+  const runtime = await retryReadOnlyPreflight(async () => {
+    await assertUserPiSelection(store, item.ownerId, selected)
+    return createUserPiRuntime(store, item.ownerId)
+  }, verify)
   // Resolve the durable Turn->execution association once, owner-scoped, so
   // replayed controller events identify the exact author request.
   const ownerThreadId = await store.persistence.continuation.runThread(item.ownerId, row.id)
@@ -151,25 +147,20 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     await assertServerClaimPermitted(job, threadId, pinned)
     if (pendingAtDispatch && !await questionAtDispatch()) throw Error('Pending author interrupt changed before claim.')
     if (fix && indexedStop) await verifyKnownFixProof(job, pinned, indexedStop)
-    let sandbox: SandboxClient | null = null
-    if (selected) {
-      sandbox = new SandboxClient()
-      await sandbox.acquire(job.jobId)
-    }
+    const sandbox = new SandboxClient()
+    await sandbox.acquire(job.jobId)
     try {
-      if (selected && runtime) {
-        await configurePiPolicy(job, { version: 1, profile: {
+      await configurePiPolicy(job, { version: 1, profile: {
           provider: selected.provider, model: selected.id,
           ...(selected.thinking ? { thinking: selected.thinking } : {}),
         }, limits })
-        await resolvePiModel(job, runtime, selected.provider, selected.id, selected.thinking)
-      }
+      await resolvePiModel(job, runtime, selected.provider, selected.id, selected.thinking)
       await claimServerGeneration(job, threadId, pinned)
       const updated = await store.persistence.generation.jobs.start(
         item.ownerId, row.id, threadId, JSON.stringify(pinned), item.workerId!, new Date().toISOString())
       if (!updated) throw new Error('Concurrent admission.')
     } catch (error) {
-      if (sandbox) await sandbox.dispose(job.jobId).catch(() => {})
+      await sandbox.dispose(job.jobId).catch(() => {})
       throw error
     }
   })
@@ -201,7 +192,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       for await (const patch of answerBudgetPause ? [] : await graph.stream(pending ? generationQuestionResume(pending) : { request: pinned,
         fixPickup: fix && indexedStop ? { id: fix.id, check: fix.check,
           failedVersion: fix.failedVersion, signature: indexedStop.signature } : null,
-        pauseAfter: item.intent === 'start' && (pinned.fixture || config?.pauseAfter === 'foundation')
+        pauseAfter: item.intent === 'start' && config?.pauseAfter === 'foundation'
           ? 'foundation' : null },
         { configurable: { thread_id: threadId }, recursionLimit: 10000, streamMode: 'updates' })) {
         const updates = patch as Record<string, unknown>
@@ -332,10 +323,9 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
             failedVersion: fix.failedVersion, signature: indexedStop.signature,
             jobId: job.jobId, threadId: job.threadId }, executeWithStatus)
         : executeWithStatus()
-      if (runtime) await withJobModelRuntime(runtime, authorized)
-      else await authorized()
+      await withJobModelRuntime(runtime, authorized)
     })
   } finally {
-    if (selected) await new SandboxClient().dispose(job.jobId).catch(() => {})
+    await new SandboxClient().dispose(job.jobId).catch(() => {})
   }
 }

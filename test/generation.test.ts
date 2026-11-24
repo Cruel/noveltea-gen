@@ -206,6 +206,26 @@ test("R14K canonical archive baseline executes Foundation, Blueprint, Architectu
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
 
+test("R14K archive production Event prerequisites use current local plan and native field grant", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("r14k-archive-events");
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
+  const run = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(run.status, "paused", run.reason + "\n" + readFileSync(log, "utf8"));
+  const point = run.recoveryCheckpoints.find((p: any) => p.workItem === "event-disclosure");
+  assert.ok(point?.eligible && point.assurance?.turnDigest === run.request.turnPlanDigest);
+  assert.equal(point.semanticReview, "passed");
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+  assert.equal(receipt.worker, "pi");
+  const { readEventMilestoneRepairGrant } = await import("../src/event-milestone-repair.js");
+  const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  assert.deepEqual(await readEventMilestoneRepairGrant(f.job, point,
+    turn.assignments.find((a: any) => a.id === "event"), "deferred-choice-closeout"),
+    { id: "milestone.disclosure", path: "milestones/disclosure.md" });
+});
+
 test("parent integrates eligible deferred ideas through the dedicated placement workflow and preserves source intent", { skip: !available }, () => {
   const f = setup("ideas-parent");
   const file = join(root, "ideas-parent-idea.json");
@@ -6527,42 +6547,16 @@ for (const domain of ["event", "composition"] as const) test(`R07 ${domain} comm
 });
 
 test("R14C Choice and Puzzle native and independent Review corrections preserve their distinct original assignments", { skip: !available, timeout: 120_000 }, async () => {
-  // The fixture supplies valid native record bytes, not the authority or
-  // recovery behavior of the production writer under test.
-  async function prepare(name: string) {
-    const f = setup(name);
-    f.env.NT_EVENT_FIXTURE_CASE = "decision-pending";
-    const contract = JSON.parse(readFileSync(f.contract, "utf8"));
-    contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
-    writeFileSync(f.contract, JSON.stringify(contract));
-    saveFixtureTurn(f.job, contract, f.start[3]!, ["The player must make a consequential local Choice."]);
-    assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-    await sealFixtureGenerationCheckpoint(f, "foundation");
-    assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
-    await sealFixtureGenerationCheckpoint(f, "global-architecture");
-    assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false), /review|independent/i);
-    await sealFixtureGenerationCheckpoint(f, "world-foundations");
-    assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
-    await sealFixtureGenerationCheckpoint(f, "character-foundations");
-    const paused = f.cli(["generate", "resume", "--pause-after", "event"]);
-    assert.equal(paused.status, "paused");
-    await sealFixtureGenerationCheckpoint(f, "event-disclosure");
-    return { f, paused };
-  }
-  const template = (await prepare("r14c-interactive-template")).f;
-  const fixture = template.cli(["generate", "resume", "--pause-after", "interactive"]);
-  assert.equal(fixture.status, "blocked");
-  await sealFixtureGenerationCheckpoint(template, "interactive-choice-disclosure");
-  const fixturePuzzle = template.cli(["generate", "resume", "--pause-after", "interactive"]);
-  assert.ok(["paused", "blocked"].includes(fixturePuzzle.status), JSON.stringify(fixturePuzzle));
-  const saved = JSON.parse(readFileSync(join(template.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
-  const records = saved.units.map((u: { commitSha: string }) => {
-    const paths = git(template.job.worktreeRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", u.commitSha).split("\n")
-      .map(path => path.replace(/^story\//, ""));
-    return Object.fromEntries(paths.map(path => [path, git(template.job.worktreeRoot, "show", u.commitSha + ":story/" + path) + "\n"]));
-  }) as Record<string, string>[];
-  const { f, paused } = await prepare("r14c-interactive-real");
-  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const { archiveInteractiveRecords: records, archiveStages } = await import("./support/scripted-archive-stages.js");
+  const f = setup("r14c-interactive-real");
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
+  assert.equal(f.cli([...f.start, "--pause-after", "event"]).status, "paused");
+  const paused = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(log, "utf8"));
+  const preludeCalls = readFileSync(log, "utf8").trim().split("\n").length;
+  const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const turnDigest = turn.digest;
   const paths = ["choice-points/loyalty.md", "puzzles/ledger-proof.md"];
   const quote = ["The player recognizes the friendship cost before making the selection.",
     "The clue comparison makes the two proof routes intelligible before either is chosen."];
@@ -6609,11 +6603,9 @@ test("R14C Choice and Puzzle native and independent Review corrections preserve 
   try {
     let graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
-    const initial = (await graph.getState(cfg)).values;
     const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "interactive:milestone.disclosure");
     assert.ok(item);
     await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
-      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
     }, "author_update_intake");
     async function crashAtSubmission(status: string, calls: number, options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
       const abort = new AbortController();
@@ -6701,20 +6693,26 @@ test("R14C Choice and Puzzle native and independent Review corrections preserve 
     for (let i = 0; i < 2; i++) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, paths[i]!), "utf8").includes(quote[i]!));
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
     assert.notEqual(await assertSubunitReviewSessions(f.job, both.units[1], repairedPuzzleHead), choiceReviewer);
-    // This fixture Event has no production field grant. The repaired Choice
-    // and Puzzle pass the Review gate, but must NOT waive that separate owner.
-    assert.deepEqual(await preflight(), { kind: "refuse", reason: "Original Event has no signed selected Milestone field grant." });
-    const next = await withJobModelRuntime(runtime, () => graph.invoke(null,
+    // The real Event grant permits exactly its selected Milestone closeout;
+    // it is not a general writer grant or a Composition completion.
+    const closeout = await preflight();
+    assert.equal(closeout.kind, "repair", JSON.stringify(closeout));
+    const scheduled = await withJobModelRuntime(runtime, () => graph.invoke(null,
       { ...cfg, interruptBefore: ["specialist_dispatch", "assess_recovery"] }));
+    assert.equal(scheduled.active?.id, "interactive:milestone.reckoning");
+    const omission = await scriptedStoryRuntime(archiveStages(f.job, turn));
+    const next = await withJobModelRuntime(omission.runtime, () => graph.invoke(null,
+      { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(omission.observed.length, 2);
     assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", JSON.stringify({ reason: next.reason, active: next.active, recovery: next.recoveryLifecycle }));
     assert.equal(next.recoveryLifecycle.active?.origin.operation, "dependency-amendment", JSON.stringify({ reason: next.reason, recovery: next.recoveryLifecycle, active: next.active }));
     assert.equal(next.recoveryLifecycle.active?.origin.assignmentId, "composition:milestone.disclosure");
     assert.equal(next.recoveryLifecycle.active?.observation, "returned-failure");
-    assert.equal(next.escalation?.kind, "dependency-replan");
+    assert.equal(next.crossDomainCloseout?.milestoneId, "milestone.disclosure", JSON.stringify({ reason: next.reason, closeout: next.crossDomainCloseout }));
     assert.equal(next.inventory?.items.find(i => i.id === "composition:milestone.disclosure")?.status !== "verified", true);
     assert.equal(next.request.turnPlanDigest, turnDigest);
     assert.equal(observed.length, 20);
-    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, observed.length,
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, preludeCalls + observed.length + omission.observed.length,
       "Restart, refused authority and parent intake cannot charge another model call.");
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), repairedPuzzleHead);
   } finally {
@@ -6731,21 +6729,11 @@ test("R06 real Interactive Pi manifest correction preserves the original session
   skip: !available, timeout: 120_000,
 }, async () => {
   const f = setup("r06-original-choice-pi");
-  f.env.NT_EVENT_FIXTURE_CASE = "decision-pending";
-  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
-  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
-  writeFileSync(f.contract, JSON.stringify(contract));
-  saveFixtureTurn(f.job, contract, f.start[3]!, ["The player must make a consequential local Choice."]);
-  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "foundation");
-  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "global-architecture");
-  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false), /review|independent/i);
-  await sealFixtureGenerationCheckpoint(f, "world-foundations");
-  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
-  await sealFixtureGenerationCheckpoint(f, "character-foundations");
-  assert.equal(f.cli(["generate", "resume", "--pause-after", "event"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
+  assert.equal(f.cli([...f.start, "--pause-after", "event"]).status, "paused");
+  const paused = f.cli(["generate", "resume", "--pause-after", "event"]);
+  assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(log, "utf8"));
   const env = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
   Object.assign(process.env, f.env);
   const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);

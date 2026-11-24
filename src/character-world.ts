@@ -1,6 +1,7 @@
 import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } from "./assignment-metadata-recovery.js";
 import { execFileSync } from "./git-read-cache.js";
-import { commitOrigin, readRecoveryFork } from "./recovery-fork-state.js";
+import { isDeepStrictEqual } from "node:util";
+import { commitOrigin, readRecoveryFork, resolvedInheritedRecoveryReviews } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
@@ -322,6 +323,29 @@ async function verifyUnitInvocation(job: JobStartResult, receipt: Receipt, unit:
     sessionRoots: [join(job.stateDir, "character-world-sessions", unit.domain)],
     responseKind: "manifest-or-choice", effect, historical });
 }
+/** A fork inherits a verified committed effect, never a writer invocation.
+ * The immutable bundle was authenticated against the source checkpoint before
+ * child creation. Local receipts must still match that exact sealed unit. */
+async function verifyCommittedUnitEvidence(job: JobStartResult, receipt: Receipt, unit: Unit) {
+  const fork = readRecoveryFork(job);
+  const origin = fork?.commits[unit.id];
+  if (!origin) {
+    if (unit.reviewedRecoveryDigest !== unit.digest)
+      await verifyUnitInvocation(job, receipt, unit, unit.digest!, true);
+    return;
+  }
+  const original = fork!.receipts["character-world.json"]?.units?.find((u: Unit) => u.id === unit.id);
+  const review = resolvedInheritedRecoveryReviews(fork!.reviewCoverage ?? []).find(r =>
+    r.workItem === unit.id && r.commitSha === origin.sha);
+  if (origin.jobId === job.jobId || unit.phase !== "committed" ||
+      !unit.digest || !unit.paths || !unit.beforeHead || unit.commitSha !== origin.sha ||
+      !isDeepStrictEqual(original, unit) ||
+      !review || !["passed", "not-required"].includes(review.status))
+    throw Error("Inherited foundation effect differs from its sealed reviewed checkpoint.");
+  git(job, "merge-base", "--is-ancestor", origin.sha, job.baseSha);
+  verifyCommit(job, unit, unit.beforeHead, origin.sha);
+}
+
 /** Reauthenticate the immutable original writer before granting a Review repair lease. */
 export async function verifyCharacterWorldReviewOrigin(job: JobStartResult, point: {
   workItem: string; commitSha: string; parentSha: string; planVersion: number | null;
@@ -651,8 +675,8 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
         return blocked("Committed foundations have unexpected worktree or staged changes.");
       verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha);
       if (receipt.worker === "pi") {
-        if (world.reviewedRecoveryDigest !== world.digest) await verifyUnitInvocation(job, receipt, world, world.digest!, true);
-        if (character.reviewedRecoveryDigest !== character.digest) await verifyUnitInvocation(job, receipt, character, character.digest!, true);
+        await verifyCommittedUnitEvidence(job, receipt, world);
+        await verifyCommittedUnitEvidence(job, receipt, character);
       }
       const characterParent = character.beforeHead ?? world.commitSha;
       if (characterParent !== world.commitSha)
@@ -671,8 +695,8 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
     if (index && worldSha) {
       verifyCommit(job, receipt.units[0]!, receipt.startHead ?? receipt.architectureHead, worldSha);
       const world = receipt.units[0];
-      if (receipt.worker === "pi" && world.reviewedRecoveryDigest !== world.digest)
-        await verifyUnitInvocation(job, receipt, world, world.digest!, true);
+      if (receipt.worker === "pi")
+        await verifyCommittedUnitEvidence(job, receipt, world);
       if (unit.beforeHead && unit.beforeHead !== worldSha ||
           unit.phase === "pending" && actualHead !== worldSha) {
         const requested = unit.beforeHead ?? actualHead;

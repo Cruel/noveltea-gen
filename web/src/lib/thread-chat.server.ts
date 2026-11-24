@@ -153,6 +153,15 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       cwd: parent.worktreeRoot, env, encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim()) throw new ThreadChatError(409, 'Previous Story has uncommitted files; reconcile them first.')
+    const oldDraft = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
+    const model: PiSelection | null = oldDraft?.model ?? null
+    if (model && !validPiSelection(model))
+      throw new ThreadChatError(409, 'Previous model configuration is invalid.')
+    if (!scope.protectedChange) {
+      if (!model) throw new ThreadChatError(409, 'Select a model before continuing Generation.')
+      verifyWebExecution(false)
+      await assertUserPiSelection(store, owner, model)
+    }
     const child = await continueCachedStory(parent, claim.id, head)
     if (child.baseSha !== head || child.headSha !== head)
       throw new ThreadChatError(409, 'Continuation baseline differs from verified source.')
@@ -178,21 +187,15 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       await advanceThread(store, owner, threadId)
       return
     }
-    const oldDraft = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
-    const model: PiSelection | null = oldDraft?.model ?? null
-    if (model && !validPiSelection(model))
-      throw new ThreadChatError(409, 'Previous model configuration is invalid.')
-    if (model) await assertUserPiSelection(store, owner, model)
-    verifyWebExecution(!model)
+    if (!model) throw new ThreadChatError(409, 'Select a model before continuing Generation.')
     const draft: GenerationDraft = { version: 1, headSha: head, task: claim.content,
       contract: scope.contract, limits: oldDraft?.limits ?? {}, model }
     const pinned: GenerationRequest = { story: child.storyRoot, job: child.jobId,
-      task: claim.content, contract: scope.contract, fixture: !model,
-      orchestrationPolicy: model || prior.skillsSource || process.env.NT_STUDIO_SKILLS_SOURCE
-        ? 'explicit' : 'fixture-test',
+      task: claim.content, contract: scope.contract, fixture: false,
+      orchestrationPolicy: 'explicit',
       turnPlanDigest: scope.turnPlan.digest,
       ...(prior.skillsSource ? { skillsSource: prior.skillsSource } : {}),
-      ...(model ? { provider: model.provider, model: model.id } : {}) }
+      provider: model.provider, model: model.id }
     await assertServerClaimPermitted(child, child.threadId + ':generation:web', pinned)
     await store.persistence.continuation.beginFollowUp({
       owner, threadId, claim, sourceHead: head,

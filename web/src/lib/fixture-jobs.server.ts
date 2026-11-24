@@ -84,14 +84,11 @@ export async function verifyTrustedRevision(job: JobStartResult) {
 }
 
 export function verifyWebExecution(fixture: boolean, agent = false) {
-  // Fixture-only evaluation must not silently invoke real model placement.
-  if (fixture && process.env.NT_LIVE_GENERATION_IDEA === '1') {
-    throw new JobError(503, 'Fixture execution refuses live model-directed idea placement.')
-  }
-  if (!fixture && (process.env.NT_REQUIRE_USER_PI_RUNTIME !== '1' ||
+  if (fixture) throw new JobError(409, 'A selected model and authenticated current-format Turn are required. Fixture execution is retired.')
+  if (process.env.NT_REQUIRE_USER_PI_RUNTIME !== '1' ||
       (agent ? (!process.env.NT_SANDBOX_SOCKET?.startsWith('/') ||
         !process.env.NT_SANDBOX_TOKEN_FILE?.startsWith('/')) :
-        (!process.env.NT_AGENT_RPC_URL || !process.env.NT_AGENT_RPC_TOKEN)))) {
+        (!process.env.NT_AGENT_RPC_URL || !process.env.NT_AGENT_RPC_TOKEN))) {
     throw new JobError(503, 'Real generation requires a rootless sandbox controller and an isolated per-user model runtime.')
   }
 }
@@ -449,7 +446,10 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       throw new JobError(409, 'Job already has a different pinned generation request.')
     const queued = (await queueRecord(store, id))
     if (existing) {
-      try { await requireGenerationTurn(job, existing, true) }
+      try {
+        if (existing.fixture || !existing.turnPlanDigest) throw Error('Obsolete fixture request')
+        await requireGenerationTurn(job, existing, true)
+      }
       catch { throw new JobError(409, 'Obsolete or untrusted Generation cannot be restarted.') }
       return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
@@ -470,7 +470,7 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
         throw new JobError(409, 'Start differs from saved generation configuration or Story revision.')
       selected = (config.model ?? null) as PiSelection | null
     }
-    if (selected && (!turn || !turn.objective))
+    if (!turn || !turn.objective || !selected)
       throw new JobError(409, 'Production Generation requires an authenticated current-format Turn plan.')
     verifyWebExecution(!selected)
     const env = { ...process.env }
@@ -490,19 +490,17 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
         !row.configJson || JSON.stringify(JSON.parse(row.configJson).limits) !== JSON.stringify(handoff.limits)))
       throw new JobError(409, 'Generation admission differs from the original Discovery Turn envelope.')
     const pinned: GenerationRequest = {
-      story: job.storyRoot, job: row.id, task: input.task, contract: input.contract, fixture: !selected,
-      orchestrationPolicy: selected || process.env.NT_STUDIO_SKILLS_SOURCE ? 'explicit' : 'fixture-test',
-      ...(turn ? { turnPlanDigest: turn.digest } : {}),
+      story: job.storyRoot, job: row.id, task: input.task, contract: input.contract, fixture: false,
+      orchestrationPolicy: 'explicit',
+      turnPlanDigest: turn.digest,
       ...(handoff ? { discoveryHandoffDigest: handoff.digest } : {}),
       ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
-      ...(selected ? { provider: selected.provider, model: selected.id } : {}),
+      provider: selected.provider, model: selected.id,
     }
     try { await requireGenerationTurn(job, pinned) }
     catch { throw new JobError(409, 'Generation requires the original authenticated current-format Turn plan.') }
-    if (selected) {
-      try { await assertUserPiSelection(store, user.id, selected) }
-      catch { throw new JobError(409, 'Pinned model credentials unavailable. Reconnect before starting.') }
-    }
+    try { await assertUserPiSelection(store, user.id, selected) }
+    catch { throw new JobError(409, 'Pinned model credentials unavailable. Reconnect before starting.') }
     try { await assertServerClaimPermitted(job, job.threadId + ':generation:web', pinned) }
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
     await queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),

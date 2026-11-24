@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { openStudioDatabase } from './support/studio-database'
+import { ensureRootThreads } from '../src/lib/threads.server'
 import { studioSeed } from './support/studio-seed'
 import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
@@ -19,6 +20,11 @@ import { parseGenerationContract } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
 import { configurePiPolicy, inspectPiPolicy } from '../../src/job-pi-policy'
 import { focusedChoiceWorkItem } from '../../src/specialist-choice'
+import { planWholeStory } from '../src/lib/turn-plan'
+import { saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { userPiCredentials } from '../src/lib/pi-credentials.server'
+import { scriptedModel, fixtureSandboxClient } from '../../test/c03-scripted-story-helpers'
+import { installScriptedArchiveProvider } from './support/scripted-archive-provider'
 
 test('only a source-bound answered choice can resume its original specialist assignment', () => {
   const conversation = { stage: 'focus', milestone: 'authored-content.dialogue' }
@@ -60,7 +66,8 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
   const root = mkdtempSync(join(tmpdir(), 'nt-studio-control-'))
   const keys = ['NT_STATE_DIR', 'NT_GIT_CACHE_DIR', 'NT_STUDIO_SKILLS_SOURCE',
     'NT_CONFIG_FILE',
-    'NT_SKILL_CACHE_DIR', 'NT_LIVE_GENERATION_IDEA'] as const
+    'NT_SKILL_CACHE_DIR', 'NT_LIVE_GENERATION_IDEA', 'NT_REQUIRE_USER_PI_RUNTIME', 'NT_PI_CREDENTIAL_KEY', 'PI_OFFLINE',
+    'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN'] as const
   const env = Object.fromEntries(keys.map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'durable')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
@@ -68,6 +75,13 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
   delete process.env.NT_LIVE_GENERATION_IDEA
+  process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+  process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 18).toString('base64')
+  process.env.PI_OFFLINE = '1'
+  process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:1'
+  process.env.NT_AGENT_RPC_TOKEN = 'local-control-test-token-not-used-for-network'
+  let restoreProvider: (() => void) | undefined
+  let restoreSandbox: (() => void) | undefined
   writeFileSync(process.env.NT_CONFIG_FILE, JSON.stringify({ novelteaSkills: skills, skillDiscovery: 'explicit-only' }))
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
   try {
@@ -108,8 +122,22 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       directory: 'story', title: 'Story', createdAt: 'now', sourceCommitSha: sha }))
     ;(await seed.job({ id, ownerUserId: author.id, storyId, title: 'Job',
       sourceCommitSha: sha, status: 'paused', createdAt: 'now', updatedAt: 'now' }))
-    const pinned = { story: job.storyRoot, job: id,
-      task: 'Write a mystery foundation', contract, fixture: true, skillsSource: skills }
+    await ensureRootThreads(store, author.id, storyId)
+    const task = 'Write a mystery foundation'
+    const turn = planWholeStory(task, contract, job.baseSha)
+    await saveJobTurnPlan(job, turn)
+    const provider = await installScriptedArchiveProvider(job, turn)
+    restoreProvider = provider.restore
+    restoreSandbox = fixtureSandboxClient(job.jobId, job.worktreeStoryRoot)
+    await userPiCredentials(store, author.id).modify(scriptedModel.provider,
+      async () => ({ type: 'api_key', key: 'in-process-only' }))
+    const model = { provider: scriptedModel.provider, id: scriptedModel.id }
+    await store.persistence.generation.jobs.saveConfiguration(author.id, id,
+      JSON.stringify({ version: 1, headSha: job.baseSha, task, contract, model,
+        limits: { steps: 30 }, pauseAfter: 'foundation' }), 'now')
+    const pinned = { story: job.storyRoot, job: id, task, contract,
+      fixture: false, skillsSource: skills, turnPlanDigest: turn.digest,
+      orchestrationPolicy: 'explicit', provider: model.provider, model: model.id }
     await queueGeneration(store, author.id, id, 'start', 'prepared', JSON.stringify(pinned),
       job.threadId + ':generation:web')
     const control = async (method: 'GET' | 'POST', cookieHeader?: string, body?: unknown,
@@ -157,14 +185,17 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
         }), id, config.baseURL)
       const statusBody = await response.json() as any
       visible = statusBody.job?.status ?? `HTTP ${response.status}: ${statusBody.error}`
-      if (!response.ok || visible === 'paused' || visible === 'interrupted') break
+      if (!response.ok || ['paused', 'interrupted', 'blocked'].includes(visible)) {
+        assert.notEqual(visible, 'blocked', JSON.stringify(statusBody))
+        break
+      }
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     assert.equal(visible, 'paused')
     assert.equal((await queueRecord(store, id))?.phase, 'finished')
     assert.equal((await control('POST', authorCookie, { action: 'budget', limits: { steps: -2 } })).status, 400)
-    assert.equal((await control('POST', authorCookie, { action: 'budget', limits: { steps: 100 } })).status, 409,
-      'fixture execution cannot impersonate a pinned Pi budget')
+    assert.equal((await control('POST', authorCookie, { action: 'budget', limits: { steps: 1 } })).status, 409,
+      'current execution cannot decrease its original cumulative budget')
     // A crash left files dirty. Merely asking to Retry must not delete files,
     // silently trust the edited HEAD, or replay a possibly interrupted writer.
     ;(await store.testing.records.update('generation_run_queue', { jobId: id }, { phase: 'interrupted' }))
@@ -203,7 +234,9 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       ownerId: author.id, repositoryId: 'github:111', remoteUrl: 'file://' + source,
       token: '', directory: 'story', commit: sha, jobId: piJobId,
       verifiedSizeBytes: 0, verifiedBlobCount: 1 })
-    const piTask = { story: piJob.storyRoot, job: piJobId,
+    const piTurn = planWholeStory('Write a mystery foundation', contract, piJob.baseSha)
+    await saveJobTurnPlan(piJob, piTurn)
+    const piTask = { story: piJob.storyRoot, job: piJobId, turnPlanDigest: piTurn.digest,
       task: 'Write a mystery foundation', contract, fixture: false,
       provider: 'openai', model: 'gpt-6-luna' }
     const draft = { version: 1, headSha: piJob.headSha, task: piTask.task,
@@ -236,6 +269,8 @@ test('authenticated queue pause, pre-start resume and cancellation preserve exac
       { steps: 4, modelCalls: 10 })
     assert.deepEqual((await store.testing.foreignKeyViolations()), [])
   } finally {
+    restoreProvider?.()
+    restoreSandbox?.()
     store.close()
     for (const key of keys) {
       if (env[key] === undefined) delete process.env[key]

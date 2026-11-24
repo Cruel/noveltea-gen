@@ -3,7 +3,9 @@
  * Unexpected model prompts and changed source bytes fail closed. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ReviewAssignment } from "../../src/narrative-review-specialist.js";
 import type { JobStartResult } from "../../src/job.js";
 import type { TurnEvidence } from "../../src/turn-plan-evidence.js";
 import type { CausalBlueprint } from "../../src/architecture-blueprint.js";
@@ -12,11 +14,25 @@ import { requiredOrchestratorSkillReads } from "../../src/story-skill-policy.js"
 import { renderFoundation } from "../../src/foundation-record.js";
 import { scriptedReadCalls, scriptedText } from "../c03-scripted-story-helpers.js";
 
-const path = resolve("test/fixtures/archive-witness");
+const path = fileURLToPath(new URL("../fixtures/archive-witness/", import.meta.url));
 const bytes = (p: string) => readFileSync(join(path, p), "utf8");
 const arc = "arcs/truth.md";
 const disclosure = "milestones/disclosure.md";
 const reckoning = "milestones/reckoning.md";
+export const archiveInteractiveRecords = [
+  ["choice-points/loyalty.md", "events/disclose-ledger.md", "events/aftermath.md", "revelations/ledger-secret.md"],
+  ["puzzles/ledger-proof.md", "events/discover-mark.md", "events/discover-seal.md", "events/decode-ledger.md",
+    "events/request-testimony.md", "revelations/puzzle-evidence.md", "authored-content/watermark-clue.md", "authored-content/seal-clue.md"],
+].map(paths => Object.fromEntries(paths.map(p => [p, bytes(p)])));
+const eventPath = "events/disclose-ledger.md";
+const openingEvent = bytes(eventPath).replace(/steps:\n[\s\S]*?(?=\n---)/,
+  "steps:\n  - id: decision-offered\n    branches:\n      - id: protect\n        conditions: []\n        effects: []\n      - id: challenge\n        conditions: []\n        effects: []")
+  .replace('Neri discloses the ledger, changing Ada\'s belief and their relationship',
+    'Neri shows Ada the original ledger and proposes a decision')
+  .replace(/\n---\n\n[\s\S]*$/, "\n---\n\nNeri opens the signed ledger and shows Ada the dated entry alongside the independent daily register. The player must still decide whether to protect Neri or demand accountability. The records establish concealment, not his motive.\n");
+const secondEventPath = "events/redacted-account.md";
+const secondEvent = "---\nschema: '0.1'\ntype: event\nid: event.redacted-account\ntitle: The Redacted Account\nstatus: draft\ndecisions: []\nparticipants: [character.ada, character.neri]\narcs: [arc.truth]\nconsequences: [The inquiry accepts independent proof of concealment without exposing the witness]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.disclose-ledger]\n      not_completed: []\nsteps: []\n---\n\nAda compares the signed entry with the independently maintained daily register and offers a redacted account to the inquiry. The matching dates independently establish concealment. The inquiry accepts the redacted account without requiring the witness's name. The records do not establish Neri's private motive.\n";
+const secondMilestone = (text: string) => text.replace("completeness: partial\n", "").replace("fulfillment: {any_of: []}", "fulfillment: {any_of: [[event.redacted-account]]}");
 const worldPaths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
 const castPaths = ["characters/ada.md", "characters/neri.md", "relationships/ada-neri.md", arc];
 const architecture: Record<string, string> = {
@@ -94,8 +110,11 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence) {
       const expected: Record<string, string[]> = {
         foundation: [foundationPath], architecture: Object.keys(architecture),
         "world-foundations": worldPaths, "character-foundations": castPaths,
+        "event-disclosure": [eventPath], "event-reckoning": [secondEventPath, reckoning],
+        "interactive-choice-disclosure": Object.keys(archiveInteractiveRecords[0]!),
+        "interactive-puzzle-disclosure": Object.keys(archiveInteractiveRecords[1]!),
       };
-      const allowed = expected[item.assignment.id] ?? expected[item.reviewedWorkItem];
+      const allowed = expected[item.reviewedWorkItem] ?? expected[item.assignment.id];
       assert.ok(allowed, "Unexpected archive Review assignment: " + item.assignment.id + " / " + item.reviewedWorkItem);
       assert.deepEqual([...item.assurance.changedPaths].sort(), [...allowed].sort());
       return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
@@ -107,6 +126,23 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence) {
           return { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: p, line,
             explanation: "The scripted source contains the expected canonical record for this bounded assignment." };
         }) });
+    }
+    if (prompt.includes("You are the independent nt-narrative-review editor")) {
+      const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!) as ReviewAssignment;
+      if (!phase) return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!
+        .split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths));
+      assert.equal(assignment.omission?.assignmentId, "interactive:milestone.reckoning");
+      assert.ok(assignment.paths.includes(secondEventPath));
+      assert.ok(onDisk(secondEventPath).includes("matching dates independently establish concealment"));
+      assert.ok(onDisk(reckoning).includes("fulfillment: {any_of: [[event.redacted-account]]}"));
+      assert.equal(assignment.routes.length + assignment.puzzleRoutes.length, 0);
+      assert.deepEqual(assignment.milestoneRoutes.map(r => [r.milestone, r.alternative, r.status]),
+        [["milestone.reckoning", 0, "reachable"]]);
+      const line = onDisk(reckoning).split("\n").findIndex(l => l.startsWith("fulfillment:")) + 1;
+      return stop({ verdict: "pass", findings: [], evidence: [
+        "milestone.reckoning#0 " + reckoning + ":" + line + ": The redacted account route is fully bound to the verified observational Event.",
+        secondEventPath + ":1: Ada submits corroborating records; no additional local player decision is necessary.",
+      ] });
     }
     if (prompt.includes("READ-ONLY COMPACT STORY BLUEPRINT.") ||
         prompt.includes("INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW")) {
@@ -139,6 +175,54 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence) {
       if (phase === 2) return validate();
       assert.equal(phase, 3);
       return manifest(paths);
+    }
+    if (prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") ||
+        prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW")) {
+      const first = prompt.includes("ONLY for milestone.disclosure.") ||
+        prompt.includes('"milestoneId":"milestone.disclosure"');
+      const milestonePath = first ? disclosure : reckoning;
+      if (!phase) return read([...skills("nt-event-design"), milestonePath]);
+      assert.equal(phase, 1);
+      return stop(prompt.includes("MILESTONE PLAN REVIEW")
+        ? { schema: "noveltea-milestone-blueprint-review/v5", status: "pass", findings: [], prior: [] }
+        : { schema: "noveltea-milestone-blueprint/v1", milestoneId: first ? "milestone.disclosure" : "milestone.reckoning",
+          events: [{ id: first ? "disclose-ledger" : "redacted-account",
+            purpose: first ? "Neri shows Ada the ledger and offers a consequential choice" : "Submit the independently corroborated redacted account",
+            dependsOn: [], participants: ["character.ada", "character.neri"],
+            evidence: [{ anchorPath: milestonePath, source: "The signed ledger and independent daily register",
+              observation: "The matching dates establish concealment", access: "Neri presents both original records to Ada",
+              establishes: "The concealed entry is corroborated by an independent record", limits: "The records do not prove private motive" }],
+            knowledge: "Ada inspects the primary records and knows that the entry was concealed",
+            routes: [] }],
+          downstream: [...(first ? [{ owner: "interactive", obligation: "Bind protect and challenge as a genuine consequential Choice and preserve distinct payoffs" }] : []),
+            { owner: "composition", obligation: "Present the corroborating evidence and the playable consequences of the verified Events" }],
+        });
+    }
+    if (prompt.includes("Author exactly ONE Event-design cluster")) {
+      const assignment = JSON.parse(prompt.split("\nAUTHORIZED ASSIGNMENT\n")[1]!);
+      const first = assignment.milestoneId === "milestone.disclosure";
+      assert.ok(first || assignment.milestoneId === "milestone.reckoning");
+      const records: Record<string, string> = first ? { [eventPath]: openingEvent } :
+        { [secondEventPath]: secondEvent, [reckoning]: secondMilestone(onDisk(reckoning)) };
+      if (!phase) return read([...skills("nt-event-design"), assignment.milestonePath]);
+      if (phase === 1) return write(records);
+      if (phase === 2) return validate();
+      assert.equal(phase, 3);
+      return stop({ modifiedRecords: Object.keys(records), architecturalConflicts: [],
+        laterObligations: first ? ["Formal Choice Point binding must enact protect and challenge before Milestone fulfillment."] :
+          ["Present the independently corroborated redacted account in playable prose."] });
+    }
+    if (prompt.includes("Complete exactly ONE Choice unit") || prompt.includes("Assess exactly ONE Puzzle unit")) {
+      const assignment = JSON.parse(prompt.split("\nAUTHORIZED ASSIGNMENT\n")[1]!);
+      assert.equal(assignment.milestoneId, "milestone.disclosure");
+      const choice = prompt.includes("Complete exactly ONE Choice unit");
+      const records = archiveInteractiveRecords[choice ? 0 : 1]!;
+      if (!phase) return read(skills(choice ? "nt-interactive-narrative" : "nt-puzzle-design"));
+      if (phase === 1) return write(records);
+      if (phase === 2) return validate();
+      assert.equal(phase, 3);
+      return stop({ modifiedRecords: Object.keys(records), architecturalConflicts: [],
+        laterObligations: ["Conditional player-facing prose must be reviewed for choice and clue visibility"] });
     }
     if (prompt.includes("You are the NovelTea foundation writing specialist")) {
       if (!phase) return read(["nt-story-discovery/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md",

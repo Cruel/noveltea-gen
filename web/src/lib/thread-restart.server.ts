@@ -13,6 +13,8 @@ import { parseGenerationContract, type GenerationRequest } from '../../../src/ge
 import { ensureRootThreads } from './threads.server'
 import { readJsonInput, JsonInputError } from './json-input.server'
 import { deleteThread, type DeletionOutcome } from './thread-deletion.server'
+import { prepareReplacementTurn } from './replacement-turn.server'
+import { readJobTurnPlan } from './turn-plan-receipt.server'
 
 const SHA = /^[a-f0-9]{40}$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
@@ -332,6 +334,9 @@ export async function prepareThreadRestart(auth: StudioAuth, store: StudioDataba
   } else {
     await verifyPreparedStory(child, JSON.parse(intent!.draft) as GenerationDraft)
   }
+  const originalTurn = await readJobTurnPlan(original)
+  await prepareReplacementTurn(child, JSON.parse(intent!.draft) as GenerationDraft,
+    source.rootJobId, originalTurn?.creativePolicy)
   await store.persistence.advancedThreads.registerChild({
     childId: input.childId, owner: actor.id, storyId: source.storyId,
     title: source.sourceTitle + ' (restart)', baseSha: child.baseSha,

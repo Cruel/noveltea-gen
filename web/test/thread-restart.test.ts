@@ -17,6 +17,11 @@ import { ensureRootThreads, listStoryNavigation } from '../src/lib/threads.serve
 import { threadRestartRequest, type Upstream } from '../src/lib/thread-restart.server'
 import { deleteThread } from '../src/lib/thread-deletion.server'
 import { initialStoryDocument } from '../src/lib/git-cache.server'
+import { planWholeStory } from '../src/lib/turn-plan'
+import { saveJobTurnPlan, readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { userPiCredentials } from '../src/lib/pi-credentials.server'
+import { scriptedModel } from '../../test/c03-scripted-story-helpers'
+import { installScriptedArchiveProvider } from './support/scripted-archive-provider'
 
 const config = { baseURL: 'http://localhost:3000',
   secret: 'restart-thread-test-secret-01234567890123456789',
@@ -28,11 +33,17 @@ const git = (root: string, ...args: string[]) => execFileSync('git', args, { cwd
 
 async function setup(canonicalStory = false, invalidStory = false) {
   const root = mkdtempSync(join(tmpdir(), 'nt-thread-restart-'))
-  const old = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_CONFIG_FILE','NT_NATIVE_CLI']
+  const old = Object.fromEntries(['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_CONFIG_FILE','NT_NATIVE_CLI', 'NT_REQUIRE_USER_PI_RUNTIME', 'NT_PI_CREDENTIAL_KEY',
+    'PI_OFFLINE', 'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN']
     .map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_CONFIG_FILE = join(root, 'config.json')
+  process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+  process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 19).toString('base64')
+  process.env.PI_OFFLINE = '1'
+  process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:1'
+  process.env.NT_AGENT_RPC_TOKEN = 'restart-test-token-not-used-for-network'
   const db = openStudioDatabase(join(root, 'studio.sqlite'))
   await migrateStudio(db, config)
   const auth = createStudioAuth(db, config), ctx = await auth.$context
@@ -72,10 +83,17 @@ async function setup(canonicalStory = false, invalidStory = false) {
   const parent = await acquireCachedStory({ cacheDirectory: process.env.NT_GIT_CACHE_DIR!,
     ownerId: owner.id, repositoryId: 'github:123', remoteUrl: 'file://' + remote,
     token: '', directory: 'story', commit: original, jobId: sourceId })
-  const draft = { version: 1, headSha: original, task: 'Original creative goal',
-    contract, limits: { steps: 7 }, model: null }
-  const request = { story: parent.storyRoot, job: sourceId, task: draft.task, contract,
-    fixture: true }
+  const task = 'Original creative goal'
+  const turn = planWholeStory(task, contract, parent.baseSha)
+  await saveJobTurnPlan(parent, turn)
+  const scripted = await installScriptedArchiveProvider(parent, turn)
+  await userPiCredentials(db, owner.id).modify(scriptedModel.provider,
+    async () => ({ type: 'api_key', key: 'in-process-only' }))
+  const model = { provider: scriptedModel.provider, id: scriptedModel.id }
+  const draft = { version: 1, headSha: original, task,
+    contract, limits: { steps: 7 }, model }
+  const request = { story: parent.storyRoot, job: sourceId, task, contract,
+    fixture: false, turnPlanDigest: turn.digest, provider: model.provider, model: model.id }
   ;(await seed.job({ id: sourceId, ownerUserId: owner.id, storyId, title: 'Original Thread',
     sourceCommitSha: original, status: 'running',
     createdAt: '2026-01-01', updatedAt: '2026-01-01',
@@ -101,6 +119,7 @@ async function setup(canonicalStory = false, invalidStory = false) {
     return { status: response.status, body: await response.json() as any }
   }
   const cleanup = () => {
+    scripted.restore()
     db.close()
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key]
@@ -312,6 +331,10 @@ test('newer restart revalidates canonical Story, protected decisions, exact remo
       const child = await restoreJob(await selectedJob(f.db, f.owner.id, newer.childId), f.owner.id)
       assert.equal(child.baseSha, latest)
       assert.equal(child.headSha, latest)
+      const newTurn = await readJobTurnPlan(child)
+      assert.equal(newTurn?.source.verifiedSha, latest)
+      assert.equal(newTurn?.source.jobId, f.sourceId)
+      assert.notEqual(newTurn?.digest, (await readJobTurnPlan(f.parent))?.digest)
       assert.equal(existsSync(join(child.worktreeStoryRoot, 'notes.txt')), true)
       assert.equal(existsSync(join(child.stateDir, 'web-generation.sqlite')), false)
       assert.equal(existsSync(join(child.stateDir, 'pi-budget.json')), false)

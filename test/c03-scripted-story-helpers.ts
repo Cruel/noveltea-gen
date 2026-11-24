@@ -8,10 +8,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage,
-  type Model, type Provider } from "@earendil-works/pi-ai";
+  type Api, type Model, type Provider } from "@earendil-works/pi-ai";
 import { SandboxClient } from "../src/sandbox-client.js";
 
-export const scriptedModel: Model = {
+export const scriptedModel: Model<Api> = {
   id: "scripted-c03", provider: "cert-c03", api: "cert-c03-api",
   name: "Local source-bound recovery", baseUrl: "http://unused.invalid",
   input: ["text"], reasoning: false, contextWindow: 128_000, maxTokens: 8_000,
@@ -67,7 +67,7 @@ export async function scriptedStoryRuntime(
     auth: { apiKey: { name: "Local scripted provider", check: async () =>
       ({ type: "api_key" as const, source: "test" }), resolve: async () =>
       ({ auth: { apiKey: "in-process-only" } }) } },
-    getModels: () => [scriptedModel], stream, streamSimple: stream });
+    getModels: () => [scriptedModel], stream: (model, context) => stream(model, context), streamSimple: stream });
   await runtime.refresh({ allowNetwork: false });
   return { runtime, observed, calls: () => index };
 }
@@ -77,6 +77,7 @@ export async function scriptedStoryRuntime(
 export function fixtureSandboxClient(jobId: string, storyRoot: string) {
   const oldAcquire = SandboxClient.prototype.acquire;
   const oldExecute = SandboxClient.prototype.execute;
+  const oldDispose = SandboxClient.prototype.dispose;
   const oldSocket = process.env.NT_SANDBOX_SOCKET;
   const oldToken = process.env.NT_SANDBOX_TOKEN_FILE;
   process.env.NT_SANDBOX_SOCKET = "/no-network-c03-sandbox";
@@ -92,6 +93,10 @@ export function fixtureSandboxClient(jobId: string, storyRoot: string) {
   SandboxClient.prototype.acquire = async (id: string) => {
     assert.equal(id, jobId);
     return { jobId: id, status: "running" };
+  };
+  SandboxClient.prototype.dispose = async id => {
+    assert.equal(id, jobId);
+    return { jobId: id, status: "disposed" };
   };
   SandboxClient.prototype.execute = async (id: string, argv: string[],
     output: (stream: "stdout" | "stderr", data: string) => void) => {
@@ -118,6 +123,7 @@ export function fixtureSandboxClient(jobId: string, storyRoot: string) {
   return () => {
     SandboxClient.prototype.acquire = oldAcquire;
     SandboxClient.prototype.execute = oldExecute;
+    SandboxClient.prototype.dispose = oldDispose;
     if (oldSocket === undefined) delete process.env.NT_SANDBOX_SOCKET;
     else process.env.NT_SANDBOX_SOCKET = oldSocket;
     if (oldToken === undefined) delete process.env.NT_SANDBOX_TOKEN_FILE;
