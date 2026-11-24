@@ -16,6 +16,7 @@ import {
 } from "./response-contract-recovery.js";
 import { inspectSpecialistManifest, lastSpecialistManifest } from "./specialist-manifest.js";
 import { extractSpecialistChoice, parseSpecialistChoice } from "./specialist-choice.js";
+import { architectureMilestoneOrder } from "./architecture-order.js";
 import type { ValidationResult } from "./validator.js";
 
 export type AssignmentDefect = Readonly<{
@@ -36,6 +37,18 @@ const metadataCodes = new Set(["schema", "yaml", "frontmatter"]);
  * check is progress; merely trading one schema error for another is not. */
 function materialProgress(before: readonly AssignmentDefect[], after: readonly AssignmentDefect[]): boolean {
   if (before.some(d => d.kind === "metadata") && after.every(d => d.kind === "provenance")) return true;
+  // Architecture verification is ordered. A later independently verified gate
+  // means the previous gate passed, not merely that its error prose changed.
+  const stage = (d: AssignmentDefect) => ({
+    "architecture-empty-draft": 2, "architecture-missing-source": 1,
+    "architecture-missing-write-evidence": 2, "architecture-new-protection": 4,
+    "architecture-incomplete-coverage": 5, "architecture-milestone-order": 6,
+    "architecture-precommit-review": 7,
+  } as Record<string, number>)[d.code] ?? (d.kind === "metadata" ? 3 : 0);
+  if (before.length && after.length && before.every(d => stage(d) > 0) &&
+      after.every(d => stage(d) > 0) &&
+      (before.some(d => d.code.startsWith("architecture-")) || after.some(d => d.code.startsWith("architecture-"))) &&
+      Math.max(...before.map(stage)) < Math.min(...after.map(stage))) return true;
   const previousReview = before[0]?.reviewProgress;
   const nextReview = after[0]?.reviewProgress;
   if (previousReview && nextReview &&
@@ -206,8 +219,16 @@ async function attestPrefix(file: string, receipt: { transcriptBytes: number; tr
     throw new ProtocolIntegrityBlockedError("Original assignment transcript changed");
 }
 const CONTRACT = "specialist.changed-paths.v1";
-export type AssignmentResponseKind = "manifest-or-choice" | "event-manifest-or-choice";
+export type AssignmentResponseKind = "manifest-or-choice" | "event-manifest-or-choice" | "architecture-order";
+const ARCHITECTURE_ORDER_REPORT = "Finish with exactly one CAUSAL_MILESTONE_ORDER: line containing all actual selected canonical Milestone IDs in causal order, separated by commas.";
 function responsePolicy(kind?: AssignmentResponseKind) {
+  if (kind === "architecture-order") return {
+    contract: "architecture.milestone-order.v1",
+    validate: (text: string) => architectureMilestoneOrder(text) ? [] :
+      [{ path: "$.milestoneOrder", expected: "exactly one CAUSAL_MILESTONE_ORDER: line with unique typed Milestone IDs" }],
+    parse: (text: string): Record<string, unknown> => ({ milestoneOrder: architectureMilestoneOrder(text)! }),
+    feedback: () => "RESPONSE-CONTRACT CORRECTION ONLY (architecture.milestone-order.v1). No tools, edits or new Story work. " + ARCHITECTURE_ORDER_REPORT,
+  };
   if (!kind) return { contract: CONTRACT, validate: inspectSpecialistManifest,
     parse: (text: string) => lastSpecialistManifest(text)! };
   return {
@@ -238,7 +259,12 @@ function responsePolicy(kind?: AssignmentResponseKind) {
 }
 export const ASSIGNMENT_REPORT = "Finish with one JSON object: modifiedRecords, architecturalConflicts and laterObligations, each an array of nonempty strings (or empty if none). Report the actual cumulative Story-relative paths; do not invent an approval.";
 
-function feedback(defects: readonly AssignmentDefect[]): string {
+function feedback(defects: readonly AssignmentDefect[], kind?: AssignmentResponseKind): string {
+  if (kind === "architecture-order") return "SOURCE-BOUND ARCHITECTURE CORRECTION. Continue the original assignment in the SAME writer conversation. " +
+    "Fix only the independently verified defects below; read any missing pinned source, author the originally authorized Arc/Milestone draft if empty, " +
+    "correct invalid newly claimed protection to agent/delegated, and preserve all existing protected decisions. " +
+    "No new scope, approval or downstream record grants. Diagnostic data: " + JSON.stringify(defects) +
+    ". Run story_validate, then " + ARCHITECTURE_ORDER_REPORT;
   if (defects.some(d => d.kind === "semantic")) return "SOURCE-BOUND STORY CORRECTION. Continue this original writer assignment in the same conversation. " +
     "Repair only the controller-verified findings within the original assignment; preserve protected decisions and original Event prerequisites. " +
     "If a read-only source was edited, restore its exact original bytes without Git mutation. If the objective needs another owner, restore draft effects and report the real dependency, not a fabricated pass. " +
@@ -547,7 +573,7 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       if (await options.effect() !== effectBefore)
         throw new ProtocolIntegrityBlockedError("Assignment source changed during budget admission");
       await beginProtocolInvocation({ receiptFile: base, contract: policy.contract, sourceDigest: grantDigest, session });
-      await options.prompt(ordinal === 0 ? options.initialPrompt : feedback(defects));
+      await options.prompt(ordinal === 0 ? options.initialPrompt : feedback(defects, options.responseKind));
       const last = session.messages.at(-1);
       if (last?.role !== "assistant" || last.stopReason !== "stop" || !Array.isArray(last.content))
         throw new ProtocolIntegrityBlockedError("Original writer did not settle a complete response");

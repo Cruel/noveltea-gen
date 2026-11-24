@@ -767,7 +767,7 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
   const milestone = s.active?.milestone!;
   switch (s.active?.stage) {
     case "foundation": throw Error("Foundation dispatch requires the checkpointed assignment child.");
-    case "architecture": return runArchitectureJob({ ...input, action: "run" });
+    case "architecture": throw Error("Architecture requires its checkpointed assignment child.");
     case "foundations": return runCharacterWorldJob({ ...input, steering, action: "run", unit: foundationUnit, round });
     case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run", round });
     case "interactive": case "choice": case "puzzle": return runInteractiveWorkItem({ ...input,
@@ -1225,10 +1225,7 @@ async function runArchitectureAssignmentChild(
       job, s, correction, s.recoveryLifecycle.decision);
   };
   let reviewPatch: Partial<State> | undefined;
-  const child = createAssignmentLifecycleGraph({
-    authenticateContinuation: async state =>
-      state.continuationRef === correction?.id && await authenticateCorrection(),
-    preflight: async () => {
+  const preflight = async () => {
       const control = await readJobControl(job);
       if (control === "cancelled") {
         const error = Error("Original Turn was cancelled before Architecture dispatch.");
@@ -1236,20 +1233,65 @@ async function runArchitectureAssignmentChild(
       }
       if (control === "paused")
         return outcome("paused", "job-control", { controlRef: "job-control" });
+      const current = await checkPlan(job, s.request, s.planVersion);
+      if (current?.plan && current.plan.version !== version)
+        throw Error("Architecture assignment cannot execute under a superseded plan version.");
+      if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
       if (correctionSelected && !await authenticateCorrection())
         throw Error("Architecture correction lacks the original independent Review proof.");
       if (!correctionSelected && !saved && await trustedHead(job) !== sourceHead)
         throw Error("Architecture source differs from its parent assignment.");
       return null;
-    },
-    invoke: async () => {
-      // The existing Architecture workflow owns exact Pi/Git reconciliation,
-      // including its independently sealed provisional Blueprint.
-      const result = await dispatch(s);
-      return { receiptRef, status: result.status, headSha: result.headSha };
-    },
-    verify: async state => {
-      const submission = state.submission!;
+  };
+  const roundRef = (proof: AssignmentInvocationProof) =>
+    [proof.sourceDigest, proof.ordinal, proof.settlementDigest].join(":");
+  const roundProof = (submission: AssignmentSubmission): AssignmentInvocationProof => {
+    const [sourceDigest, ordinal, settlementDigest, extra] = submission.receiptRef.split(":");
+    if (submission.status !== "writer-round" || extra !== undefined ||
+        !/^[a-f0-9]{64}$/.test(sourceDigest ?? "") || !/^(0|[1-9][0-9]*)$/.test(ordinal ?? "") ||
+        !/^[a-f0-9]{64}$/.test(settlementDigest ?? "") || !Number.isSafeInteger(Number(ordinal)))
+      throw new ProtocolIntegrityBlockedError("Invalid checkpointed Architecture writer round reference.");
+    return { sourceDigest: sourceDigest!, ordinal: Number(ordinal), settlementDigest: settlementDigest! };
+  };
+  const runRound = async (command: AssignmentRoundCommand): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
+    // Architecture's own started/settled Pi and Git receipt reconciliation
+    // prevents duplicate model turns, charges and commits after a crash.
+    try {
+      const stopped = await preflight();
+      if (stopped) return stopped;
+      const result = await runArchitectureJob({ ...s.request, action: "run",
+        round: { assignmentKey: key, command } });
+      if ("round" in result && result.round) {
+        const ref = roundRef(result.round.proof);
+        if (result.round.status === "correction")
+          return { correctionRef: result.round.grantDigest, rejectedReceiptRef: ref };
+        return { receiptRef: ref, status: "writer-round" };
+      }
+      if (!result.status)
+        throw Error("Architecture returned no settled specialist status.");
+      return { receiptRef: "architecture.json", status: result.status, headSha: result.headSha };
+    } catch (error) {
+      if (error instanceof AssignmentAuthorPauseError)
+        return outcome("paused", "job-control", { controlRef: "job-control" });
+      if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError))
+        throw error;
+      const terminal = await (await import("./architecture.js")).inspectArchitectureFailure(job, sourceHead);
+      const kind = error instanceof ProtocolExhaustedError ? "protocol-exhausted" : "nonconverging";
+      if (!terminal || terminal.proof.kind !== kind)
+        throw Error("Original assignment terminal receipt does not match its typed failure.");
+      return outcome("unresolved", terminal.proof.receiptDigest, { dispositionRef: kind });
+    }
+  };
+  const assertChildIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
+    if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
+      throw new ProtocolIntegrityBlockedError("Architecture checkpoint belongs to another admitted logical assignment.");
+  };
+  const invokeRound = async (command: AssignmentRoundCommand) => {
+    const result = await runRound(command);
+    if ("correctionRef" in result) throw Error("Architecture invocation cannot select its own correction.");
+    return result;
+  };
+  const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
       if (submission.receiptRef !== receiptRef || !submission.headSha ||
           !accepted.architecture.includes(submission.status))
         return outcome("unresolved", receiptRef, { dispositionRef: receiptRef });
@@ -1297,13 +1339,33 @@ async function runArchitectureAssignmentChild(
       }
       return outcome("verified", receiptRef, { headSha: head,
         reviewRef: disposition === "adopted" ? receiptRef : "review-checkpoints:" + head });
+  };
+  const child = createAssignmentLifecycleGraph({
+    authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+    preflight: async state => { assertChildIdentity(state.identity, state.continuationRef); return preflight(); },
+    invoke: async state => { assertChildIdentity(state.identity, state.continuationRef); return invokeRound({ phase: "invoke" }); },
+    correct: async state => {
+      assertChildIdentity(state.identity, state.continuationRef);
+      if (correction) throw Error("Postcommit Review cannot authorize a precommit writer.");
+      return invokeRound({ phase: "correct", proof: roundProof(state.submission!), grantDigest: state.correction!.correctionRef });
+    },
+    verify: async state => {
+      assertChildIdentity(state.identity, state.continuationRef);
+      let submission = state.submission!;
+      if (submission.status === "writer-round") {
+        const verified = await runRound({ phase: "verify", proof: roundProof(submission) });
+        if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
+        if (verified.status === "writer-round") throw Error("Architecture verification did not settle the round.");
+        submission = verified;
+      }
+      return { outcome: await verifyCommitted(submission), submission };
     },
   });
   const finished = await child.invoke({
     identity, submission: correction && s.result
       ? { receiptRef, status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null,
-  }, assignmentChildConfig(config, identity, correction ? "correction" : "original"));
+  }, { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Architecture child returned no authenticated outcome.");
   if (finished.outcome.status === "verified")
@@ -1328,6 +1390,15 @@ async function runArchitectureAssignmentChild(
   }
   if (finished.outcome.status === "paused")
     return { status: "paused", reason: "Original Architecture assignment is suspended." };
+  if (finished.outcome.status === "unresolved" &&
+      ["protocol-exhausted", "nonconverging"].includes(finished.outcome.dispositionRef)) {
+    const terminal = await (await import("./architecture.js")).inspectArchitectureFailure(job, sourceHead);
+    if (!terminal || terminal.proof.receiptDigest !== finished.outcome.evidenceRef)
+      throw Error("Original Architecture terminal proof changed.");
+    return operationFailure(s, job, "specialist-result", "Original Architecture assignment exhausted its bounded correction.",
+      { reference: "specialist-receipt", assignmentId: identity.assignmentId, resultStatus: terminal.proof.kind,
+        assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } }, "returned-failure");
+  }
   return operationFailure(s, job, "specialist-result", "Architecture returned an unverified result.",
     { reference: "specialist-receipt", assignmentId: identity.assignmentId,
       resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
@@ -2832,6 +2903,7 @@ async function inspectOriginalSpecialistCommitForResume(
 ): Promise<boolean> {
   if (!s.active || s.result || !s.inventory) return false;
   clean(job);
+  if (s.active.stage === "architecture") return (await import("./architecture.js")).inspectRecoverableArchitectureCommit(job, s.inventory.headSha);
   if (s.active.stage === "foundation") {
     const { inspectRecoverableFoundationCommit } = await import("./foundation.js");
     return inspectRecoverableFoundationCommit(job);
@@ -3698,6 +3770,7 @@ export function createGenerationGraph(
           // that effect; no author edits or new assignment can run here.
           if (!s.result && s.inventory && (s.active?.stage === "foundation" &&
               await inspectPendingFoundationInvocation(job, s.inventory.headSha) ||
+              s.active?.stage === "architecture" && await (await import("./architecture.js")).inspectPendingArchitectureInvocation(job, s.inventory.headSha) ||
               s.active?.stage === "foundations" &&
               (await inspectPendingCharacterWorldInvocation(job, s.inventory.headSha) ||
                await inspectRecoverableCharacterWorldCommit(job) && !await trustedHead(job).catch(() => null)) ||
@@ -3778,7 +3851,7 @@ export function createGenerationGraph(
             // trustedHead deliberately refuses incomplete receipts, so do
             // not misclassify this narrow crash window as an untrusted source
             // or start a replacement writer.
-            if (["foundation", "interactive", "choice", "puzzle", "event", "composition", "focus"].includes(s.active.stage) &&
+            if (["foundation", "architecture", "interactive", "choice", "puzzle", "event", "composition", "focus"].includes(s.active.stage) &&
                 await inspectOriginalSpecialistCommitForResume(s, job))
               return { status: "running" as const, reason: null };
             try { clean(job); await trustedHead(job); }

@@ -1,9 +1,9 @@
 import { createPiStatusTool } from "./pi-work-status.js";
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { execFileSync } from "./git-read-cache.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
@@ -20,7 +20,9 @@ import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { boundedPinnedSources, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
-import { guardPiBudget } from "./job-pi-policy.js";
+import { guardPiBudget, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentDefect } from "./assignment-metadata-recovery.js";
+import { readJobControl } from "./job-control.js";
 import type { ArchitectureDraftReviewPin } from "./architecture-draft-review.js";
 
 /** A new agent-authored Arc/Milestone decision cannot silently grant itself
@@ -56,15 +58,7 @@ export function unapprovedArchitectureDecisionIds(after: string, before = ""): s
 /** The same pinned writer supplies a source-bound execution order after its
  * canonical Milestones exist. This changes scheduling only, never record grants
  * or the story's native causal prerequisites. */
-export function architectureMilestoneOrder(text: string): string[] | null {
-  const lines = text.split(/\r?\n/).filter(line => /^CAUSAL_MILESTONE_ORDER:\s*/.test(line));
-  if (lines.length !== 1) return null;
-  const raw = lines[0]!.slice('CAUSAL_MILESTONE_ORDER:'.length).trim();
-  const ids = raw.split(',').map(s => s.trim());
-  if (!ids.length || ids.some(id => !/^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)) ||
-      new Set(ids).size !== ids.length) return null;
-  return ids;
-}
+export { architectureMilestoneOrder } from "./architecture-order.js";
 
 const REQUIRED = boundedPinnedSources("nt-story-architecture");
 
@@ -238,10 +232,16 @@ export async function authorArchitecture(
   provider: string,
   modelId: string,
   onSession: (sessionId: string, path: string) => Promise<void>,
-  authorTask?: string,
-  blueprint?: CausalBlueprint,
-): Promise<{ piSessionId: string; piSessionFile?: string; skillReads: string[]; milestoneOrder: string[];
-  draftReview: ArchitectureDraftReviewPin }> {
+  authorTask: string | undefined,
+  blueprint: CausalBlueprint | undefined,
+  options: {
+    command: AssignmentRoundCommand; sourceDigest: string; sessionFile?: string; sessionId?: string;
+    authorize: () => Promise<void>; effect: () => Promise<string | null>;
+    reviewPaths?: readonly string[];
+    verify: (order: string[], reads: string[], writes: string[], writer: {id: string; file: string}, writerRound: string) =>
+      Promise<{ defects: readonly AssignmentDefect[]; draftReview?: ArchitectureDraftReviewPin }>;
+  },
+) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
     discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -261,16 +261,31 @@ export async function authorArchitecture(
   const runtime = await createJobModelRuntime();
   const sessionDir = join(job.stateDir, "architecture-sessions");
   const context = await preparePiContext(job, project, {
-    group: "architecture", step: "architecture:" + plan.version,
+    group: "architecture:" + options.sourceDigest, step: "architecture:" + plan.version,
     paths: ["creative-direction/foundation.md"], snapshot: snapshot.id,
-    provider, model: modelId, directory: sessionDir,
+    provider, model: modelId, directory: sessionDir, insideWriter: true,
   }, runtime);
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
+  const permittedTools = (sandboxTools ?? []).filter(t => t.name !== "bash").map(t => {
+    if (!["write", "edit"].includes(t.name)) return t;
+    const execute = t.execute;
+    return { ...t, async execute(...args: Parameters<typeof execute>) {
+      await options.authorize();
+      const input = args[1] as { path?: unknown };
+      const path = typeof input.path === "string" ?
+        relative(project.root, resolve(project.root, input.path)).split(sep).join("/") : "";
+      if (!authorizedArchitectureRecordPath(path) ||
+          plan.causalAmendment && path !== plan.causalAmendment.source.path ||
+          options.reviewPaths && !options.reviewPaths.includes(path))
+        throw Error("Architecture tool write outside original authorized scope.");
+      return execute(...args);
+    }};
+  });
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
-    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
+    sessionManager: options.sessionFile && existsSync(options.sessionFile) ? SessionManager.open(options.sessionFile, dirname(options.sessionFile), project.root) : context.manager,
+    customTools: [...permittedTools, createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
+    noTools: "all", tools: [...SANDBOX_TOOLS.filter(t => t !== "bash"), "story_context", "story_validate", "report_status"],
   });
   try {
     if (context.thinking && session.thinkingLevel !== context.thinking) {
@@ -278,173 +293,63 @@ export async function authorArchitecture(
     }
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Architecture Pi session transcript cannot be persisted; writer will not begin.");
+    if (options.sessionId && options.sessionId !== session.sessionId) {
+      const initialGrant = join(job.stateDir, "architecture-assignment", options.sourceDigest, "0.grant.json");
+      if (existsSync(initialGrant) || await options.effect() !== null)
+        throw Error("Original Architecture writer session changed.");
+    }
+    if (!existsSync(join(job.stateDir, "architecture-assignment", options.sourceDigest, "0.grant.json"))) {
+      await options.authorize();
+      if (await options.effect() !== null) throw Error("Unstarted Architecture writer has unexpected effects.");
+      await guardPiBudget(job, "architecture:" + plan.version);
+    }
     await onSession(session.sessionId, sessionFile);
-    await context.beforeTurn(sessionFile);
-    await promptStorySpecialist(session, context.contextNote +
-      architectureSpecialistPrompt(snapshot, plan, Boolean(sandboxTools), authorTask, blueprint));
-    let assistant = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!assistant || assistant.role !== "assistant" ||
-        ["error", "aborted"].includes(assistant.stopReason)) {
-      throw new Error("Architecture specialist did not complete a successful Pi turn.");
-    }
-    const attemptedWrite = session.messages.some(m => m.role === "assistant" &&
-      m.content.some(c => c.type === "toolCall" && ["write", "edit"].includes(c.name)));
-    const newStory = !existsSync(join(project.root, "arcs")) &&
-      !existsSync(join(project.root, "milestones"));
-    if (newStory && !attemptedWrite) {
-      const env = { ...process.env };
-      for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"])
-        delete env[key];
-      const dirty = !!execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
-        cwd: job.worktreeRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
-      if (canCorrectEmptyArchitecture(attemptedWrite, dirty)) {
-        await promptStorySpecialist(session, emptyArchitectureCorrectionPrompt());
-        assistant = [...session.messages].reverse().find(m => m.role === "assistant");
-        if (!assistant || assistant.role !== "assistant" ||
-            ["error", "aborted"].includes(assistant.stopReason))
-          throw new Error("Same-session empty Architecture correction did not complete safely.");
-      }
-    }
-    const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-      m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-    const calls = session.messages.flatMap(m => m.role === "assistant"
-      ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> => c.type === "toolCall")
-      : []);
-    const reads = calls.filter(c => completed.has(c.id) && c.name === "read" &&
-      typeof c.arguments?.path === "string")
-      .map(c => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
-    const required = REQUIRED.map(p => join(snapshot.path, "skills", p));
-    if (required.some(path => !reads.includes(path))) {
-      throw new Error("Architecture specialist did not read all required pinned skill references.");
-    }
-    const authored = calls.some(c => completed.has(c.id) && ["write", "edit"].includes(c.name) &&
-      typeof c.arguments?.path === "string" &&
-      authorizedArchitectureRecordPath(
-        relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"),
-      ));
-    if (!authored) throw new Error("Architecture specialist did not author canonical Arc/Milestone Markdown.");
-    const authoredPaths = [...new Set(calls.filter(c => completed.has(c.id) &&
-      ["write", "edit"].includes(c.name) && typeof c.arguments?.path === "string")
-      .map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"))
-      .filter(authorizedArchitectureRecordPath))];
-    const authorityErrors = async () => {
-      const result: string[] = [];
-      for (const path of authoredPaths) {
-        let before = "";
-        try {
-          const env = { ...process.env };
-          for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"])
-            delete env[key];
-          before = execFileSync("git", ["show", "HEAD:" +
-            (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path], {
-            cwd: job.worktreeRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-        } catch { /* Newly created file: no existing author authority. */ }
-        const full = join(project.root, path);
-        const stat = await lstat(full);
-        if (!stat.isFile() || stat.isSymbolicLink() || await realpath(full) !== full)
-          throw new Error("Architecture preflight rejects unsafe record path: " + path);
-        const after = await readFile(full, "utf8");
-        for (const id of unapprovedArchitectureDecisionIds(after, before))
-          result.push(path + " decision " + id);
-      }
-      return result;
-    };
-    const errors = await authorityErrors();
-    if (errors.length) {
-      // One completed-turn correction in the SAME Pi session, not a replay of
-      // an uncertain writer or a grant of previously absent user protection.
-      await promptStorySpecialist(session,
-        "The controller found NEW author-protected decisions that were not " +
-        "approved by the author. This is a provenance error, not a schema " +
-        "validation exception. In your existing Arc/Milestone files, correct " +
-        "each newly authored decision to origin: agent and authority: delegated; " +
-        "preserve all truly preexisting author-protected decisions unchanged. " +
-        "Do not modify any other records or ask the author for blanket approval. " +
-        "Run story_validate and finish normally. Exact new invalid claims:\n" + errors.join("\n"));
-      const corrected = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!corrected || corrected.role !== "assistant" || ["error", "aborted"].includes(corrected.stopReason))
-        throw new Error("Architecture authority correction turn did not complete safely.");
-      const stillInvalid = await authorityErrors();
-      if (stillInvalid.length) throw new Error("Architecture invented user protection: " + stillInvalid.join("; "));
-    }
-    let milestoneOrder = architectureMilestoneOrder(assistant.content.filter(c =>
-      c.type === 'text').map(c => c.text).join('\n'));
-    if (!milestoneOrder) {
-      // Never guess alphabetical order or relaunch the original writer. Request
-      // one no-write metadata correction in this same pinned Pi session.
-      await promptStorySpecialist(session,
-        'The final answer omitted the exact CAUSAL_MILESTONE_ORDER line. Read the Milestones you just authored if necessary. ' +
-        'Do not edit any files, create new records or modify the proposed scope. ' +
-        'Reply with exactly CAUSAL_MILESTONE_ORDER: followed by all selected milestone IDs ' +
-        'in actual dramatic cause-to-consequence order, comma-separated.');
-      const latest = [...session.messages].reverse().find(m => m.role === 'assistant');
-      if (latest?.role !== 'assistant' || ['error', 'aborted'].includes(latest.stopReason))
-        throw new Error('Architecture milestone-order correction did not finish safely.');
-      milestoneOrder = architectureMilestoneOrder(latest.content.filter(c =>
-        c.type === 'text').map(c => c.text).join('\n'));
-      if (!milestoneOrder) throw new Error('Architecture did not declare a valid source-bound causal Milestone order.');
-    }
-    // Review the ACTUAL uncommitted draft before it becomes a source-verified
-    // Architecture checkpoint. The independent read-only reviewer cannot
-    // approve canon or weaken the later mandatory postcommit semantic gate.
-    const { createArchitectureDraftReviewCycle, verifyArchitectureDraftReviewPin } =
-      await import("./architecture-draft-review.js");
-    const writer = { id: session.sessionId, file: sessionFile };
-    const cycle = await createArchitectureDraftReviewCycle(job, snapshot, plan, provider,
-      modelId, authoredPaths, writer, authorTask ?? "", blueprint);
-    let draftReview: ArchitectureDraftReviewPin | undefined;
-    try {
-      for (let iteration = 0; ; iteration++) {
-        const result = await cycle.review();
-        const review = result.verdict;
-        if (review.status === "pass") {
-          draftReview = result.pin;
-          break;
-        }
-        if (result.diagnosticTrigger || result.convergence.reassess) {
-          // Do not invoke the original writer again until a third, independent
-          // read-only Diagnostic has examined the sealed source and verdicts.
-          const diagnosis = await cycle.diagnose();
-          if (diagnosis.action !== "continue")
-            throw Error("Architecture Diagnostic recommended " + diagnosis.action +
-              "; original draft and review sessions are preserved for author-guided reconciliation.");
-        }
-        await guardPiBudget(job, "architecture:precommit-writer:" + plan.version + ":" + iteration,
-          sessionFile);
-        await promptStorySpecialist(session,
-        "INDEPENDENT PRECOMMIT ARCHITECTURE REVIEW: The read-only reviewer found " +
-        "specific problems in the existing Arc/Milestone draft. Within ONLY the " +
-        "already authorized files, correct these findings in this SAME original writer " +
-        "Pi session. No new files, scope, protected author decisions or write authority " +
-        "have been granted. Do not invent Event/Choice IDs, fabricate independent " +
-        "observations, or conceal route-duration uncertainty. If a finding truly " +
-        "needs author approval or another owner, make NO unauthorized edit and " +
-        "explain the conflict. Run story_validate and finish with the exact " +
-        "CAUSAL_MILESTONE_ORDER line listing all authored Milestones. " +
-        "The subsequent independent rereview remains mandatory.\n" +
-        JSON.stringify(review.findings));
-        const corrected = [...session.messages].reverse().find(m => m.role === "assistant");
-        if (!corrected || corrected.role !== "assistant" ||
-            ["error", "aborted"].includes(corrected.stopReason))
-          throw Error("Architecture same-session review correction was interrupted; preserve draft.");
-        const stillInvalid = await authorityErrors();
-        if (stillInvalid.length)
-          throw Error("Architecture review correction invented protected decisions: " + stillInvalid.join("; "));
-        const candidateOrder = architectureMilestoneOrder(corrected.content.filter(c =>
-          c.type === "text").map(c => c.text).join("\n"));
-        if (!candidateOrder)
-          throw Error("Architecture review correction omitted the exact causal Milestone order; preserve draft.");
-        milestoneOrder = candidateOrder;
-      }
-    } finally { cycle.dispose(); }
-    if (!draftReview) throw Error("Architecture precommit review ended without an exact independent pass.");
-    await verifyArchitectureDraftReviewPin(job, snapshot, plan, provider, modelId,
-      authoredPaths, writer, draftReview, authorTask ?? "", blueprint);
+    let accepted: { skillReads: string[]; milestoneOrder: string[]; draftReview: ArchitectureDraftReviewPin } | undefined;
+    const round = await executeAssignmentRound({
+      session, directory: join(job.stateDir, "architecture-assignment", options.sourceDigest),
+      sourceDigest: options.sourceDigest, sessionRoots: [sessionDir], responseKind: "architecture-order",
+      initialPrompt: context.contextNote + architectureSpecialistPrompt(snapshot, plan, Boolean(sandboxTools), authorTask, blueprint),
+      authorize: options.authorize, effect: options.effect,
+      beforeTurn: async () => {
+        const control = await readJobControl(job);
+        if (control === "paused") throw new AssignmentAuthorPauseError();
+        if (control === "cancelled") { const error = Error("Architecture cancelled."); error.name = "StoryCancelledError"; throw error; }
+        const ordinal = options.command.phase === "invoke" ? 0 :
+          options.command.proof.ordinal + (options.command.phase === "correct" ? 1 : 0);
+        await guardPiBudget(job, ordinal === 0 ? "architecture:" + plan.version :
+          "architecture:writer:" + options.sourceDigest + ":" + ordinal, sessionFile);
+      },
+      prompt: async text => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, text);
+        await recordPiSession(job, sessionFile);
+      },
+      verify: async manifest => {
+        const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
+          m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
+        const calls = session.messages.flatMap(m => m.role === "assistant"
+          ? m.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> => c.type === "toolCall") : []);
+        const reads = calls.filter(c => completed.has(c.id) && c.name === "read" && typeof c.arguments?.path === "string")
+          .map(c => canonicalPinnedReadPath(c.arguments.path as string, project.root, snapshot.path));
+        const required = REQUIRED.map(p => join(snapshot.path, "skills", p));
+        const writes = [...new Set(calls.filter(c => completed.has(c.id) && ["write", "edit"].includes(c.name) &&
+          typeof c.arguments?.path === "string").map(c =>
+          relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/")))];
+        const missing = required.filter(p => !reads.includes(p));
+        const order = manifest.milestoneOrder as string[];
+        const writerRound = createHash("sha256").update(await readFile(sessionFile)).digest("hex");
+        const defects: AssignmentDefect[] = missing.map(p => ({kind: "requirement", path: p, code: "architecture-missing-source"}));
+        if (defects.length) return defects;
+        const result = await options.verify(order, reads, writes, {id: session.sessionId, file: sessionFile}, writerRound);
+        if (!result.defects.length && result.draftReview)
+          accepted = { skillReads: reads.filter(p => required.includes(p)), milestoneOrder: order, draftReview: result.draftReview };
+        return result.defects;
+      },
+    }, options.command);
+    if (round.status !== "accepted") return { round };
+    if (!accepted) throw Error("Architecture acceptance lacks its independently reviewed source.");
     await context.completed(sessionFile, session.sessionId);
-    return { piSessionId: session.sessionId, piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
-      skillReads: reads.filter(p => required.includes(p)), milestoneOrder, draftReview };
-  } finally {
-    session.dispose();
-  }
+    return { round, accepted: { ...(accepted as {skillReads: string[]; milestoneOrder: string[]; draftReview: ArchitectureDraftReviewPin}),
+      piSessionId: session.sessionId, piSessionFile: sessionFile } };
+  } finally { session.dispose(); }
 }

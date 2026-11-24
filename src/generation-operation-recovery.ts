@@ -130,6 +130,8 @@ export async function authenticateAssignmentFailure(job: JobStartResult,
   const original = ["foundation", "foundations"].includes(assignment ?? "") && !evidence.interactiveDomain
     ? await (assignment === "foundation" ? (await import("./foundation.js")).inspectFoundationFailure : (await import("./character-world.js")).inspectCharacterWorldFailure)(job, sourceHead).catch(() => null)
     : await (async () => {
+      if (assignment === "architecture" && !evidence.interactiveDomain)
+        return (await import("./architecture.js")).inspectArchitectureFailure(job, sourceHead).catch(() => null);
       const event = /^event:(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
       if (event && !evidence.interactiveDomain)
         return (await import("./event-work.js")).inspectEventFailure(job, event[1]!, sourceHead).catch(() => null);

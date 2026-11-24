@@ -24,6 +24,8 @@ import { validateFocusedCreationGrants } from "./creation-grants.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { createReviewedBlueprint, readApprovedBlueprint, inspectPausedBlueprint, classifyBlueprintFailure,
   type BlueprintPin } from "./architecture-blueprint.js";
+import { nativeMetadataDefects, verifySettledAssignment, inspectAssignmentFailure,
+  type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof, type AssignmentDefect } from "./assignment-metadata-recovery.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics,
   type ArchitectureBudgetReview } from "./story-metrics.js";
 
@@ -103,12 +105,17 @@ interface Receipt {
   draftReview?: import("./architecture-draft-review.js").ArchitectureDraftReviewPin;
   /** Source-bound authoring metadata, not a permission or a gameplay prerequisite. */
   milestoneOrder?: string[];
+  assignmentKey?: string;
+  sourceDigest?: string;
+  priorProtection?: string[];
+  reviewPaths?: string[];
+  invocationProof?: AssignmentInvocationProof;
   outstanding?: Obligation[];
   /** Native, source/revision-bound advisory planning assessment. */
   architectureMetrics?: ArchitectureBudgetReview;
 }
 interface Obligation { id: string; path: string; field: string; requiredBy: string; code: string; message: string }
-interface CatalogRecord { path: string; metadata: { id: string; type: string; status: string; arcs?: string[] } }
+interface CatalogRecord { path: string; metadata: { id: string; type: string; status: string; arcs?: string[]; decisions?: { id: string; authority: string; origin: string; statement: string }[] } }
 interface CatalogReport {
   records: CatalogRecord[];
   diagnostics: unknown[];
@@ -123,6 +130,7 @@ export interface ArchitectureOptions {
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
   proposal?: string; approvalFile?: string; recoveryDigest?: string; carryForward?: string[];
   causalDigest?: string;
+  round?: { assignmentKey: string; command: AssignmentRoundCommand };
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -283,6 +291,61 @@ function assertCausalPaths(plan: Plan, paths: string[]) {
 async function contentDigest(job: JobStartResult, paths: string[]) {
   return hash(JSON.stringify(await Promise.all(paths.map(async path => [path, hash(await readFile(join(job.worktreeStoryRoot, path), "utf8"))]))));
 }
+function protectedArchitectureDecisions(report: CatalogReport): string[] {
+  return report.records.filter(r => authorizedArchitectureRecordPath(r.path))
+    .flatMap(r => (r.metadata.decisions ?? []).filter(d => d.authority === "user-protected")
+      .map(d => JSON.stringify([r.path, d.id, d.origin, d.authority, d.statement]))).sort();
+}
+function architectureRoundSource(job: JobStartResult, state: Receipt, originalHead = state.executionHead ?? state.expectedHead): string {
+  return hash(JSON.stringify({ job: job.jobId, thread: job.threadId, head: originalHead,
+    key: state.assignmentKey, plan: state.plan?.version, contract: state.plan?.contract,
+    amendment: state.plan?.causalAmendment, snapshot: state.snapshot?.id, blueprint: state.blueprint,
+    task: state.blueprintTask, provider: state.provider, model: state.model, prior: state.priorProtection }));
+}
+export async function inspectArchitectureFailure(job: JobStartResult, sourceHead: string) {
+  const state = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as Receipt;
+  if (state.phase !== "writing" || !state.sourceDigest || !state.piSessionId || !state.piSessionFile ||
+      (state.executionHead ?? state.expectedHead) !== sourceHead || architectureRoundSource(job, state) !== state.sourceDigest) return null;
+  assertHead(job, sourceHead);
+  await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
+  const paths = dirty(job).length ? await changedPaths(job) : [];
+  if (paths.length) assertCausalPaths(state.plan!, paths);
+  const terminal = await inspectAssignmentFailure({ directory: join(job.stateDir, "architecture-assignment", state.sourceDigest),
+    sourceDigest: state.sourceDigest, sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+    sessionRoots: [join(job.stateDir, "architecture-sessions")], responseKind: "architecture-order",
+    effect: paths.length ? await contentDigest(job, paths) : null });
+  return terminal && { ...terminal, ref: "architecture-assignment/" + state.sourceDigest + "/terminal.json" };
+}
+
+/** Routing only: the original child still authenticates its invocation chain before effects. */
+export async function inspectPendingArchitectureInvocation(job: JobStartResult, sourceHead: string) {
+  const file = join(job.stateDir, "architecture.json");
+  if (!existsSync(file)) return false;
+  const state = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  if (state.worker !== "pi" || !["writing", "authored"].includes(state.phase) ||
+      !state.assignmentKey || !state.sourceDigest || architectureRoundSource(job, state) !== state.sourceDigest ||
+      (state.executionHead ?? state.expectedHead) !== sourceHead) return false;
+  const result = await reconcile(job, state, state.assignmentKey);
+  if (result.status === "blocked") throw Error("Architecture reconciliation refused: " + result.reason);
+  if (state.phase === "writing" && result.changes.length &&
+      !existsSync(join(job.stateDir, "architecture-assignment", state.sourceDigest, "0.started.json")))
+    throw Error("Unstarted Architecture invocation has unexpected effects.");
+  return true;
+}
+export async function inspectRecoverableArchitectureCommit(job: JobStartResult, sourceHead: string) {
+  const file = join(job.stateDir, "architecture.json");
+  if (!existsSync(file)) return false;
+  const state = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  if (state.phase === "authored" && (state.executionHead ?? state.expectedHead) === sourceHead)
+    return (await reconcile(job, state, state.assignmentKey)).status === "recoverable-commit";
+  if (state.phase === "committed" && state.paths?.length && !dirty(job).length &&
+      git(job, "rev-parse", "HEAD").trim() === state.expectedHead &&
+      git(job, "rev-parse", "HEAD^").trim() === sourceHead)
+    return git(job, "log", "-1", "--format=%B").includes("NovelTea-Architecture: " + state.contentDigest) &&
+      await contentDigest(job, state.paths) === state.contentDigest;
+  return false;
+}
+
 type Reconciliation = {
   status: "ready" | "recoverable-commit" | "blocked";
   actualHead: string;
@@ -292,7 +355,7 @@ type Reconciliation = {
 };
 
 /** Reconcile the receipt with Git, not merely with the last graph node. */
-async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconciliation> {
+async function reconcile(job: JobStartResult, state: Receipt, assignmentKey?: string): Promise<Reconciliation> {
   const actualHead = git(job, "rev-parse", "HEAD").trim();
   const workingHead = state.executionHead ?? state.expectedHead;
   const changes = dirty(job);
@@ -331,11 +394,17 @@ async function reconcile(job: JobStartResult, state: Receipt): Promise<Reconcili
       }
       return { status: "ready", actualHead, changes };
     }
-    if (state.worker === "pi" && ["writing", "authored"].includes(state.phase)) {
+    if (state.worker === "pi" && ["writing", "authored"].includes(state.phase) && (state.phase === "authored" || (state.sourceDigest && existsSync(join(job.stateDir, "architecture-assignment", state.sourceDigest, "0.started.json"))))) {
       await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
     }
     if (state.phase === "writing") {
-      const result = blocked("Interrupted architecture writer: review the preserved files; use job architecture reconcile with the exact candidate digest to accept them without replaying the writer.");
+      if (state.worker === "pi" && assignmentKey && state.assignmentKey === assignmentKey &&
+          state.sourceDigest && actualHead === workingHead) {
+        const paths = changes.length ? await changedPaths(job) : [];
+        if (paths.length) assertCausalPaths(state.plan!, paths);
+        return { status: "ready", actualHead, changes };
+      }
+      const result = blocked("Interrupted architecture writer: only the original checkpointed assignment may reconcile Pi draft effects; ambiguous effects remain fenced.");
       if (actualHead === workingHead) {
         try {
           const paths = await changedPaths(job);
@@ -604,6 +673,25 @@ export async function verifyArchitectureAssignmentResult(
     if (verified.actualHead !== resultHead ||
         git(job, "rev-parse", resultHead + "^").trim() !== sourceHead)
       throw Error("Architecture commit does not match the admitted source.");
+    if (state.worker === "pi" && !isFocusedScope(state.plan.contract)) {
+      if (!state.snapshot || !state.sourceDigest || architectureRoundSource(job, state, sourceHead) !== state.sourceDigest ||
+          !state.invocationProof || state.invocationProof.sourceDigest !== state.sourceDigest ||
+          !state.piSessionFile || !state.piSessionId || !state.draftReview || !state.blueprint)
+        throw Error("Architecture commit lacks its original invocation and independent draft proof.");
+      await verifySettledAssignment({ proof: state.invocationProof,
+        directory: join(job.stateDir, "architecture-assignment", state.sourceDigest),
+        sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+        sessionRoots: [join(job.stateDir, "architecture-sessions")],
+        effect: await contentDigest(job, state.paths), responseKind: "architecture-order" });
+      const approved = await readApprovedBlueprint(job, state.plan, state.snapshot,
+        state.provider, state.model, state.blueprintTask ?? "", sourceHead);
+      if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(state.blueprint))
+        throw Error("Architecture commit lost its independently approved Blueprint.");
+      await (await import("./architecture-draft-review.js")).verifyArchitectureDraftReviewPin(
+        job, state.snapshot, state.plan, state.provider, state.model, state.paths,
+        { id: state.piSessionId, file: state.piSessionFile }, state.draftReview, state.blueprintTask ?? "",
+        approved.blueprint, sourceHead);
+    }
     return "commit";
   }
   if (verified.actualHead !== sourceHead || await trustedHead(job) !== sourceHead)
@@ -651,6 +739,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
     }
     if (input.action === "inspect") return output(job, state, await reconcile(job, state));
     if (input.action === "reconcile") {
+      if (state.worker === "pi") throw Error("Original Architecture writer must reconcile through its shared assignment receipts.");
       if (!["writing", "authored"].includes(state.phase) ||
           !input.recoveryDigest || !/^[a-f0-9]{64}$/.test(input.recoveryDigest)) {
         throw new Error("Manual reconciliation requires a writing/authored work item and the exact --digest <sha256> of the reviewed files.");
@@ -659,7 +748,6 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       // protected changes. The canonical validator and independent Git gate
       // must still accept the exact reviewed content on the next run.
       assertHead(job, state.expectedHead);
-      if (state.worker === "pi") await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
       const paths = await changedPaths(job);
       const digest = await contentDigest(job, paths);
       if (digest !== input.recoveryDigest) throw new Error("Review digest differs from current Story bytes. Inspect again; nothing was adopted.");
@@ -751,6 +839,13 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           delete state.contentDigest;
           delete state.manuallyReconciled;
           delete state.draftReview;
+          delete state.assignmentKey;
+          delete state.sourceDigest;
+          delete state.priorProtection;
+          delete state.reviewPaths;
+          delete state.invocationProof;
+          delete state.piSessionId;
+          delete state.piSessionFile;
           delete state.blueprint;
           delete state.blueprintTask;
           delete state.blueprintFailure;
@@ -761,8 +856,10 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       return output(job, state);
     }
     if (input.action !== "run") throw new Error("Unknown architecture action.");
-    const recovery = await reconcile(job, state);
+    const recovery = await reconcile(job, state, input.round?.assignmentKey);
     if (recovery.status === "blocked") throw new Error("Architecture recovery blocked: " + recovery.reason);
+    if (state.assignmentKey && state.phase !== "committed" && state.assignmentKey !== input.round?.assignmentKey)
+      throw Error("Architecture assignment identity changed.");
     if ((input.fixture === true) !== (state.worker === "fixture") || input.mode && input.mode !== state.mode ||
         input.provider && input.provider !== state.provider || input.model && input.model !== state.model) throw new Error("Architecture worker configuration differs from the persisted assignment.");
     const config = input.skillsSource
@@ -796,14 +893,14 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       }
       return output(job, state);
     }
-    const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
+    const Channels = Annotation.Root({ receipt: Annotation<Receipt>(), round: Annotation<AssignmentRoundResult | null>() });
     const saver = SqliteSaver.fromConnString(join(job.stateDir, "architecture-workflow.sqlite"));
     const graph = new StateGraph(Channels)
       .addNode("review_causal_blueprint", async ({ receipt }) => {
-        if (receipt.phase === "authored" || receipt.worker === "fixture" ||
+        if (receipt.phase === "authored" || receipt.phase === "writing" || receipt.worker === "fixture" ||
             isFocusedScope(receipt.plan!.contract)) return {};
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
-        if (dirty(job).length || receipt.phase === "writing")
+        if (dirty(job).length)
           throw Error("Causal planning cannot restart an interrupted Architecture writer.");
         const before = reportOf(await validate(source, { ...job,
           baseSha: receipt.executionHead ?? receipt.expectedHead }));
@@ -866,51 +963,121 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         return { receipt };
       })
       .addNode("architecture_specialist", async ({ receipt }) => {
-        if (receipt.phase === "authored") return {};
-        assertHead(job, receipt.executionHead ?? receipt.expectedHead);
-        if (dirty(job).length || receipt.phase === "writing") throw new Error("Interrupted architecture edits/session require inspection; never blindly rerun a writer.");
-        if (receipt.phase === "blueprinting" && receipt.blueprintTask === undefined)
-          throw Error("Interrupted Architecture blueprint lost its pinned original task.");
-        const before = reportOf(await validate(source, { ...job, baseSha: receipt.executionHead ?? receipt.expectedHead }));
-        if (before.readiness.design.stages.foundation?.minimum !== "passed") throw new Error("Architecture requires a canonical ready Creative Direction.");
-        // A focused existing-record request adopts only verified canonical context;
-        // it MUST NOT launch the whole-Story architecture writer to invent context.
-        if (isFocusedScope(receipt.plan!.contract)) {
-          checkArchitecture(before, receipt.plan!.contract);
-          receipt.plan!.items[0] = { ...receipt.plan!.items[0]!, status: "verified",
-            verifiedSha: receipt.executionHead ?? receipt.expectedHead };
+        if (receipt.phase === "authored") {
+          if (receipt.worker === "pi" && (!input.round || input.round.command.phase !== "verify" ||
+              JSON.stringify(input.round.command.proof) !== JSON.stringify(receipt.invocationProof)))
+            throw Error("Architecture acceptance differs from its checkpointed writer proof.");
           return {};
         }
-        // Reuse verified architecture when it already satisfies the exact newly
-        // approved scope; otherwise write an additional coherent architecture unit.
-        if (receipt.plan!.items[0]?.status === "verified") {
-          try {
+        assertHead(job, receipt.executionHead ?? receipt.expectedHead);
+        if (receipt.phase !== "writing") {
+          if (dirty(job).length) throw new Error("Unexpected Architecture changes before admission.");
+          if (receipt.phase === "blueprinting" && receipt.blueprintTask === undefined)
+            throw Error("Interrupted Architecture blueprint lost its pinned original task.");
+          const before = reportOf(await validate(source, { ...job, baseSha: receipt.executionHead ?? receipt.expectedHead }));
+          if (before.readiness.design.stages.foundation?.minimum !== "passed") throw new Error("Architecture requires a canonical ready Creative Direction.");
+          // A focused existing-record request adopts only verified canonical context;
+          // it MUST NOT launch the whole-Story architecture writer to invent context.
+          if (isFocusedScope(receipt.plan!.contract)) {
             checkArchitecture(before, receipt.plan!.contract);
+            receipt.plan!.items[0] = { ...receipt.plan!.items[0]!, status: "verified",
+              verifiedSha: receipt.executionHead ?? receipt.expectedHead };
             return {};
-          } catch {
-            receipt.plan!.items[0] = workItem("global-architecture", "architecture",
-              receipt.plan!.contract.scope.targets, [], receipt.plan!.version);
           }
+          // Reuse verified architecture when it already satisfies the exact newly
+          // approved scope; otherwise write an additional coherent architecture unit.
+          if (receipt.plan!.items[0]?.status === "verified") {
+            try {
+              checkArchitecture(before, receipt.plan!.contract);
+              return {};
+            } catch {
+              receipt.plan!.items[0] = workItem("global-architecture", "architecture",
+                receipt.plan!.contract.scope.targets, [], receipt.plan!.version);
+            }
+          }
+          await preflightPiAssignment(job, "architecture:" + receipt.plan!.version, receipt.worker === "pi"
+            ? { provider: receipt.provider, model: receipt.model } : undefined);
+          const blueprint = receipt.worker === "pi" ? await readApprovedBlueprint(job,
+            receipt.plan!, receipt.snapshot!, receipt.provider, receipt.model,
+            receipt.blueprintTask ?? "", receipt.executionHead ?? receipt.expectedHead) : null;
+          if (receipt.worker === "pi" && (!blueprint ||
+              JSON.stringify(blueprint.pin) !== JSON.stringify(receipt.blueprint)))
+            throw Error("Architecture writer has no graph-checkpointed independently reviewed blueprint.");
+          if (receipt.worker === "pi") {
+            if (!input.round || input.round.command.phase !== "invoke") throw Error("Architecture writer requires its shared assignment admission.");
+            receipt.assignmentKey = input.round.assignmentKey;
+            receipt.priorProtection = protectedArchitectureDecisions(before);
+            receipt.sourceDigest = architectureRoundSource(job, receipt);
+          }
+          receipt.phase = "writing"; receipt.plan!.items[0]!.status = "writing";
+          await persist(file, receipt);
         }
-        await preflightPiAssignment(job, "architecture:" + receipt.plan!.version, receipt.worker === "pi"
-          ? { provider: receipt.provider, model: receipt.model } : undefined);
-        const blueprint = receipt.worker === "pi" ? await readApprovedBlueprint(job,
-          receipt.plan!, receipt.snapshot!, receipt.provider, receipt.model,
-          receipt.blueprintTask ?? "", receipt.executionHead ?? receipt.expectedHead) : null;
-        if (receipt.worker === "pi" && (!blueprint ||
-            JSON.stringify(blueprint.pin) !== JSON.stringify(receipt.blueprint)))
-          throw Error("Architecture writer has no graph-checkpointed independently reviewed blueprint.");
-        receipt.phase = "writing"; receipt.plan!.items[0]!.status = "writing";
-        await persist(file, receipt);
+        const blueprint = receipt.worker === "pi" ? await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
+          receipt.provider, receipt.model, receipt.blueprintTask ?? "", receipt.executionHead ?? receipt.expectedHead) : null;
         if (receipt.worker === "fixture") await fixtureAuthor(job, receipt);
         else {
           const { authorArchitecture } = await import("./architecture-specialist.js");
-          Object.assign(receipt, await authorArchitecture(job, receipt.snapshot!, receipt.plan!, receipt.provider, receipt.model,
+          if (!input.round || receipt.assignmentKey !== input.round.assignmentKey ||
+              !receipt.sourceDigest || receipt.sourceDigest !== architectureRoundSource(job, receipt) ||
+              !blueprint || JSON.stringify(blueprint.pin) !== JSON.stringify(receipt.blueprint))
+            throw Error("Architecture writer lost its original assignment or Blueprint.");
+          const head = receipt.executionHead ?? receipt.expectedHead;
+          const authorize = async () => {
+            assertHead(job, head);
+            if (receipt.sourceDigest !== architectureRoundSource(job, receipt)) throw Error("Architecture source grant changed.");
+            const paths = dirty(job).length ? await changedPaths(job) : [];
+            if (paths.length) assertCausalPaths(receipt.plan!, paths);
+            if (receipt.reviewPaths && JSON.stringify(paths) !== JSON.stringify(receipt.reviewPaths))
+              throw Error("Architecture correction altered its independently reviewed path inventory.");
+          };
+          const result = await authorArchitecture(job, receipt.snapshot!, receipt.plan!, receipt.provider, receipt.model,
             async (piSessionId, piSessionFile) => {
-              receipt.piSessionId = piSessionId;
-              receipt.piSessionFile = piSessionFile;
+              receipt.piSessionId = piSessionId; receipt.piSessionFile = piSessionFile;
               await persist(file, receipt);
-            }, receipt.blueprintTask, blueprint?.blueprint));
+            }, receipt.blueprintTask, blueprint.blueprint, {
+              command: input.round.command, sourceDigest: receipt.sourceDigest,
+              sessionId: receipt.piSessionId, sessionFile: receipt.piSessionFile, authorize, reviewPaths: receipt.reviewPaths,
+              effect: async () => dirty(job).length ? contentDigest(job, await changedPaths(job)) : null,
+              verify: async (order, _reads, writes, writer, writerRound) => {
+                await authorize();
+                const paths = dirty(job).length ? await changedPaths(job) : [];
+                const reject = (code: string, path = ".", detail?: string, kind: AssignmentDefect["kind"] = "requirement") =>
+                  ({ defects: [{ kind, path, code, detail }] });
+                if (!paths.length) return reject("architecture-empty-draft");
+                if (paths.some(p => !writes.includes(p))) return reject("architecture-missing-write-evidence");
+                const latest = await validate(source, { ...job, baseSha: head });
+                if (latest.status === "rejected")
+                  return { defects: nativeMetadataDefects(latest, { jobId: job.jobId, baseSha: head,
+                    worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths }) };
+                const report = reportOf(latest);
+                if (latest.status !== "passed" || report.protection.status !== "checked" ||
+                    report.protection.changes.length || report.protection.warnings.length)
+                  throw Error("Architecture cannot revise protected decisions.");
+                const invented = protectedArchitectureDecisions(report).filter(d => !receipt.priorProtection!.includes(d));
+                if (invented.length) return reject("architecture-new-protection", ".", invented.join("; "), "provenance");
+                checkOriginalProtection(job, await validate(source), head);
+                let selected: CatalogRecord[];
+                try { selected = checkArchitecture(report, receipt.plan!.contract); }
+                catch (error) { return reject("architecture-incomplete-coverage", ".", String(error)); }
+                if (paths.some(p => !selected.some(r => r.path === p))) throw Error("Architecture wrote outside accepted scope.");
+                try { verifiedArchitectureMilestoneOrder(order, selected.filter(r => r.metadata.type === "milestone").map(r => r.metadata.id)); }
+                catch (error) { return reject("architecture-milestone-order", ".", String(error)); }
+                if (!receipt.reviewPaths) { receipt.reviewPaths = paths; await persist(file, receipt); }
+                const { createArchitectureDraftReviewCycle } = await import("./architecture-draft-review.js");
+                const cycle = await createArchitectureDraftReviewCycle(job, receipt.snapshot!, receipt.plan!, receipt.provider,
+                  receipt.model, paths, writer, receipt.blueprintTask ?? "", blueprint.blueprint, writerRound);
+                try {
+                  const result = await cycle.review();
+                  if (result.verdict.status === "pass") return { defects: [], draftReview: result.pin };
+                  return { defects: result.verdict.findings.map(f => ({ kind: "semantic" as const, path: f.path,
+                    code: "architecture-precommit-review", detail: JSON.stringify(f),
+                    reviewProgress: { receiptDigest: result.receiptDigest, productive: result.convergence.productive } })) };
+                } finally { cycle.dispose(); }
+              },
+            });
+          if (result.round.status !== "accepted") return { receipt, round: result.round };
+          Object.assign(receipt, result.accepted);
+          receipt.invocationProof = result.round.proof;
         }
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         receipt.paths = await changedPaths(job);
@@ -936,6 +1103,14 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         checkOriginalProtection(job, original, workingHead);
         const selected = checkArchitecture(report, receipt.plan!.contract);
         if (receipt.worker === 'pi' && !isFocusedScope(receipt.plan!.contract)) {
+          if (!receipt.invocationProof || receipt.sourceDigest !== receipt.invocationProof.sourceDigest ||
+              !receipt.paths || !receipt.piSessionId || !receipt.piSessionFile)
+            throw Error("Architecture commit lacks accepted original assignment evidence.");
+          await verifySettledAssignment({ proof: receipt.invocationProof,
+            directory: join(job.stateDir, "architecture-assignment", receipt.sourceDigest),
+            sessionId: receipt.piSessionId, sessionFile: receipt.piSessionFile,
+            sessionRoots: [join(job.stateDir, "architecture-sessions")],
+            effect: await contentDigest(job, receipt.paths), responseKind: "architecture-order" });
           // Early review is not postcommit semantic approval. Its source-bound
           // receipt must nevertheless match the exact candidate before commit.
           if (!receipt.manuallyReconciled) {
@@ -949,7 +1124,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
             await verifyArchitectureDraftReviewPin(job, receipt.snapshot, receipt.plan!,
               receipt.provider, receipt.model, receipt.paths,
               { id: receipt.piSessionId, file: receipt.piSessionFile },
-              receipt.draftReview, receipt.blueprintTask ?? "", blueprint?.blueprint);
+              receipt.draftReview, receipt.blueprintTask ?? "", blueprint?.blueprint, recovering ? workingHead : undefined);
           }
           // Reject a stale or invented order BEFORE committing any Story bytes.
           verifiedArchitectureMilestoneOrder(receipt.milestoneOrder,
@@ -1009,15 +1184,16 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       })
       .addEdge(START, "review_causal_blueprint")
       .addEdge("review_causal_blueprint", "architecture_specialist")
-      .addEdge("architecture_specialist", "validate_and_commit_architecture")
+      .addConditionalEdges("architecture_specialist", state => state.round ? END : "validate_and_commit_architecture", [END, "validate_and_commit_architecture"])
       .addEdge("validate_and_commit_architecture", END).compile({ checkpointer: saver });
-    let result: { receipt: Receipt };
+    let result: { receipt: Receipt; round: AssignmentRoundResult | null };
     try {
-      result = await graph.invoke({ receipt: state }, { configurable: {
+      result = await graph.invoke({ receipt: state, round: null }, { configurable: {
         thread_id: job.threadId + ":architecture:" + state.plan!.version + ":" +
           (state.executionHead ?? state.expectedHead),
       } });
     } finally { saver.db.close(); }
+    if (result.round) return { ...output(job, result.receipt), status: "writer-round", round: result.round };
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "architecture");

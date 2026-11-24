@@ -4,8 +4,8 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { dirname, join, sep } from "node:path";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import type { Plan } from "./architecture.js";
@@ -13,7 +13,7 @@ import type { CausalBlueprint } from "./architecture-blueprint.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { guardPiBudget, preparePiContext } from "./job-pi-policy.js";
+import { guardPiBudget, preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
@@ -22,6 +22,7 @@ import { authorizedArchitectureRecordPath } from "./architecture-record-path.js"
 import { openSkillSnapshot } from "./snapshot.js";
 import { reviewCycleId, assertReviewCycleSession, sourceReviewConvergence,
   sourceReviewDiagnosticTrigger } from "./review-cycle.js";
+import { beginProtocolInvocation, recoverResponseContract } from "./response-contract-recovery.js";
 import { parseArchitectureDraftDiagnosis } from "./architecture-draft-diagnosis.js";
 
 const sha = (input: unknown) =>
@@ -78,6 +79,8 @@ type RoundReceipt = {
   reviewer: Writer;
   sources: Record<string, string>;
   verdict: ArchitectureDraftReview;
+  draft: Record<string, string>;
+  writerRound: string | null;
   transcriptBytes: number;
   transcriptDigest: string;
 };
@@ -87,9 +90,9 @@ export function architectureDraftFormatCorrection(paths: readonly string[]): str
     throw Error("Architecture draft format correction lacks authorized record paths.");
   return (
     "INDEPENDENT DRAFT VERDICT PROTOCOL CORRECTION (same read-only session): " +
-    "Your verdict or source reads failed the controller's exact contract. Do not edit files, " +
-    "change standards or assert approval. Re-read the pinned skills, Creative Direction and " +
-    "ALL changed files and return COMPLETE strict JSON with exactly schema,status,findings,prior. " +
+    "Your verdict failed the controller's exact contract. No tools or edits. " +
+    "Do not change standards or assert approval. Use your already completed source reads and " +
+    "return COMPLETE strict JSON with exactly schema,status,findings,prior. " +
     "Schema is noveltea-architecture-draft-review/v2. Each finding has EXACT keys " +
     "path,reason,correction,requirement,evidence,origin. Requirement is {source,quote} from " +
     "foundation,contract,task,blueprint; evidence is {path,quote} with an EXACT 8+ character " +
@@ -213,8 +216,9 @@ function cycleScope(
   paths: string[],
   task: string,
   blueprint?: CausalBlueprint,
+  sourceHead?: string,
 ) {
-  const head = execFileSync("git", ["rev-parse", "HEAD"], {
+  const head = sourceHead ?? execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: job.worktreeRoot,
     encoding: "utf8",
   }).trim();
@@ -265,7 +269,7 @@ async function transcriptEvidence(job: JobStartResult, reviewer: Writer) {
   return bytes;
 }
 
-async function sourceDraft(job: JobStartResult, paths: readonly string[]) {
+async function sourceDraft(job: JobStartResult, paths: readonly string[], committed = false) {
   const changes = execFileSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
     cwd: job.worktreeRoot,
     encoding: "utf8",
@@ -284,7 +288,7 @@ async function sourceDraft(job: JobStartResult, paths: readonly string[]) {
     )
       throw Error("Architecture review rejects unauthorized or newly introduced record: " + raw);
   }
-  if (!changes.length) throw Error("Architecture review cannot approve an unchanged worktree.");
+  if (!changes.length && !committed) throw Error("Architecture review cannot approve an unchanged worktree.");
   const result: Record<string, string> = {};
   for (const path of paths) {
     if (!authorizedArchitectureRecordPath(path)) throw Error("Unauthorized Architecture review path.");
@@ -307,8 +311,9 @@ export async function verifyArchitectureDraftReviewPin(
   pin: ArchitectureDraftReviewPin,
   task = "",
   blueprint?: CausalBlueprint,
+  committedSourceHead?: string,
 ): Promise<void> {
-  const cycleId = reviewCycleId(cycleScope(job, snapshot, plan, provider, model, paths, task, blueprint));
+  const cycleId = reviewCycleId(cycleScope(job, snapshot, plan, provider, model, paths, task, blueprint, committedSourceHead));
   if (
     pin.cycleId !== cycleId ||
     !Number.isSafeInteger(pin.round) ||
@@ -328,7 +333,7 @@ export async function verifyArchitectureDraftReviewPin(
   )
     throw Error("Architecture precommit review admission has wrong session or authorization.");
   assertReviewCycleSession(writer, admitted.reviewer);
-  const current = await sourceDraft(job, paths);
+  const current = await sourceDraft(job, paths, !!committedSourceHead);
   let prior = "";
   let reviewer: Writer | undefined;
   for (let i = 0; i <= pin.round; i++) {
@@ -343,6 +348,8 @@ export async function verifyArchitectureDraftReviewPin(
         "reviewer",
         "sources",
         "verdict",
+        "draft",
+        "writerRound",
         "transcriptBytes",
         "transcriptDigest",
       ]) ||
@@ -358,7 +365,8 @@ export async function verifyArchitectureDraftReviewPin(
       receipt.transcriptBytes <= 0 ||
       !HASH.test(receipt.transcriptDigest) ||
       Object.keys(receipt.sources).sort().join(",") !== [...paths].sort().join(",") ||
-      Object.values(receipt.sources).some((v) => !HASH.test(v))
+      Object.values(receipt.sources).some((v) => !HASH.test(v)) ||
+      !receipt.draft || paths.some(p => sha(receipt.draft[p]) !== receipt.sources[p])
     )
       throw Error("Architecture precommit review receipt has invalid identity or source evidence.");
     assertReviewCycleSession(writer, receipt.reviewer, reviewer ?? admitted.reviewer);
@@ -394,6 +402,7 @@ export async function createArchitectureDraftReviewCycle(
   writer: Writer,
   task = "",
   blueprint?: CausalBlueprint,
+  writerRound?: string,
 ) {
   if (
     !paths.length ||
@@ -404,10 +413,18 @@ export async function createArchitectureDraftReviewCycle(
     throw Error("Architecture draft reviewer lacks bounded authorized Arc/Milestone paths.");
   const scope = cycleScope(job, snapshot, plan, provider, model, paths, task, blueprint);
   const cycleId = reviewCycleId(scope);
-  if (existsSync(admissionPath(job, cycleId)))
+  const existing = existsSync(admissionPath(job, cycleId)) ? JSON.parse(await readFile(admissionPath(job, cycleId), "utf8")) as AdmissionReceipt : null;
+  if (existing && !writerRound)
     throw Error(
       "An admitted Architecture precommit review cycle already exists; reconcile the original reviewer and draft, never start a fresh session.",
     );
+  if (existing) {
+    if (existing.cycleId !== cycleId || existing.schema !== "noveltea-architecture-draft-admission/v1" ||
+        JSON.stringify(existing.writer) !== JSON.stringify(writer))
+      throw Error("Architecture reviewer admission changed.");
+    assertReviewCycleSession(writer, existing.reviewer);
+    await transcriptEvidence(job, existing.reviewer);
+  }
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
     discovery: "explicit-only",
@@ -426,6 +443,7 @@ export async function createArchitectureDraftReviewCycle(
     throw Error("Independent Architecture draft feedback lacks pinned method resources.");
   const runtime = await createJobModelRuntime();
   const step = "architecture:precommit-review:" + cycleId;
+  if (!existing) await guardPiBudget(job, step + ":0");
   const context = await preparePiContext(
     job,
     project,
@@ -449,7 +467,7 @@ export async function createArchitectureDraftReviewCycle(
     thinkingLevel: context.thinking,
     resourceLoader: loader,
     settingsManager,
-    sessionManager: context.manager,
+    sessionManager: existing ? SessionManager.open(existing.reviewer.file, dirname(existing.reviewer.file), project.root) : context.manager,
     customTools: safeTools ?? [],
     noTools: "all",
     tools: [...SANDBOX_READ_ONLY_TOOLS],
@@ -466,10 +484,8 @@ export async function createArchitectureDraftReviewCycle(
       reviewer,
     };
     await mkdir(cycleDirectory(job, cycleId), { recursive: true });
-    await writeFile(admissionPath(job, cycleId), JSON.stringify(admission, null, 2) + "\n", {
-      flag: "wx",
-      mode: 0o600,
-    });
+    if (existing && JSON.stringify(existing.reviewer) !== JSON.stringify(reviewer)) throw Error("Original reviewer identity changed.");
+
     const originalFoundation = await readFile(join(project.root, "creative-direction/foundation.md"), "utf8");
     const requirements = {
       foundation: originalFoundation,
@@ -484,6 +500,30 @@ export async function createArchitectureDraftReviewCycle(
     let lastDigest: string | null = null;
     let lastPin: ArchitectureDraftReviewPin | undefined;
 
+    let lastReceipt: RoundReceipt | undefined;
+    let lastConvergence: ReturnType<typeof architectureDraftConvergence> | undefined;
+    if (existing) {
+      const bytes = await transcriptEvidence(job, reviewer);
+      for (let i = 0; existsSync(roundPath(job, cycleId, i)); i++) {
+        const saved = JSON.parse(await readFile(roundPath(job, cycleId, i), "utf8")) as RoundReceipt;
+        if (saved.cycleId !== cycleId || saved.round !== i || saved.previousDigest !== lastDigest ||
+            JSON.stringify(saved.writer) !== JSON.stringify(writer) ||
+            JSON.stringify(saved.reviewer) !== JSON.stringify(reviewer) ||
+            !saved.draft || paths.some(p => sha(saved.draft[p]) !== saved.sources[p]) ||
+            bytes.length < saved.transcriptBytes ||
+            sha(bytes.subarray(0, saved.transcriptBytes).toString("utf8")) !== saved.transcriptDigest)
+          throw Error("Architecture reviewer history changed.");
+        const verdict = parseArchitectureDraftReview(JSON.stringify(saved.verdict), paths, saved.draft, requirements, history);
+        lastConvergence = architectureDraftConvergence(verdict, saved.draft, history, stalled);
+        stalled = lastConvergence.stalled;
+        history.push({ sources: saved.draft, verdict });
+        lastDigest = sha(saved); lastReceipt = saved;
+      }
+      if (!lastReceipt || bytes.length !== lastReceipt.transcriptBytes)
+        throw Error("Original Architecture reviewer has an unsettled invocation; never replay.");
+      if (lastReceipt.verdict.status === "pass")
+        lastPin = { cycleId, round: lastReceipt.round, receiptDigest: lastDigest! };
+    }
     const required = [
       ...paths.map((p) => join(project.root, p)),
       join(project.root, "creative-direction/foundation.md"),
@@ -513,6 +553,16 @@ export async function createArchitectureDraftReviewCycle(
             throw Error("Architecture review session or saved verdict changed between correction rounds.");
         }
         const sources = await sourceDraft(job, paths);
+        if (writerRound && lastReceipt?.writerRound === writerRound) {
+          if (paths.some(p => sha(sources[p]) !== lastReceipt!.sources[p]))
+            throw Error("Architecture writer effect changed after precommit review.");
+          return { verdict: lastReceipt.verdict, convergence: lastConvergence!, pin: lastPin,
+            receiptDigest: lastDigest!, diagnosticTrigger: sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound) };
+        }
+        if (writerRound && lastReceipt?.verdict.status === "pass")
+          throw Error("A passed Architecture draft cannot admit a new reviewer round.");
+        const started = join(cycleDirectory(job, cycleId), "round-" + round + ".started.json");
+        if (existsSync(started)) throw Error("Original Architecture reviewer invocation is unsettled; never replay.");
         if (
           (await readFile(join(project.root, "creative-direction/foundation.md"), "utf8")) !==
             originalFoundation ||
@@ -533,7 +583,16 @@ export async function createArchitectureDraftReviewCycle(
         // Each round is a distinct budgeted model step. No budget overrun can
         // silently authorize a dirty draft or consume additional writer turns.
         await guardPiBudget(job, step + ":" + round, reviewer.file);
+        if (!existing && !history.length)
+          await writeFile(admissionPath(job, cycleId), JSON.stringify(admission, null, 2) + "\n", {flag: "wx", mode: 0o600});
         const messageStart = session.messages.length;
+        await writeFile(started, JSON.stringify({ cycleId, round, writerRound, reviewer,
+          sources: Object.fromEntries(Object.entries(sources).map(([p,v]) => [p,sha(v)])) }), { flag: "wx", mode: 0o600 });
+        const protocolBase = join(cycleDirectory(job, cycleId), "round-" + round + ".protocol");
+        const contract = "architecture.draft-review.v2";
+        const sourceDigest = sha({cycleId, round, writerRound: writerRound ?? null, sources, previous: lastDigest});
+        await beginProtocolInvocation({receiptFile: protocolBase, contract, sourceDigest, session});
+        await registerPendingPiSession(job, reviewer.file);
         await promptStorySpecialist(
           session,
           (round
@@ -607,48 +666,29 @@ export async function createArchitectureDraftReviewCycle(
           );
           return required.filter((p) => !reads.includes(p));
         };
+        await recordPiSession(job, reviewer.file);
         if (!complete())
           throw Error("Architecture draft reviewer interrupted; preserve writer and reviewer transcripts.");
-        if (missing().length) {
-          await promptStorySpecialist(
-            session,
-            "READ-ONLY SOURCE/METHOD CORRECTION: Your verdict " +
-              "cannot count. Read EVERY missing required source with the read tool and return the " +
-              "complete current JSON verdict again:\n" +
-              missing()
-                .map((p) =>
-                  p.startsWith(join(snapshot.path, "skills") + sep)
-                    ? "skill://" + p.slice((join(snapshot.path, "skills") + sep).length)
-                    : p.slice(project.root.length + 1),
-                )
-                .join("\n"),
-          );
-        }
-        const parse = () => {
-          if (!complete() || missing().length)
-            throw Error("Architecture reviewer omitted required current-round read results.");
-          return parseArchitectureDraftReview(
-            session.getLastAssistantText() ?? "",
-            paths,
-            sources,
-            requirements,
-            history,
-          );
-        };
-        let verdict: ArchitectureDraftReview;
-        try {
-          verdict = parse();
-        } catch (error) {
-          await promptStorySpecialist(
-            session,
-            architectureDraftFormatCorrection(paths) +
-              "\nController rejection: " +
-              (error instanceof Error ? error.message : String(error)) +
-              "\nHistory: " +
-              JSON.stringify(history.map((h) => h.verdict)),
-          );
-          verdict = parse();
-        }
+        if (missing().length)
+          throw Error("Architecture reviewer omitted required current-round read results.");
+        const parse = (text: string) => parseArchitectureDraftReview(text, paths, sources, requirements, history);
+        const verdict = await recoverResponseContract({
+          session, contract, sourceDigest, receiptFile: protocolBase + ".initial.json", sealTranscript: true,
+          validate: text => { try { parse(text); return []; } catch { return [{ path: "$", expected: "exact source-bound independent verdict" }]; } },
+          parse,
+          beforeCorrection: async () => {
+            if (sha(await sourceDraft(job, paths)) !== sha(sources))
+              throw Error("Architecture reviewer source changed before format repair.");
+            await guardPiBudget(job, step + ":" + round, reviewer.file);
+          },
+          feedback: () => architectureDraftFormatCorrection(paths) +
+            "\nHistory: " + JSON.stringify(history.map(h => h.verdict)),
+          prompt: async text => {
+            await registerPendingPiSession(job, reviewer.file);
+            await promptStorySpecialist(session, text);
+            await recordPiSession(job, reviewer.file);
+          },
+        });
         // A reviewer must not certify source bytes that changed while it read them.
         if (
           sha(await sourceDraft(job, paths)) !== sha(sources) ||
@@ -672,6 +712,8 @@ export async function createArchitectureDraftReviewCycle(
           reviewer,
           sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, sha(v)])),
           verdict,
+          draft: sources,
+          writerRound: writerRound ?? null,
           transcriptBytes: transcript.length,
           transcriptDigest: sha(transcript.toString("utf8")),
         };
@@ -682,7 +724,7 @@ export async function createArchitectureDraftReviewCycle(
         history.push({ sources, verdict });
         lastPin = verdict.status === "pass" ? { cycleId, round, receiptDigest: lastDigest } : undefined;
         const diagnosticTrigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
-        return { verdict, convergence, pin: lastPin, diagnosticTrigger };
+        return { verdict, convergence, pin: lastPin, receiptDigest: lastDigest!, diagnosticTrigger };
       },
       async diagnose() {
         const trigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
