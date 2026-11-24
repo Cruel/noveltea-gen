@@ -5783,7 +5783,7 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
   skip: !available, timeout: 240_000,
 }, async () => {
@@ -5795,7 +5795,8 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
   const stalled = scenario === "review-stalled" || scenario === "review-stalled-continue";
   const dispute = scenario === "review-dispute";
   const scopeRevision = scenario === "review-scope";
-  const revising = scenario === "review-converges" || stalled;
+  const reviewCrash = scenario === "review-crash-rounds";
+  const revising = scenario === "review-converges" || stalled || reviewCrash;
   const f = setup("r01-real-foundation-pi-" + scenario);
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
@@ -5936,11 +5937,11 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         assert.ok(prompt, "Original reviewer receives the source-bound packet");
         const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
         const item = packet.items[0];
-        const pass = crashRounds || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
+        const pass = crashRounds || reviewCrash && correction === 1 || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
         const finding = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: target, line: 1, kind: "missing-requirement",
           message: "The witness causal connection still needs the next specific link.",
-          requiredCorrection: "Specify the witness's concrete causal connection to the archive theft.",
+          requiredCorrection: scenario === "review-protected" ? "Create a new character record and change a protected author decision." : "Specify the witness's concrete causal connection to the archive theft.",
           affectedPaths: [target] };
         return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: pass ? "pass" : "fail",
           findings: pass ? [] : [finding],
@@ -6068,8 +6069,51 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         assert.equal(stopped.completedStages.length, 0);
         return;
       }
+      // Simulate loss of a persisted child task output after an external effect
+      // settled. This aborts the parent as well, then reopens the same database.
+      const crashReviewCheckpoint = async (which: "negative" | "writer" | "review",
+        initial: typeof input | null, calls: number) => {
+        const abort = new AbortController();
+        const put = saver.put.bind(saver);
+        const putWrites = saver.putWrites.bind(saver);
+        let crashed = false;
+        const failure = Error("R14B injected SQLite loss at " + which);
+        saver.put = async (...args) => {
+          if (crashed) throw failure;
+          return put(...args);
+        };
+        saver.putWrites = async (cfg, writes, task) => {
+          if (crashed) throw failure;
+          const submission = writes.find(([channel]) => channel === "submission")?.[1] as
+            { status?: string } | undefined;
+          const outcome = writes.find(([channel]) => channel === "outcome")?.[1] as
+            { status?: string; dispositionRef?: string } | undefined;
+          if (cfg.configurable?.checkpoint_ns?.includes("assignment-") &&
+              (which === "negative" ? outcome?.status === "unresolved" && outcome.dispositionRef === "review-checkpoints" :
+                which === "writer" ? submission?.status === "repair-round" : outcome?.status === "verified")) {
+            crashed = true;
+            abort.abort(failure);
+            throw failure;
+          }
+          return putWrites(cfg, writes, task);
+        };
+        await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(initial,
+          { ...config, signal: abort.signal, durability: "sync" })));
+        assert.ok(crashed, "Expected actual child SQLite checkpoint loss: " + which);
+        assert.equal(observed.length, calls);
+        assert.ok(!existsSync(join(f.job.stateDir, ".story-job")), "Writer lease must not survive settled child effect");
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(checkpointFile);
+        graph = makeGraph();
+      };
+      if (reviewCrash) {
+        await crashReviewCheckpoint("negative", input, 13);
+        const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+        assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)?.semanticReview, "failed");
+        assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
+      }
       let first = await withJobModelRuntime(runtime, () =>
-        graph.invoke(crashRounds ? null : input, { ...config, interruptAfter: ["specialist_dispatch"] }));
+        graph.invoke(crashRounds || reviewCrash ? null : input, { ...config, interruptAfter: ["specialist_dispatch"] }));
       if (realReview) {
         const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
         assert.equal(first.result?.headSha, head,
@@ -6087,9 +6131,12 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction",
           JSON.stringify(selected.recoveryLifecycle));
         assert.equal(observed.length, 13, "Selection cannot start a new Pi writer");
-        if (scenario === "review-session-unavailable") {
+        if (scenario === "review-session-unavailable" || scenario === "review-reviewer-unavailable") {
           const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
-          const transcript = receipt.piSessionFile;
+          const point = (await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)!;
+          const { inspectPostcommitReviewCycle } = await import("../src/postcommit-review-cycle.js");
+          const cycle = await inspectPostcommitReviewCycle(f.job, head, point.assurance!.assignmentDigest);
+          const transcript = scenario === "review-reviewer-unavailable" ? cycle!.reviewer.file : receipt.piSessionFile;
           assert.ok(transcript);
           const { renameSync } = await import("node:fs");
           renameSync(transcript, transcript + ".unavailable");
@@ -6099,6 +6146,19 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             assert.ok(fenced.recoveryLifecycle.inspectionFences.length || fenced.recoveryLifecycle.decision?.action === "integrity-fence");
             assert.equal(observed.length, 13, "Missing original session cannot authorize a new writer");
           } finally { renameSync(transcript + ".unavailable", transcript); }
+        }
+        if (scenario === "review-protected") {
+          const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+          assert.equal(stopped.status, "blocked", JSON.stringify(stopped.recoveryLifecycle));
+          assert.equal(stopped.recoveryLifecycle.active?.id, original.id);
+          assert.ok(stopped.recoveryLifecycle.decision?.action === "pause" &&
+            stopped.recoveryLifecycle.decision.reason === "protected-approval" ||
+            stopped.recoveryLifecycle.inspectionFences.length ||
+            stopped.recoveryLifecycle.decision?.action === "integrity-fence");
+          assert.equal(observed.length, 13, "Protected scope cannot authorize another writer");
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+          assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+          assert.ok(!existsSync(join(f.job.stateDir, ".story-job")));
         }
         if (scopeRevision) {
           const paused = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
@@ -6185,7 +6245,16 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)?.semanticReview, "failed");
           }
         }
-        if (scenario === "review-converges") {
+        if (scenario === "review-converges" || reviewCrash) {
+          if (reviewCrash) {
+            await crashReviewCheckpoint("writer", null, 15);
+            const successor = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+            assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), "1");
+            assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === successor)?.semanticReview, "required-pending");
+            await crashReviewCheckpoint("review", null, 16);
+            assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), successor);
+            assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === successor)?.semanticReview, "passed");
+          }
           const repaired = await withJobModelRuntime(runtime, () => graph.invoke(null, {
             ...config, interruptAfter: ["independent_assignment_review"],
           }));
@@ -6195,18 +6264,69 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           const finalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
           assert.equal(repaired.recoveryLifecycle.discharged.at(-1)?.case.id, original.id);
           assert.equal(repaired.result?.headSha, finalHead);
-          assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), "3");
-          assert.equal(observed.length, 22);
+          assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), reviewCrash ? "1" : "3");
+          assert.equal(observed.length, reviewCrash ? 16 : 22);
           const cycle = await (await import("../src/postcommit-review-cycle.js"))
             .inspectPostcommitReviewCycle(f.job, head, (await inspectRecoveryCheckpoints(f.job))
               .find(p => p.commitSha === head)!.assurance!.assignmentDigest);
-          assert.equal(cycle?.rounds.length, 4);
+          assert.equal(cycle?.rounds.length, reviewCrash ? 2 : 4);
+          // The actual shared child must checkpoint one admission and one
+          // committed submission per repair; native/Git and Review receipts
+          // remain the independent authorities for every reference.
+          const repairAdmissions = new Set<string>(), repairSubmissions = new Set<string>();
+          const originalReceipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+          for await (const tuple of saver.list({ configurable: { thread_id: config.configurable.thread_id } })) {
+            const ns = tuple.config.configurable?.checkpoint_ns ?? "";
+            if (!ns.includes("assignment-") || !ns.includes("-correction")) continue;
+            const { identity, correction, submission } = tuple.checkpoint.channel_values as {
+              identity?: import("../src/generation-assignment-lifecycle.js").AssignmentIdentity;
+              correction?: { correctionRef: string; rejectedReceiptRef: string };
+              submission?: { status: string; receiptRef: string; headSha: string };
+            };
+            if (identity) {
+              const { logicalAssignmentKey } = await import("../src/generation-assignment-lifecycle.js");
+              assert.equal(logicalAssignmentKey(identity), originalReceipt.assignmentKey);
+              assert.equal(identity.turnDigest, pinnedDigest);
+            }
+            if (correction?.correctionRef.match(/^[a-f0-9]{40}:[a-f0-9]{64}$/))
+              repairAdmissions.add(correction.correctionRef);
+            if (submission?.status === "repair-round") {
+              const [, source, successor] = submission.receiptRef.split(":");
+              const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "review-repairs", source + ".json"), "utf8"));
+              assert.equal(receipt.rootFailureSha, head);
+              assert.equal(receipt.repairedCommitSha, successor);
+              assert.equal(receipt.origin.sessionId, originalReceipt.piSessionId);
+              assert.deepEqual(receipt.allowedPaths, ["creative-direction/foundation.md"]);
+              assert.equal(receipt.reviewer.sessionFiles[0], cycle!.reviewer.file);
+              assert.ok(receipt.findings.length);
+              assert.equal(submission.headSha, successor);
+              repairSubmissions.add(submission.receiptRef);
+            }
+          }
+          assert.equal(repairAdmissions.size, reviewCrash ? 1 : 3);
+          assert.equal(repairSubmissions.size, reviewCrash ? 1 : 3);
+          const policy = await inspectPiPolicy(f.job);
+          assert.equal(policy.budget.modelCalls, observed.length, "Restart cannot double charge an original session");
+          assert.ok(observed.slice(13).filter((_, i) => i % 3 === 2)
+            .every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
+
           assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id), repaired.recoveryLifecycle);
           const completed = await withJobModelRuntime(runtime, () => graph.invoke(null, {
             ...config, interruptAfter: ["verify_committed_work"],
           }));
           assert.ok(completed.completedStages.some(item => item.stage === "foundation"));
-          assert.equal(observed.length, 22);
+          assert.equal(observed.length, reviewCrash ? 16 : 22);
+          // Resume through the parent's author/plan boundary, not the child's
+          // scheduler. The next owner may be admitted, but not invoked here.
+          const scheduled = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["author_update_intake"],
+          }));
+          assert.equal(scheduled.status, "running", scheduled.reason ?? undefined);
+          assert.equal(scheduled.active?.stage, "architecture");
+          assert.equal(scheduled.request.turnPlanDigest, pinnedDigest);
+          assert.equal(scheduled.inventory?.headSha, finalHead);
+          assert.ok((await graph.getState(config)).next.includes("specialist_dispatch"));
+          assert.equal(observed.length, reviewCrash ? 16 : 22);
         }
         return;
       }

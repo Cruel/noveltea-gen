@@ -49,7 +49,7 @@ import type { RecoveryDecision, RecoveryEvidence } from "./generation-recovery-c
 import { isDeepStrictEqual } from "node:util";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { steeringForAssignment } from "./steering-amendments.js";
-import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
+import { driveRejectedRepairCycle, type RepairCycleOps } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
@@ -196,10 +196,7 @@ function specialistSource(job: JobStartResult, workItem: string) {
 export async function readRejectedRepairOrigin(job: JobStartResult, point: RecoveryCheckpoint): Promise<RepairOrigin> {
   if (point.workItem.startsWith("repair-")) {
     const previous = await inspectRejectedRepair(job, point.workItem.slice(7));
-    if (previous.repairedCommitSha !== point.commitSha ||
-        !["failed", "blocked", "passed"].includes(previous.phase))
-      throw Error("The rejected repair does not have a closed original-session receipt.");
-    return previous.origin;
+    return predecessorOrigin(previous, point);
   }
   const source = specialistSource(job, point.workItem);
   if (!source) throw Error("This specialist has no registered original-session repair adapter; preserve the rejected checkpoint.");
@@ -259,10 +256,19 @@ async function verifiedFailure(job: JobStartResult, point: RecoveryCheckpoint) {
     p.eligible && p.commitSha === point.commitSha && p.proofDigest === point.proofDigest);
   if (!saved || !saved.assurance || JSON.stringify(saved.assurance) !==
       JSON.stringify(point.assurance)) throw Error("Rejected checkpoint no longer matches sealed evidence.");
-  const review = await inspectCheckpointReview(job, saved);
+  return readVerifiedFailure(job, saved);
+}
+async function readVerifiedFailure(job: JobStartResult, point: RecoveryCheckpoint) {
+  const review = await inspectCheckpointReview(job, point);
   if (review?.status !== "failed" || !review.result)
     throw Error("Only a source-linked sealed independent review failure can start repair.");
   return review.result;
+}
+function predecessorOrigin(previous: RepairReceipt, point: RecoveryCheckpoint): RepairOrigin {
+  if (previous.repairedCommitSha !== point.commitSha ||
+      !["failed", "blocked", "passed"].includes(previous.phase))
+    throw Error("The rejected repair does not have a closed original-session receipt.");
+  return previous.origin;
 }
 export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCheckpoint) {
   if (!SHA.test(point.commitSha)) throw Error("Invalid rejected commit.");
@@ -302,7 +308,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
       ["rejected-review-next-attempt"], () => recordReviewDependency(job, request));
     throw new ReviewDependencyRequiredError(request);
   }
-  const origin = await readRejectedRepairOrigin(job, point);
+  const origin = previous ? predecessorOrigin(previous, point) : await readRejectedRepairOrigin(job, point);
   const planAmendment = deriveReviewRepairAmendment({ assurance: point.assurance!,
     review: failure, original: assignment, planVersion: point.planVersion ?? plan!.version,
     originWorkItem: origin.workItem,
@@ -396,10 +402,12 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
   const checkpoints = await inspectRecoveryCheckpoints(job);
   const original = checkpoints.find(p => p.eligible && p.commitSha === state.rootFailureSha);
   const current = checkpoints.find(p => p.eligible && p.commitSha === state.sourceCommitSha);
-  if (!original || !current ||
-      sourceOf(await verifiedFailure(job, original)) !== state.originalReviewDigest ||
-      sourceOf(await verifiedFailure(job, current)) !== state.sourceReviewDigest ||
-      JSON.stringify((await verifiedFailure(job, current)).source) !== JSON.stringify(state.source) ||
+  if (!original || !current) throw Error("Repair no longer matches the original, immutable failure.");
+  const rootFailure = await readVerifiedFailure(job, original);
+  const sealed = original.commitSha === current.commitSha ? rootFailure : await readVerifiedFailure(job, current);
+  if (sourceOf(rootFailure) !== state.originalReviewDigest ||
+      sourceOf(sealed) !== state.sourceReviewDigest ||
+      JSON.stringify(sealed.source) !== JSON.stringify(state.source) ||
       JSON.stringify(original.assurance && {
         jobId: original.assurance.jobId, commitSha: original.assurance.commitSha,
         turnDigest: original.assurance.turnDigest, assignmentId: original.assurance.assignmentId,
@@ -409,12 +417,11 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
     throw Error("Repair no longer matches the original, immutable failure.");
   if (state.phase === "passed" && !state.repairedCommitSha)
     throw Error("Repair cannot pass without a reviewed successor checkpoint.");
-  const sealed = await verifiedFailure(job, current);
   const turn = await readReviewTurnEvidence(job);
   if (!turn) throw Error("Repair lost its pinned original Turn plan.");
-  const origin = await readRejectedRepairOrigin(job, current);
   const previous = current.workItem.startsWith("repair-")
     ? await inspectRejectedRepair(job, current.workItem.slice(7)) : null;
+  const origin = previous ? predecessorOrigin(previous, current) : await readRejectedRepairOrigin(job, current);
   const eventMilestone = current.workItem.startsWith("event-") &&
       current.assurance!.changedPaths.some(p => p.startsWith("milestones/"))
     ? await readEventMilestoneRepairGrant(job, current, state.assignment)
@@ -1785,11 +1792,10 @@ export async function acceptGuidedRepairContinuation(job: JobStartResult,
   return state;
 }
 
-/** One owned, restart-reconcilable controller workflow. The original failed
- * review remains sealed. A second correction uses the same original writer
- * session, a new rejected checkpoint and a new independent Pi review. */
-export async function advanceRejectedRepair(job: JobStartResult, sourceSha: string,
-  options: RejectedRepairOptions = {}) {
+/** Existing receipt/effect operations, shared by the remaining unmigrated
+ * controller and the checkpointed Foundation child. No scheduling here. */
+async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
+  options: RejectedRepairOptions, foundationChild = false): Promise<RepairCycleOps<RepairReceipt>> {
   if (!SHA.test(sourceSha)) throw Error("Repair requires one exact reviewed commit.");
   await withStoryJobLock(job, "reconcile-published-repair", async () => {
     await reconcileUnpublishedRepairCommit(job, sourceSha);
@@ -1804,15 +1810,18 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
+  if (!foundationChild && (point.workItem === "foundation" ||
+      point.workItem.startsWith("repair-") && (await readRejectedRepairOrigin(job, point)).workItem === "foundation"))
+    throw Error("Foundation Review correction requires its checkpointed assignment child.");
   if (!options.sharedAssessment && (usesSharedAssignmentReview(point.workItem) ||
       point.workItem.startsWith("repair-") && usesSharedAssignmentReview((await readRejectedRepairOrigin(job, point)).workItem)))
     throw Error("Shared assignment Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
-  return driveRejectedRepairCycle({
+  return {
     begin: async () => {
       const state = await beginRejectedRepair(job, point);
       await withStoryJobLock(job, "rejected-review-profile", () =>
         reviewerFor(job, state.sourceCommitSha, options));
-      return state;
+      return inspectRejectedRepair(job, state.sourceCommitSha);
     },
     inspect: async sha => {
       if (sha !== sourceSha) await withStoryJobLock(job, "reconcile-successor-repair", async () => {
@@ -1898,5 +1907,156 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
       return withStoryJobLock(job, "rejected-review-next-attempt", () =>
         beginRejectedRepair(job, point));
     },
-  });
+  };
+}
+
+/** Temporary whole-cycle adapter for the explicitly unmigrated lanes.
+ * A Foundation assignment may only enter the bounded round API below. */
+export async function advanceRejectedRepair(job: JobStartResult, sourceSha: string,
+  options: RejectedRepairOptions = {}) {
+  return driveRejectedRepairCycle(await rejectedRepairOperations(job, sourceSha, options));
+}
+
+export type FoundationReviewCommand =
+  | { phase: "admit"; sourceSha: string }
+  | { phase: "correct"; sourceSha: string; grantDigest: string }
+  | { phase: "verify"; sourceSha: string; successorSha: string };
+
+export type FoundationReviewRound =
+  | { status: "admitted"; sourceSha: string; grantDigest: string }
+  | { status: "committed"; sourceSha: string; successorSha: string }
+  | { status: "passed" | "failed"; sourceSha: string; successorSha: string }
+  | { status: "assess"; sourceSha: string; assessment: ReviewAssessment }
+  | { status: "paused"; sourceSha: string; reason: "author-choice" | "author-pause" | "budget" | "provider-unavailable"; ref: string }
+  | { status: "cancelled" | "fenced" | "steering"; sourceSha: string; ref: string };
+
+/** A grant is the existing source-bound repair admission, not a new ledger.
+ * Mutable execution phase, attempts, and reviewer transcript suffixes do not
+ * change its identity. Author revisions do change it. */
+function foundationRepairGrant(state: RepairReceipt, caseId: string, assignmentKey: string) {
+  return hash({ caseId, assignmentKey, root: state.rootFailureSha, source: state.sourceCommitSha,
+    review: state.sourceReviewDigest, originalReview: state.originalReviewDigest,
+    originalSource: state.originalSource, plan: state.planAmendment.digest,
+    origin: state.origin, revision: state.revision?.digest ?? null,
+    reviewer: state.reviewer && { snapshot: state.reviewer.snapshot.id,
+      provider: state.reviewer.provider, model: state.reviewer.model,
+      thinking: state.reviewer.thinking, originalFile: state.reviewer.sessionFiles[0] } });
+}
+
+/** Compare the immutable negative checkpoint to the original reviewer
+ * transcript. Historical successor packets cannot be regenerated from a
+ * now-terminal repair phase; attest the sealed packet and exact findings. */
+async function attestFoundationNegative(job: JobStartResult, state: RepairReceipt, point: RecoveryCheckpoint) {
+  if (!point.assurance || !state.reviewer)
+    throw new ProtocolIntegrityBlockedError("Foundation repair has no independent reviewer evidence");
+  const cycle = await inspectPostcommitReviewCycle(job, state.rootFailureSha, point.assurance.assignmentDigest);
+  const round = cycle?.rounds.find(r => r.commitSha === point.commitSha);
+  if (!cycle || !round || cycle.turnDigest !== state.originalSource.turnDigest ||
+      !state.reviewer.sessionFiles.includes(cycle.reviewer.file) ||
+      cycle.provider !== state.reviewer.provider || cycle.model !== state.reviewer.model ||
+      cycle.snapshot.id !== state.reviewer.snapshot.id)
+    throw new ProtocolIntegrityBlockedError("Foundation negative verdict has no original reviewer round");
+  assertReviewCycleSession({ id: state.origin.sessionId, file: state.origin.sessionFile }, cycle.reviewer);
+  const verdict = await readSealedPostcommitVerdict(cycle, round);
+  const review = await readVerifiedFailure(job, point);
+  const findings = verdict.findings.filter(f => f.commitSha === point.commitSha &&
+      f.assignmentId === point.assurance!.assignmentId).map(f => ({
+    path: f.path, message: f.path + ":" + f.line + " " + f.message,
+    kind: f.kind, line: f.line, affectedPaths: f.affectedPaths, requiredCorrection: f.requiredCorrection,
+  }));
+  const evidence = JSON.parse(review.evidence);
+  if (verdict.verdict !== "fail" || review.reviewer !== "independent-pi-assignment-review" ||
+      evidence.sourceDigest !== round.packetDigest || !isDeepStrictEqual(findings, review.findings) ||
+      !isDeepStrictEqual(evidence.evidence, verdict.evidence.filter(e =>
+        e.commitSha === point.commitSha && e.assignmentId === point.assurance!.assignmentId)))
+    throw new ProtocolIntegrityBlockedError("Foundation negative verdict differs from its sealed reviewer response");
+}
+
+/** One original Foundation repair round. Admission, writer+native publication,
+ * and rereview are separate child transitions. Reentry can authenticate the
+ * same settled effects, but cannot schedule another substantive round here. */
+export async function executeFoundationReviewRound(job: JobStartResult,
+  authority: { rootSha: string; caseId: string; assignmentKey: string },
+  command: FoundationReviewCommand, options: RejectedRepairOptions): Promise<FoundationReviewRound> {
+  const { sourceSha } = command;
+  const { rootSha, caseId, assignmentKey } = authority;
+  if (!SHA.test(sourceSha) || !SHA.test(rootSha) || !caseId || !HASH.test(assignmentKey))
+    throw new ProtocolIntegrityBlockedError("Missing original Foundation Review admission");
+  const ops = await rejectedRepairOperations(job, sourceSha, { ...options, sharedAssessment: true }, true);
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === sourceSha);
+  // Never create a repair receipt for a foreign checkpoint, even on replay.
+  if (!point || (sourceSha === rootSha
+      ? point.workItem !== "foundation"
+      : !point.workItem.startsWith("repair-")))
+    throw new ProtocolIntegrityBlockedError("Foreign Foundation repair source");
+  if (sourceSha !== rootSha) {
+    const previous = await inspectRejectedRepair(job, point.workItem.slice(7));
+    if (previous.rootFailureSha !== rootSha || previous.origin.workItem !== "foundation" ||
+        previous.repairedCommitSha !== sourceSha || previous.phase !== "failed")
+      throw new ProtocolIntegrityBlockedError("Foundation repair successor lacks its rejected predecessor");
+  }
+  let state = command.phase === "admit" ? await ops.begin() : await ops.inspect(sourceSha);
+  const authenticate = () => {
+    if (state.rootFailureSha !== rootSha || state.origin.workItem !== "foundation" ||
+        state.sourceCommitSha !== sourceSha || !state.reviewer)
+      throw new ProtocolIntegrityBlockedError("Foundation repair lost its original assignment or reviewer");
+  };
+  authenticate();
+  const control = async (): Promise<FoundationReviewRound | null> => {
+    const { readJobControl } = await import("./job-control.js");
+    const status = await readJobControl(job);
+    return status === "cancelled" ? { status: "cancelled", sourceSha, ref: "job-control" } :
+      status === "paused" ? { status: "paused", sourceSha, reason: "author-pause", ref: "job-control" } : null;
+  };
+  const boundary = async (): Promise<FoundationReviewRound | null> => {
+    const assessment = await foundationReviewBoundary(job, state);
+    if (assessment) return { status: "assess", sourceSha, assessment };
+    if (state.phase === "awaiting-author")
+      return { status: "paused", sourceSha, reason: "author-choice", ref: state.choiceId ?? sourceSha };
+    if (["repairing", "adjudicating", "blocked", "needs-plan", "disputing"].includes(state.phase))
+      return { status: "fenced", sourceSha, ref: state.sourceReviewDigest };
+    return null;
+  };
+  const stopped = await control();
+  if (stopped) return stopped;
+  if (command.phase === "admit") {
+    const stop = await boundary();
+    if (stop) return stop;
+    if (state.phase === "ready" || state.phase === "prepared")
+      await attestFoundationNegative(job, state, point);
+    return { status: "admitted", sourceSha, grantDigest: foundationRepairGrant(state, caseId, assignmentKey) };
+  }
+  if (command.phase === "correct") {
+    if (command.grantDigest !== foundationRepairGrant(state, caseId, assignmentKey))
+      throw new ProtocolIntegrityBlockedError("Foundation corrective grant differs from its checkpointed admission");
+    const stop = await boundary();
+    if (stop) return stop;
+    if (state.phase === "ready" || state.phase === "prepared") {
+      await attestFoundationNegative(job, state, point);
+      state = await ops.correct(sourceSha);
+      authenticate();
+      const stop = await boundary();
+      if (stop) return stop;
+    }
+    // No loop, no next writer, and no reviewer invocation in this transition.
+    if (state.phase === "validating") state = await ops.validate(sourceSha);
+    if (state.phase === "awaiting-checkpoint") state = await ops.commit(sourceSha);
+    if (!state.repairedCommitSha || !["reviewing", "passed", "failed"].includes(state.phase))
+      throw new ProtocolIntegrityBlockedError("Foundation writer did not settle a native-verified commit");
+    return { status: "committed", sourceSha, successorSha: state.repairedCommitSha };
+  }
+  if (state.repairedCommitSha !== command.successorSha ||
+      !["reviewing", "passed", "failed"].includes(state.phase))
+    throw new ProtocolIntegrityBlockedError("Foundation rereview differs from its checkpointed native successor");
+  if (state.phase === "reviewing") {
+    if (await ops.reviewStatus(state) === "required-pending") await ops.rereview(state);
+    const stop = await boundary();
+    if (stop) return stop;
+    state = await ops.finishReview(sourceSha);
+  }
+  if (state.phase === "failed" && await ops.shouldYieldForSteering?.(state))
+    return { status: "steering", sourceSha, ref: state.sourceReviewDigest };
+  if (state.phase !== "passed" && state.phase !== "failed")
+    throw new ProtocolIntegrityBlockedError("Foundation rereview has no sealed disposition");
+  return { status: state.phase, sourceSha, successorSha: command.successorSha };
 }

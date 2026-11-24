@@ -274,7 +274,7 @@ type CoreState = GenerationGraphState;
 type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict";
   reviewAssessmentRequested?: true;
   reviewDependencyRequest?: ReviewDependencyRequest;
-  reviewPauseReason?: "author-pause" | "author-choice" | "budget" | "provider-unavailable" | "cancelled"; };
+  reviewPauseReason?: "author-pause" | "author-choice" | "protected-approval" | "budget" | "provider-unavailable" | "cancelled"; };
 const openJob = async (s: Pick<State, "request">) => {
   const job = await startStoryJob({ story: s.request.story, job: s.request.job }, false);
   assertNativeVersion(job.validatorVersion);
@@ -849,11 +849,12 @@ async function runFoundationAssignmentChild(
   const preflight = async () => {
     const control = await readJobControl(job);
     if (control === "cancelled") {
+      if (correction) return outcome("unresolved", "job-control", { dispositionRef: "cancelled" });
       const error = Error("Original Turn was cancelled before Foundation dispatch.");
       error.name = "StoryCancelledError"; throw error;
     }
     if (control === "paused")
-      return outcome("paused", "job-control", { controlRef: "job-control" });
+      return outcome("paused", "job-control", { controlRef: correction ? "author-pause:job-control" : "job-control" });
     // The original specialist owns dirty/authored-byte reconciliation. A
     // crash after model completion may leave its authenticated target dirty;
     // a blanket clean-worktree gate here would prevent safe verification.
@@ -924,8 +925,8 @@ async function runFoundationAssignmentChild(
       return outcome("unresolved", terminal.proof.receiptDigest, { dispositionRef: kind });
     }
   };
-  const assertChildIdentity = (saved: AssignmentIdentity) => {
-    if (logicalAssignmentKey(saved) !== key)
+  const assertChildIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
+    if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
       throw new ProtocolIntegrityBlockedError("Foundation checkpoint belongs to another admitted logical assignment.");
   };
   const invokeRound = async (command: AssignmentRoundCommand) => {
@@ -940,7 +941,7 @@ async function runFoundationAssignmentChild(
       return outcome("unresolved", submission.receiptRef,
         { dispositionRef: "foundation.json" });
     try {
-      reviewPatch = await reviewBoundary(candidate, correctionSelected);
+      reviewPatch = await reviewBoundary(candidate, false);
     } catch (error) {
       // Review runs within the shared child, but its original failed check
       // is STILL independent-review, never the adjacent specialist writer.
@@ -969,13 +970,6 @@ async function runFoundationAssignmentChild(
       const head = await trustedHead(job);
       if (actual.headSha !== head)
         throw Error("Original Foundation result differs from independently reviewed Git HEAD.");
-      if (correction) {
-        const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
-        if (!await verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
-          throw Error("Foundation correction has no independently passing original-session successor.");
-        return outcome("verified", "recovery-checkpoints:" + head,
-          { headSha: head, reviewRef: "review-checkpoints:" + head });
-      }
       const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
       const reviews = await resolvedCheckpointReviews(job, points);
       const reviewed = points.find(p => p.workItem === "foundation" &&
@@ -1002,19 +996,102 @@ async function runFoundationAssignmentChild(
         { dispositionRef: "generation-verification" });
     }
   };
+  const runReviewRound = async (command: import("./rejected-review-repair.js").FoundationReviewCommand) => {
+    if (!correction || !published)
+      throw new ProtocolIntegrityBlockedError("Review round lacks the original admitted Case.");
+    const stopped = await preflight();
+    if (stopped) return stopped;
+    const { executeFoundationReviewRound, ReviewDependencyRequiredError } = await import("./rejected-review-repair.js");
+    try {
+      return await executeFoundationReviewRound(job, {
+        rootSha: correction.origin.sourceHeadSha, caseId: correction.id, assignmentKey: key,
+      }, command, { skillsSource: s.request.skillsSource, provider: s.request.provider,
+        model: s.request.model, canYieldForSteering: async () =>
+          !!s.request.turnPlanDigest && !!s.inventory?.items.some(item =>
+            item.stage === "architecture" && item.status === "verified") &&
+          (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion });
+    } catch (error) {
+      if (error instanceof ReviewDependencyRequiredError &&
+          error.request.action === "author-approval-required")
+        return outcome("paused", error.request.digest,
+          { controlRef: "protected-approval:" + error.request.digest });
+      const reason = error instanceof Error && (error.name === "PiBudgetPause" ? "budget" :
+        error.name === "PiModelUnavailableError" ? "provider-unavailable" :
+        error.name === "SpecialistChoiceRequiredError" ? "author-choice" :
+        error.name === "StoryCancelledError" ? "cancelled" : null);
+      if (reason) {
+        return reason === "cancelled" ? outcome("unresolved", command.sourceSha, { dispositionRef: "cancelled" })
+          : outcome("paused", command.sourceSha, { controlRef: reason + ":" + command.sourceSha });
+      }
+      throw error;
+    }
+  };
+  type ReviewRound = import("./rejected-review-repair.js").FoundationReviewRound;
+  const reviewStop = (result: ReviewRound): AssignmentOutcome => {
+    if (result.status === "assess")
+      return outcome("unresolved", result.assessment.digest, { dispositionRef: "assess-review" });
+    if (result.status === "paused")
+      return outcome("paused", result.ref, { controlRef: result.reason + ":" + result.ref });
+    if (result.status === "cancelled")
+      return outcome("unresolved", result.ref, { dispositionRef: "cancelled" });
+    if (result.status === "steering")
+      return outcome("paused", result.ref, { controlRef: "author-updates" });
+    if (result.status === "fenced")
+      return outcome("fenced", result.ref, { inspectionRef: result.sourceSha });
+    throw new ProtocolIntegrityBlockedError("Unexpected Foundation Review round transition.");
+  };
+  const reviewCorrection = async (submission: AssignmentSubmission, sourceSha: string) => {
+    const admitted = await runReviewRound({ phase: "admit", sourceSha });
+    if ("assignmentKey" in admitted) return admitted;
+    if (admitted.status !== "admitted") return reviewStop(admitted);
+    return { correctionRef: admitted.sourceSha + ":" + admitted.grantDigest,
+      rejectedReceiptRef: submission.receiptRef };
+  };
+  const verifyReviewRound = async (submission: AssignmentSubmission): Promise<AssignmentOutcome | AssignmentCorrection> => {
+    if (submission.status !== "repair-round") {
+      if (submission.receiptRef !== "foundation.json" || submission.headSha !== correction?.origin.sourceHeadSha)
+        throw new ProtocolIntegrityBlockedError("Foundation Review lost its initial negative submission.");
+      return reviewCorrection(submission, submission.headSha!);
+    }
+    const [kind, sourceSha, successorSha, extra] = submission.receiptRef.split(":");
+    if (kind !== "repair" || extra !== undefined || successorSha !== submission.headSha ||
+        !/^[a-f0-9]{40}$/.test(sourceSha ?? "") || !/^[a-f0-9]{40}$/.test(successorSha ?? ""))
+      throw new ProtocolIntegrityBlockedError("Foreign Foundation repair submission.");
+    const reviewed = await runReviewRound({ phase: "verify", sourceSha: sourceSha!, successorSha: successorSha! });
+    if ("assignmentKey" in reviewed) return reviewed;
+    if (reviewed.status === "failed") return reviewCorrection(submission, reviewed.successorSha);
+    if (reviewed.status !== "passed") return reviewStop(reviewed);
+    const head = await trustedHead(job);
+    const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+    if (head !== reviewed.successorSha || !await verifyReviewCycleSuccessor(job, correction!.origin.sourceHeadSha, head))
+      throw new ProtocolIntegrityBlockedError("Foundation Review lacks an independently passing successor.");
+    return outcome("verified", "recovery-checkpoints:" + head, { headSha: head, reviewRef: "review-checkpoints:" + head });
+  };
   const child = createAssignmentLifecycleGraph({
     authenticateContinuation: async state =>
       state.continuationRef === correction?.id && await authenticateCorrection(),
-    preflight: async state => { assertChildIdentity(state.identity); return preflight(); },
-    invoke: async state => { assertChildIdentity(state.identity); return invokeRound({ phase: "invoke" }); },
+    preflight: async state => { assertChildIdentity(state.identity, state.continuationRef); return preflight(); },
+    invoke: async state => { assertChildIdentity(state.identity, state.continuationRef); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
-      assertChildIdentity(state.identity);
+      assertChildIdentity(state.identity, state.continuationRef);
+      if (correction) {
+        const [sourceSha, grantDigest, extra] = state.correction!.correctionRef.split(":");
+        if (extra !== undefined || !/^[a-f0-9]{40}$/.test(sourceSha ?? "") || !/^[a-f0-9]{64}$/.test(grantDigest ?? "") ||
+            sourceSha !== state.submission!.headSha)
+          throw new ProtocolIntegrityBlockedError("Foundation Review corrective grant belongs to another submission.");
+        const repaired = await runReviewRound({ phase: "correct", sourceSha: sourceSha!, grantDigest: grantDigest! });
+        if ("assignmentKey" in repaired) return repaired;
+        if (repaired.status !== "committed") return reviewStop(repaired);
+        return { receiptRef: ["repair", repaired.sourceSha, repaired.successorSha].join(":"),
+          status: "repair-round", headSha: repaired.successorSha };
+      }
       return invokeRound({ phase: "correct", proof: roundProof(state.submission!),
         grantDigest: state.correction!.correctionRef });
     },
     verify: async state => {
-      assertChildIdentity(state.identity);
+      assertChildIdentity(state.identity, state.continuationRef);
       let submission = state.submission!;
+      if (correction) return verifyReviewRound(submission);
       const stopped = await preflight();
       if (stopped) return stopped;
       if (submission.status === "writer-round") {
@@ -1046,15 +1123,55 @@ async function runFoundationAssignmentChild(
       finished.outcome.dispositionRef === "assess-review") {
     // The callback projection is not persisted. Rebuild a returned child
     // handoff after a crash from its actual original Repair/Review receipts.
-    if (!await (await import("./rejected-review-repair.js")).inspectFoundationReviewBoundary(job,
-        correction.origin.sourceHeadSha))
-      throw Error("Returned Foundation assessment lost its original boundary.");
+    const assessment = await (await import("./rejected-review-repair.js")).inspectFoundationReviewBoundary(job,
+        correction.origin.sourceHeadSha);
+    if (!assessment || assessment.digest !== finished.outcome.evidenceRef)
+      throw new ProtocolIntegrityBlockedError("Returned Foundation assessment lost its exact original boundary.");
     return { reviewAssessmentRequested: true, reason: "Assessing the sealed Foundation Review boundary.",
-      result: { status: finished.submission!.status, headSha: finished.submission!.headSha } };
+      result: s.result };
   }
   if (finished.outcome.status === "verified")
     return { ...reviewedState,
-      result: { status: finished.submission!.status, headSha: finished.outcome.headSha } };
+      result: { status: correction ? s.result!.status : finished.submission!.status, headSha: finished.outcome.headSha } };
+  if (correction) {
+    if (finished.outcome.status === "paused") {
+      if (finished.outcome.controlRef === "author-updates")
+        return { reviewSteeringHandoff: true, reason: REPAIR_STEERING_BOUNDARY, result: s.result };
+      const reason = finished.outcome.controlRef.split(":")[0];
+      if (reason === "protected-approval") {
+        const digest = finished.outcome.controlRef.split(":")[1];
+        const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
+          r.digest === digest && r.turnDigest === identity.turnDigest &&
+          r.originalAssignmentId === identity.assignmentId && r.action === "author-approval-required");
+        if (!request || request.originalWorkItem !== "foundation")
+          throw new ProtocolIntegrityBlockedError("Protected Foundation Review request lost its original source.");
+        return { status: "blocked", reviewPauseReason: "protected-approval",
+          reason: "Foundation Review requires explicit author approval of a separately authorized scope.",
+          result: s.result };
+      }
+      if (reason === "author-choice" || reason === "author-pause" || reason === "budget" || reason === "provider-unavailable")
+        return { status: "paused", reviewPauseReason: reason, reason: "Original Foundation Review correction paused.", result: s.result };
+    }
+    if (finished.outcome.status === "unresolved" && finished.outcome.dispositionRef === "cancelled")
+      return { status: "cancelled", reviewPauseReason: "cancelled", reason: "Original Foundation Review was cancelled.", result: s.result };
+    throw new ProtocolIntegrityBlockedError("Original Foundation Review correction is unresolved; inspect the sealed original Case and repair receipts.");
+  }
+  // The negative verdict can survive the physical child while its local
+  // projection does not. Reconstruct the same failure from the original
+  // independent checkpoint, never misclassify it as a new writer failure.
+  if (!reviewedState && finished.outcome.status === "unresolved" &&
+      finished.outcome.dispositionRef === "review-checkpoints" && finished.submission?.headSha) {
+    const head = finished.submission.headSha;
+    const failed = (await inspectRecoveryCheckpoints(job)).find(p =>
+      p.eligible && p.workItem === "foundation" && p.commitSha === head && p.semanticReview === "failed");
+    if (failed) {
+      const candidate = { ...s, result: { status: finished.submission.status, headSha: head } };
+      return { ...await operationFailure(candidate, job, "independent-review",
+        "Original independently reviewed assignment has source-linked negative findings.",
+        { reference: "review-checkpoints", assignmentId: identity.assignmentId }, "returned-failure"),
+        result: candidate.result };
+    }
+  }
   // Preserve an actual existing Review/RecoveryLifecycle disposition. An
   // empty reviewer patch is NOT proof of completion: it must not return {}
   // to the parent and cause the same Foundation writer to be selected again.
@@ -2255,6 +2372,8 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
             { reference: "review-checkpoints", assignmentId: s.active.id },
             "returned-failure");
         }
+        if (s.active.stage === "foundation")
+          throw new ProtocolIntegrityBlockedError("Foundation corrections must use the checkpointed assignment child.");
         const progress = await advanceRejectedRepair(job, point.commitSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider,
           model: s.request.model,
