@@ -110,7 +110,7 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
           {' '}No later Story edits or publication were approved.
         </p>
         {continuation?.message && <p className="m-0 text-muted-foreground">{continuation.message}</p>}
-        {continuation?.state === 'blocked' && <div className="flex gap-3 items-center">
+        {(continuation?.state === 'blocked' || continuation?.state === 'pending') && <div className="flex gap-3 items-center">
           <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('continue')}>
             Continue
           </Button>

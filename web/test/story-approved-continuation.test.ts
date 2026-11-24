@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { hostname } from 'node:os'
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -168,6 +169,25 @@ test('approved original Story Turn queues one owner-scoped execution, while foun
     const inherited = (await inspectPiPolicy(fullJob)).budget
     assert.equal(inherited.modelCalls, 3)
     assert.equal(inherited.steps, 3)
+    // Exercise the actual first Generation checkpoint from the queued Studio
+    // request. The author's durable pause must win before objective planning
+    // (there is deliberately no provider transport in this test).
+    const savedGeneration = (await db.persistence.generation.jobs.state(owner, fullId))!
+    const { openWebGenerationGraph } = await import('../../src/web-fixture-runtime')
+    const { setJobControl } = await import('../../src/job-control')
+    const { graph, saver } = openWebGenerationGraph(join(fullJob.stateDir, 'web-generation.sqlite'))
+    try {
+      await setJobControl(fullJob, 'paused')
+      const checkpoint = { configurable: { thread_id: savedGeneration.threadId! } }
+      const result = await graph.invoke({ request: JSON.parse(savedGeneration.requestJson!) }, checkpoint)
+      assert.equal(result.status, 'paused', result.reason ?? undefined)
+      assert.equal(result.reason, 'paused')
+      assert.ok(!result.orchestratorOrder, 'the original author boundary precedes model planning')
+      assert.equal((await inspectPiPolicy(fullJob)).budget.modelCalls, 3)
+    } finally {
+      saver.db.close()
+      await setJobControl(fullJob, 'running')
+    }
 
     const limitedId = randomUUID(), limited = 'Only the existing premise'
     await prepare(limitedId, limited)
@@ -276,6 +296,24 @@ test('approved original Story Turn queues one owner-scoped execution, while foun
     assert.ok(interrupted)
     const committed = await trustedHead(newJob)
     assert.notEqual(committed, newSha)
+    // Simulate the durable state left by a killed process, rather than an
+    // exception that runs the continuation's catch/finally.
+    const key = 'story-discovery-handoff,' + newStoryId + ',' + newJobId
+    const savedEffect = (await db.persistence.onboarding.conversation(owner, repoId, key))!
+    const state = JSON.parse(savedEffect.state)
+    await db.persistence.naturalStory.beginFirstTurn(owner, newStoryId, newJobId,
+      objective, new Date().toISOString())
+    const setLease = async (pid: number, revision: number) => {
+      assert.ok(await save(owner, repoId, key, revision + 1, JSON.stringify({
+        ...state, revision: revision + 1, lease: { host: hostname(), pid, nonce: randomUUID() },
+      }), revision, new Date().toISOString()))
+    }
+    await setLease(process.pid, savedEffect.revision)
+    assert.equal((await continueApprovedStoryChat(auth, db, headers, origin,
+      newApproval, { github: newGateway })).state, 'pending')
+    // The child has exited and been reaped: its PID is no longer a live owner.
+    const deadPid = Number(execFileSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }))
+    await setLease(deadPid, savedEffect.revision + 1)
     const started = await continueApprovedStoryChat(auth, db,
       headers, origin, newApproval, { github: newGateway })
     assert.equal(started.state, 'queued', started.message)

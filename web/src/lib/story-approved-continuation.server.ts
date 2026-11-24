@@ -15,7 +15,7 @@ import { interpretFirstObjective } from './natural-story.server'
 import { saveJobTurnPlan } from './turn-plan-receipt.server'
 import { pinChatApprovedFoundation, readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 import { pinReusedFoundation } from '../../../src/chat-reused-foundation'
-import { runFoundationJob } from '../../../src/foundation'
+import { runFoundationJob, inspectRecoverableFoundationCommit } from '../../../src/foundation'
 import { trustedHead } from '../../../src/revision'
 import { foundationOnlyObjective } from './foundation-intent'
 import { parseCreativePolicy } from '../../../src/creative-policy'
@@ -139,6 +139,13 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       const request = pinnedRequest(await selectedJob(store, actor.id, chat.firstTurnId), job)
       if (queued.ownerId !== actor.id || !request) throw Error('Original queue identity changed.')
       await requireGenerationTurn(job, request, true)
+      const state = await effects.read()
+      if (!state || !['queue-started', 'queue-settled'].includes(state.stage))
+        throw Error('Missing queue effect admission.')
+      if (state.stage === 'queue-started' && await effects.claim()) {
+        try { await effects.advance('queue-settled') }
+        finally { await effects.release() }
+      }
     } catch { return { state: 'blocked', message: 'The original queued handoff cannot be authenticated.' } }
     if (queued.phase === 'interrupted')
       return { state: 'blocked', message: 'The original writer was interrupted. Inspect its saved execution before recovery.' }
@@ -150,9 +157,6 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     }
     return { state: 'queued' }
   }
-  if (first.phase === 'preparing')
-    return { state: 'pending', message: 'Admission is already reserved at ' +
-      ((await effects.read())?.stage ?? 'first-Turn reservation') + '. Inspect its original effect; an uncertain writer is never replayed.' }
   if (!foundationOnly && isExistingStoryModificationRequest(chat.originalObjective))
     return { state: 'blocked', message:
       'A request to revise existing canon needs a native-verified focused Turn, not an approved whole-Story Foundation continuation.' }
@@ -170,13 +174,29 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
   if (!foundationOnly && plan.reviewRequired)
     return { state: 'blocked', message: plan.clarification ??
       'Review the original Story scope before authorizing full-Story generation.' }
-  const claim = await store.persistence.naturalStory.beginFirstTurn(actor.id,
-    chat.storyId, chat.firstTurnId, chat.originalObjective, new Date().toISOString())
-  if (claim.state === 'admitted') return { state: 'queued' }
-  if (claim.state === 'pending')
-    return { state: 'pending', message: 'Another admission request owns this first Turn.' }
+  if (first.phase === 'preparing' && !await effects.read())
+    return { state: 'blocked', message: 'Preparing first Turn has no authenticated handoff admission receipt.' }
+  const ownership = await effects.claim()
+  if (!ownership) return { state: 'pending', message: 'Original admission is owned at ' +
+    ((await effects.read())?.stage ?? 'prepared') + '. A live or unprovably dead owner cannot be replaced.' }
+  const prior = ownership.previous
   try {
-    const prior = await effects.read()
+    // The CAS lease precedes the first-Turn reservation. A proven dead
+    // original owner may resume a preparing Turn, but no live owner can.
+    const claim = await store.persistence.naturalStory.beginFirstTurn(actor.id,
+      chat.storyId, chat.firstTurnId, chat.originalObjective, new Date().toISOString())
+    if (claim.state === 'admitted') {
+      const job = await verifyHandoff()
+      const queue = await store.persistence.generation.queue.record(chat.firstTurnId)
+      const request = pinnedRequest(await selectedJob(store, actor.id, chat.firstTurnId), job)
+      if (!queue || queue.ownerId !== actor.id || !request || queue.phase === 'interrupted')
+        throw Error('Original queue admission is unavailable.')
+      await requireGenerationTurn(job, request, true)
+      await effects.advance('queue-settled')
+      return { state: 'queued' }
+    }
+    if (claim.state === 'pending' && !prior)
+      throw Error('First Turn reservation has no original handoff receipt.')
     await effects.advance('prepared')
     const identity = await store.persistence.generation.jobs.identity(chat.firstTurnId)
     if (identity && (identity.ownerId !== actor.id || identity.storyId !== chat.storyId ||
@@ -188,7 +208,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     if (!identity && prior && !['prepared', 'provider-started', 'provider-verified'].includes(prior.stage))
       throw Error('Original worktree acquisition is unresolved.')
     let providerHead: string | undefined
-    if (!identity || !prior) {
+    if (!identity || !prior || prior.stage === 'prepared') {
       await effects.advance('provider-started')
       const prepared = await responseData(await (story.provider === 'github'
         ? (gateways.github ?? githubJobRequest)(auth, store, internalRequest(baseURL, headers,
@@ -203,16 +223,22 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     const job = await authorizedStoryJob(store, actor.id, chat.firstTurnId)
     const earlierApproval = await readChatApprovedFoundation(job)
     const inheritedInitialization = await isVerifiedInitializedDraft(job)
+    const trusted = await trustedHead(job).catch(() => null)
+    const recoverable = earlierApproval && prior &&
+      ['foundation-started', 'foundation-settled', 'queue-started'].includes(prior.stage) &&
+      trusted !== job.headSha && await inspectRecoverableFoundationCommit(job)
     if (providerHead && providerHead !== job.headSha ||
         (!earlierApproval && job.headSha !== chat.sourceSha && !inheritedInitialization) ||
-        await trustedHead(job) !== job.headSha)
+        trusted !== job.headSha && !recoverable)
       throw Error('The provider acquired a different or untrusted Story revision.')
     await effects.advance('worktree-settled')
     await pinDiscoveryHandoff(job, receipt)
     await effects.advance('foundation-started')
-    const explorer = await validatedExplorer(auth, store,
-      new Request(baseURL + '/api/story-explorer', { headers }), chat.firstTurnId)
-    const existingFoundation = await verifiedReusableStoryFoundation(job, explorer.result)
+    // An earlier approved work item owns its own native validation/recovery.
+    // Do not classify an interrupted draft as an independently reusable Foundation.
+    const existingFoundation = !earlierApproval && await verifiedReusableStoryFoundation(job,
+      (await validatedExplorer(auth, store,
+        new Request(baseURL + '/api/story-explorer', { headers }), chat.firstTurnId)).result)
     if (earlierApproval || !existingFoundation) {
       if (!approval.digest || !approval.skillId)
         throw new Error('The exact Chat foundation approval is missing.')
@@ -234,7 +260,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
         ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
         provider: approval.model.provider, model: approval.model.id,
       })
-      if (completed.status !== 'committed')
+      if (completed.status !== 'committed' || completed.commitSha !== await trustedHead(job))
         throw new Error('The approved foundation did not reach a verified commit.')
     }
     await effects.advance('foundation-settled')
@@ -276,5 +302,7 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
     return { state: 'blocked', message:
       'Generation setup stopped at ' + ((await effects.read().catch(() => null))?.stage ?? 'handoff verification') +
       '. Inspect the original effect and saved job; the approved Turn is preserved.' }
+  } finally {
+    await effects.release()
   }
 }

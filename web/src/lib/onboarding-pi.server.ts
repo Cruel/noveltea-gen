@@ -243,8 +243,9 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
   instructions: string, evidence: DiscoveryEvidence,
   sourceDigest: string, invocationSource: string, role: DiscoveryPiReference['role'], previous?: DiscoveryPiReference,
   payload?: object, validateFormat?: (raw: string) => void,
-  beforePrompt?: (current?: { reference: DiscoveryPiReference; startedAt: number }) => Promise<void>):
-  Promise<{ text: string; piSessionFile: string; reference: DiscoveryPiReference }> {
+  beforePrompt?: (current?: { reference: DiscoveryPiReference; startedAt: number }) => Promise<void>,
+  resume?: DiscoveryAttempt['correctionPause']):
+  Promise<{ text: string; piSessionFile: string; reference: DiscoveryPiReference; activeSeconds: number }> {
   const startedAt = Date.now()
   const { runtime, model } = await (async () => {
     await assertUserPiSelection(store, owner, session.model)
@@ -262,7 +263,8 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     systemPrompt: instructions, noExtensions: true, noSkills: true, noContextFiles: true,
     noPromptTemplates: true, noThemes: true })
   await loader.reload()
-  const manager = previous ? await reopenDiscoveryPiReference(previous, sourceDigest, role)
+  const manager = resume ? await reopenDiscoveryPiReference(resume.reference, sourceDigest, role)
+    : previous ? await reopenDiscoveryPiReference(previous, sourceDigest, role)
     : SessionManager.create('/', evidence.piDirectory)
   const { session: agent } = await createAgentSession({ cwd: '/', agentDir: '/',
     modelRuntime: runtime, model, thinkingLevel: session.model.thinking,
@@ -275,15 +277,17 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
       planningSources: authorEvidence(session).map(({ source, decisionId, statement, authorText, selectedOption, delegated }) =>
         ({ source, decisionId, statement, authorText, selectedOption, delegated })) }
     const receiptFile = join(evidence.dir, 'protocol')
-    await beforePrompt?.()
-    await beginProtocolInvocation({ receiptFile, sourceDigest: invocationSource, contract, session: agent })
+    if (!resume) {
+      await beforePrompt?.()
+      await beginProtocolInvocation({ receiptFile, sourceDigest: invocationSource, contract, session: agent })
+    }
     const prompt = async (text: string) => {
       await agent.prompt(text, { expandPromptTemplates: false })
       const last = [...agent.messages].reverse().find(item => item.role === 'assistant')
       if (!last || last.role !== 'assistant' || last.stopReason !== 'stop')
         throw new Error('Pi specialist did not finish')
     }
-    await prompt(JSON.stringify({ ...(previous ? { controllerInstructions: instructions } : {}), ...data }))
+    if (!resume) await prompt(JSON.stringify({ ...(previous ? { controllerInstructions: instructions } : {}), ...data }))
     const validate = (raw: string) => {
       try {
         if (validateFormat) validateFormat(raw)
@@ -303,8 +307,10 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
     const text = await recoverResponseContract({ session: agent, contract,
       sourceDigest: invocationSource, receiptFile: receiptFile + '.initial.json',
       validate, parse: raw => raw, prompt, sealTranscript: true,
+      ...(resume ? { resumeOriginal: { base: receiptFile, sessionRoots: [join(evidence.dir, '..')] } } : {}),
       beforeCorrection: async () => {
-        await beforePrompt?.({ reference: await sealDiscoveryPiReference(agent.sessionManager, sourceDigest, role), startedAt })
+        await beforePrompt?.({ reference: await sealDiscoveryPiReference(agent.sessionManager, sourceDigest, role),
+          startedAt: startedAt - (resume?.activeSeconds ?? 0) * 1000 })
       },
       feedback: failures => 'RESPONSE-CONTRACT CORRECTION ONLY. ' + failures.map(failure => failure.expected).join('; ') +
         '. Return the complete previous response as valid JSON ' +
@@ -312,7 +318,8 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
         'review verdicts; do not claim approval or change the assignment.',
     })
     const reference = await sealDiscoveryPiReference(agent.sessionManager, sourceDigest, role)
-    return { text, piSessionFile: reference.file, reference }
+    return { text, piSessionFile: reference.file, reference,
+      activeSeconds: (resume?.activeSeconds ?? 0) + (Date.now() - startedAt) / 1000 }
   } finally {
     clearTimeout(timer)
     try {
@@ -872,7 +879,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         throw new DiscoveryError(409, 'Discovery has no proven safe invocation boundary; inspect the original receipts instead of replaying it')
       if (saved!.recovery.reason === 'budget') {
         // No new entitlement can authorize replay of an uncertain prompt.
-        if (saved!.activeAttempts?.some(attempt => attempt.status === 'started' && !attempt.responseDigest))
+        if (saved!.activeAttempts?.some(attempt => attempt.status === 'started' && !attempt.responseDigest && !attempt.correctionPause))
           throw new DiscoveryError(409, 'Original model invocation usage is unsettled; reconcile it before replenishment.')
         let requested: JobLimits
         try { requested = parseJobLimits(data.limits) }
@@ -1021,11 +1028,12 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       evidencePaths.push(opened.dir)
       return { evidence: opened, prior: undefined, requestDigest }
     }
-    const markSettled = async (dir: string, responseDigest: string) => {
+    const markSettled = async (dir: string, responseDigest: string, activeSeconds?: number) => {
       const index = attempts.findIndex(attempt => attempt.dir === dir)
       if (index < 0 || attempts[index]?.status !== 'started')
         throw Error('Discovery settlement lacks an original dispatch.')
-      attempts[index] = { ...attempts[index]!, responseDigest }
+      attempts[index] = { ...attempts[index]!, responseDigest, correctionPause: undefined,
+        ...(activeSeconds !== undefined ? { activeSeconds } : {}) }
       await persistAttempts(attempts)
     }
     const markUnstarted = async (dir: string) => {
@@ -1044,8 +1052,15 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const limits = session.limits ?? {}
       if ((limits.modelCalls !== undefined && usage.modelCalls >= limits.modelCalls) ||
           (limits.costUsd !== undefined && (usage.unpricedCalls > 0 || usage.costUsd >= limits.costUsd)) ||
-          (limits.activeSeconds !== undefined && usage.activeSeconds >= limits.activeSeconds))
+          (limits.activeSeconds !== undefined && usage.activeSeconds >= limits.activeSeconds)) {
+        const index = attempts.length - 1
+        if (attempts[index]?.status !== 'started' || attempts[index]?.responseDigest)
+          throw Error('Missing original Discovery correction attempt.')
+        attempts[index] = { ...attempts[index]!, correctionPause: {
+          reference: current.reference, activeSeconds: (Date.now() - current.startedAt) / 1000 } }
+        await persistAttempts(attempts)
         throw new DiscoveryBudgetPaused()
+      }
     }
     const failureResult = (error: unknown): Session => {
       // Only typed, controller-owned observations affect recovery. Private
@@ -1057,7 +1072,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         : error instanceof DiscoveryReviewerDrift ? 'reviewer-drift' as const
         : 'uncertain-effect' as const
       const status = reason === 'not-started' || (reason === 'budget' &&
-        attempts.every(attempt => attempt.status === 'not-started' || attempt.responseDigest)) ? 'paused' as const
+        attempts.every(attempt => attempt.status === 'not-started' || attempt.responseDigest || attempt.correctionPause)) ? 'paused' as const
         : reason === 'protocol-exhausted' || reason === 'nonconverging' ? 'unresolved' as const : 'fenced' as const
       if (process.env.NT_TEST_WEB_PI_DIAGNOSTIC === '1')
         console.error('Trusted local Story discovery failure:', JSON.stringify({
@@ -1075,7 +1090,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const invoke = async (prompt: string, stage: 'initial' | 'corrective' | 'opening-questions') => {
         const opened = await openAttempt(stage, prompt)
         evidence = opened.evidence
-        if (opened.prior) {
+        if (opened.prior && !opened.prior.correctionPause) {
           const result = await readDiscoveryResponse(opened.prior, assignmentSource, 'writer', !infer)
           if (writerReference && (!result.reference || writerReference.id !== result.reference.id ||
               writerReference.file !== result.reference.file)) throw Error('Original Discovery writer session changed.')
@@ -1092,15 +1107,15 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
                   if (!(error instanceof PlanningProvenanceError) && !(error instanceof PlanningClarificationRequired))
                     throw error
                 }
-              }, admitPrompt)
+              }, admitPrompt, opened.prior?.correctionPause)
           if ('reference' in result) writerReference = result.reference
           const responseDigest = await evidence.response(result.text, 'piSessionFile' in result ? result.piSessionFile : undefined,
             'reference' in result ? result.reference : undefined)
-          await markSettled(evidence.dir, responseDigest)
+          await markSettled(evidence.dir, responseDigest, 'activeSeconds' in result ? result.activeSeconds : undefined)
           return result.text
         } catch (error) {
-          await evidence?.inferenceError(error)
-          if (error instanceof DiscoveryInvocationNotStarted) await markUnstarted(evidence.dir)
+          if (!opened.prior && !(error instanceof DiscoveryBudgetPaused)) await evidence?.inferenceError(error)
+          if (error instanceof DiscoveryInvocationNotStarted && !opened.prior) await markUnstarted(evidence.dir)
           throw error
         }
       }
@@ -1116,11 +1131,11 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         const opened = await openAttempt(stage, instructions, packet)
         const receipt = opened.evidence
         try {
-          const result = opened.prior ? await readDiscoveryResponse(opened.prior, assignmentSource, role, !infer)
+          const result = opened.prior && !opened.prior.correctionPause ? await readDiscoveryResponse(opened.prior, assignmentSource, role, !infer)
             : infer ? { text: await infer(session, instructions + '\nREVIEW_PACKET_JSON:\n' + JSON.stringify(packet), stage) }
             : await realInference(store, actor.id, session, instructions, receipt,
               assignmentSource, opened.requestDigest, role, diagnostic ? undefined : reviewerReference,
-              { reviewPacket: packet, previousReviews: reviewHistory }, validate, admitPrompt)
+              { reviewPacket: packet, previousReviews: reviewHistory }, validate, admitPrompt, opened.prior?.correctionPause)
           if ('reference' in result && result.reference) {
             if (writerReference) assertReviewCycleSession(writerReference, result.reference,
               diagnostic ? undefined : reviewerReference)
@@ -1130,15 +1145,15 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           }
           if (opened.prior && !opened.prior.responseDigest && 'responseDigest' in result)
             await markSettled(receipt.dir, result.responseDigest)
-          if (!opened.prior) {
+          if (!opened.prior || opened.prior.correctionPause) {
             const digest = await receipt.response(result.text, 'piSessionFile' in result ? result.piSessionFile : undefined,
               'reference' in result ? result.reference : undefined)
-            await markSettled(receipt.dir, digest)
+            await markSettled(receipt.dir, digest, 'activeSeconds' in result ? result.activeSeconds : undefined)
           }
           return { raw: result.text, receipt }
         } catch (error) {
-          if (!opened.prior) await receipt.inferenceError(error)
-          if (error instanceof DiscoveryInvocationNotStarted) await markUnstarted(receipt.dir)
+          if (!opened.prior && !(error instanceof DiscoveryBudgetPaused)) await receipt.inferenceError(error)
+          if (error instanceof DiscoveryInvocationNotStarted && !opened.prior) await markUnstarted(receipt.dir)
           if (error instanceof DiscoveryInvocationNotStarted || error instanceof DiscoveryBudgetPaused ||
               error instanceof ProtocolExhaustedError || error instanceof DiscoveryReviewerDrift) throw error
           throw new DiscoveryReviewerFailure()

@@ -2773,6 +2773,15 @@ export function createGenerationGraph(
         if (!graphThreadId?.trim()) throw new Error("Generation requires a durable graph Thread identity.");
         if (executionOwner === "cli") ensureNotServerOwned(job);
         else await claimServerGeneration(job, graphThreadId, request);
+        // The first handoff checkpoint is also an author boundary: don't
+        // dispatch an objective planner before durable author controls and
+        // pending protected updates have been reconciled on the same job.
+        if (request.discoveryHandoffDigest && !s.graphThreadId) {
+          await requireGenerationTurn(job, request);
+          const stopped = await withStoryJobLock(job, "generation-boundary",
+            () => authorBoundary(job, { ...s, request } as State));
+          if (stopped) return stopped;
+        }
         // The trusted controller selects a METHOD, not a worker or write grant.
         // Every real Turn uses the pinned method; only isolated fixture
         // transports may omit model planning.

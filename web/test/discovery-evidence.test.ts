@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { beginProtocolInvocation, recoverResponseContract } from '../../src/response-contract-recovery'
-import { createDiscoveryEvidence, readDiscoveryResponse, reopenDiscoveryPiReference, sealDiscoveryPiReference, type DiscoveryAttempt } from '../src/lib/discovery-evidence.server'
+import { createDiscoveryEvidence, readDiscoveryResponse, reopenDiscoveryPiReference, sealDiscoveryPiReference, meterDiscoveryAttempts, type DiscoveryAttempt } from '../src/lib/discovery-evidence.server'
 
 test('reconcile real Pi protocol receipts and retain append-only writer/reviewer identities', async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-discovery-protocol-'))
@@ -69,6 +69,58 @@ test('reconcile real Pi protocol receipts and retain append-only writer/reviewer
     appendFileSync(corrected.reference!.file, '{}\n')
     await assert.rejects(reopenDiscoveryPiReference(corrected.reference!, source, 'writer'), /changed after settlement/)
     assert.equal(calls, 4, 'Inspection and tamper rejection never call a model')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('budget pause reopens the exact invalid Pi response and meters only the original and correction', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nt-discovery-budget-'))
+  try {
+    const source = 'a'.repeat(64), requestDigest = 'b'.repeat(64)
+    const evidence = await createDiscoveryEvidence({ owner: 'owner', repositoryId: 'repo', workspace: 'turn',
+      revision: 1, stage: 'initial', model: { provider: 'openai', id: 'fixture' },
+      skillId: 'pinned-skill', instructions: 'Return JSON' }, { NT_DISCOVERY_EVIDENCE_DIR: root })
+    const base = join(evidence.dir, 'protocol')
+    const contract = 'discovery.writer-response.v1'
+    let manager = SessionManager.create('/', evidence.piDirectory)
+    const session = () => ({ sessionId: manager.getSessionId(), sessionManager: manager,
+      get messages() { return manager.buildSessionContext().messages },
+      getActiveToolNames: () => [], setActiveToolsByName: (names: string[]) => assert.deepEqual(names, []) })
+    const append = (value: string) => {
+      manager.appendMessage({ role: 'user', content: 'Return JSON', timestamp: Date.now() })
+      manager.appendMessage({ role: 'assistant', stopReason: 'stop', timestamp: Date.now(),
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0.1 } },
+        content: [{ type: 'text', text: value }],
+      } as Parameters<SessionManager['appendMessage']>[0])
+    }
+    await beginProtocolInvocation({ receiptFile: base, sourceDigest: requestDigest, contract, session: session() })
+    append('invalid')
+    const validate = (value: string) => value === 'invalid' ? [{ path: '$', expected: 'JSON' }] : []
+    const attempt: DiscoveryAttempt = { dir: evidence.dir, requestDigest, status: 'started', role: 'writer',
+      sourceDigest: source, requestReceiptDigest: await evidence.requestReceiptDigest() }
+    const reference = await sealDiscoveryPiReference(manager, source, 'writer')
+    const meter = await meterDiscoveryAttempts([], { reference, startedAt: Date.now() })
+    assert.equal(meter.modelCalls, 1)
+    await assert.rejects(recoverResponseContract({ session: session(), contract,
+      sourceDigest: requestDigest, receiptFile: base + '.initial.json', validate, parse: x => x,
+      prompt: async () => { assert.fail('Budget exhausted') }, sealTranscript: true,
+      beforeCorrection: async () => { throw Error('budget pause') } }), /budget pause/)
+    manager = await reopenDiscoveryPiReference(reference, source, 'writer')
+    let corrections = 0
+    const raw = await recoverResponseContract({ session: session(), contract,
+      sourceDigest: requestDigest, receiptFile: base + '.initial.json', validate, parse: x => x,
+      prompt: async () => { corrections++; append('{"draft":1}') }, sealTranscript: true,
+      resumeOriginal: { base, sessionRoots: [root] } })
+    assert.equal(corrections, 1)
+    const settled = await sealDiscoveryPiReference(manager, source, 'writer')
+    assert.equal(settled.id, reference.id)
+    const responseDigest = await evidence.response(raw, settled.file, settled)
+    const usage = await meterDiscoveryAttempts([{ ...attempt, responseDigest, activeSeconds: 2 }])
+    assert.equal(usage.modelCalls, 2)
+    assert.equal(usage.steps, 1)
+    assert.equal(usage.tokens.total, 30)
+    assert.equal(usage.costUsd, 0.2)
+    assert.equal(usage.activeSeconds, 2)
+    await assert.rejects(reopenDiscoveryPiReference(reference, source, 'writer'), /changed after settlement/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

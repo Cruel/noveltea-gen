@@ -97,6 +97,8 @@ export type DiscoveryAttempt = Readonly<{
   sourceDigest?: string
   requestReceiptDigest?: string
   fixture?: boolean
+  correctionPause?: { reference: DiscoveryPiReference; activeSeconds: number }
+  activeSeconds?: number
 }>
 
 /** Verify an immutable response receipt and the original transcript prefix.
@@ -235,7 +237,7 @@ export async function meterDiscoveryAttempts(attempts: readonly DiscoveryAttempt
       summary.unpricedCalls++
       summary.unknownTokenCalls++
     }
-    const elapsed = (finished - started) / 1000
+    const elapsed = attempt.activeSeconds ?? (finished - started) / 1000
     if (!Number.isFinite(elapsed) || elapsed < 0)
       throw Error('Discovery usage timestamps are invalid.')
     summary.activeSeconds += elapsed
