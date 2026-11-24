@@ -40,6 +40,8 @@ interface Receipt {
   version: 1; jobId: string; workItemId: string; planVersion: number; contractDigest: string;
   expectedHead: string; phase: "pending" | "writing" | "authored" | "committed" | "waiting-dependency" | "awaiting-author";
   dependencyReport?: DependencyReport; resolvedDependency?: string;
+  dependencySuspension?: { reportDigest: string; sessionId: string; sessionFile: string;
+    transcriptBytes: number; transcriptSha256: string };
   target: string; paths: string[]; context: string[]; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot; piSessionFile?: string;
   piSessionId?: string; choiceWorkItem?: string; authorChoiceId?: string;
@@ -62,6 +64,50 @@ async function save(path: string, value: Receipt) {
   const tmp = path + "." + randomUUID() + ".tmp";
   await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   await rename(tmp, path);
+}
+/** Authenticate a settled original no-write boundary without invoking Pi.
+ * The original report stays in the existing focused receipt; the graph only
+ * checkpoints its digest. A later continuation may append to the same session,
+ * but may never replace the settled prefix. */
+export async function inspectFocusedPrerequisite(job: JobStartResult, target: string,
+  turnDigest: string, fixture: boolean, planVersion: number) {
+  if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target))
+    throw Error("Invalid focused prerequisite target.");
+  const file = receiptPath(job, { workItemId: "focus:" + target, target });
+  if (!existsSync(file)) return null;
+  const receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  if (!receipt.dependencyReport) return null;
+  const report = parseDependencyReport(receipt.dependencyReport);
+  const seal = receipt.dependencySuspension;
+  if (receipt.jobId !== job.jobId || receipt.target !== target ||
+      receipt.workItemId !== "focus:" + target || receipt.assignmentDigest !== turnDigest ||
+      receipt.worker !== (fixture ? "fixture" : "pi") || receipt.planVersion !== planVersion ||
+      report.assignmentId !== receipt.workItemId || report.turnDigest !== turnDigest ||
+      !seal || seal.reportDigest !== dependencyDigest(report) ||
+      (receipt.phase === "waiting-dependency" ? report.sourceSha !== receipt.expectedHead :
+        receipt.resolvedDependency !== seal.reportDigest))
+    throw Error("Focused prerequisite lost its original assignment, plan or settled report.");
+  if (fixture) {
+    if (seal.sessionId !== "fixture" || seal.sessionFile !== "fixture" ||
+        seal.transcriptBytes !== 0 || seal.transcriptSha256 !== "f".repeat(64))
+      throw Error("Focused prerequisite has invalid fixture provenance.");
+  } else {
+    const sessionFile = seal.sessionFile;
+    if (!sessionFile.startsWith(join(job.stateDir, "focused-sessions", target) + sep) ||
+        sessionFile !== receipt.piSessionFile || seal.sessionId !== receipt.piSessionId ||
+        await realpath(sessionFile) !== sessionFile || !(await lstat(sessionFile)).isFile() ||
+        !Number.isSafeInteger(seal.transcriptBytes) || seal.transcriptBytes <= 0)
+      throw Error("Focused prerequisite lost its original Pi session.");
+    const transcript = await readFile(sessionFile);
+    const original = transcript.subarray(0, seal.transcriptBytes);
+    const header = JSON.parse(original.toString("utf8").split("\n")[0]!);
+    if (original.length !== seal.transcriptBytes ||
+        createHash("sha256").update(original).digest("hex") !== seal.transcriptSha256 ||
+        header.type !== "session" || header.id !== seal.sessionId ||
+        receipt.phase === "waiting-dependency" && transcript.length !== original.length)
+      throw Error("Focused prerequisite's settled Pi transcript changed.");
+  }
+  return { report, seal, phase: receipt.phase, paths: receipt.paths };
 }
 function changes(job: JobStartResult) {
   return git(job, "status", "--porcelain=v1", "-z", "--untracked-files=all").toString()
@@ -192,7 +238,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   create?: PlannedFocusCreate, obligations: string[] = [], steering = "",
   resume?: SpecialistChoiceReceipt,
   arcLink?: { path: string; characterId: string },
-  eventReviewSupport = false): Promise<DependencyReport | {
+  eventReviewSupport = false, dependencyResume?: { file: string; id: string; changedPaths: string[] }): Promise<DependencyReport | {
     authorQuestion: SpecialistChoiceQuestion; sessionFile: string; sessionId: string;
   } | undefined> {
   let dependencyReport: DependencyReport | undefined;
@@ -215,10 +261,13 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
     throw new Error("Focused specialist lacks pinned, verifiable skill instructions.");
   const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
-    group: piNarrativeGroup("focused", receipt.context, receipt.target),
+    // Supporting work must not replace the suspended writer's context receipt.
+    group: piNarrativeGroup(receipt.workItemId.startsWith("dependency:") ? "focused-support" : "focused",
+      receipt.context, receipt.target),
     step: receipt.workItemId + ":" + receipt.planVersion + (receipt.resolvedDependency ? ":" + receipt.resolvedDependency : ""),
     paths: receipt.context, snapshot: receipt.snapshot!.id, provider: receipt.provider,
     model: receipt.model, directory: join(job.stateDir, "focused-sessions", receipt.target),
+    ...(dependencyResume ? { resumeSession: dependencyResume } : {}),
     task: { kind: receipt.target.startsWith("event.") ? "event" :
       receipt.target.startsWith("puzzle.") || receipt.target.startsWith("choice-point.") ? "puzzle" :
       receipt.target.startsWith("authored-content.") ? "dialogue" : "character",
@@ -241,6 +290,8 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       throw new Error("Focused specialist did not honor the pinned reasoning profile.");
     const file = session.sessionManager.getSessionFile();
     if (!file) throw Error("Focused specialist requires a persistent Pi transcript.");
+    if (dependencyResume && (file !== dependencyResume.file || session.sessionId !== dependencyResume.id))
+      throw Error("Focused dependency must re-enter the original exact Pi session.");
     if (resume && (file !== resume.sessionFile || session.sessionId !== resume.sessionId))
       throw Error("Focused author response must resume the original exact Pi session.");
     receipt.piSessionFile = file;
@@ -511,6 +562,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     }
     const contractDigest = digest(JSON.stringify(plan.contract));
     let receipt: Receipt | undefined = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) : undefined;
+    let dependencyResume: { file: string; id: string; changedPaths: string[] } | undefined;
     if (receipt) {
       if (receipt.jobId !== job.jobId || receipt.target !== input.target ||
           receipt.contractDigest !== contractDigest || receipt.planVersion !== plan.version ||
@@ -544,9 +596,30 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         if (!resolved || resolved.phase !== "verified") return { status: "dependency-required" };
         if (resolved.commitSha !== current || resolved.fixture !== input.fixture)
           throw Error("Resolved dependency is stale or belongs to a different worker mode.");
+        const original = await inspectFocusedPrerequisite(job, input.target, turnAssignmentDigest!,
+          input.fixture, plan.version);
+        if (!original || original.seal.reportDigest !== resolved.reportDigest ||
+            resolved.amendment?.resumes !== receipt.workItemId ||
+            resolved.amendment.assignment.specialist !== original.report.likelySpecialist)
+          throw Error("Focused continuation lacks authenticated original support.");
+        if (!input.fixture) dependencyResume = { file: original.seal.sessionFile,
+          id: original.seal.sessionId, changedPaths: resolved.amendment.assignment.authority.existingPaths };
         receipt.phase = "pending"; receipt.expectedHead = current;
         receipt.resolvedDependency = resolved.reportDigest;
         await save(file, receipt);
+      }
+      // A crash after persisting the authorized pending phase but before
+      // dispatch must reopen the same exact session, not silently fork it.
+      if (receipt.phase === "pending" && receipt.resolvedDependency && !input.fixture && !dependencyResume) {
+        const original = await inspectFocusedPrerequisite(job, input.target, turnAssignmentDigest!,
+          input.fixture, plan.version);
+        const entry = (await inspectDependencyPlan(job))?.entries.find(e =>
+          e.reportDigest === receipt!.resolvedDependency);
+        if (!original || !entry?.amendment || entry.phase !== "verified" || entry.commitSha !== current ||
+            entry.amendment.resumes !== receipt.workItemId)
+          throw Error("Pending focused continuation lost its authenticated support.");
+        dependencyResume = { file: original.seal.sessionFile, id: original.seal.sessionId,
+          changedPaths: entry.amendment.assignment.authority.existingPaths };
       }
       if (receipt.phase === "writing" || receipt.phase === "authored")
         throw new Error("Interrupted focused writer: inspect preserved session and Git worktree; do not automatically replay.");
@@ -634,7 +707,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
         input.steering, answered,
         reviewArc ? { path: reviewArc, characterId: input.target } : undefined,
-        !!reviewCreate && !reviewArc);
+        !!reviewCreate && !reviewArc, dependencyResume);
       if (output && "authorQuestion" in output) {
         if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
         receipt.piSessionFile = output.sessionFile;
@@ -655,6 +728,13 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           missing.sourceSha !== current || missing.turnDigest !== turnAssignmentDigest ||
           missing.assignmentId !== workItemId)
         throw Error("Dependency report is stale or writer left edits; preserve for manual reconciliation.");
+      const transcript = input.fixture ? Buffer.alloc(0) : await readFile(receipt.piSessionFile!);
+      receipt.dependencySuspension = { reportDigest: dependencyDigest(missing),
+        sessionFile: input.fixture ? "fixture" : receipt.piSessionFile!,
+        sessionId: input.fixture ? "fixture" : receipt.piSessionId!,
+        transcriptBytes: transcript.length,
+        transcriptSha256: input.fixture ? "f".repeat(64) :
+          createHash("sha256").update(transcript).digest("hex") };
       receipt.dependencyReport = missing; receipt.phase = "waiting-dependency";
       await save(file, receipt);
       if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);

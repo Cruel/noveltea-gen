@@ -2,7 +2,7 @@ import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig,
-  type AssignmentIdentity, type AssignmentOutcome } from "./generation-assignment-lifecycle.js";
+  type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension } from "./generation-assignment-lifecycle.js";
 import { readRecoveryFork, verifyReadyRecoveryFork, resolvedInheritedRecoveryReviews } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -52,7 +52,7 @@ import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-on
 import { runCompositionWorkItem } from "./composition-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { runNarrativeReview } from "./narrative-review.js";
-import { runFocusedWorkItem } from "./focused-work.js";
+import { inspectFocusedPrerequisite, runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
 import { canonicalPreviousAdaptiveInventory, reconcileAdaptiveWork } from "./adaptive-work.js";
@@ -209,6 +209,10 @@ export const GenerationInputSchema = z.object({
     signature: z.string() }).nullable().optional(),
 });
 
+type FocusedPrerequisitePin = {
+  identity: AssignmentIdentity; suspension: AssignmentPrerequisiteSuspension;
+  supportRef: string | null;
+};
 const Channels = Annotation.Root({
   /** Sole recovery phase, decision, pending-case and invocation authority. */
   recoveryLifecycle: Annotation<RecoveryLifecycle>({ reducer: (_, next) => next, default: emptyRecoveryLifecycle }),
@@ -247,6 +251,7 @@ const Channels = Annotation.Root({
   graphThreadId: Annotation<string | null>(),
   adaptiveVersion: Annotation<number | null>(),
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
+  focusedPrerequisite: Annotation<FocusedPrerequisitePin | null>({ reducer: (_, next) => next, default: () => null }),
   /** A sealed source-grounded causal replan request, never write authority. */
   causalAmendment: Annotation<CausalAmendment | null>(),
   /** A controller-admitted prerequisite, before the next dependent dispatch. */
@@ -1209,6 +1214,108 @@ async function runCharacterWorldAssignmentChild(
   // rather than reclassifying a previously committed writer as an error.
   if (result?.status === resultStatus) return { result };
   throw Error("World/Character child returned an unsupported disposition.");
+}
+
+/** A focused assignment returns a settled prerequisite to its parent at END.
+ * Neither this child nor the suspended writer can authorize supporting work. */
+async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
+  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+): Promise<Partial<State>> {
+  const job = await openJob(s);
+  const active = s.active;
+  const graphThreadId = config.configurable?.thread_id;
+  const turnDigest = s.request.turnPlanDigest;
+  if (!active || active.stage !== "focus" || !active.milestone || !s.inventory ||
+      !turnDigest || typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId ||
+      s.planVersion === null)
+    throw Error("Focused child lacks the exact admitted Turn and plan.");
+  const target = active.milestone;
+  const planVersion = s.planVersion;
+  const pin = s.focusedPrerequisite;
+  const prior = await inspectFocusedPrerequisite(job, target, turnDigest, s.request.fixture, planVersion);
+  const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = active;
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+    graphThreadId, turnDigest, assignmentId: active.id, planVersion,
+    sourceHeadSha: prior?.report.sourceSha ?? s.inventory.headSha,
+    scopeDigest: dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }),
+  };
+  const key = logicalAssignmentKey(identity);
+  if (pin && logicalAssignmentKey(pin.identity) !== key)
+    throw Error("Suspended focused assignment no longer matches the admitted scope.");
+  const suspensionOf = (original: NonNullable<typeof prior>): AssignmentPrerequisiteSuspension => ({
+    status: "needs-prerequisite", assignmentKey: key, evidenceRef: original.seal.reportDigest,
+    suspensionRef: dependencyDigest(original.seal), owner: original.report.likelySpecialist,
+    scopeRef: original.seal.reportDigest, pendingPhase: "writer",
+  });
+  const authenticate = async () => {
+    if (!pin?.supportRef) return false;
+    const original = await inspectFocusedPrerequisite(job, target, turnDigest, s.request.fixture, planVersion);
+    const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === pin.suspension.evidenceRef);
+    if (!original || !isDeepStrictEqual(suspensionOf(original), pin.suspension) ||
+        !entry?.amendment || entry.phase !== "verified" || dependencyDigest(entry) !== pin.supportRef ||
+        entry.amendment.resumes !== active.id || entry.amendment.assignment.specialist !== pin.suspension.owner)
+      return false;
+    const head = await trustedHead(job);
+    if (head === entry.commitSha) return true;
+    return original.phase === "committed" && (await inspectRecoveryCheckpoints(job)).some(p =>
+      p.eligible && p.workItem === active.id && p.parentSha === entry.commitSha && p.commitSha === head);
+  };
+  const invoke = async () => {
+    const result = await dispatch(s);
+    if (result.status === "dependency-required") {
+      const original = await inspectFocusedPrerequisite(job, target, turnDigest, s.request.fixture, planVersion);
+      if (!original || original.phase !== "waiting-dependency" ||
+          original.report.sourceSha !== identity.sourceHeadSha)
+        throw Error("Focused no-write result lost its sealed original report.");
+      return suspensionOf(original);
+    }
+    return { receiptRef: active.id, status: result.status, headSha: result.headSha };
+  };
+  let patch: Partial<State> | undefined;
+  const child = createAssignmentLifecycleGraph({
+    preflight: async () => {
+      await checkPlan(job, s.request, planVersion);
+      if (pin && !await authenticate()) throw Error("Focused continuation has no authenticated support.");
+      if (!pin && prior?.phase === "waiting-dependency")
+        return suspensionOf(prior);
+      return null;
+    },
+    authenticateContinuation: async state =>
+      state.continuationRef === pin?.supportRef && await authenticate(),
+    invoke,
+    reenterWriter: invoke,
+    verify: async state => {
+      const submission = state.submission!;
+      const candidate = { ...s, result: { status: submission.status, headSha: submission.headSha } };
+      patch = await reviewBoundary(candidate);
+      const actual = patch.result === undefined ? candidate.result : patch.result;
+      const head = await trustedHead(job);
+      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const reviews = await resolvedCheckpointReviews(job, points);
+      if (!patch.status && !patch.operationRecovery && !patch.recovery && !patch.unknownRecovery &&
+          !patch.escalation && !patch.reviewSteeringHandoff && actual?.headSha === head &&
+          accepted.focus.includes(actual.status) && points.some(p =>
+            p.workItem === active.id && p.commitSha === head && p.validation.status === "passed" &&
+            (s.request.fixture || p.assurance?.turnDigest === turnDigest &&
+              ["passed", "not-required"].includes(reviews.get(p.commitSha) ?? p.semanticReview))))
+        return { status: "verified", assignmentKey: key, evidenceRef: active.id,
+          headSha: head, reviewRef: "review-checkpoints:" + head };
+      return { status: "unresolved", assignmentKey: key, evidenceRef: active.id,
+        dispositionRef: "review-checkpoints" };
+    },
+  });
+  const finished = await child.invoke({ identity, submission: null, submissionKey: null,
+    outcome: null, continuationRef: pin?.supportRef ?? null, suspension: pin?.suspension ?? null }, config);
+  if (finished.outcome?.status === "needs-prerequisite")
+    return { result: { status: "dependency-required" },
+      focusedPrerequisite: { identity, suspension: finished.outcome, supportRef: null } };
+  if (!finished.submission) throw Error("Focused child returned without its original submission.");
+  const result = { status: finished.submission.status, headSha: finished.submission.headSha };
+  // The parent reattests review and native completion; unresolved review keeps
+  // its original submitted receipt rather than restarting the writer.
+  return { ...patch, result: patch?.result === undefined ? result : patch.result,
+    focusedPrerequisite: null };
 }
 
 const accepted: Record<Stage, readonly string[]> = {
@@ -2746,7 +2853,9 @@ export function createGenerationGraph(
       });
     }))
     .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async (s, config) => {
-      if (s.crossDomainCloseout) throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
+      if (s.crossDomainCloseout || s.focusedPrerequisite &&
+          (s.active?.stage !== "focus" || s.active.id !== s.focusedPrerequisite.identity.assignmentId))
+        throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
       // Every admitted Foundation assignment uses the shared child. A missing
       // production Turn proof is fenced by the common execution boundary.
       if (s.active?.stage === "foundation" && !s.result)
@@ -2758,6 +2867,8 @@ export function createGenerationGraph(
       try {
         if (s.active?.stage === "foundations")
           return await runCharacterWorldAssignmentChild(s, config, reviewBoundary);
+        if (s.active?.stage === "focus" && s.request.turnPlanDigest)
+          return runFocusedAssignmentChild(s, config, reviewBoundary);
         let result = await dispatch(s);
         if (result.status === "interactive-conflict-reported") {
           const evidence = result as typeof result & { prerequisite?: {
@@ -2912,17 +3023,36 @@ export function createGenerationGraph(
         } catch { return assessment; }
       }
     }))
-    .addNode("dependency_amendment", recoveryNode("dependency_amendment", async s => {
+    .addNode("dependency_amendment", recoveryNode("dependency_amendment", async (s, config) => {
       try {
         if (s.active?.stage !== "focus" || !s.active.milestone)
           throw Error("Dependency amendment is not bound to a focused assignment.");
         const job = await openJob(s);
         const stopped = await withStoryJobLock(job, "dependency-author-boundary", () => authorBoundary(job, s));
         if (stopped) return stopped;
-        const resolved = await advanceFocusedDependency({ ...s.request, target: s.active.milestone });
+        const pin = s.focusedPrerequisite;
+        if (!pin || pin.identity.assignmentId !== s.active.id || pin.identity.planVersion !== s.planVersion ||
+            pin.identity.turnDigest !== s.request.turnPlanDigest || pin.identity.jobId !== job.jobId ||
+            pin.identity.jobThreadId !== job.threadId ||
+            pin.identity.graphThreadId !== config.configurable?.thread_id)
+          throw Error("Dependency amendment has no checkpointed original assignment suspension.");
+        const original = await inspectFocusedPrerequisite(job, s.active.milestone,
+          s.request.turnPlanDigest!, s.request.fixture, s.planVersion!);
+        const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active;
+        if (!original || original.phase !== "waiting-dependency" ||
+            original.report.sourceSha !== pin.identity.sourceHeadSha ||
+            pin.identity.scopeDigest !== dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }) ||
+            dependencyDigest(original.seal) !== pin.suspension.suspensionRef ||
+            original.seal.reportDigest !== pin.suspension.evidenceRef ||
+            pin.suspension.scopeRef !== original.seal.reportDigest ||
+            pin.suspension.owner !== original.report.likelySpecialist || pin.suspension.pendingPhase !== "writer" ||
+            pin.suspension.assignmentKey !== logicalAssignmentKey(pin.identity))
+          throw Error("Dependency amendment lost the original sealed no-write report.");
+        const resolved = await advanceFocusedDependency({ ...s.request, target: s.active.milestone }, config);
         const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === resolved.reportDigest);
         if (!entry || entry.phase !== "verified") throw Error("Dependency amendment lost its completion evidence.");
-        return { result: null, dependencyHistory: [...(s.dependencyHistory ?? []).filter(p =>
+        return { result: null, focusedPrerequisite: { ...pin, supportRef: dependencyDigest(entry) },
+          dependencyHistory: [...(s.dependencyHistory ?? []).filter(p =>
           p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
       } catch (error) {
         const stop = blocked(error);
@@ -3202,10 +3332,11 @@ export function createGenerationGraph(
     .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.ideaTask ? "idea_integration" :
+      s.result?.status === "dependency-required" ? "dependency_amendment" :
       s.active && s.result && s.recoveryLifecycle.active?.origin.operation === "commit-verification" &&
         s.recoveryLifecycle.phase === "verifying" ? "verify_committed_work" :
       s.active && s.result ? "independent_assignment_review" :
-      s.active ? "specialist_dispatch" : "completion_decision"), [END, "assess_recovery", "idea_integration", "independent_assignment_review", "verify_committed_work", "specialist_dispatch", "completion_decision"])
+      s.active ? "specialist_dispatch" : "completion_decision"), [END, "assess_recovery", "idea_integration", "dependency_amendment", "independent_assignment_review", "verify_committed_work", "specialist_dispatch", "completion_decision"])
     .addConditionalEdges("idea_integration", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "verify_idea_integration"), [END, "assess_recovery", "verify_idea_integration"])
     .addConditionalEdges("verify_idea_integration", s => routeAfterOperationAssessment(s,
@@ -3272,7 +3403,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
           pendingOrder: null, pendingVersion: null, graphThreadId: null, adaptiveVersion: null,
-          dependencyHistory: [], crossDomainCloseout: null, causalAmendment: null };
+          dependencyHistory: [], focusedPrerequisite: null, crossDomainCloseout: null, causalAmendment: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)

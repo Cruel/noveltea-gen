@@ -8,7 +8,7 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { removeTestTree } from "./helpers.js";
 import {
   authenticateAssignmentReentry, createAssignmentLifecycleGraph, logicalAssignmentKey,
-  type AssignmentAdapter, type AssignmentIdentity, type AssignmentOutcome,
+  type AssignmentAdapter, type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
 } from "../src/generation-assignment-lifecycle.js";
 
 const dir = mkdtempSync(join(tmpdir(), "nt-r01-child-"));
@@ -35,8 +35,10 @@ function graph(adapter: AssignmentAdapter, name: string) {
   const channels = Annotation.Root({
     identity: Annotation<AssignmentIdentity>(),
     submission: Annotation<{ receiptRef: string; status: string; headSha?: string } | null>(),
+    submissionKey: Annotation<string | null>(),
     outcome: Annotation<AssignmentOutcome | null>(),
     continuationRef: Annotation<string | null>(),
+    suspension: Annotation<AssignmentPrerequisiteSuspension | null>(),
   });
   const saver = SqliteSaver.fromConnString(join(dir, name + ".sqlite"));
   const child = createAssignmentLifecycleGraph(adapter);
@@ -140,6 +142,7 @@ test("R01 returned needs-prerequisite is END; re-entry requires authenticated su
   const suspension: AssignmentOutcome = {
     status: "needs-prerequisite", assignmentKey: key,
     evidenceRef: "original-no-write:character", suspensionRef: "original-review-negative",
+    owner: "nt-character-development", scopeRef: "character:scope", pendingPhase: "writer",
   };
   const { parent } = graph({
     preflight: async () => null,
@@ -156,13 +159,14 @@ test("R01 returned needs-prerequisite is END; re-entry requires authenticated su
     proof.identity.jobId === "job-one" && proof.continuationRef === "support:sha"), key);
   await assert.rejects(authenticateAssignmentReentry(
     { ...identity, graphThreadId: "another-thread" }, suspension, "support:sha", async () => true),
-    /authenticated original support/, "Changed source identity must never inherit original support");
+    /authenticated original source|authenticated original support/, "Changed source identity must never inherit original support");
 });
 
 test("R01 returned-END child re-enters a later authenticated logical phase, never Command(resume)", async () => {
   const suspension: AssignmentOutcome = {
     status: "needs-prerequisite", assignmentKey: key,
     evidenceRef: "original-no-write:foundation", suspensionRef: "review:blocked",
+    owner: "nt-worldbuilding", scopeRef: "world:scope", pendingPhase: "writer",
   };
   let invocations = 0;
   const support = "source-bound-correction:original-review:head";
@@ -170,7 +174,8 @@ test("R01 returned-END child re-enters a later authenticated logical phase, neve
     preflight: async state => state.continuationRef ? null : suspension,
     authenticateContinuation: async state =>
       state.continuationRef === support && state.identity.sourceHeadSha === identity.sourceHeadSha,
-    invoke: async () => {
+    invoke: async () => { throw Error("returned child must never repeat initial writer"); },
+    reenterWriter: async () => {
       invocations++;
       return { receiptRef: "original-foundation:continued", status: "committed",
         headSha: "d".repeat(40) };
@@ -189,7 +194,7 @@ test("R01 returned-END child re-enters a later authenticated logical phase, neve
       continuationRef === support && requested.sourceHeadSha === identity.sourceHeadSha);
   assert.equal(authorizedKey, key);
   const continued = await parent.invoke({
-    identity, submission: null, outcome: null, continuationRef: support,
+    identity, submission: null, outcome: null, continuationRef: support, suspension,
   }, config);
   assert.equal(continued.outcome?.status, "verified");
   assert.equal(continued.outcome?.assignmentKey, first.outcome?.assignmentKey,
@@ -198,10 +203,47 @@ test("R01 returned-END child re-enters a later authenticated logical phase, neve
   assert.deepEqual((await parent.getState(config)).next, [],
     "A returned-END child is a new phase; no pending interrupt is resumed");
   await assert.rejects(parent.invoke({
-    identity, submission: null, outcome: null, continuationRef: "forged-support",
+    identity, submission: null, outcome: null, continuationRef: "forged-support", suspension,
   }, { configurable: { thread_id: "generation-reentry-foreign" } }),
   /authenticated original support/);
   assert.equal(invocations, 1, "Invalid continuation cannot dispatch a model");
+});
+
+test("R04 returned review suspension retains its original submission and never invokes the writer again", async () => {
+  const negative: AssignmentPrerequisiteSuspension = {
+    status: "needs-prerequisite", assignmentKey: key, evidenceRef: "original-negative-review",
+    suspensionRef: "original-review-cycle", owner: "nt-event-design",
+    scopeRef: "events/source.md", pendingPhase: "review",
+  };
+  const original = { receiptRef: "original-native-commit", status: "committed",
+    headSha: "d".repeat(40) };
+  let writes = 0, reviews = 0;
+  const { parent, saver } = graph({
+    preflight: async () => null,
+    invoke: async () => { writes++; return original; },
+    authenticateContinuation: async s => s.continuationRef === "verified-support" &&
+      s.suspension?.evidenceRef === negative.evidenceRef,
+    verify: async s => {
+      reviews++;
+      assert.deepEqual(s.submission, original);
+      return s.continuationRef ? verified() : negative;
+    },
+  }, "r04-review");
+  const config = { configurable: { thread_id: "generation-review-reentry" } };
+  try {
+    const first = await parent.invoke({ identity, submission: null, submissionKey: null,
+      outcome: null, continuationRef: null, suspension: null }, config);
+    assert.deepEqual(first.outcome, negative);
+    assert.deepEqual((await parent.getState(config)).next, []);
+    const bad = { identity, submission: null, submissionKey: null, outcome: null,
+      continuationRef: "verified-support", suspension: negative };
+    await assert.rejects(parent.invoke(bad, { configurable: { thread_id: "review-missing-submission" } }),
+      /exact original pending phase/);
+    const final = await parent.invoke({ ...bad, submission: first.submission, submissionKey: key }, config);
+    assert.equal(final.outcome?.status, "verified");
+    assert.equal(writes, 1);
+    assert.equal(reviews, 2);
+  } finally { saver.db.close(); }
 });
 
 test("R01 crash windows reuse settled original invocation/Git/reviewer receipts without a second model charge", async () => {

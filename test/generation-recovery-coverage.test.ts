@@ -47,8 +47,8 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:5,throws:5",
-  dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
+  specialist_dispatch: "returns:17,status:1,blocked:1,operationFailure:5,throws:5",
+  dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:4",
   independent_assignment_review: "returns:7,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
   completion_decision:
@@ -174,7 +174,7 @@ function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
 /** Baseline from the current C01 source: any changed route must be audited. */
 const approvedEdgeSignatures: Record<string, string> = {
   assess_recovery: "68e31ce4e43b0258f559658405c3e616af916e4aba65c0d4d54aee575e12558c",
-  author_update_intake: "0ca4965adcd4a316dad45ac3981b23e8a21b25b2bdab2ffa7c636a31be15a12a",
+  author_update_intake: "6f21754bef107f0b6f5f71aaee34c1058fd0175446b97d8901b5bd44b6215181",
   completion_decision: "75726d85064f0f9b1eb31b89fad2856bbcdfc7f02748f590116cb30fd2148df5",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   idea_integration: "2a18b888743ce1be5a7c8e570b8c1e903874e38bec4fd2c9531d7826bb930235",
@@ -206,8 +206,9 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "runFoundationAssignmentChild", "329033ddaaf952f13386641642ea670fdf9a4455deeb408cead3bb70a89419a1"],
     [file, "runCharacterWorldAssignmentChild", "6cf079f8d65f958018d4d2e8b674d7deeddf50036a9ed0b1b35ec4b2f3247f24"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
-    [child, "createAssignmentLifecycleGraph", "0f012ed09905cddb030afa7475e1c4fde87316885704803d0e90abca43eaf015"],
-    [child, "authenticateAssignmentReentry", "5b24030609f9d19c2cd5c001a29dbcb865388377cfd865ee6c176b4996a2e135"],
+    [file, "runFocusedAssignmentChild", "692eb56fd45ccc7ae2ad323c14876207b68817086db494098bc18ea7f421028b"],
+    [child, "createAssignmentLifecycleGraph", "6b344735d806683e12bb39d4dd789ee434b11ecd5845df3abdc6a1f19d9940e9"],
+    [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
     const body = helpers(source).get(name);

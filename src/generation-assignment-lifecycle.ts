@@ -67,7 +67,7 @@ type OutcomeBase = Readonly<{
 export type AssignmentOutcome<I extends LifecycleIdentity = AssignmentIdentity> =
   | (OutcomeBase & Readonly<{ status: "verified"; reviewRef: string }> &
       (I extends DiscoveryAssignmentIdentity ? Readonly<{ sourceDigest: string }> : Readonly<{ headSha: string }>))
-  | (OutcomeBase & Readonly<{ status: "needs-prerequisite"; suspensionRef: string }>)
+  | AssignmentPrerequisiteSuspension
   | (OutcomeBase & Readonly<{ status: "awaiting-author"; questionRef: string }>)
   | (OutcomeBase & Readonly<{ status: "paused"; controlRef: string }>)
   | (OutcomeBase & Readonly<{ status: "fenced"; inspectionRef: string }>)
@@ -77,6 +77,15 @@ export type AssignmentOutcome<I extends LifecycleIdentity = AssignmentIdentity> 
 export type AssignmentCorrection = Readonly<{
   correctionRef: string;
   rejectedReceiptRef: string;
+}>;
+
+export type AssignmentPrerequisiteSuspension = OutcomeBase & Readonly<{
+  status: "needs-prerequisite";
+  /** Authenticated original failure/report, with owner and exact bounded scope. */
+  suspensionRef: string;
+  owner: string;
+  scopeRef: string;
+  pendingPhase: "writer" | "review";
 }>;
 
 export type AssignmentSubmission = Readonly<{
@@ -96,6 +105,8 @@ function lifecycleChannels<I extends LifecycleIdentity>() {
   outcome: Annotation<AssignmentOutcome<I> | null>({ reducer: (_, next) => next, default: () => null }),
   /** Only a reference into the existing controller-owned history. */
   continuationRef: Annotation<string | null>({ reducer: (_, next) => next, default: () => null }),
+  /** Original returned-END suspension, not an author interrupt or a new assignment. */
+  suspension: Annotation<AssignmentPrerequisiteSuspension | null>({ reducer: (_, next) => next, default: () => null }),
   correction: Annotation<AssignmentCorrection | null>({ reducer: (_, next) => next, default: () => null }),
   });
 }
@@ -122,6 +133,10 @@ export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> 
   /** Required for any returned-END logical phase reentry. Must check the
    * original suspension, matching Turn/scope/source and supporting receipt. */
   authenticateContinuation?: (state: LifecycleState<I>, config: RunnableConfig) => Promise<boolean>;
+  /** Continue a settled no-write writer at its original Pi session. Never
+   * substitute the initial invocation for a returned-END continuation. */
+  reenterWriter?: (state: LifecycleState<I>, config: RunnableConfig) =>
+    Promise<AssignmentSubmission | AssignmentOutcome<I>>;
 }>;
 
 function assertAssignmentOutcome(identity: LifecycleIdentity, outcome: AssignmentOutcome<LifecycleIdentity>): void {
@@ -132,6 +147,10 @@ function assertAssignmentOutcome(identity: LifecycleIdentity, outcome: Assignmen
     outcome.status === "awaiting-author" ? outcome.questionRef :
     outcome.status === "paused" ? outcome.controlRef :
     outcome.status === "fenced" ? outcome.inspectionRef : outcome.dispositionRef;
+  if (outcome.status === "needs-prerequisite" &&
+      (!outcome.owner?.trim() || !outcome.scopeRef?.trim() ||
+       !["writer", "review"].includes(outcome.pendingPhase)))
+    throw Error("Prerequisite suspension lacks its bounded owner, scope or pending phase.");
   if (typeof ref !== "string" || !ref.trim() ||
       outcome.status === "verified" && (identity.schema === "noveltea-discovery-assignment/v1"
         ? !("sourceDigest" in outcome) || outcome.sourceDigest !== identity.scopeDigest
@@ -146,6 +165,13 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       if (state.outcome) assertAssignmentOutcome(state.identity, state.outcome);
       if (state.submission && state.submissionKey !== key)
         throw Error("Saved specialist submission belongs to another logical assignment.");
+      if (state.suspension) {
+        assertAssignmentOutcome(state.identity, state.suspension);
+        if (state.suspension.status !== "needs-prerequisite" || !state.continuationRef ||
+            (state.suspension.pendingPhase === "review" && !state.submission) ||
+            (state.suspension.pendingPhase === "writer" && (!adapter.reenterWriter || state.submission)))
+          throw Error("Prerequisite continuation lacks its exact original pending phase.");
+      }
       if (state.continuationRef !== null &&
           (!state.continuationRef ||
            !adapter.authenticateContinuation ||
@@ -166,7 +192,8 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
     })
     .addNode("invoke_original", async (state, config) => {
       if (state.submission || state.outcome) return {};
-      const settled = await adapter.invoke(state, config);
+      const settled = state.suspension?.pendingPhase === "writer"
+        ? await adapter.reenterWriter!(state, config) : await adapter.invoke(state, config);
       if ("assignmentKey" in settled) {
         assertAssignmentOutcome(state.identity, settled);
         return { outcome: settled };
@@ -242,6 +269,7 @@ export async function authenticateAssignmentReentry(
     continuationRef: string;
   }) => Promise<boolean>,
 ): Promise<string> {
+  assertAssignmentOutcome(identity, suspension);
   if (suspension.status !== "needs-prerequisite" ||
       suspension.assignmentKey !== logicalAssignmentKey(identity) ||
       !suspension.suspensionRef || !continuationRef ||

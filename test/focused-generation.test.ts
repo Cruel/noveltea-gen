@@ -483,11 +483,26 @@ test("discovered prerequisite amends a focused plan and survives process restart
     const saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
     try {
       const graph = createGenerationGraph(saver, "cli");
-      const result = await graph.invoke({ request: { story: f.story, job: "dependency", task,
+      const config = { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 };
+      const suspended = await graph.invoke({ request: { story: f.story, job: "dependency", task,
         contract, fixture: true, skillsSource: source, turnPlanDigest: turn.digest,
         orchestrationPolicy: "fixture-test" }, pauseAfter: "focus" },
-        { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 });
+        { ...config, interruptBefore: ["dependency_amendment"] });
+      assert.equal(suspended.result?.status, "dependency-required");
+      assert.equal(suspended.focusedPrerequisite?.suspension.status, "needs-prerequisite");
+      assert.equal(suspended.focusedPrerequisite?.suspension.owner, "nt-event-design");
+      assert.equal(suspended.focusedPrerequisite?.suspension.pendingPhase, "writer");
+      assert.equal(suspended.focusedPrerequisite?.supportRef, null);
+      assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), job.baseSha);
+      const supported = await createGenerationGraph(saver, "cli").invoke(null,
+        { ...config, interruptAfter: ["dependency_amendment"] });
+      assert.ok(supported.focusedPrerequisite?.supportRef);
+      assert.deepEqual(supported.focusedPrerequisite?.identity, suspended.focusedPrerequisite?.identity);
+      assert.deepEqual(supported.focusedPrerequisite?.suspension, suspended.focusedPrerequisite?.suspension);
+      assert.equal(git(job.worktreeRoot, "rev-list", "--count", job.baseSha + "..HEAD"), "1");
+      const result = await createGenerationGraph(saver, "cli").invoke(null, config);
       assert.equal(result.status, "paused", result.reason ?? JSON.stringify(result));
+      assert.equal(result.focusedPrerequisite, null);
     } finally { saver.db.close(); }
     const amended = await inspectDependencyPlan(job);
     assert.equal(amended?.version, 2);
@@ -550,6 +565,23 @@ test("discovered prerequisite amends a focused plan and survives process restart
     assert.equal((await inspectDependencyPlan(rejected))?.version, 1);
     await assert.rejects(advanceFocusedDependency(rejectedOptions), /rejected.*no replay/);
     assert.equal(git(rejected.worktreeRoot, "rev-parse", "HEAD"), rejected.baseSha);
+
+    // Tampering with the original typed owner must not grant a supporting
+    // writer, even if the altered report still parses as a valid report.
+    const owner = await startStoryJob({ story: f.story, job: "dependency-owner" });
+    await saveJobTurnPlan(owner, turn);
+    await runArchitectureJob({ story: f.story, job: owner.jobId, action: "run",
+      fixture: true, contract, skillsSource: source });
+    process.env.NT_FOCUS_FIXTURE_DEPENDENCY = JSON.stringify(report);
+    const ownerOptions = { ...options, job: owner.jobId };
+    assert.equal((await runFocusedWorkItem(ownerOptions)).status, "dependency-required");
+    const originalReceipt = join(owner.stateDir, "focused-items", target + ".json");
+    const stored = JSON.parse(readFileSync(originalReceipt, "utf8"));
+    stored.dependencyReport.likelySpecialist = "nt-character-development";
+    writeFileSync(originalReceipt, JSON.stringify(stored));
+    await assert.rejects(advanceFocusedDependency(ownerOptions), /lost its original assignment, plan or settled report/);
+    assert.equal(await inspectDependencyPlan(owner), null);
+    assert.equal(git(owner.worktreeRoot, "rev-parse", "HEAD"), owner.baseSha);
   } finally {
     for (const [key, value] of [["NT_STATE_DIR", old.state], ["NT_SKILL_CACHE_DIR", old.cache],
       ["NT_FOCUS_FIXTURE_DEPENDENCY", old.report]]) {

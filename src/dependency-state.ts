@@ -42,6 +42,8 @@ export interface DependencyEntry {
     sourceSha: string; amendmentDigest: string };
   planner?: { snapshot: SkillSnapshot; sessionFile: string; skillReads?: string[] };
   commitSha?: string; review?: EditorialVerdict; reviewerSession?: string;
+  /** Independently sealed focused-support verdict transcript. */
+  reviewerSessionDigest?: string;
   fixture: boolean;
   /** Exact sealed negative review which generated a supporting work report. */
   reviewSourceSha?: string;
@@ -191,6 +193,13 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         dependencyGit(job, "show", entry.commitSha + ":" + prefix + eventPath),
         dependencyGit(job, "show", correction.commitSha + ":" + prefix + eventPath),
         entry.amendment!.assignment.targets[0]!);
+    }
+    if (entry.phase === "verified" && !entry.fixture && !entry.reviewSourceSha) {
+      const session = entry.reviewerSession!;
+      if (!session.startsWith(join(job.stateDir, "review-sessions") + "/") ||
+          await realpath(session) !== session || !entry.reviewerSessionDigest ||
+          createHash("sha256").update(await readFile(session)).digest("hex") !== entry.reviewerSessionDigest)
+        throw Error("Focused supporting review lost its independently sealed transcript.");
     }
     if (entry.phase === "verified") {
       const a = entry.amendment!;

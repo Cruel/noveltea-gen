@@ -521,7 +521,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   directory: string;
   /** Sealed safe-boundary resume: reopen this exact original Pi session, even
    * beyond the normal opportunistic 1.5 MB context-fork threshold. */
-  resumeSession?: { file: string; id: string; formatOnly?: boolean };
+  resumeSession?: { file: string; id: string; formatOnly?: boolean;
+    /** Exact paths independently verified by the trusted supporting-work controller. */
+    changedPaths?: readonly string[] };
   /** Public native task-scoped Context Manifest query. Omit for discovery-only work. */
   task?: StoryContextRequest;
   /** An independent review nested inside an active writer must not pause mid-edit. */
@@ -548,7 +550,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
   // A format-only continuation deliberately requests no source tools. Its
   // historical reads are not superseded assignments. Require *all* original
   // source versions unchanged instead of applying the new-assignment heuristic.
-  const redesigned = options.resumeSession?.formatOnly ? changed.length !== 0 :
+  const redesigned = options.resumeSession?.changedPaths ?
+    changed.some(p => !options.resumeSession!.changedPaths!.includes(p)) :
+    options.resumeSession?.formatOnly ? changed.length !== 0 :
     changed.some(p => /^(creative-direction|arcs|milestones)\//.test(p)) ||
     changed.length + superseded.length > 12;
   const clean = !execFileSync("git", ["status", "--porcelain", "--untracked-files=all"],
@@ -574,6 +578,9 @@ export async function preparePiContext(job: JobStartResult, project: StoryProjec
     // A new work item must retain its own receipt-directory identity for crash
     // recovery and editorial repair. Pi's supported fork carries the same cache
     // prefix forward without rewriting the original transcript.
+    if (options.resumeSession?.changedPaths && (!previous.sessionSha256 ||
+        createHash("sha256").update(await readFile(previous.file)).digest("hex") !== previous.sessionSha256))
+      throw Error("Cannot continue after supporting work: original completed Pi transcript changed.");
     const verified = SessionManager.open(previous.file, dirname(previous.file), project.root);
     if (verified.getSessionId() !== previous.sessionId) {
       throw new Error("Cannot reuse Pi context: session identity mismatch.");

@@ -1,8 +1,11 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import type { RunnableConfig } from "@langchain/core/runnables";
+import { createAssignmentLifecycleGraph, logicalAssignmentKey, type AssignmentIdentity } from "./generation-assignment-lifecycle.js";
 import { join } from "node:path";
 import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
+import { inspectFocusedPrerequisite, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, registerReviewDependency, approveDependency,
   inspectDependencyPlan, saveDependencyPlan } from "./dependency-state.js";
@@ -20,7 +23,7 @@ import { reviewNarrative, type ReviewAssignment } from "./narrative-review-speci
 /** Serialized sub-work at the originating assignment's no-write boundary.
  * The parent stays on that assignment, so no second origin writer is scheduled.
  * All external effects are fenced by private receipts, independently of graph checkpoints. */
-export async function advanceFocusedDependency(input: FocusedWorkOptions) {
+export async function advanceFocusedDependency(input: FocusedWorkOptions, config?: RunnableConfig) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const origin = JSON.parse(await readFile(join(job.stateDir, "focused-items", input.target + ".json"), "utf8")) as {
     jobId: string; workItemId: string; phase: string; dependencyReport?: DependencyReport;
@@ -30,8 +33,15 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
       origin.phase !== "waiting-dependency" || !origin.dependencyReport ||
       origin.assignmentDigest !== input.turnPlanDigest || origin.worker !== (input.fixture ? "fixture" : "pi"))
     throw Error("Dependency amendment requires the exact suspended originating assignment.");
-  const report = origin.dependencyReport;
-  const reportDigest = dependencyDigest(report);
+  const planVersion = (origin as { planVersion?: number }).planVersion;
+  if (!input.turnPlanDigest || !Number.isSafeInteger(planVersion))
+    throw Error("Dependency requires an authenticated original Turn and plan version.");
+  const suspension = await inspectFocusedPrerequisite(job, input.target, input.turnPlanDigest,
+    input.fixture, planVersion!);
+  if (!suspension || suspension.phase !== "waiting-dependency")
+    throw Error("Dependency requires the sealed original no-write session.");
+  const report = suspension.report;
+  const reportDigest = suspension.seal.reportDigest;
   const assignment = await withStoryJobLock(job, "dependency-authorization", async () => {
     const head = await dependencyBoundary(job);
     let plan = await inspectDependencyPlan(job);
@@ -71,14 +81,41 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
   let saved = await inspectDependencyPlan(job);
   if (saved?.entries.find(e => e.reportDigest === reportDigest)?.phase === "verified")
     return { status: "dependency-verified", reportDigest };
-  const result = await runFocusedWorkItem({ ...input, target: assignment.targets[0]!,
-    dependencyAssignmentId: assignment.id });
-  if (result.status !== "focused-committed" || !result.headSha)
-    throw Error("Dependency specialist did not publish a native-validated bounded commit.");
-  await withStoryJobLock(job, "dependency-review", async () => {
+  const graphThreadId = config?.configurable?.thread_id;
+  const admitted = saved?.entries.find(e => e.reportDigest === reportDigest);
+  if (typeof graphThreadId !== "string" || !admitted?.amendment)
+    throw Error("Supporting assignment requires the admitting Generation graph Thread.");
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
+    jobThreadId: job.threadId, graphThreadId, turnDigest: report.turnDigest,
+    assignmentId: assignment.id, planVersion: admitted.amendment.afterVersion,
+    sourceHeadSha: report.sourceSha, scopeDigest: dependencyDigest(assignment),
+  };
+  const key = logicalAssignmentKey(identity);
+  const child = createAssignmentLifecycleGraph({
+    preflight: async () => {
+      const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
+      if (!current?.amendment || dependencyDigest(current.amendment.assignment) !== identity.scopeDigest ||
+          current.amendment.afterVersion !== identity.planVersion ||
+          !["authorized", "verified"].includes(current.phase))
+        throw Error("Supporting child lost its exact controller authorization.");
+      return null;
+    },
+    invoke: async () => {
+      const result = await runFocusedWorkItem({ ...input, target: assignment.targets[0]!,
+        dependencyAssignmentId: assignment.id });
+      if (result.status !== "focused-committed" || !result.headSha)
+        throw Error("Dependency specialist did not publish a native-validated bounded commit.");
+      return { receiptRef: assignment.id, status: result.status, headSha: result.headSha };
+    },
+    verify: async state => {
+      const result = state.submission!;
+      const complete = await withStoryJobLock(job, "dependency-review", async () => {
     const head = await dependencyBoundary(job);
     saved = await inspectDependencyPlan(job);
     const entry = saved?.entries.find(e => e.reportDigest === reportDigest);
+    if (entry?.phase === "verified" && entry.commitSha === head && head === result.headSha)
+      return entry;
     if (!saved || !entry || entry.phase !== "authorized" || head !== result.headSha)
       throw Error("Dependency review source or receipt changed.");
     const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", assignment.id + ".json"), "utf8"));
@@ -119,13 +156,24 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
         undefined, async sessionFile => {
           entry.reviewerSession = sessionFile;
           await saveDependencyPlan(job, saved!);
-        });
+        }, "focused-support:" + reportDigest);
+      if (!entry.reviewerSession) throw Error("Supporting review lacks a persistent Pi transcript.");
+      entry.reviewerSessionDigest = createHash("sha256").update(await readFile(entry.reviewerSession)).digest("hex");
     }
     if (await dependencyBoundary(job) !== head) throw Error("Dependency review changed the Story source.");
     entry.phase = entry.review.verdict === "pass" ? "verified" : "rejected";
     await saveDependencyPlan(job, saved);
     if (entry.phase !== "verified") throw Error("Independent dependency review rejected the prerequisite; preserve work for author reconciliation.");
+    return entry;
+      });
+      return { status: "verified", assignmentKey: key, evidenceRef: dependencyDigest(complete),
+        reviewRef: reportDigest, headSha: complete.commitSha! };
+    },
   });
+  const finished = await child.invoke({ identity, submission: null, submissionKey: null,
+    outcome: null, continuationRef: null, suspension: null }, config);
+  if (finished.outcome?.status !== "verified" || finished.outcome.assignmentKey !== key)
+    throw Error("Supporting child did not independently verify the approved prerequisite.");
   return { status: "dependency-verified", reportDigest };
 }
 
