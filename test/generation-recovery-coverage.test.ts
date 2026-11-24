@@ -47,7 +47,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:6,throws:7",
+  specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:5,throws:5",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
   independent_assignment_review: "returns:7,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
@@ -178,9 +178,9 @@ const approvedEdgeSignatures: Record<string, string> = {
   completion_decision: "75726d85064f0f9b1eb31b89fad2856bbcdfc7f02748f590116cb30fd2148df5",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   idea_integration: "2a18b888743ce1be5a7c8e570b8c1e903874e38bec4fd2c9531d7826bb930235",
-  independent_assignment_review: "f87aeaf6ff6b7d83e855614fce024415bc395e9b7de258c5a4f6e25dde3d87a5",
+  independent_assignment_review: "d298f31f395e3186120d4d586a5c0b0149f65f56d1b64c9139186da892d91db7",
   schedule: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
-  specialist_dispatch: "fb238e11658e9aec770037118d2a8a2e08bed03d1c5e822d993125e9337a9286",
+  specialist_dispatch: "9f5ffa93f6202d91b0b9eafcf75e35521264ad50c20658d819051cd382488e01",
   verify_committed_work: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   verify_idea_integration: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
 };
@@ -203,7 +203,9 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const reviewed = [
     [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
-    [file, "runFoundationAssignmentChild", "7d87aa711348f21360594d3eb523c1fb4bb4524c4e5a09f0b03ed9e811b1789f"],
+    [file, "runFoundationAssignmentChild", "329033ddaaf952f13386641642ea670fdf9a4455deeb408cead3bb70a89419a1"],
+    [file, "runCharacterWorldAssignmentChild", "6cf079f8d65f958018d4d2e8b674d7deeddf50036a9ed0b1b35ec4b2f3247f24"],
+    [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
     [child, "createAssignmentLifecycleGraph", "9fa13f1f13a3729ec1fd9253f553483222c06492c7d1b490c59ccf5f225d7701"],
     [child, "authenticateAssignmentReentry", "5b24030609f9d19c2cd5c001a29dbcb865388377cfd865ee6c176b4996a2e135"],
   ] as const;
@@ -222,15 +224,17 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
   const reviewed = [
     ["assignment-metadata-recovery.ts", "materialProgress", "4e8f587da128adb223f8c9160f92b365f1e57bc1d0f52c0cb6c79f07fdf8fd15"],
     ["assignment-metadata-recovery.ts", "nativeMetadataDefects", "82ab3b20064ca15b238009c47632d07415d7e9b8cecae82d588ed04c90c9cc0e"],
-    ["assignment-metadata-recovery.ts", "inspectSettledChain", "a5c669483503867eb0294a3019716fd3fe8d3813831bccfdd33506b5e9ce5732"],
-    ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "5aff6609778cab8b2a3a4454f70ce89b387551fcf7a96133ccb2c2b070591dc9"],
-    ["assignment-metadata-recovery.ts", "recoverSubmittedAssignment", "c89c6fa4789c11116944ff68583d71946e6b28391913e7a136a2d15f228b8f98"],
+    ["assignment-metadata-recovery.ts", "inspectSettledChain", "57e7ae8162a250d1cd98ba9245c07fa5970b20e7d033583fe7ee4de647ea26d1"],
+    ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "b7ae344df102adc7dc9e8e4c8d465a00a054676c2e3627b4e918885b4e416cfe"],
+    ["assignment-metadata-recovery.ts", "recoverSubmittedAssignment", "1973ed1285d32d85db986e98084d241c08358bf96a1bf7afa4521163a3ba593f"],
+    ["character-world.ts", "verifyCharacterWorldReviewOrigin", "142e6331451c4480892b21f7e7b7c150c86a6030a0cfc77c8d24a58b5a78cc37"],
+    ["character-world.ts", "inspectRecoverableCharacterWorldCommit", "ff7d64d08ab609775cde44af310b0cfef840862325bfe5f1369f72c3ba52875a"],
     ["foundation.ts", "foundationSourceDigest", "f1520e850f14566097c03e9750c229d73f29b2874fc770d7d15027dad3ff53a0"],
     ["foundation.ts", "inspectFoundationFailure", "8ea7e6c1ac238a0bc742e7e344e4de30ca1f07a0d10c7ac7564ad4ff6394bf48"],
-    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "bb892a67ef0eb4e86df44369763cb56d9dd159b00eaaae4ebd926e7bb49dc35b"],
-    ["generation-operation-strategy.ts", "originalAssignmentFailure", "9c6670e50947297267867f372f38c27beb62c107c235d0ff90da0ec9b7a31fe7"],
-    ["generation.ts", "authenticateRecoveryOrigin", "b65569bb1936afe4551d9059ba17653368b74e7de41ba3101481e4e20e689c3b"],
-    ["generation.ts", "recoverySourceHead", "0b23bfbd098202d14a40a33ac80b78f7ac05f2f02c9427ee818f0d8437d8b3fe"],
+    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "37851c421fbe8b2803533f7c4b51e7ae4ec3a253e4a7f0f4121f6b263790ec54"],
+    ["generation-operation-strategy.ts", "originalAssignmentFailure", "097d55048dfc63b6505160f1c202f4eadf07d6ffe5c6ee80dc2558a2248f476d"],
+    ["generation.ts", "authenticateRecoveryOrigin", "93785bc0b45741a66bdcc91df51fa144a98f62df97bd7d56c96bb94ebbdfe454"],
+    ["generation.ts", "recoverySourceHead", "3c98eabbab5c48478d8803727b3d07361c88fb38c226796ed2f72989ed94477b"],
   ] as const;
   const printer = ts.createPrinter({ removeComments: true });
   for (const [path, name, expected] of reviewed) {

@@ -4,7 +4,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { assertPlanContinuity, assertFoundationArchitectureContinuity } from "./plan-continuity.js";
@@ -23,7 +22,9 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { CompletionContract, Plan } from "./architecture.js";
-import { authorCharacterWorld, characterInitialKnowledgeCorrection,
+import { nativeMetadataDefects, inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { lastSpecialistManifest } from "./specialist-manifest.js";
+import { authorCharacterWorld,
   type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
   type SpecialistChoiceProposal } from "./character-world-specialist.js";
 
@@ -48,6 +49,10 @@ interface Unit {
   architecturalConflicts?: string[];
   conflictDigest?: string;
   piSessionSha256?: string;
+  invocationProof?: AssignmentInvocationProof;
+  invocationSource?: string;
+  invocationTurnDigest?: string | null;
+  invocationChoiceId?: string;
   validation?: { status: "passed"; protectionBase: string; validatorVersion: string; records: string[] };
 }
 interface Receipt {
@@ -84,6 +89,8 @@ export interface CharacterWorldOptions {
   story: string;
   job: string;
   action: "run" | "inspect" | "reconcile";
+  /** Generation dispatches one independently reviewable unit at a time. */
+  unit?: FoundationDomain;
   recoveryDigest?: string;
   skillsSource?: string;
   validatorSource?: string;
@@ -279,6 +286,55 @@ function verifyCommit(job: JobStartResult, unit: Unit, before: string, commit: s
     throw new Error("Foundation commit tree does not match its independently audited file inventory.");
   }
 }
+function invocationDirectory(job: JobStartResult, unit: Unit, sessionId: string) {
+  if (!/^[a-zA-Z0-9-]+$/.test(sessionId) ||
+      unit.invocationChoiceId && !/^[a-zA-Z0-9-]+$/.test(unit.invocationChoiceId))
+    throw Error("Unsafe foundation invocation identity.");
+  return join(job.stateDir, "character-world-invocations", unit.domain, sessionId,
+    unit.invocationChoiceId ?? "initial");
+}
+function invocationSource(job: JobStartResult, receipt: Receipt, unit: Unit, turn: string | null) {
+  return digest(JSON.stringify({ job: job.jobId, thread: job.threadId, branch: job.branch,
+    base: job.baseSha, source: unit.beforeHead, workItem: unit.id, planVersion: receipt.planVersion,
+    contract: receipt.contractDigest, snapshot: receipt.snapshot?.id, provider: receipt.provider,
+    model: receipt.model, assignment: unit.assignment, validator: job.validatorVersion,
+    turn, authorChoiceId: unit.invocationChoiceId ?? null }));
+}
+async function ownedEffect(job: JobStartResult, unit: Unit, assign: FoundationAssignment) {
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const observed = dirty(job).map(entry => entry.slice(3).slice(prefix.length));
+  const paths = await auditPaths(job, unit, assign, observed, true);
+  return fileDigest(job, paths);
+}
+async function verifyUnitInvocation(job: JobStartResult, receipt: Receipt, unit: Unit, effect: string, historical = false) {
+  if (!unit.invocationProof || !unit.piSessionId || !unit.piSessionFile ||
+      unit.invocationTurnDigest === undefined ||
+      unit.invocationSource !== invocationSource(job, receipt, unit, unit.invocationTurnDigest) ||
+      unit.invocationProof.sourceDigest !== unit.invocationSource)
+    throw Error("Original foundation writer lacks its current-format invocation receipt.");
+  await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+  await verifySettledAssignment({ proof: unit.invocationProof,
+    directory: invocationDirectory(job, unit, unit.piSessionId),
+    sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+    sessionRoots: [join(job.stateDir, "character-world-sessions", unit.domain)],
+    responseKind: "manifest-or-choice", effect, historical });
+}
+/** Reauthenticate the immutable original writer before granting a Review repair lease. */
+export async function verifyCharacterWorldReviewOrigin(job: JobStartResult, point: {
+  workItem: string; commitSha: string; parentSha: string; planVersion: number | null;
+  assurance?: { turnDigest: string } | null;
+}) {
+  const receipt = JSON.parse(await readFile(join(job.stateDir, "character-world.json"), "utf8")) as Receipt;
+  const unit = receipt.units.find(entry => entry.id === point.workItem);
+  if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId ||
+      receipt.branch !== job.branch || receipt.baseSha !== job.baseSha || receipt.worker !== "pi" ||
+      receipt.planVersion !== point.planVersion || !unit || unit.phase !== "committed" ||
+      unit.beforeHead !== point.parentSha || unit.commitSha !== point.commitSha || !unit.digest ||
+      unit.invocationTurnDigest !== point.assurance?.turnDigest)
+    throw Error("Review repair has lost its original World/Character writer receipt.");
+  verifyCommit(job, unit, point.parentSha, point.commitSha);
+  await verifyUnitInvocation(job, receipt, unit, unit.digest, true);
+}
 async function fileDigest(job: JobStartResult, paths: string[]) {
   return digest(JSON.stringify(await Promise.all(paths.map(async p =>
     [p, digest(await readFile(join(job.worktreeStoryRoot, p)))]))));
@@ -467,9 +523,8 @@ export async function inspectFoundationConflict(job: JobStartResult, domain: Fou
       .at(-1)?.message;
     if (!final || final.stopReason !== "stop") throw Error("Foundation no-write Pi report never settled.");
     const text = (final.content ?? []).filter(c => c.type === "text").map(c => c.text ?? "").join("\n");
-    const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
-    const parsed = match ? JSON.parse(match) as {
-      modifiedRecords?: unknown; architecturalConflicts?: unknown; laterObligations?: unknown } : null;
+    await verifyUnitInvocation(job, receipt, unit, await fileDigest(job, []));
+    const parsed = lastSpecialistManifest(text);
     if (!parsed || JSON.stringify(parsed.modifiedRecords) !== "[]" ||
         JSON.stringify(parsed.architecturalConflicts) !== JSON.stringify(unit.architecturalConflicts) ||
         JSON.stringify(parsed.laterObligations) !== JSON.stringify(unit.laterObligations))
@@ -592,6 +647,10 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
       if (!last || !world.commitSha || changes.length)
         return blocked("Committed foundations have unexpected worktree or staged changes.");
       verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha);
+      if (receipt.worker === "pi") {
+        if (world.reviewedRecoveryDigest !== world.digest) await verifyUnitInvocation(job, receipt, world, world.digest!, true);
+        if (character.reviewedRecoveryDigest !== character.digest) await verifyUnitInvocation(job, receipt, character, character.digest!, true);
+      }
       const characterParent = character.beforeHead ?? world.commitSha;
       if (characterParent !== world.commitSha)
         await verifiedWorldReviewHandoff(job, world.commitSha, characterParent);
@@ -608,6 +667,9 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
     if (!before) return blocked("Saved work-item parent differs from the verified chain.");
     if (index && worldSha) {
       verifyCommit(job, receipt.units[0]!, receipt.startHead ?? receipt.architectureHead, worldSha);
+      const world = receipt.units[0];
+      if (receipt.worker === "pi" && world.reviewedRecoveryDigest !== world.digest)
+        await verifyUnitInvocation(job, receipt, world, world.digest!, true);
       if (unit.beforeHead && unit.beforeHead !== worldSha ||
           unit.phase === "pending" && actualHead !== worldSha) {
         const requested = unit.beforeHead ?? actualHead;
@@ -628,6 +690,9 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
       } catch (error) { return blocked("Author choice cannot safely resume: " + String(error)); }
     }
     if (unit.phase === "writing") {
+      if (receipt.worker === "pi" && unit.invocationSource &&
+          await inspectPendingCharacterWorldInvocation(job, before))
+        return { status: "ready", actualHead, changes, ...(index ? { characterBeforeHead: before } : {}) };
       if (receipt.worker === "pi") await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
       const result = blocked("Interrupted specialist writing (" + unit.id + "): review preserved files and use foundations reconcile with the exact candidate digest; no replay.");
       if (actualHead === before && changes.every(entry => ["??", " M"].includes(entry.slice(0, 2)))) {
@@ -652,7 +717,11 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
         : blocked("Unexpected Git history, staged data or worktree changes before specialist handoff.");
     }
     if (!unit.paths?.length || !unit.digest) return blocked("Authored foundation inventory is missing or corrupt.");
-    if (receipt.worker === "pi") await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+    if (receipt.worker === "pi") {
+      await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+      if (unit.reviewedRecoveryDigest !== unit.digest)
+        await verifyUnitInvocation(job, receipt, unit, unit.digest);
+    }
     if (actualHead === before) {
       const observed = changes.map(entry => entry.slice(3));
       const expected = unit.paths.map(p => repoPath(job, p)).sort();
@@ -675,6 +744,56 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
   }
 }
 
+/** Read-only admission for an existing original unit, never an authorization
+ * to replay a started writer. The shared invocation chain performs effect
+ * reconciliation before issuing another prompt. */
+export async function inspectPendingCharacterWorldInvocation(job: JobStartResult, sourceHead: string) {
+  const path = join(job.stateDir, "character-world.json");
+  if (!existsSync(path)) return null;
+  const receipt = JSON.parse(await readFile(path, "utf8")) as Receipt;
+  const unit = receipt.units.find(u => u.phase !== "committed");
+  if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId ||
+      receipt.branch !== job.branch || receipt.baseSha !== job.baseSha ||
+      receipt.worker !== "pi" || !unit || unit.phase !== "writing" ||
+      !unit.assignment || unit.beforeHead !== sourceHead || unit.invocationTurnDigest === undefined ||
+      unit.invocationSource !== invocationSource(job, receipt, unit, unit.invocationTurnDigest))
+    return null;
+  assertHead(job, sourceHead);
+  if (unit.piSessionId || unit.piSessionFile)
+    await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+  else if (dirty(job).length) throw Error("Unstarted foundation invocation has unexpected effects.");
+  const effect = await ownedEffect(job, unit, unit.assignment);
+  return { receipt, unit, effect };
+}
+export async function inspectCharacterWorldFailure(job: JobStartResult, sourceHead: string) {
+  const pending = await inspectPendingCharacterWorldInvocation(job, sourceHead);
+  const unit = pending?.unit;
+  if (!pending || !unit?.piSessionId || !unit.piSessionFile) return null;
+  const directory = invocationDirectory(job, unit, unit.piSessionId);
+  const terminal = await inspectAssignmentFailure({ directory, sourceDigest: unit.invocationSource!,
+    sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+    sessionRoots: [join(job.stateDir, "character-world-sessions", unit.domain)],
+    responseKind: "manifest-or-choice", effect: pending.effect });
+  return terminal && { ...terminal, ref: directory.slice(job.stateDir.length + 1) + "/terminal.json" };
+}
+
+/** Read-only original Git reconciliation, including a commit made before the
+ * verified-head pointer. No pending writer is admitted by this inspection. */
+export async function inspectRecoverableCharacterWorldCommit(job: JobStartResult) {
+  const path = join(job.stateDir, "character-world.json");
+  if (!existsSync(path) || dirty(job).length) return false;
+  const receipt = JSON.parse(await readFile(path, "utf8")) as Receipt;
+  if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId ||
+      receipt.branch !== job.branch || receipt.baseSha !== job.baseSha) return false;
+  const recovery = await inspectRecovery(job, receipt);
+  if (recovery.status === "recoverable-commit") return true;
+  if (recovery.status !== "ready") return false;
+  const unit = receipt.units.find(unit => unit.phase === "committed" && unit.commitSha === recovery.actualHead);
+  if (!unit) return false;
+  return (await inspectRecoveryCheckpoints(job)).some(point => point.eligible &&
+    point.workItem === unit.id && point.commitSha === recovery.actualHead);
+}
+
 export async function runCharacterWorldJob(input: CharacterWorldOptions) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const parent = job.stateDir;
@@ -694,8 +813,16 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       ? await readTurnEvidence(job, plan.contract, input.task, input.turnPlanDigest) : null;
     const policy = turnEvidence?.creativePolicy ?? DEFAULT_CREATIVE_POLICY;
     const contractDigest = digest(JSON.stringify(plan.contract));
-    const trustedSteering = await steeringForAssignment(job, input.turnPlanDigest, "foundations",
-      await trustedHead(job));
+    // A committed-but-unpublished original unit may have advanced Git before
+    // its verified-head marker. Derive steering only from the original safe
+    // predecessor; inspectRecovery separately verifies the actual commit.
+    const savedForSteering = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) as Receipt : null;
+    const pending = savedForSteering?.units.find(unit => unit.phase !== "committed");
+    const steeringHead = await trustedHead(job).catch(error => {
+      if (pending?.phase === "authored" && pending.beforeHead) return pending.beforeHead;
+      throw error;
+    });
+    const trustedSteering = await steeringForAssignment(job, input.turnPlanDigest, "foundations", steeringHead);
     if ((input.steering ?? "") !== trustedSteering)
       throw Error("Foundation author steering differs from the controller-amended plan.");
     // The saved original Turn request remains immutable. Steering is appended
@@ -820,15 +947,6 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       await persist(file, receipt);
       return { ...output(job, receipt), status: "authored", recovery: await inspectRecovery(job, receipt) };
     }
-    const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
-    const graph = new StateGraph(Channels)
-      .addNode("world_foundations", async ({ receipt }) => { await executeUnit(receipt.units[0]!, receipt); return { receipt }; })
-      .addNode("character_foundations", async ({ receipt }) => { await executeUnit(receipt.units[1]!, receipt); return { receipt }; })
-      .addEdge(START, "world_foundations")
-      .addConditionalEdges("world_foundations", ({ receipt }) =>
-        receipt.units[0].phase === "conflicted" ? END : "character_foundations",
-        [END, "character_foundations"])
-      .addEdge("character_foundations", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
       const prior = index ? state.units[index - 1]!.commitSha : (state.startHead ?? state.architectureHead);
@@ -878,9 +996,10 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         return;
       }
       if (index > 0) await assertNativeReviewDependencies(job, unit.id);
-      if (unit.phase === "writing") {
+      const resumingInvocation = unit.phase === "writing" && state.worker === "pi" &&
+        !!await inspectPendingCharacterWorldInvocation(job, before);
+      if (unit.phase === "writing" && !resumingInvocation)
         throw new Error("Interrupted specialist writing; inspect preserved files and Pi session, then reconcile exact bytes. Never replay the writer.");
-      }
       const resumingChoice = unit.phase === "awaiting-author";
       const choice = resumingChoice && unit.authorChoiceId
         ? await verifySpecialistChoice(job, unit.authorChoiceId, "answered") : null;
@@ -894,7 +1013,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         assertHead(job, before);
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Specialist requires a clean work-item boundary.");
       }
-      const assign = resumingChoice
+      const assign = resumingChoice || resumingInvocation
         ? unit.assignment
         : { ...deriveFoundationAssignment(unit.domain, plan,
           reportOf(await validate(before), before),
@@ -904,8 +1023,11 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       if (JSON.stringify(assign?.creativePolicy ?? DEFAULT_CREATIVE_POLICY) !== JSON.stringify(policy))
         throw new Error("Foundation assignment creative policy differs from the original Turn receipt.");
       if (!assign || assign.domain !== unit.domain) throw Error("Saved specialist assignment missing or mismatched.");
-      if (unit.phase === "pending" || resumingChoice) {
-        if (!resumingChoice) {
+      if (unit.phase === "pending" || resumingChoice || resumingInvocation) {
+        if (resumingInvocation) {
+          if (unit.invocationTurnDigest !== (turnEvidence?.digest ?? null))
+            throw Error("Pending foundation invocation belongs to another Turn.");
+        } else if (!resumingChoice) {
           await preflightPiAssignment(job, "foundations:" + unit.domain, state.worker === "pi"
             ? { provider: state.provider, model: state.model } : undefined);
           unit.beforeHead = before;
@@ -922,64 +1044,59 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         await persist(file, state);
         let evidence: SpecialistEvidence | SpecialistChoiceProposal;
         if (state.worker === "fixture") evidence = await fixtureAuthor(job, unit, assign);
-        else evidence = await authorCharacterWorld(job, state.snapshot!, assign, state.provider, state.model,
-          async (id, session) => { unit.piSessionId = id; unit.piSessionFile = session; await persist(file, state); },
-          async proposed => {
-            // Inspect the actual working tree BEFORE showing validator diagnostics
-            // to Pi. Unexpected paths, staging or forged manifests fail closed.
-            let paths: string[] | undefined;
-            let manifestFeedback: string | undefined;
-            try {
-              paths = await auditPaths(job, unit, assign, proposed.claimedPaths,
+        else {
+          if (!resumingInvocation) {
+            unit.invocationChoiceId = choice?.id;
+            unit.invocationTurnDigest = turnEvidence?.digest ?? null;
+            unit.invocationSource = invocationSource(job, state, unit, unit.invocationTurnDigest);
+            await persist(file, state);
+          }
+          evidence = await authorCharacterWorld(job, state.snapshot!, assign, state.provider, state.model,
+            async (id, session) => { unit.piSessionId = id; unit.piSessionFile = session; await persist(file, state); },
+            async proposed => {
+              const paths = await auditPaths(job, unit, assign, proposed.claimedPaths,
                 !!proposed.architecturalConflicts?.length && !proposed.claimedPaths.length);
-            } catch (error) {
-              const message = String(error);
-              // Only an incomplete self-report or empty work item is repairable.
-              // Out-of-scope/staged/unsafe paths must still fail closed.
-              if (!message.includes("claimed modifiedRecords differ from actual Git diff")) throw error;
-              manifestFeedback = message;
-            }
-            assertHead(job, before);
-            if (proposed.architecturalConflicts?.length) {
-              // An exactly clean no-write report is an accepted negative
-              // semantic result, not an incentive to invent Foundation files.
-              // A draft with effects still uses the bounded original Pi repair.
-              if (!paths?.length && !dirty(job).length) return [];
-              return proposed.architecturalConflicts.slice(0, 8).map(message =>
-                "Unresolved architectural conflict; repair the existing files and references: " +
-                message.slice(0, 800));
-            }
-            const draft = await validate(before);
-            const report = draft.report as unknown as CatalogReport | undefined;
-            if (!report?.protection || report.protection.status !== "checked" ||
-                report.protection.changes.length || report.protection.warnings.length) {
-              throw new Error("Draft contains unverified or protected changes; no automated specialist repair allowed.");
-            }
-            if (report.diagnostics.length) {
-              return report.diagnostics.slice(0, 16).map(d => JSON.stringify(d));
-            }
-            if (manifestFeedback) return [manifestFeedback +
-              ". Report only the exact changed files; do not touch existing canonical records just to fill a required category."];
-            const candidate: Unit = { ...unit, paths };
-            if (draft.status === "passed") {
+              assertHead(job, before);
+              if (proposed.architecturalConflicts?.length) {
+                if (!paths.length) return [];
+                // A conflicting draft is not a verified metadata defect.
+                // Preserve it for controller assessment, never widen scope.
+                throw Error("Foundation draft contains effects and an unresolved architectural conflict.");
+              }
+              const draft = await validate(before);
+              if (draft.status === "rejected") return nativeMetadataDefects(draft, {
+                jobId: job.jobId, baseSha: before, worktreeStoryRoot: job.worktreeStoryRoot,
+                validatorVersion: job.validatorVersion, paths,
+              });
+              const report = reportOf(draft, before);
+              const candidate: Unit = { ...unit, paths };
               try { await checkOutput(job, report, candidate, assign); return []; }
               catch (error) {
-                if (!/^Error: (World foundations require|Foundation cluster requires|Character foundations require)/.test(String(error))) throw error;
-                if (unit.domain === "character" &&
-                    String(error).includes("Character foundations require at least one explicit, typed initial Fact-knowledge baseline.")) {
-                  const factIds = report.records.filter(record =>
-                    record.metadata.type === "fact" &&
-                    record.metadata.status !== "superseded" &&
-                    record.metadata.initial !== false).map(record => record.metadata.id);
-                  // Source-constrained, same-session repair. No new Fact,
-                  // author decision or scope is granted by this diagnostic.
-                  if (factIds.length) return [characterInitialKnowledgeCorrection(factIds)];
-                }
-                return [String(error)];
+                const message = error instanceof Error ? error.message : "";
+                const code = message === "World foundations require a canonical Fact and World Entity in the assigned scope."
+                  ? "missing-world-baseline" :
+                  message === "Foundation cluster requires at least two Characters, a Fact and a Relationship."
+                    ? "missing-character-baseline" :
+                  message === "Character foundations require at least one explicit, typed initial Fact-knowledge baseline."
+                    ? "initial-knowledge-required" : null;
+                if (!code) throw error;
+                return [{ kind: "requirement", path: ".", code }];
               }
-            }
-            throw new Error("Canonical validator rejected the draft without actionable structural diagnostics.");
-          }, choice ?? undefined);
+            }, {
+              sourceDigest: unit.invocationSource!,
+              ...(resumingInvocation && unit.piSessionId && unit.piSessionFile ?
+                { savedSession: { id: unit.piSessionId, file: unit.piSessionFile } } : {}),
+              directory: id => invocationDirectory(job, unit, id),
+              authorize: async () => {
+                assertHead(job, before);
+                if (unit.invocationSource !== invocationSource(job, state, unit, turnEvidence?.digest ?? null))
+                  throw Error("Original foundation writer source changed.");
+                await ownedEffect(job, unit, assign);
+              },
+              effect: () => ownedEffect(job, unit, assign),
+            }, choice ?? (resumingInvocation && unit.invocationChoiceId
+              ? await inspectSpecialistChoice(job, unit.invocationChoiceId) : undefined));
+        }
         if ("authorQuestion" in evidence) {
           // Only an independently audited safe draft can be suspended.
           await auditPaths(job, unit, assign, evidence.claimedPaths, true);
@@ -989,7 +1106,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           if (!protection || protection.status !== "checked" ||
               protection.changes?.length || protection.warnings?.length)
             throw Error("Specialist question includes unverified/protected changes; no author-choice shortcut.");
-          if (resumingChoice) await completeSpecialistChoice(job, unit.authorChoiceId!);
+          if (resumingChoice || resumingInvocation && unit.invocationChoiceId)
+            await completeSpecialistChoice(job, unit.authorChoiceId!);
           const pending = await recordSpecialistChoice(job, unit.id, evidence.authorQuestion,
             evidence.piSessionId, evidence.piSessionFile);
           unit.authorChoiceId = pending.id;
@@ -1003,6 +1121,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         unit.architecturalConflicts = evidence.architecturalConflicts;
         unit.laterObligations = evidence.laterObligations;
         unit.skillReads = evidence.skillReads;
+        unit.invocationProof = evidence.invocationProof;
         unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
         unit.piSessionId = evidence.piSessionId ?? unit.piSessionId;
         if (!evidence.claimedPaths.length && evidence.architecturalConflicts?.length) {
@@ -1031,6 +1150,8 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
           await fileDigest(job, unit.paths) !== unit.digest) {
         throw new Error("Specialist bytes differ from persisted inventory; preserve for inspection.");
       }
+      if (state.worker === "pi" && unit.reviewedRecoveryDigest !== unit.digest)
+        await verifyUnitInvocation(job, state, unit, unit.digest);
       const report = reportOf(await validate(before), before);
       await checkOutput(job, report, unit, assign);
       if (!recovering) {
@@ -1053,13 +1174,22 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       unit.commitSha = sha; unit.phase = "committed";
       await persist(file, state);
       await publishHead(job, before, sha, unit.id);
-      if (resumingChoice && unit.authorChoiceId)
+      if ((resumingChoice || resumingInvocation && unit.invocationChoiceId) && unit.authorChoiceId)
         await completeSpecialistChoice(job, unit.authorChoiceId);
     }
-    const result = await graph.invoke({ receipt });
+    // The Generation child owns each invocation/Review boundary. The direct
+    // operator command uses the very same serialized unit implementation and
+    // cannot cross the native independent Review gate either.
+    if (input.unit !== "character") await executeUnit(receipt.units[0], receipt);
+    if (input.unit !== "world" && receipt.units[0].phase !== "conflicted")
+      await executeUnit(receipt.units[1], receipt);
+    if (input.unit === "world" && receipt.units[0].phase === "committed" &&
+        receipt.units[1].phase === "pending") {
+      return { ...output(job, receipt), status: "review-handoff", headSha: receipt.units[0].commitSha! };
+    }
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "character-world");
-    return { ...output(job, result.receipt), authorUpdates };
+    return { ...output(job, receipt), authorUpdates };
   });
 }

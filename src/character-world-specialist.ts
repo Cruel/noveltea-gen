@@ -3,17 +3,21 @@ import { mkdir } from "node:fs/promises";
 import { parseSpecialistChoice, extractSpecialistChoice, authorChoiceDirection, type SpecialistChoiceQuestion,
   type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
+import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
+import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { lastSpecialistManifest } from "./specialist-manifest.js";
+import { readJobControl } from "./job-control.js";
+import { StoryCancelledError } from "./story-interruption.js";
 import type { SkillConfig } from "./skills.js";
 import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
@@ -47,6 +51,7 @@ export interface SpecialistEvidence {
   skillReads: string[];
   architecturalConflicts?: string[];
   laterObligations?: string[];
+  invocationProof?: AssignmentInvocationProof;
 }
 const CATALOG = [
   "nt-catalog/SKILL.md",
@@ -133,7 +138,14 @@ export function foundationManifestCorrectionPrompt(): string {
 export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillSnapshot,
   assignment: FoundationAssignment, provider: string, modelId: string,
   onSession: (id: string, path: string) => Promise<void>,
-  verifyDraft: (evidence: SpecialistEvidence) => Promise<string[]>,
+  verifyDraft: (evidence: SpecialistEvidence) => Promise<readonly AssignmentDefect[]>,
+  invocation: {
+    sourceDigest: string;
+    directory: (sessionId: string) => string;
+    authorize: () => Promise<void>;
+    effect: () => Promise<string>;
+    savedSession?: { id: string; file: string };
+  },
   resume?: SpecialistChoiceReceipt): Promise<SpecialistEvidence | SpecialistChoiceProposal> {
   const selected = DOMAINS[assignment.domain];
   const required = [selected.name + "/SKILL.md", ...CATALOG];
@@ -159,8 +171,9 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: resume
-      ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
+    sessionManager: invocation.savedSession
+      ? SessionManager.open(invocation.savedSession.file, dirname(invocation.savedSession.file), project.root)
+      : resume ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
       : context.manager,
     customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
     noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
@@ -171,8 +184,10 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     }
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Character/World Pi transcript cannot be persisted before authoring.");
+    if (invocation.savedSession && invocation.savedSession.id !== session.sessionId)
+      throw Error("World/Character recovery opened a foreign Pi session.");
     await onSession(session.sessionId, sessionFile);
-    let prompt =
+    const prompt =
       `You are the NovelTea ${selected.name} specialist assigned ONE bounded canonical Story work item.\n` +
       "Read ALL the pinned guidance below using the read tool before writing. " +
       "These are exact stable skill:// references served by the verified immutable " +
@@ -204,96 +219,59 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       "List ALL paths changed since the beginning of this work item, not just the latest edits. " +
       "Call story_validate with no arguments, inspect diagnostics and coverage, repair and revalidate before reporting. " +
       "The graph will check this claim against the actual Git diff; your self-report is not acceptance evidence.";
-    // Do not start a second writer or discard its work. The SAME Pi session can
-    // receive bounded, source-located validator feedback before commit.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      const direction = resume?.answer
-        ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true)
-        : null;
-      await promptStorySpecialist(session, attempt === 0 ? context.contextNote +
-        (direction ? direction + "\nContinue this same Pi session, inspect the current files, and carry out this choice without modifying protected decisions.\n" : "") + prompt : prompt);
-      const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!assistant || assistant.role !== "assistant" || ["error", "aborted"].includes(assistant.stopReason)) {
-        const detail = assistant?.role === "assistant"
-          ? `stopReason=${assistant.stopReason}; error=${assistant.errorMessage ?? "none"}`
-          : "no assistant turn";
-        throw new Error("Foundation specialist did not finish a successful Pi turn (" + detail + ").");
-      }
-      const pinned = required.map(p => join(snapshot.path, "skills", p));
-      const skillReads = await requirePinnedSkillReads(session, project.root, pinned, "Foundation specialist");
-      const finalAssistant = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!finalAssistant || finalAssistant.role !== "assistant") throw new Error("Foundation specialist reply is missing.");
-      const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-        m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-      const calls = session.messages.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "toolCall") : []);
-
-      const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
-      const choice = extractSpecialistChoice(text);
-      if (choice) {
-        const question = parseSpecialistChoice(choice.authorDecisionRequest);
-        const files = choice.modifiedRecords ?? [];
-        if (!Array.isArray(files) || !files.every(p => typeof p === "string"))
-          throw Error("Author question must enumerate the existing changed Story paths.");
-        // A question is a completed Pi turn. Record its usage BEFORE pausing,
-        // so a budget increase can be requested without consuming the
-        // subsequent one-time writer retry.
-        await context.completed(sessionFile, session.sessionId);
-        return { authorQuestion: question, claimedPaths: files as string[],
-          piSessionId: session.sessionId, piSessionFile: sessionFile };
-      }
-      const edits = calls.filter(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
-        typeof c.arguments?.path === "string").map(c => relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/"));
-      const noEdits = edits.length === 0;
-      const match = text.match(/\{\s*"modifiedRecords"\s*:\s*\[[^\]]*\][^{}]*\}/g)?.at(-1);
-      let declared: unknown;
-      try { declared = JSON.parse(match ?? "null"); } catch { /* reject below */ }
-      const paths = (declared as { modifiedRecords?: unknown })?.modifiedRecords;
-      if (!Array.isArray(paths) || !paths.every(p => typeof p === "string")) {
-        if (attempt === 2) throw new Error("Foundation specialist did not provide a valid modifiedRecords manifest.");
-        prompt = foundationManifestCorrectionPrompt();
-        continue;
-      }
-      const messages = declared as { architecturalConflicts?: unknown; laterObligations?: unknown };
-      const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === "string" && x.trim());
-      if (!strings(messages.architecturalConflicts) || !strings(messages.laterObligations)) {
-        if (attempt === 2) throw new Error("Specialist must explicitly report architectural conflicts and downstream obligations.");
-        prompt = foundationManifestCorrectionPrompt();
-        continue;
-      }
-      if (noEdits && (paths.length !== 0 || !(messages.architecturalConflicts as string[]).length)) {
-        // Missing methodology reads or misunderstood directory ownership can
-        // still be repaired in the SAME context; a genuine, settled no-write
-        // architectural contradiction is not a writer/protocol failure.
-        if (attempt === 2) throw new Error("Foundation specialist produced no edits or authenticated architectural contradiction.");
-        prompt = "No canonical files were authored. Check the pinned skill:// references " +
-          "and remember absent Story record directories can be CREATED within your " +
-          "original lease. If the assignment is feasible, author its required " +
-          "canonical files and return the complete manifest. If an exact earlier " +
-          "Architecture/owner contradiction prevents this, return modifiedRecords: [] " +
-          "with specific architecturalConflicts and laterObligations. Do NOT invent " +
-          "a workaround or request permission to change protected scope.";
-        continue;
-      }
-      const evidence: SpecialistEvidence = { claimedPaths: paths, skillReads,
-        architecturalConflicts: messages.architecturalConflicts as string[],
-        laterObligations: messages.laterObligations as string[],
-        piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
-      const diagnostics = await verifyDraft(evidence);
-      if (diagnostics.length === 0) {
-        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-        return evidence;
-      }
-      if (attempt === 2) {
-        throw new Error("Specialist failed canonical validation after two bounded repair attempts: " + JSON.stringify(diagnostics));
-      }
-      prompt = "The independent canonical validator rejected your UNCOMMITTED Story draft. " +
-        "Stay within the exact original authorized scope; repair these file/line diagnostics in your existing files. " +
-        "Read the relevant pinned catalog references again if necessary. Do not stage or commit. " +
-        "Do not change or weaken protected decisions, or fill unknown future routes with fictitious Events. " +
-        "After fixing, repeat the COMPLETE modifiedRecords/architecturalConflicts/laterObligations JSON manifest. " +
-        "Diagnostics:\n" + diagnostics.join("\n");
-    }
-    throw new Error("Specialist repair loop terminated unexpectedly.");
+    const direction = resume?.answer
+      ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true)
+      : null;
+    const readSkills = () => {
+      const reads = completedPinnedSkillReads(session.messages, project.root, snapshot.path);
+      const paths = required.map(p => join(snapshot.path, "skills", p));
+      if (paths.some(path => !reads.includes(path)))
+        throw Error("Original foundation invocation did not read the pinned methodology.");
+      return paths;
+    };
+    const toEvidence = (manifest: Record<string, unknown>, skillReads: string[]): SpecialistEvidence => ({
+      claimedPaths: manifest.modifiedRecords as string[], skillReads,
+      architecturalConflicts: manifest.architecturalConflicts as string[],
+      laterObligations: manifest.laterObligations as string[],
+      piSessionId: session.sessionId, piSessionFile: sessionFile,
+    });
+    const proof = await recoverSubmittedAssignment({
+      session, directory: invocation.directory(session.sessionId),
+      sourceDigest: invocation.sourceDigest, sessionRoots: [dir],
+      responseKind: "manifest-or-choice",
+      initialTranscriptSha256: resume?.sessionSha256,
+      authorize: invocation.authorize, effect: invocation.effect,
+      initialPrompt: context.contextNote +
+        (direction ? direction + "\nContinue this same Pi session and carry out this choice without modifying protected decisions.\n" : "") + prompt,
+      beforeTurn: async () => {
+        const control = await readJobControl(job);
+        if (control === "cancelled") throw new StoryCancelledError("foundations:" + assignment.domain);
+        if (control !== "running") throw new AssignmentAuthorPauseError();
+        await context.beforeTurn(sessionFile);
+        if (await readJobControl(job) !== "running") throw new AssignmentAuthorPauseError();
+      },
+      prompt: async text => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, text);
+        await recordPiSession(job, sessionFile);
+      },
+      verify: async manifest => {
+        const skillReads = await readSkills();
+        // Author questions are only a settled report; the work-unit
+        // controller separately verifies scope, protection and author receipt.
+        if ("authorDecisionRequest" in manifest) return [];
+        return verifyDraft(toEvidence(manifest, skillReads));
+      },
+    });
+    const final = session.messages.filter(m => m.role === "assistant").at(-1);
+    if (!final || final.role !== "assistant" || final.stopReason !== "stop")
+      throw Error("Original foundation specialist response is not settled.");
+    const text = final.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+    const choice = extractSpecialistChoice(text);
+    const skillReads = await readSkills();
+    await context.completed(sessionFile, session.sessionId);
+    if (choice) return { authorQuestion: parseSpecialistChoice(choice.authorDecisionRequest),
+      claimedPaths: choice.modifiedRecords as string[], piSessionId: session.sessionId, piSessionFile: sessionFile };
+    return { ...toEvidence(lastSpecialistManifest(text)!, skillReads), invocationProof: proof };
   } finally { session.dispose(); }
 }

@@ -117,10 +117,12 @@ export async function authenticateAssignmentFailure(job: JobStartResult,
   evidence: GenerationOperationRecovery["evidence"], sourceHead: string) {
   const failure = evidence.assignmentFailure;
   if (!failure || failure.sourceHeadSha !== sourceHead ||
-      evidence.assignmentId !== "foundation" || evidence.reference !== "specialist-receipt" ||
+      !["foundation", "foundations"].includes(evidence.assignmentId ?? "") || evidence.reference !== "specialist-receipt" ||
       evidence.resultStatus !== failure.proof.kind) return null;
-  const { inspectFoundationFailure } = await import("./foundation.js");
-  const original = await inspectFoundationFailure(job, sourceHead).catch(() => null);
+  const inspect = evidence.assignmentId === "foundation"
+    ? (await import("./foundation.js")).inspectFoundationFailure
+    : (await import("./character-world.js")).inspectCharacterWorldFailure;
+  const original = await inspect(job, sourceHead).catch(() => null);
   return original && isDeepStrictEqual(original.proof, failure.proof) ? original : null;
 }
 

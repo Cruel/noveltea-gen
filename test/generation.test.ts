@@ -3154,18 +3154,24 @@ test("independent World and Character checkpoints survive restart and reconcile 
   unlinkSync(draft);
 });
 
-test("crash after World commit before finalization never replays writer or grants an incomplete point", { skip: !available }, () => {
-  const f = setup("threads-crash");
-  f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = "world-foundations";
+for (const unit of ["world-foundations", "character-foundations"] as const)
+test(`crash after ${unit} commit before finalization never replays writer or grants an incomplete point`, { skip: !available }, () => {
+  const f = setup("threads-crash-" + unit);
+  f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = unit;
   const crashed = f.cli([...f.start, "--pause-after", "foundations"]);
   assert.equal(crashed.status, "blocked", JSON.stringify(crashed));
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
-  assert.match(git(f.job.worktreeRoot, "log", "-1", "--format=%B"), /NovelTea-Work-Item: world-foundations/);
+  assert.match(git(f.job.worktreeRoot, "log", "-1", "--format=%B"), new RegExp("NovelTea-Work-Item: " + unit));
   assert.ok(crashed.recoveryCheckpoints.some((p: any) => p.commitSha === head && !p.eligible));
+  const before = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+  if (unit === "world-foundations") assert.equal(before.units[1].phase, "pending");
   delete f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT;
   const reconciled = f.cli(["generate", "resume", "--pause-after", "foundations"]);
   assert.ok(reconciled.recoveryCheckpoints.some((p: any) =>
-    p.commitSha === head && p.workItem === "world-foundations" && p.eligible));
+    p.commitSha === head && p.workItem === unit && p.eligible));
+  const after = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+  assert.deepEqual(after.units[0], before.units[0], "World receipt is retained across restart");
+  if (unit === "character-foundations") assert.deepEqual(after.units[1], before.units[1]);
   assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD").trim(),
     String(reconciled.recoveryCheckpoints.filter((p: any) => p.eligible).length));
   assert.equal(reconciled.status, "paused", JSON.stringify({ reason: reconciled.reason, nextStage: reconciled.nextStage, operationRecovery: reconciled.operationRecovery, active: reconciled.selectedWorkItem, pendingNodes: reconciled.pendingNodes }));
@@ -5002,6 +5008,106 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
   } finally {
     restoreSandbox();
     for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("R05 World metadata and independent Review correction resume the original Thread before Character", { skip: !available, timeout: 120_000 }, async () => {
+  const f = setup("r05-world-review");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  saveFixtureTurn(f.job, contract, f.start[3]!, ["Keep the original archive mystery objective."]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(paused.status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const paths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
+  const world = "---\nschema: '0.1'\ntype: world-entity\nid: world-entity.archive\ntitle: Archive\nstatus: draft\ndecisions: []\ndescription: A public archive with a restricted ledger\n---\n\nThe custodian guards the sealed ledger.\n";
+  const fact = "---\nschema: '0.1'\ntype: fact\nid: fact.evidence-concealed\ntitle: Hidden evidence\nstatus: draft\ndecisions: []\ninitial: true\n---\n\nNeri concealed an entry implicating an official.\n";
+  const reads = (specialist: string) => [specialist + "/SKILL.md", "nt-catalog/SKILL.md",
+    "nt-catalog/references/records.md", "nt-catalog/references/progression.md",
+    "nt-catalog/references/authority-and-validation.md", "nt-catalog/references/glossary.md"].map(p => "skill://" + p);
+  const write = (path: string, content: string, id: string) => ({
+    type: "toolCall" as const, name: "write", id, arguments: { path, content },
+  });
+  const manifest = { modifiedRecords: paths, architecturalConflicts: [], laterObligations: [] };
+  const { runtime, observed } = await scriptedStoryRuntime((i, context) => {
+    if (i === 0) return { content: scriptedReadCalls(reads("nt-worldbuilding"), i), reason: "toolUse" };
+    if (i === 1) return { content: [write(paths[0]!, world.replace("description:", "unknown_field: true\ndescription:"), "r05-invalid"), write(paths[1]!, fact, "r05-fact")], reason: "toolUse" };
+    if (i === 2 || i === 4) return { content: scriptedText(manifest), reason: "stop" };
+    if (i === 3) return { content: [write(paths[0]!, world, "r05-metadata")], reason: "toolUse" };
+    if (i === 5) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), i), reason: "toolUse" };
+    if (i === 7) return { content: [write(paths[0]!, world + "\nThe custodian signs each transfer in a register.\n", "r05-review-repair")], reason: "toolUse" };
+    if (i === 8) return { content: scriptedText("Clarified the evidence transfer in the archive."), reason: "stop" };
+    if (i === 6 || i === 9) {
+      const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+      const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+        .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+      assert.ok(prompt);
+      const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+      const item = packet.items[0];
+      const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: paths[0], line: 1 };
+      return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: i === 6 ? "fail" : "pass",
+        findings: i === 6 ? [{ ...ref, kind: "missing-requirement", message: "The transfer provenance is unspecified.",
+          requiredCorrection: "Clarify how the custodian records transfers.", affectedPaths: [paths[0]] }] : [],
+        evidence: i === 9 ? [{ ...ref, explanation: "The signed register establishes transfer provenance." }] : [],
+        ...(i === 9 ? { progressDiagnosis: { status: "material", reason: "The register addresses the source-linked gap.",
+          evidence: { path: paths[0], quote: "The custodian signs each transfer in a register.", change: "added" } } } : {}),
+      }), reason: "stop" };
+    }
+    if (i === 10) return { content: scriptedReadCalls(reads("nt-character-development"), i), reason: "toolUse" };
+    if (i === 11) return { content: scriptedText({ modifiedRecords: [],
+      architecturalConflicts: ["A prerequisite remains assigned to Architecture."], laterObligations: [] }), reason: "stop" };
+    throw Error("Unexpected replacement writer/reviewer: " + i);
+  });
+  const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const initial = (await graph.getState(cfg)).values;
+    const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "foundations");
+    await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
+      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
+    }, "author_update_intake");
+    const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(failed.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: failed.reason, recovery: failed.recoveryLifecycle, calls: observed.length}));
+    const original = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+    assert.equal(original.units[1].phase, "pending");
+    const preceding = (await inspectRecoveryCheckpoints(f.job)).filter(point =>
+      ["foundation", "global-architecture"].includes(point.workItem));
+    const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(selected.recoveryLifecycle));
+    const corrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
+    assert.equal(corrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: corrected.reason, recovery: corrected.recoveryLifecycle, calls: observed.length}));
+    const correctedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(correctedHead, original.units[0].commitSha);
+    assert.equal(corrected.result, null, "Passing World correction is not cluster completion");
+    const reviewed = await inspectRecoveryCheckpoints(f.job);
+    for (const point of preceding) {
+      const retained = reviewed.find(entry => entry.commitSha === point.commitSha);
+      assert.equal(retained?.proofDigest, point.proofDigest);
+      assert.equal(retained?.semanticReview, point.semanticReview, "Unchanged prerequisite Review remains intact");
+    }
+    assert.equal(reviewed.find(point => point.commitSha === original.units[0].commitSha)?.semanticReview, "failed");
+    assert.equal(reviewed.find(point => point.commitSha === correctedHead)?.semanticReview, "passed");
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), corrected.recoveryLifecycle);
+    assert.equal(JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")).units[1].phase, "pending");
+    const resumed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(resumed.recoveryLifecycle.active?.origin.operation, "specialist-result", JSON.stringify({reason: resumed.reason, recovery: resumed.recoveryLifecycle, calls: observed.length}));
+    const after = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+    assert.deepEqual(after.units[0], original.units[0]);
+    assert.equal(after.units[1].beforeHead, correctedHead);
+    assert.equal(observed.length, 12);
+  } finally {
+    saver.db.close();
+    restoreSandbox();
+    for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }

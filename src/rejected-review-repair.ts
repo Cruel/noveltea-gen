@@ -246,8 +246,7 @@ export async function readRejectedRepairOrigin(job: JobStartResult, point: Recov
   else if (point.workItem.startsWith("event-"))
     await verifyJobPiSession(job, "event", sessionFile, sessionId, point.workItem);
   else if (point.workItem.endsWith("-foundations"))
-    await verifyJobPiSession(job, point.workItem === "world-foundations" ? "world" : "character",
-      sessionFile, sessionId);
+    await (await import("./character-world.js")).verifyCharacterWorldReviewOrigin(job, point);
   return { workItem: point.workItem, sessionFile, sessionId, provider: raw.provider,
     model: raw.model, thinking: raw.thinking, snapshot: raw.snapshot };
 }
@@ -929,7 +928,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   if (review.status === "failed" && point.assurance) {
     const cycle = await inspectPostcommitReviewCycle(job,
       state.rootFailureSha, point.assurance.assignmentDigest);
-    if (cycle && (state.origin.workItem === "foundation"
+    if (cycle && (sharedFoundationReviewWorkItem(state.origin.workItem)
       ? await foundationDiagnosticReason(job, cycle, state.allowedPaths)
       : postcommitDiagnosticReason(cycle.rounds.length))) {
       const diagnosis = await readPostcommitDiagnosis(job, cycle, state.repairedCommitSha);
@@ -944,7 +943,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
       }
     }
   }
-  const stagnation = state.origin.workItem === "foundation" ? null : detectRepairStagnation(job, state, review.result);
+  const stagnation = sharedFoundationReviewWorkItem(state.origin.workItem) ? null : detectRepairStagnation(job, state, review.result);
   if (stagnation) {
     finished.phase = "blocked";
     finished.failure = stagnation === "oscillation"
@@ -1589,7 +1588,7 @@ async function foundationDiagnosticSource(job: JobStartResult, state: RepairRece
  * shared assessor. No model reply or child outcome grants a new strategy. */
 async function foundationReviewBoundary(job: JobStartResult, state: RepairReceipt,
   selected?: ReviewAssessment): Promise<ReviewAssessment | null> {
-  if (state.origin.workItem !== "foundation") return null;
+  if (!sharedFoundationReviewWorkItem(state.origin.workItem)) return null;
   const make = (kind: ReviewAssessment["kind"], evidence: unknown): ReviewAssessment =>
     ({ kind, sourceSha: state.sourceCommitSha, digest: hash({ root: state.rootFailureSha,
       source: state.sourceReviewDigest, kind, evidence }) });
@@ -1626,10 +1625,14 @@ async function foundationReviewBoundary(job: JobStartResult, state: RepairReceip
 
 /** Current HEAD may have advanced through this original correction case,
  * but never through unrelated work or an unverified replacement writer. */
+export function sharedFoundationReviewWorkItem(workItem: string) {
+  return ["foundation", "world-foundations", "character-foundations"].includes(workItem);
+}
+
 export async function authenticateFoundationReviewHead(job: JobStartResult, root: string) {
   const head = await trustedHead(job);
   const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
-  const original = points.find(p => p.commitSha === root && p.workItem === "foundation" &&
+  const original = points.find(p => p.commitSha === root && sharedFoundationReviewWorkItem(p.workItem) &&
     p.validation.status === "passed" && p.semanticReview === "failed");
   if (!original?.assurance) return false;
   let cursor = head;
@@ -1643,7 +1646,7 @@ export async function authenticateFoundationReviewHead(job: JobStartResult, root
     const source = point.workItem.slice("repair-".length);
     const state = await inspectRejectedRepair(job, source);
     if (state.rootFailureSha !== root || state.repairedCommitSha !== cursor ||
-        state.origin.workItem !== "foundation" || point.parentSha !== source) return false;
+        state.origin.workItem !== original.workItem || point.parentSha !== source) return false;
     cursor = source;
   }
   return true;
@@ -1659,7 +1662,7 @@ export async function inspectFoundationReviewBoundary(job: JobStartResult, root:
     if (seen.has(sha)) throw Error("Cyclic Foundation repair source lineage");
     seen.add(sha);
     const state = await inspectRejectedRepair(job, sha);
-    if (state.rootFailureSha !== root || state.origin.workItem !== "foundation")
+    if (state.rootFailureSha !== root || !sharedFoundationReviewWorkItem(state.origin.workItem))
       throw Error("Foreign Foundation repair lineage");
     if (state.phase === "failed" && state.repairedCommitSha) {
       sha = state.repairedCommitSha;
@@ -1794,8 +1797,8 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
-  if (!options.sharedAssessment && (point.workItem === "foundation" ||
-      point.workItem.startsWith("repair-") && (await readRejectedRepairOrigin(job, point)).workItem === "foundation"))
+  if (!options.sharedAssessment && (sharedFoundationReviewWorkItem(point.workItem) ||
+      point.workItem.startsWith("repair-") && sharedFoundationReviewWorkItem((await readRejectedRepairOrigin(job, point)).workItem)))
     throw Error("Foundation Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
   return driveRejectedRepairCycle({
     begin: async () => {

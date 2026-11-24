@@ -315,7 +315,7 @@ export async function prepareSemanticReview(job: JobStartResult,
     if (point.workItem.startsWith("repair-")) {
       const sourceSha = point.workItem.slice("repair-".length);
       if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw Error("Unsafe correction source identity.");
-      const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
+      const { inspectRejectedRepair, sharedFoundationReviewWorkItem } = await import("./rejected-review-repair.js");
       const prior = await inspectRejectedRepair(job, sourceSha);
       if (prior.repairedCommitSha !== point.commitSha ||
           (challenge?.sourceSha === point.commitSha
@@ -325,7 +325,7 @@ export async function prepareSemanticReview(job: JobStartResult,
       priorNegative = { sourceCommitSha: sourceSha, rootFailureSha: prior.rootFailureSha,
         reviewDigest: prior.sourceReviewDigest, findings: prior.findings,
         completedCorrections: prior.attempts };
-      if (prior.origin.workItem === "foundation" && !challenge)
+      if (sharedFoundationReviewWorkItem(prior.origin.workItem) && !challenge)
         progressScope = repairProgressScope(job, sourceSha, point.commitSha,
           [...new Set(prior.findings.map(f => f.path))], prior.findings.map(f => ({
             severity: "blocking", source: f.path, message: f.message,

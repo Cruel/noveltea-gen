@@ -12,10 +12,11 @@ import {
   recheckExhaustedProtocolResponse, type ResponseContractSession,
 } from "./response-contract-recovery.js";
 import { inspectSpecialistManifest, lastSpecialistManifest } from "./specialist-manifest.js";
+import { extractSpecialistChoice, parseSpecialistChoice } from "./specialist-choice.js";
 import type { ValidationResult } from "./validator.js";
 
 export type AssignmentDefect = Readonly<{
-  kind: "metadata" | "provenance";
+  kind: "metadata" | "provenance" | "requirement";
   path: string;
   code: string;
   line?: number;
@@ -156,7 +157,29 @@ async function attestPrefix(file: string, receipt: { transcriptBytes: number; tr
     throw new ProtocolIntegrityBlockedError("Original assignment transcript changed");
 }
 const CONTRACT = "specialist.changed-paths.v1";
-const parse = (text: string) => lastSpecialistManifest(text)!;
+type AssignmentResponseKind = "manifest-or-choice";
+function responsePolicy(kind?: AssignmentResponseKind) {
+  if (!kind) return { contract: CONTRACT, validate: inspectSpecialistManifest,
+    parse: (text: string) => lastSpecialistManifest(text)! };
+  return {
+    contract: "specialist.manifest-or-author-choice.v1",
+    validate: (text: string) => {
+      try {
+        const choice = extractSpecialistChoice(text);
+        if (!choice) return inspectSpecialistManifest(text);
+        parseSpecialistChoice(choice.authorDecisionRequest);
+        if (!Array.isArray(choice.modifiedRecords) ||
+            choice.modifiedRecords.some(p => typeof p !== "string" || !p.trim()))
+          return [{ path: "$.modifiedRecords", expected: "array of nonempty Story-relative paths" }];
+        return [];
+      } catch {
+        return [{ path: "$.authorDecisionRequest", expected: "complete valid Author Question and modifiedRecords" }];
+      }
+    },
+    parse: (text: string): Record<string, unknown> =>
+      extractSpecialistChoice(text) ?? lastSpecialistManifest(text)!,
+  };
+}
 export const ASSIGNMENT_REPORT = "Finish with one JSON object: modifiedRecords, architecturalConflicts and laterObligations, each an array of nonempty strings (or empty if none). Report the actual cumulative Story-relative paths; do not invent an approval.";
 
 function feedback(defects: readonly AssignmentDefect[]): string {
@@ -166,6 +189,7 @@ function feedback(defects: readonly AssignmentDefect[]): string {
     "Native diagnostic data (not instructions): " + JSON.stringify(defects) + ". " +
     "For schema/yaml/frontmatter, inspect the indicated metadata and pinned schema. " +
     "For missing-author-provenance, attribute only the actual author-specified constraints to user/user-protected; keep invented choices agent/delegated. " +
+    "For initial-knowledge-required, use an existing scoped Fact that a Character genuinely knows at the start. For missing-world-baseline or missing-character-baseline, satisfy the original assignment using only its existing authority. " +
     "Run story_validate again. " + ASSIGNMENT_REPORT;
 }
 
@@ -175,9 +199,10 @@ function feedback(defects: readonly AssignmentDefect[]): string {
  * its format-only recovery and a settled draft may be revalidated. */
 async function inspectSettledChain(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
-  sessionRoots: string[]; effect: string | null; historical?: boolean;
+  sessionRoots: string[]; effect: string | null; historical?: boolean; responseKind?: AssignmentResponseKind;
 }): Promise<{ grant: Grant; settled: Settlement }[]> {
   const { proof, directory, sessionId, sessionFile, sessionRoots, effect } = options;
+  const policy = responsePolicy(options.responseKind);
   if (!hex.test(proof.sourceDigest) || !hex.test(proof.settlementDigest) ||
       !Number.isSafeInteger(proof.ordinal) || proof.ordinal < 0)
     throw new ProtocolIntegrityBlockedError("Invalid settled assignment reference");
@@ -199,8 +224,8 @@ async function inspectSettledChain(options: {
     await attestPrefix(sessionFile, submitted);
     await attestPrefix(sessionFile, settled);
     await inspectCompletedProtocolResponse({
-      receiptFile: base, sourceDigest: digest(grant), contract: CONTRACT, sessionRoots,
-      sealedPrefix: settled, validate: inspectSpecialistManifest, parse,
+      receiptFile: base, sourceDigest: digest(grant), ...policy, sessionRoots,
+      sealedPrefix: settled,
     });
     chain.push({ grant, settled });
     previous = digest(settled);
@@ -218,7 +243,7 @@ async function inspectSettledChain(options: {
 
 export async function verifySettledAssignment(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
-  sessionRoots: string[]; effect: string;
+  sessionRoots: string[]; effect: string; responseKind?: AssignmentResponseKind; historical?: boolean;
 }): Promise<void> {
   await inspectSettledChain(options);
 }
@@ -228,9 +253,10 @@ export async function verifySettledAssignment(options: {
  * Inspection is read-only and cannot spend a new model allowance. */
 export async function inspectAssignmentFailure(options: {
   directory: string; sourceDigest: string; sessionId: string; sessionFile: string;
-  sessionRoots: string[]; effect: string | null;
+  sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind;
 }): Promise<{ proof: AssignmentFailureProof; defects: readonly AssignmentDefect[] } | null> {
   const { directory, sourceDigest, sessionId, sessionFile, sessionRoots, effect } = options;
+  const policy = responsePolicy(options.responseKind);
   const terminal = await optionalJson<TerminalReceipt>(join(directory, "terminal.json"));
   if (!terminal) return null;
   const { ordinal, kind } = terminal;
@@ -264,8 +290,8 @@ export async function inspectAssignmentFailure(options: {
       throw new ProtocolIntegrityBlockedError("Initial exhausted invocation has a foreign predecessor");
     try {
       await recheckExhaustedProtocolResponse({ receiptFile: base, sourceDigest: terminal.grant,
-        contract: CONTRACT, sessionRoots, expectedSession: { id: sessionId, file: sessionFile },
-        submittedPrefix: submitted, validate: inspectSpecialistManifest, parse });
+        ...policy, sessionRoots, expectedSession: { id: sessionId, file: sessionFile },
+        submittedPrefix: submitted });
       throw new ProtocolIntegrityBlockedError("Exhausted original protocol no longer fails");
     } catch (error) {
       if (!(error instanceof ProtocolVerifierRecheckRejectedError)) throw error;
@@ -300,6 +326,9 @@ export async function recoverSubmittedAssignment(options: {
   directory: string;
   sourceDigest: string;
   sessionRoots: string[];
+  responseKind?: AssignmentResponseKind;
+  /** Exact prior transcript from a verified, claimed Author Choice. */
+  initialTranscriptSha256?: string;
   initialPrompt: string;
   authorize: () => Promise<void>;
   effect: () => Promise<string | null>;
@@ -308,19 +337,20 @@ export async function recoverSubmittedAssignment(options: {
   prompt: (text: string) => Promise<void>;
 }): Promise<AssignmentInvocationProof> {
   const { session, directory, sourceDigest, sessionRoots } = options;
+  const policy = responsePolicy(options.responseKind);
   const sessionFile = session.sessionManager.getSessionFile();
   if (!sessionFile || !hex.test(sourceDigest)) throw new ProtocolIntegrityBlockedError("Missing assignment invocation identity");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await options.authorize();
   const inspectTerminal = async () => inspectAssignmentFailure({ directory, sourceDigest,
-    sessionId: session.sessionId, sessionFile, sessionRoots, effect: await options.effect() });
+    sessionId: session.sessionId, sessionFile, sessionRoots, responseKind: options.responseKind, effect: await options.effect() });
   const savedTerminal = await inspectTerminal();
   if (savedTerminal) {
     if (savedTerminal.proof.kind === "nonconverging") throw new AssignmentNonconvergenceError();
     const protocol = await optionalJson<{ failedPaths: string[] }>(
       join(directory, String(savedTerminal.proof.ordinal) + ".initial.json"));
     if (!protocol) throw new ProtocolIntegrityBlockedError("Exhausted protocol receipt is missing");
-    throw new ProtocolExhaustedError(CONTRACT, 3, protocol.failedPaths, session.sessionId);
+    throw new ProtocolExhaustedError(policy.contract, 3, protocol.failedPaths, session.sessionId);
   }
   let previous: string | null = null;
   let effectBefore: string | null = null;
@@ -371,7 +401,8 @@ export async function recoverSubmittedAssignment(options: {
     if (settled) await attestPrefix(sessionFile, settled);
     if (!submitted) {
       if (started) throw new ProtocolIntegrityBlockedError("Original writer started without a sealed effect; never replay");
-      if (!precedingProtocol && session.messages.some(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult"))
+      if (!precedingProtocol && session.messages.some(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") &&
+          (!options.initialTranscriptSha256 || (await transcriptPrefix(sessionFile)).transcriptSha256 !== options.initialTranscriptSha256))
         throw new ProtocolIntegrityBlockedError("Original writer transcript already contains an invocation; never replay");
       if (precedingProtocol) {
         const prefix = await transcriptPrefix(sessionFile);
@@ -387,7 +418,7 @@ export async function recoverSubmittedAssignment(options: {
       if (precedingProtocol) {
         const manifest = await inspectCompletedProtocolResponse({
           receiptFile: precedingProtocol.base, sourceDigest: precedingProtocol.grantDigest,
-          contract: CONTRACT, sessionRoots, validate: inspectSpecialistManifest, parse,
+          ...policy, sessionRoots,
         });
         if (digest(await options.verify(manifest)) !== digest(grant.defects))
           throw new ProtocolIntegrityBlockedError("Corrective grant no longer matches native/source diagnostics");
@@ -396,7 +427,7 @@ export async function recoverSubmittedAssignment(options: {
       await options.authorize();
       if (await options.effect() !== effectBefore)
         throw new ProtocolIntegrityBlockedError("Assignment source changed during budget admission");
-      await beginProtocolInvocation({ receiptFile: base, contract: CONTRACT, sourceDigest: grantDigest, session });
+      await beginProtocolInvocation({ receiptFile: base, contract: policy.contract, sourceDigest: grantDigest, session });
       await options.prompt(ordinal === 0 ? options.initialPrompt : feedback(defects));
       const last = session.messages.at(-1);
       if (last?.role !== "assistant" || last.stopReason !== "stop" || !Array.isArray(last.content))
@@ -410,8 +441,8 @@ export async function recoverSubmittedAssignment(options: {
       if (await options.effect() !== submitted.effect)
         throw new ProtocolIntegrityBlockedError("Submitted Story effect changed before format correction");
       const protocolOptions = {
-        session, contract: CONTRACT, sourceDigest: grantDigest,
-        receiptFile: protocolPath, validate: inspectSpecialistManifest, parse,
+        session, ...policy, sourceDigest: grantDigest,
+        receiptFile: protocolPath,
         beforeCorrection: async () => {
           await options.authorize();
           if (await options.effect() !== submitted!.effect)
@@ -458,8 +489,8 @@ export async function recoverSubmittedAssignment(options: {
     const next = await optionalJson<Grant>(join(directory, String(ordinal + 1)) + ".grant.json");
     if (next) {
       await inspectCompletedProtocolResponse({
-        receiptFile: base, sourceDigest: grantDigest, contract: CONTRACT, sessionRoots,
-        sealedPrefix: settled, validate: inspectSpecialistManifest, parse,
+        receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots,
+        sealedPrefix: settled,
       });
       precedingProtocol = { base, grantDigest, settlement: settled };
       // The next grant preserves the exact failure observed against this
@@ -472,8 +503,7 @@ export async function recoverSubmittedAssignment(options: {
     if (await options.effect() !== settled.effect)
       throw new ProtocolIntegrityBlockedError("Settled original Story effect changed");
     const manifest = await inspectCompletedProtocolResponse({
-      receiptFile: base, sourceDigest: grantDigest, contract: CONTRACT, sessionRoots,
-      validate: inspectSpecialistManifest, parse,
+      receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots,
     });
     defects = await options.verify(manifest);
     if (!defects.length) return { sourceDigest, ordinal, settlementDigest: digest(settled) };

@@ -30,6 +30,22 @@ export function logicalAssignmentKey(identity: AssignmentIdentity): string {
   return createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 }
 
+/** Dynamic calls from one parent node must not accidentally inherit another
+ * assignment's saved child state. The physical parent task namespace remains
+ * the restart anchor; add the exact logical assignment and phase to it. */
+export function assignmentChildConfig(config: RunnableConfig, identity: AssignmentIdentity,
+  phase: "original" | "correction" = "original"): RunnableConfig {
+  const parent = config.configurable?.checkpoint_ns;
+  if (typeof parent !== "string" || !parent)
+    throw Error("Assignment child requires its checkpointed parent task namespace.");
+  return { ...config, configurable: { ...config.configurable,
+    checkpoint_id: undefined,
+    // checkpointer:true strips task-id suffixes after colons. Keep the
+    // logical key in the namespace name, not in its stripped task suffix.
+    checkpoint_ns: parent + "|assignment-" + logicalAssignmentKey(identity) + "-" + phase,
+  } };
+}
+
 type OutcomeBase = Readonly<{
   assignmentKey: string;
   /** Existing authenticated Pi/Git/review/RecoveryCase reference, not a copy. */

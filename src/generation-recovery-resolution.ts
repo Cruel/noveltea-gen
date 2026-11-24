@@ -11,7 +11,7 @@ import { generationStages, type GenerationInventory, type GenerationStage } from
 import type { IdeaHistoryEntry, GenerationRequest } from "./generation.js";
 import { inspectCheckpointReview, resolvedCheckpointReviews } from "./checkpoint-assurance.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
-import { inspectRejectedRepair } from "./rejected-review-repair.js";
+import { inspectRejectedRepair, sharedFoundationReviewWorkItem } from "./rejected-review-repair.js";
 import { inspectRepairLedger } from "./repair-ledger.js";
 import { assertCompletedSelectiveRevalidation } from "./selective-revalidation-work.js";
 import { readEventOnlyOmission, readHistoricalEventOnlyOmission } from "./interactive-event-only.js";
@@ -38,7 +38,7 @@ export async function verifyReviewCycleSuccessor(job: JobStartResult, rootSha: s
   const reviews = await resolvedCheckpointReviews(job, points);
   if (receipt.phase !== "passed" || receipt.repairedCommitSha !== head ||
       receipt.rootFailureSha !== rootSha || reviews.get(rootSha) !== "not-required") return false;
-  if (receipt.origin.workItem !== "foundation") return true;
+  if (!sharedFoundationReviewWorkItem(receipt.origin.workItem)) return true;
   // A successful new scope must not erase or replace its sealed predecessor.
   // Reauthenticate each cycle and its committed verdicts on restart.
   let cycle = await inspectPostcommitReviewCycle(job, rootSha, successor.assurance!.assignmentDigest);
