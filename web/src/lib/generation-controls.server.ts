@@ -13,7 +13,7 @@ import { queueGeneration, queueRecord, dequeueBeforeStart } from './generation-q
 import { readJobControl, setJobControl } from '../../../src/job-control'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { sameGenerationRequest } from '../../../src/generation-owner'
-import type { GenerationRequest } from '../../../src/generation'
+import { requireGenerationTurn, type GenerationRequest } from '../../../src/generation'
 import { trustedHead } from '../../../src/revision'
 import { activeSpecialistChoice, focusedChoiceWorkItem, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { validateStoryJob } from '../../../src/validator'
@@ -224,6 +224,8 @@ export function matchesRepairSteeringReviewBoundary(
 export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
   threadId: string, pinned: string, retry: boolean, originalStatus?: string, principal?: string):
   Promise<{ intent: QueueIntent; resumeKind: ResumeKind | null }> {
+  const request = JSON.parse(pinned) as GenerationRequest
+  await requireGenerationTurn(job, request, true)
   return withStoryJobLock(job, 'studio-control-recovery', async () => {
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
@@ -242,7 +244,10 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
     try {
       const state = await graph.getState({ configurable: { thread_id: threadId } })
       const raw = state.values as PendingReviewChoiceState & { request?: unknown;
-        recoveryLifecycle?: RecoveryLifecycle; recoverySources?: RecoverySource[] }
+        recoveryLifecycle?: RecoveryLifecycle; recoverySources?: RecoverySource[];
+        inventory?: { invalidationVersion?: number } | null }
+      if (raw.inventory && raw.inventory.invalidationVersion !== 1)
+        throw Error('Obsolete Generation inventory cannot authorize execution.')
       const checkedModern = await inspectModernGenerationRecovery(job, saver, threadId)
       const recovered = {
         recoveryLifecycle: raw.recoveryLifecycle ?? emptyRecoveryLifecycle(),

@@ -449,7 +449,8 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       throw new JobError(409, 'Job already has a different pinned generation request.')
     const queued = (await queueRecord(store, id))
     if (existing) {
-      if (existing.discoveryHandoffDigest) await requireGenerationTurn(job, existing, true)
+      try { await requireGenerationTurn(job, existing, true) }
+      catch { throw new JobError(409, 'Obsolete or untrusted Generation cannot be restarted.') }
       return reply({ job: await inspectRegisteredJob(store, row, user.id) })
     }
     if (row.status !== 'paused') throw new JobError(409, 'Only a prepared job can start generation.')
@@ -468,12 +469,8 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
           JSON.stringify({ task: config.task, contract: config.contract }) !== JSON.stringify(input))
         throw new JobError(409, 'Start differs from saved generation configuration or Story revision.')
       selected = (config.model ?? null) as PiSelection | null
-      if (selected) {
-        try { await assertUserPiSelection(store, user.id, selected) }
-        catch { throw new JobError(409, 'Pinned model credentials unavailable. Reconnect before starting.') }
-      }
     }
-    if (selected && !turn)
+    if (selected && (!turn || !turn.objective))
       throw new JobError(409, 'Production Generation requires an authenticated current-format Turn plan.')
     verifyWebExecution(!selected)
     const env = { ...process.env }
@@ -500,7 +497,12 @@ export async function generationJobRequest(auth: StudioAuth, store: StudioDataba
       ...(process.env.NT_STUDIO_SKILLS_SOURCE ? { skillsSource: process.env.NT_STUDIO_SKILLS_SOURCE } : {}),
       ...(selected ? { provider: selected.provider, model: selected.id } : {}),
     }
-    await requireGenerationTurn(job, pinned)
+    try { await requireGenerationTurn(job, pinned) }
+    catch { throw new JobError(409, 'Generation requires the original authenticated current-format Turn plan.') }
+    if (selected) {
+      try { await assertUserPiSelection(store, user.id, selected) }
+      catch { throw new JobError(409, 'Pinned model credentials unavailable. Reconnect before starting.') }
+    }
     try { await assertServerClaimPermitted(job, job.threadId + ':generation:web', pinned) }
     catch { throw new JobError(409, 'CLI or conflicting server generation ownership prevents this queue admission.') }
     await queueGeneration(store, user.id, row.id, 'start', 'prepared', JSON.stringify(pinned),

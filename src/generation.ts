@@ -305,6 +305,11 @@ export function parseGenerationContract(value: unknown): CompletionContract {
  * isolated from live Pi authority; a missing live Turn is never a fallback. */
 export async function requireGenerationTurn(job: JobStartResult, request: GenerationRequest,
   admitted = false) {
+  if (!request || request.story !== job.storyRoot || request.job !== job.jobId)
+    throw Error("Generation request belongs to another Story Job.");
+  if (request.fixture !== true && (typeof request.turnPlanDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(request.turnPlanDigest)))
+    throw Error("Generation requires an authenticated current-format Turn plan digest.");
   const { readDiscoveryHandoff } = await import("./discovery-generation-handoff.js");
   const handoff = await readDiscoveryHandoff(job);
   if (handoff || request.discoveryHandoffDigest) {
@@ -4206,8 +4211,7 @@ export function createGenerationGraph(
       const task = s.ideaTask!;
       const job = await openJob(s);
       const file = ideaDispatchFile(job);
-      const fixture = s.request.fixture && process.env.NT_LIVE_GENERATION_IDEA === "1"
-        ? false : s.request.fixture;
+      const fixture = s.request.fixture;
       let reconciling = false;
       let resuming = false;
       try {
@@ -4914,6 +4918,16 @@ export function createGenerationGraph(
 export async function runStoryGeneration(options: GenerationOptions) {
   const job = await startStoryJob({ story: options.story, job: options.job }, false);
   assertNativeVersion(job.validatorVersion);
+  // An obsolete start must not create generation.sqlite (which would claim
+  // CLI ownership even though no authenticated Turn was ever admitted).
+  if (options.action === "start" && !options.fixture) {
+    if (!options.task?.trim()) throw Error("Generation start requires --task and --contract.");
+    const contract = parseGenerationContract(options.contract);
+    const turn = await readTurnEvidence(job, contract, options.task);
+    await requireGenerationTurn(job, { story: job.storyRoot, job: job.jobId,
+      task: options.task, contract, fixture: false, turnPlanDigest: turn?.digest,
+      provider: options.provider, model: options.model, orchestrationPolicy: "explicit" });
+  }
   return withStoryGenerationLock(job, async () => {
     ensureNotServerOwned(job);
     const path = join(job.stateDir, "generation.sqlite");

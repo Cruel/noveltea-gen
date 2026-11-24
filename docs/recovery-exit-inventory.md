@@ -232,3 +232,21 @@ The [contract's R14H strategy matrix](generation-recovery-contract.md#r14h-268--
 | `event-work.ts`, `event-specialist.ts`, `interactive-work.ts`, `interactive-specialist.ts` | Preserve typed, path-bound native metadata diagnostics when the native validator and owned diff prove that category. | Semantic/causal feedback remains distinct; protection and unrelated edits never acquire diagnostic repair authority. |
 
 Production regressions cover supporting writer and Review questions with restart and same-session continuation, Architecture's postcommit negative Review and subsequent scheduling, and Event's nonconverging native metadata repair with an admitted diagnostic and crash/restart at the successor submission. Other migrated writer lanes share the same admission contract and domain-specific proof ports; full cross-lane qualification remains R14L.
+
+### R14K (#271) — initial entrypoint audit
+
+| Entrypoint / production source | Disposition and remaining proof |
+| --- | --- |
+| [CLI `refuseObsoleteStageCommand`](../src/cli.ts) | Retire live standalone Foundation and stage `run` (Architecture, foundations, Event, Interactive, Composition, narrative Review, repair), Idea place/relocate/recorded reassess before opening a Job. Keep historical inspect. Deterministic stage fixture callers, explicit reconcile, author-update/plan/approval and administrative routes still require complete disposition and migration; the fixture switch is **not** the final contract. |
+| [Generation `requireGenerationTurn`, `runStoryGeneration`](../src/generation.ts) | Adapt live request/source admission; reject an absent digest before creating a CLI checkpoint/owner; same current Turn receipt is checked at nodes. The legacy no-Turn fixture identity, phase/focus fallback, strategy branches and final fulfillment still require removal and fixture conversion. |
+| [Studio start](../web/src/lib/fixture-jobs.server.ts), [resume admission](../web/src/lib/generation-controls.server.ts), [worker](../web/src/agent-runner.ts) | Adapt admission before credentials/queue and fence obsolete inventory. Preserve independent worker-side proof; other queue/answer/fix paths still require complete qualification. |
+| [Foundation inspect](../src/foundation.ts), [approved handoff](../web/src/lib/story-approved-continuation.server.ts) | Inspect cannot consume a retry. Keep exact current approved handoff; no new standalone model authority. |
+| [Idea integration](../src/generation.ts) | Remove the `NT_LIVE_GENERATION_IDEA` fixture-to-live override. Paid certification must use current authenticated live/scripted transport instead. |
+| [Merge preview](../src/merge-preview.ts) | Separate disposable detached Git candidate and independent integration review; no canonical write/merge grant. Full administrative-path qualification remains outstanding. |
+
+Focused regression: [recovery-cutover](../test/recovery-cutover.test.ts).
+The three touched existing helper fingerprints in the [reviewed AST gate](../test/generation-recovery-coverage.test.ts)
+are individually updated for the Job/Turn check, Foundation inspect retry guard,
+and Studio resume preflight/inventory gate. No blanket snapshot regeneration.
+
+`runStoryGeneration/throw#1` (`aee3a3f31877864a`) refuses a missing start task before SQLite ownership. The CLI regression asserts that an unplanned start leaves the Job state directory and Git unchanged.

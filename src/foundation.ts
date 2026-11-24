@@ -698,7 +698,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         state?.workerMode !== "fixture" && state?.stage !== "committed" && !state?.authoredSha256 && !state?.chatApprovalDigest &&
         !await readChatApprovedFoundation(job))
       throw new ProtocolIntegrityBlockedError("Foundation Pi writer requires the admitted Generation assignment child.");
-    if (state?.stage === "writing" && state.writerStarted && !state.authoredSha256 &&
+    if (!input.inspect && state?.stage === "writing" && state.writerStarted && !state.authoredSha256 &&
         !state.chatApprovalDigest) {
       // A completed, clean no-write specialist is not a partially authored
       // file. Only an exact authenticated job-scoped author decision can permit

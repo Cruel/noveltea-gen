@@ -31,24 +31,18 @@ Usage:
   pnpm dev job validate --story /path/to/story --job draft-1
   pnpm dev job pi inspect --story /path/to/story --job draft-1
   pnpm dev job pi configure --story /path/to/story --job draft-1 --max-steps 5 --max-model-calls 100
-  pnpm dev job foundation --story /path/to/story --job draft-1 --mode autonomous --task "A mystery premise"
   pnpm dev job foundation --story /path/to/story --job draft-1 --inspect
-  pnpm dev job foundation --story /path/to/story --job draft-1 --reconcile-digest <reviewed-sha256>
-  pnpm dev job architecture run --story /path/to/story --job draft-1 --contract scope.json --skills-source /path/to/noveltea-skills
   pnpm dev job architecture inspect --story /path/to/story --job draft-1
   pnpm dev job architecture reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
-  pnpm dev job foundations run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
+  pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
+  pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract unchanged-scope.json --causal-digest <sha256> --carry-forward reviewed.json
+  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --approval /path/to/plan-approval-reference.json
   pnpm dev job foundations inspect --story /path/to/story --job draft-1
   pnpm dev job foundations reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
-  pnpm dev job event run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
   pnpm dev job event inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
-  pnpm dev job interactive run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
   pnpm dev job interactive inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
-  pnpm dev job composition run --story /path/to/story --job draft-1 --milestone milestone.disclosure --skills-source /path/to/noveltea-skills
   pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
-  pnpm dev job review run --story /path/to/story --job draft-1 --skills-source /path/to/noveltea-skills
   pnpm dev job review inspect --story /path/to/story --job draft-1
-  pnpm dev job repair run --story /path/to/story --job draft-1 --commit <rejected-commit-sha> --skills-source /path/to/noveltea-skills
   pnpm dev job repair inspect --story /path/to/story --job draft-1 --commit <rejected-commit-sha>
   pnpm dev job approval-revisions inspect --story /path/to/story --job draft-1 [--severity warning] [--cause unclassified] [--milestone milestone.disclosure] [--limit 50] [--offset 0]
   pnpm dev job report --story /path/to/story --job draft-1 [--format markdown] [--output /outside/report.md]
@@ -61,21 +55,15 @@ Usage:
   pnpm dev job ideas context --story /path/to/story --job draft-1 --target arc.truth
   pnpm dev job ideas placement-context --story /path/to/story --job draft-1 --target event.reveal
   pnpm dev job ideas plan --story /path/to/story --job draft-1
-  pnpm dev job ideas place --story /path/to/story --job draft-1 --id idea-abc --target authored-content.reveal --skills-source /path/to/noveltea-skills
   pnpm dev job ideas audit --story /path/to/story --job draft-1
   pnpm dev job ideas reverse --story /path/to/story --job draft-1
   pnpm dev job ideas reassess --story /path/to/story --job draft-1 --id idea-abc
-  pnpm dev job ideas reassess --story /path/to/story --job draft-1 --id idea-abc --record --skills-source /path/to/noveltea-skills
-  pnpm dev job ideas relocate --story /path/to/story --job draft-1 --id idea-abc --target authored-content.alternative
   pnpm dev job author send --story /path/to/story --job draft-1 --file author-message.json
   pnpm dev job author inspect --story /path/to/story --job draft-1
   pnpm dev job author process --story /path/to/story --job draft-1
   pnpm dev job author plan --story /path/to/story --job draft-1 --id change-1 --file revised-contract.json
   pnpm dev job author resume --story /path/to/story --job draft-1 --file typed-response.json
   pnpm dev job author control --story /path/to/story --job draft-1 --state paused
-  pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
-  pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract unchanged-scope.json --causal-digest <sha256> --carry-forward reviewed.json
-  pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --approval /path/to/plan-approval-reference.json
   pnpm dev job revision inspect --story /path/to/story --job draft-1 --work-item revise-foundation --path creative-direction/foundation.md
   pnpm dev job revision authorize --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --approval /path/to/decision-approval-reference.json
   pnpm dev job revision review --story /path/to/story --job draft-1 --work-item revise-foundation --proposal <sha256> --approval /path/to/editorial-approval-reference.json
@@ -341,7 +329,22 @@ function parseJobOptions(
   return values;
 }
 
+/** Public stage commands cannot be an alternate live Story scheduler.
+ * Keep forensic inspection available. Deterministic stage fixtures still
+ * need migration to the current Turn transport (R14K). */
+function refuseObsoleteStageCommand(args: string[]): void {
+  if (args[0] !== "job" || args.includes("--help") || args.includes("-h")) return;
+  const [, stage, action] = args;
+  const fixture = args.includes("--fixture");
+  const direct = stage === "foundation" ? !args.includes("--inspect") :
+    ["architecture", "foundations", "event", "interactive", "composition", "review", "repair"].includes(stage!) ? action === "run" :
+    stage === "ideas" ? ["place", "relocate"].includes(action!) || action === "reassess" && args.includes("--record") : false;
+  if (direct && !fixture)
+    throw Error("Standalone Story execution is retired; use authenticated Generation start/resume or inspect historical evidence.");
+}
+
 async function main(): Promise<void> {
+  refuseObsoleteStageCommand(process.argv.slice(2));
   if (process.argv.slice(2).some(arg =>
     arg === "--validator-source" || arg.startsWith("--validator-source=")))
     throw new Error("--validator-source has been removed; all Story validation uses the native NovelTea CLI.");

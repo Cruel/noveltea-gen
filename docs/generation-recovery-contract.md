@@ -677,3 +677,25 @@ Architecture's postcommit Review now uses the same child correction transitions 
 Both Focused supporting assignment paths use the same nested author-question gate. Their distinct dependency work-item identifiers, original parent suspension and exact dependency overlay grant are checked at submission and resume. The dependency overlay version is not confused with the parent Architecture plan version. An answer permits only the original supporting writer to resume, never a new owner or approval. No alternate author ledger or writer is introduced.
 
 Diagnostic continuation uses the shared original assignment reentry helper across all migrated writer lanes, with per-domain original failure inspection and exact historical effect verification. Event and Interactive now retain typed native metadata defects instead of reducing them to semantic feedback hashes; the existing semantic and causal feedback remains separately classified. A successful diagnosis can admit exactly one original-session native correction, not an arbitrary new plan or semantic repair. The original Case, terminal and successor remain sealed. The focused Event production regression exercises the nonconvergence, independent diagnosis, successor admission, SQLite submission restart, native commit, independent Review and next assignment.
+
+### R14K (#271) — initial live entrypoint retirement and admission hardening
+
+The live public CLI no longer dispatches standalone Foundation Discovery,
+Architecture, World/Character, Event, Interactive, Composition, narrative
+Review, rejected-work repair, or model-driven Idea placement. These commands
+are refused before opening a Job; the Generation parent remains responsible for
+live Story scheduling. Forensic inspect is retained. Foundation inspect must
+not consume a pending retry authorization. The approved Studio Foundation
+handoff still calls its deterministic commit adapter directly, not the retired
+CLI Discovery command.
+
+The common Generation admission checks the executing Job/Story and digest
+before reading the handoff; CLI start preflights before creating the SQLite
+owner checkpoint. Studio start (including repeated POST), and resume admission
+authenticate the original Turn before provider credential checks or queue
+admission; a persisted obsolete inventory cannot authorize resume. The worker
+retains its independent dispatch check. The environment flag that converted an
+Idea fixture into live Pi execution is removed.
+
+This is an incremental cutover, not a waiver of the remaining R14K criteria.
+See the [source-linked R14K entrypoint audit](recovery-exit-inventory.md#r14k-271--initial-entrypoint-audit).

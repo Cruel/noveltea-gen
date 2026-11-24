@@ -58,7 +58,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independentAssignmentBoundary: "returns:15,status:6,operationFailure:2,throws:8",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
-  runStoryGeneration: "returns:5,status:10,blocked:6,reconcile:1,throws:17",
+  runStoryGeneration: "returns:5,status:10,blocked:6,reconcile:1,throws:18",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
   recoveryNode: "returns:28,status:21,throws:16",
 };
@@ -203,7 +203,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const writer = ts.createSourceFile("generation-writer-round.ts", readFileSync(resolve(root, "src/generation-writer-round.ts"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const reviewed = [
-    [file, "requireGenerationTurn", "4e2cba38f5a0211fef83a9ed6ef9765cb71e6b8aa2e640f13d67e81b5ea0b7f8"],
+    [file, "requireGenerationTurn", "a89e7a29cd0459fc64b0bd2cfcbdce540cddd99b19f8374b7de24adf75bda086"],
     [file, "dispatch", "1405fcbbacbf4ce2dc8ee8be2a0fd75aaf3bcbdfca5b67f4d687a19281f326ad"],
     [file, "runFoundationAssignmentChild", "09eceae0c76ac0f082fc2eb896625a6c89bb4d9f0e741e0bbdfdc0f44d153bfa"],
     [file, "runArchitectureAssignmentChild", "3a202a428fc66d7eebec3b36525a0abb4c6829efeeda4fabbeb26d626b8270ec"],
@@ -288,7 +288,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["interactive-work.ts", "interactiveSourceDigest", "05a9b608bc9b0f6f086aa75dee55eae1949885679b5629576ec8c57fe468ed02"],
     ["character-world.ts", "verifyCharacterWorldReviewOrigin", "142e6331451c4480892b21f7e7b7c150c86a6030a0cfc77c8d24a58b5a78cc37"],
     ["character-world.ts", "inspectRecoverableCharacterWorldCommit", "ff7d64d08ab609775cde44af310b0cfef840862325bfe5f1369f72c3ba52875a"],
-    ["foundation.ts", "runFoundationJob", "f81b577c0f5708baa814b3eae4a03acef1088414a169b7aab43816ec7049247c"],
+    ["foundation.ts", "runFoundationJob", "297b4569e52b23f7588c8c5d72ba7f3196773ce30a8fd793f62491e1f32f22fd"],
     ["foundation.ts", "executeFoundationGraph", "707e63e9d422b619674aa8aecf4c7bec059ebfd9357db0fcf81e7b1935c88eb4"],
     ["foundation.ts", "piAuthor", "7ddea4dd9f4f529178cd06f47c4052eb80a24949a1cb46d50419ac0d15ec9875"],
     ["foundation.ts", "foundationSourceDigest", "848e2caae6e2ade76b70ceda6c87703519c2a85fbce7dae80544953564aa68e3"],
@@ -837,7 +837,7 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/lib/generation-controls.server.ts",
       "verifiedResumeAdmission",
-      "2810d077eaf00869e4990fb1beb831ac936f0b26177f41e8972d81a2dcbac190"
+      "d8c9ec622485190e7035f9077136f6bed40a447bdb8760adffe23f0e7710669c"
     ],
     [
       "web/src/lib/author-interactions.server.ts",
