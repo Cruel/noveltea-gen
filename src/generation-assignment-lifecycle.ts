@@ -32,6 +32,11 @@ export function usesSharedAssignmentReview(workItem: string | undefined | null):
     /^(?:event|composition)-[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
     /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem ?? "");
 }
+/** Cutover registry: only lanes with the actual bounded Review adapter are
+ * admitted here; the older policy registry alone is not proof of migration. */
+export function usesCheckpointedReviewRounds(workItem: string): boolean {
+  return workItem === "foundation";
+}
 /** Studio Discovery precedes any Generation job or Git write grant. */
 export type DiscoveryAssignmentIdentity = Readonly<{
   schema: "noveltea-discovery-assignment/v1";
@@ -124,9 +129,8 @@ type LifecycleState<I extends LifecycleIdentity> = ReturnType<typeof lifecycleCh
 /** Verification may publish a native commit after the checkpointed Pi round.
  * Keep its actual committed receipt alongside the outcome for parent replay. */
 export type AssignmentVerifiedSubmission<I extends LifecycleIdentity> = Readonly<{
-  outcome: AssignmentOutcome<I>;
   submission: AssignmentSubmission;
-}>;
+} & ({ outcome: AssignmentOutcome<I> } | { correction: AssignmentCorrection })>;
 
 export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> = Readonly<{
   /** Reauthenticate the parent authorization, source and uncertain effects. */
@@ -226,6 +230,12 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       if ("submission" in verified) {
         if (!verified.submission.receiptRef || !verified.submission.status)
           throw Error("Verification lost the committed submission receipt.");
+        if ("correction" in verified) {
+          if (!adapter.correct || !verified.correction.correctionRef ||
+              verified.correction.rejectedReceiptRef !== verified.submission.receiptRef)
+            throw Error("Correction lacks its verified successor submission.");
+          return { submission: verified.submission, correction: verified.correction };
+        }
         assertAssignmentOutcome(state.identity, verified.outcome);
         return { outcome: verified.outcome, submission: verified.submission, correction: null };
       }

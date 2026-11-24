@@ -20,7 +20,7 @@ import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
 import { inspectRejectedRepair, authenticateFoundationReviewHead, inspectFoundationReviewBoundary,
-  executeFoundationReviewAssessment, inspectFoundationReviewStop } from "./rejected-review-repair.js";
+  executeFoundationReviewAssessment, inspectFoundationReviewStop, inspectNativeReviewFailure } from "./rejected-review-repair.js";
 import { inspectJobReport } from "./job-report.js";
 import { isTrustedFinalVerdictAnomaly } from "./generation-final-verdict.js";
 import { authorizedInventoryComplete } from "./generation-plan.js";
@@ -41,7 +41,14 @@ const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
 async function originalAssignmentFailure(job: JobStartResult, s: State, c: RecoveryCase) {
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined;
-  if (!op?.evidence.assignmentFailure) return null;
+  if (!op?.evidence.assignmentFailure) {
+    if (c.origin.operation !== "independent-review" || !usesSharedAssignmentReview(c.origin.assignmentId)) return null;
+    const failure = await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id);
+    if (!failure) return null;
+    if (!await originalFailedReviewProof(job, s, c))
+      throw Error("Original Review native failure lost its admitted source");
+    return failure;
+  }
   if (c.origin.operation !== "specialist-result" || c.origin.assignmentId !== op.evidence.assignmentId ||
       c.observation !== "returned-failure" || s.active?.id !== c.origin.assignmentId || s.result ||
       !s.inventory || s.request.fixture ||
@@ -441,6 +448,12 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
       digest: assignmentFailure.proof.receiptDigest };
     return { ...base(c, proof), action: "exhausted", reason: "protocol-exhausted", attemptRefs: [proof] };
   }
+  if (assignmentFailure?.proof.kind === "nonconverging" && c.origin.operation === "independent-review") {
+    const proof = { store: "specialist-receipt" as const, ref: assignmentFailure.ref,
+      digest: assignmentFailure.proof.receiptDigest };
+    await assertSource(job, s, c);
+    return { ...base(c, proof), action: "diagnostic", adapter: "unknown-diagnostic", mode: "read-only", attemptRef: null };
+  }
   const owner = await originalNoWriteOwnerProof(job, s, c);
   if (owner) {
     await assertSource(job, s, c);
@@ -585,6 +598,13 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
               error.message, "paused");
           throw error;
         }
+      }
+      if (await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id)) {
+        const selected = await selectOperationStrategy(job, s, c);
+        if (selected?.action === "exhausted") return stop(selected, "Original Review native response protocol exhausted.", "blocked");
+        if (selected?.action !== "diagnostic") throw Error("Review native terminal has no shared assessment");
+        return { recoveryLifecycle: { ...decideRecovery(lifecycle, selected), assessorPending: true },
+          status: "running", reason: null };
       }
       const boundary = await inspectFoundationReviewBoundary(job, c.origin.sourceHeadSha);
       if (boundary)

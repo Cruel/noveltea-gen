@@ -1,6 +1,7 @@
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createReviewRoundTransitions } from "./generation-review-round.js";
 import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, usesSharedAssignmentReview,
   type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
   type AssignmentSubmission, type AssignmentCorrection } from "./generation-assignment-lifecycle.js";
@@ -996,15 +997,15 @@ async function runFoundationAssignmentChild(
         { dispositionRef: "generation-verification" });
     }
   };
-  const runReviewRound = async (command: import("./rejected-review-repair.js").FoundationReviewCommand) => {
+  const runReviewRound = async (command: import("./rejected-review-repair.js").ReviewRoundCommand) => {
     if (!correction || !published)
       throw new ProtocolIntegrityBlockedError("Review round lacks the original admitted Case.");
     const stopped = await preflight();
     if (stopped) return stopped;
-    const { executeFoundationReviewRound, ReviewDependencyRequiredError } = await import("./rejected-review-repair.js");
+    const { executeReviewRound, ReviewDependencyRequiredError } = await import("./rejected-review-repair.js");
     try {
-      return await executeFoundationReviewRound(job, {
-        rootSha: correction.origin.sourceHeadSha, caseId: correction.id, assignmentKey: key,
+      return await executeReviewRound(job, {
+        rootSha: correction.origin.sourceHeadSha, caseId: correction.id, assignmentKey: key, workItem: "foundation",
       }, command, { skillsSource: s.request.skillsSource, provider: s.request.provider,
         model: s.request.model, canYieldForSteering: async () =>
           !!s.request.turnPlanDigest && !!s.inventory?.items.some(item =>
@@ -1018,6 +1019,7 @@ async function runFoundationAssignmentChild(
       const reason = error instanceof Error && (error.name === "PiBudgetPause" ? "budget" :
         error.name === "PiModelUnavailableError" ? "provider-unavailable" :
         error.name === "SpecialistChoiceRequiredError" ? "author-choice" :
+        error.name === "AssignmentAuthorPauseError" ? "author-pause" :
         error.name === "StoryCancelledError" ? "cancelled" : null);
       if (reason) {
         return reason === "cancelled" ? outcome("unresolved", command.sourceSha, { dispositionRef: "cancelled" })
@@ -1026,47 +1028,16 @@ async function runFoundationAssignmentChild(
       throw error;
     }
   };
-  type ReviewRound = import("./rejected-review-repair.js").FoundationReviewRound;
-  const reviewStop = (result: ReviewRound): AssignmentOutcome => {
-    if (result.status === "assess")
-      return outcome("unresolved", result.assessment.digest, { dispositionRef: "assess-review" });
-    if (result.status === "paused")
-      return outcome("paused", result.ref, { controlRef: result.reason + ":" + result.ref });
-    if (result.status === "cancelled")
-      return outcome("unresolved", result.ref, { dispositionRef: "cancelled" });
-    if (result.status === "steering")
-      return outcome("paused", result.ref, { controlRef: "author-updates" });
-    if (result.status === "fenced")
-      return outcome("fenced", result.ref, { inspectionRef: result.sourceSha });
-    throw new ProtocolIntegrityBlockedError("Unexpected Foundation Review round transition.");
-  };
-  const reviewCorrection = async (submission: AssignmentSubmission, sourceSha: string) => {
-    const admitted = await runReviewRound({ phase: "admit", sourceSha });
-    if ("assignmentKey" in admitted) return admitted;
-    if (admitted.status !== "admitted") return reviewStop(admitted);
-    return { correctionRef: admitted.sourceSha + ":" + admitted.grantDigest,
-      rejectedReceiptRef: submission.receiptRef };
-  };
-  const verifyReviewRound = async (submission: AssignmentSubmission): Promise<AssignmentOutcome | AssignmentCorrection> => {
-    if (submission.status !== "repair-round") {
-      if (submission.receiptRef !== "foundation.json" || submission.headSha !== correction?.origin.sourceHeadSha)
-        throw new ProtocolIntegrityBlockedError("Foundation Review lost its initial negative submission.");
-      return reviewCorrection(submission, submission.headSha!);
-    }
-    const [kind, sourceSha, successorSha, extra] = submission.receiptRef.split(":");
-    if (kind !== "repair" || extra !== undefined || successorSha !== submission.headSha ||
-        !/^[a-f0-9]{40}$/.test(sourceSha ?? "") || !/^[a-f0-9]{40}$/.test(successorSha ?? ""))
-      throw new ProtocolIntegrityBlockedError("Foreign Foundation repair submission.");
-    const reviewed = await runReviewRound({ phase: "verify", sourceSha: sourceSha!, successorSha: successorSha! });
-    if ("assignmentKey" in reviewed) return reviewed;
-    if (reviewed.status === "failed") return reviewCorrection(submission, reviewed.successorSha);
-    if (reviewed.status !== "passed") return reviewStop(reviewed);
-    const head = await trustedHead(job);
-    const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
-    if (head !== reviewed.successorSha || !await verifyReviewCycleSuccessor(job, correction!.origin.sourceHeadSha, head))
-      throw new ProtocolIntegrityBlockedError("Foundation Review lacks an independently passing successor.");
-    return outcome("verified", "recovery-checkpoints:" + head, { headSha: head, reviewRef: "review-checkpoints:" + head });
-  };
+  const reviewRounds = createReviewRoundTransitions({
+    originalHead: correction?.origin.sourceHeadSha ?? sourceHead,
+    originalReceipt: "foundation.json",
+    run: runReviewRound, outcome,
+    verifySuccessor: async successor => {
+      const head = await trustedHead(job);
+      const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+      return head === successor && await verifyReviewCycleSuccessor(job, correction!.origin.sourceHeadSha, head);
+    },
+  });
   const child = createAssignmentLifecycleGraph({
     authenticateContinuation: async state =>
       state.continuationRef === correction?.id && await authenticateCorrection(),
@@ -1074,24 +1045,14 @@ async function runFoundationAssignmentChild(
     invoke: async state => { assertChildIdentity(state.identity, state.continuationRef); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
       assertChildIdentity(state.identity, state.continuationRef);
-      if (correction) {
-        const [sourceSha, grantDigest, extra] = state.correction!.correctionRef.split(":");
-        if (extra !== undefined || !/^[a-f0-9]{40}$/.test(sourceSha ?? "") || !/^[a-f0-9]{64}$/.test(grantDigest ?? "") ||
-            sourceSha !== state.submission!.headSha)
-          throw new ProtocolIntegrityBlockedError("Foundation Review corrective grant belongs to another submission.");
-        const repaired = await runReviewRound({ phase: "correct", sourceSha: sourceSha!, grantDigest: grantDigest! });
-        if ("assignmentKey" in repaired) return repaired;
-        if (repaired.status !== "committed") return reviewStop(repaired);
-        return { receiptRef: ["repair", repaired.sourceSha, repaired.successorSha].join(":"),
-          status: "repair-round", headSha: repaired.successorSha };
-      }
+      if (correction) return reviewRounds.correct(state.submission!, state.correction!);
       return invokeRound({ phase: "correct", proof: roundProof(state.submission!),
         grantDigest: state.correction!.correctionRef });
     },
     verify: async state => {
       assertChildIdentity(state.identity, state.continuationRef);
       let submission = state.submission!;
-      if (correction) return verifyReviewRound(submission);
+      if (correction) return reviewRounds.verify(submission);
       const stopped = await preflight();
       if (stopped) return stopped;
       if (submission.status === "writer-round") {
@@ -1128,6 +1089,16 @@ async function runFoundationAssignmentChild(
     if (!assessment || assessment.digest !== finished.outcome.evidenceRef)
       throw new ProtocolIntegrityBlockedError("Returned Foundation assessment lost its exact original boundary.");
     return { reviewAssessmentRequested: true, reason: "Assessing the sealed Foundation Review boundary.",
+      result: s.result };
+  }
+  if (correction && finished.outcome.status === "unresolved" &&
+      finished.outcome.dispositionRef.startsWith("repair-native:")) {
+    const terminal = await (await import("./rejected-review-repair.js")).inspectNativeReviewFailure(job,
+      correction.origin.sourceHeadSha, correction.id);
+    if (!terminal || terminal.proof.receiptDigest !== finished.outcome.evidenceRef ||
+        finished.outcome.dispositionRef !== "repair-native:" + terminal.proof.kind)
+      throw new ProtocolIntegrityBlockedError("Returned Review native terminal lost its original evidence.");
+    return { reviewAssessmentRequested: true, reason: "Assessing the sealed Review native correction terminal.",
       result: s.result };
   }
   if (finished.outcome.status === "verified")
@@ -2754,6 +2725,7 @@ export function recoveryNode(
     if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
         prior.recoveryLifecycle.decision?.action === "exhausted" &&
         !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment ||
+          prior.recoveryLifecycle.active.origin.operation === "independent-review" && prior.recoveryLifecycle.decision.reason === "protocol-exhausted" ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.protocolFailure)) {
       const active = prior.recoveryLifecycle.active;
@@ -2915,7 +2887,7 @@ export function recoveryNode(
       const job = await openJob(local);
       try {
       const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
-      const { inspectFoundationReviewBoundary, authenticateFoundationReviewHead } = await import("./rejected-review-repair.js");
+      const { inspectFoundationReviewBoundary, authenticateFoundationReviewHead, inspectNativeReviewFailure } = await import("./rejected-review-repair.js");
       if (!active || !usesSharedAssignmentReview(active.origin.assignmentId) ||
           decision?.action !== "known-correction" || decision.adapter !== "review-cycle" ||
           !await authenticateOperationReviewProof(job, local, active, decision) ||
@@ -2929,7 +2901,8 @@ export function recoveryNode(
             action: "pause", reason: outcome.reviewPauseReason, resumeRef: decision.receipt,
           }), assessorPending: false } };
       }
-      if (!await inspectFoundationReviewBoundary(job, active.origin.sourceHeadSha))
+      if (!await inspectFoundationReviewBoundary(job, active.origin.sourceHeadSha) &&
+          !await inspectNativeReviewFailure(job, active.origin.sourceHeadSha, active.id))
         throw Error("Foundation Review handoff has no authenticated reassessment boundary.");
       return { status: "running", reason: outcome.reason,
         recoveryLifecycle: { ...prior.recoveryLifecycle, assessorPending: true } };

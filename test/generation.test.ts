@@ -5783,7 +5783,7 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-native", "review-native-steer", "review-native-protected", "review-native-protocol", "review-native-stall", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
   skip: !available, timeout: 240_000,
 }, async () => {
@@ -5795,7 +5795,8 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
   const stalled = scenario === "review-stalled" || scenario === "review-stalled-continue";
   const dispute = scenario === "review-dispute";
   const scopeRevision = scenario === "review-scope";
-  const reviewCrash = scenario === "review-crash-rounds";
+  const nativeRepair = scenario.startsWith("review-native");
+  const reviewCrash = scenario === "review-crash-rounds" || nativeRepair;
   const revising = scenario === "review-converges" || stalled || reviewCrash;
   const f = setup("r01-real-foundation-pi-" + scenario);
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
@@ -5917,7 +5918,33 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             requirement: { quote: packet.items[0].assignment.outcome.slice(0, 60) },
             evidence: { path: target, quote: "The witness took a ledger from the archive before the theft." } }] }), reason: "stop" };
       }
-      const revisionIndex = stalled && i >= 19 ? i - 2 : i;
+      if (nativeRepair && i === 11)
+        return { content: [{ type: "toolCall", name: "write", id: "r14b-invalid-native-repair",
+          arguments: { path: target, content: (scenario === "review-native-protected" ? authored.replace("A missing archive witness; invent unspecified details", "Replace the protected author brief") : authored).replace("central_conflict:", "unsupported_field: true\ncentral_conflict:") + "\nThe witness took a ledger from the archive before the theft.\n" } }], reason: "toolUse" };
+      if (nativeRepair && i === 12)
+        return { content: scriptedText("Corrected the witness obligation but introduced invalid metadata."), reason: "stop" };
+      if (scenario === "review-native-protocol" && i >= 13 && i <= 15)
+        return { content: scriptedText("Still not a structured report."), reason: "stop" };
+      if (scenario === "review-native-stall" && (i === 13 || i === 14))
+        return { content: scriptedText(report), reason: "stop" };
+      if (scenario === "review-native-stall" && i === 15) {
+        const serialized = JSON.stringify(context.messages);
+        const signature = serialized.match(/signature=([a-f0-9]{64});/)?.[1];
+        const sourceRef = serialized.match(/sourceRef=([^;]+); category=/)?.[1];
+        assert.ok(signature && sourceRef);
+        assert.match(serialized, /assignmentDefects/);
+        return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1",
+          signature, sourceRef, category: "defect", diagnosis: "The native correction did not converge.",
+          strategy: "review-adjudication", owner: null, scopeRef: null, prerequisites: [],
+          uncertainty: "No currently admitted successor correction." }), reason: "stop" };
+      }
+      if (nativeRepair && i === 13) {
+        assert.match(JSON.stringify(context.messages.at(-1)), /Native|native diagnostics/);
+        return { content: [{ type: "toolCall", name: "write", id: "r14b-native-repair",
+          arguments: { path: target, content: authored + "\nThe witness took a ledger from the archive before the theft.\n" } }], reason: "toolUse" };
+      }
+      if (nativeRepair && i === 14) return { content: scriptedText(report), reason: "stop" };
+      const revisionIndex = nativeRepair && i >= 15 ? i - 2 : stalled && i >= 19 ? i - 2 : i;
       const correction = revisionIndex >= 11 ? Math.floor((revisionIndex - 11) / 3) + 1 : 0;
       const correctionStep = (revisionIndex - 11) % 3;
       const revisions = [
@@ -6071,7 +6098,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }
       // Simulate loss of a persisted child task output after an external effect
       // settled. This aborts the parent as well, then reopens the same database.
-      const crashReviewCheckpoint = async (which: "negative" | "writer" | "review",
+      const crashReviewCheckpoint = async (which: "negative" | "writer" | "review" | "native-rejected" | "native-settled",
         initial: typeof input | null, calls: number) => {
         const abort = new AbortController();
         const put = saver.put.bind(saver);
@@ -6090,7 +6117,9 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             { status?: string; dispositionRef?: string } | undefined;
           if (cfg.configurable?.checkpoint_ns?.includes("assignment-") &&
               (which === "negative" ? outcome?.status === "unresolved" && outcome.dispositionRef === "review-checkpoints" :
-                which === "writer" ? submission?.status === "repair-round" : outcome?.status === "verified")) {
+                which === "writer" ? submission?.status === "repair-round" :
+                which === "native-rejected" ? submission?.status === "repair-native-rejected" :
+                which === "native-settled" ? submission?.status === "repair-native-round" : outcome?.status === "verified")) {
             crashed = true;
             abort.abort(failure);
             throw failure;
@@ -6098,7 +6127,11 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           return putWrites(cfg, writes, task);
         };
         await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(initial,
-          { ...config, signal: abort.signal, durability: "sync" })));
+          { ...config, signal: abort.signal, durability: "sync" })).then(result => {
+            assert.fail("Expected SQLite crash at " + which + ": " + JSON.stringify({
+              status: result.status, reason: result.reason, recovery: result.recoveryLifecycle, calls: observed.length,
+            }));
+          }), error => { if (!crashed) throw error; return true; });
         assert.ok(crashed, "Expected actual child SQLite checkpoint loss: " + which);
         assert.equal(observed.length, calls);
         assert.ok(!existsSync(join(f.job.stateDir, ".story-job")), "Writer lease must not survive settled child effect");
@@ -6245,15 +6278,54 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)?.semanticReview, "failed");
           }
         }
+        if (scenario === "review-native-protocol" || scenario === "review-native-stall") {
+          const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+          assert.equal(stopped.status, "blocked");
+          assert.equal(stopped.recoveryLifecycle.active?.id, original.id);
+          assert.deepEqual(stopped.recoveryLifecycle.inspectionFences, [], JSON.stringify(stopped.recoveryLifecycle));
+          assert.equal(stopped.recoveryLifecycle.decision?.action,
+            scenario === "review-native-protocol" ? "exhausted" : "diagnostic-stop", JSON.stringify(stopped.recoveryLifecycle));
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+          assert.equal(observed.length, 18);
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id), stopped.recoveryLifecycle);
+          const resumed = await withJobModelRuntime(runtime, () => graph.invoke(input, config));
+          assert.deepEqual(resumed.recoveryLifecycle, stopped.recoveryLifecycle);
+          assert.equal(observed.length, 18);
+          return;
+        }
+        if (scenario === "review-native-protected") {
+          const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+          assert.equal(stopped.status, "blocked");
+          assert.equal(stopped.recoveryLifecycle.active?.id, original.id);
+          assert.equal(observed.length, 15);
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+          assert.match(stopped.reason ?? "", /protected|integrity|evidence/i);
+          return;
+        }
         if (scenario === "review-converges" || reviewCrash) {
           if (reviewCrash) {
-            await crashReviewCheckpoint("writer", null, 15);
+            if (nativeRepair) {
+              await crashReviewCheckpoint("native-rejected", null, 15);
+              assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+              await crashReviewCheckpoint("native-settled", null, 17);
+              assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+            } else await crashReviewCheckpoint("writer", null, 15);
             const successor = git(f.job.worktreeRoot, "rev-parse", "HEAD");
-            assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), "1");
-            assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === successor)?.semanticReview, "required-pending");
-            await crashReviewCheckpoint("review", null, 16);
-            assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), successor);
-            assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === successor)?.semanticReview, "passed");
+            if (!nativeRepair) {
+              assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), "1");
+              assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === successor)?.semanticReview, "required-pending");
+            }
+            await crashReviewCheckpoint("review", null, nativeRepair ? 18 : 16);
+            const reviewedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+            if (!nativeRepair) assert.equal(reviewedHead, successor);
+            assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === reviewedHead)?.semanticReview, "passed");
+            if (scenario === "review-native-steer") {
+              const { sendAuthorUpdate } = await import("../src/author-updates.js");
+              const queued = await sendAuthorUpdate(f.job, { id: "r14-author-steer", kind: "change",
+                payload: { text: "Change the witness's protected motivation before continuing.",
+                  affectedIds: ["creative-direction.foundation"] } });
+              assert.equal(queued.phase, "queued");
+            }
           }
           const repaired = await withJobModelRuntime(runtime, () => graph.invoke(null, {
             ...config, interruptAfter: ["independent_assignment_review"],
@@ -6265,7 +6337,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           assert.equal(repaired.recoveryLifecycle.discharged.at(-1)?.case.id, original.id);
           assert.equal(repaired.result?.headSha, finalHead);
           assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), reviewCrash ? "1" : "3");
-          assert.equal(observed.length, reviewCrash ? 16 : 22);
+          assert.equal(observed.length, nativeRepair ? 18 : reviewCrash ? 16 : 22);
           const cycle = await (await import("../src/postcommit-review-cycle.js"))
             .inspectPostcommitReviewCycle(f.job, head, (await inspectRecoveryCheckpoints(f.job))
               .find(p => p.commitSha === head)!.assurance!.assignmentDigest);
@@ -6307,7 +6379,14 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           assert.equal(repairSubmissions.size, reviewCrash ? 1 : 3);
           const policy = await inspectPiPolicy(f.job);
           assert.equal(policy.budget.modelCalls, observed.length, "Restart cannot double charge an original session");
-          assert.ok(observed.slice(13).filter((_, i) => i % 3 === 2)
+          if (nativeRepair) {
+            const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "review-repairs", head + ".json"), "utf8"));
+            assert.ok(receipt.nativeCorrection?.accepted?.proof);
+            assert.equal(receipt.nativeCorrection.defects[0].kind, "metadata");
+            assert.equal(receipt.nativeCorrection.defects[0].path, "creative-direction/foundation.md");
+            assert.equal(observed[17]!.tools.includes("write"), false);
+            assert.ok(observed[15]!.tools.includes("write"));
+          } else assert.ok(observed.slice(13).filter((_, i) => i % 3 === 2)
             .every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
 
           assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id), repaired.recoveryLifecycle);
@@ -6315,18 +6394,28 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             ...config, interruptAfter: ["verify_committed_work"],
           }));
           assert.ok(completed.completedStages.some(item => item.stage === "foundation"));
-          assert.equal(observed.length, reviewCrash ? 16 : 22);
+          assert.equal(observed.length, nativeRepair ? 18 : reviewCrash ? 16 : 22);
           // Resume through the parent's author/plan boundary, not the child's
           // scheduler. The next owner may be admitted, but not invoked here.
           const scheduled = await withJobModelRuntime(runtime, () => graph.invoke(null, {
             ...config, interruptAfter: ["author_update_intake"],
           }));
+          if (scenario === "review-native-steer") {
+            const { inspectAuthorUpdates } = await import("../src/author-updates.js");
+            const receipt = (await inspectAuthorUpdates(f.job)).records.find(r => r.message.id === "r14-author-steer")?.acknowledgement;
+            assert.equal(receipt?.phase, "review-required");
+            assert.equal(receipt?.pinned?.headSha, finalHead);
+            assert.equal(scheduled.status, "blocked", scheduled.reason ?? undefined);
+            assert.equal(observed.length, 18);
+            assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), finalHead);
+            return;
+          }
           assert.equal(scheduled.status, "running", scheduled.reason ?? undefined);
           assert.equal(scheduled.active?.stage, "architecture");
           assert.equal(scheduled.request.turnPlanDigest, pinnedDigest);
           assert.equal(scheduled.inventory?.headSha, finalHead);
           assert.ok((await graph.getState(config)).next.includes("specialist_dispatch"));
-          assert.equal(observed.length, reviewCrash ? 16 : 22);
+          assert.equal(observed.length, nativeRepair ? 18 : reviewCrash ? 16 : 22);
         }
         return;
       }

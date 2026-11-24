@@ -9,6 +9,8 @@ import type { JobStartResult } from "./job.js";
 import { parseEventManifest } from "./event-manifest.js";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { parseDocument } from "yaml";
+import { isDeepStrictEqual } from "node:util";
 import {
   beginProtocolInvocation, inspectCompletedProtocolResponse, recoverResponseContract,
   ProtocolIntegrityBlockedError, ProtocolExhaustedError, ProtocolVerifierRecheckRejectedError,
@@ -102,6 +104,9 @@ export function nativeMetadataDefects(
     paths: readonly string[];
     /** Explicit assignment-specific derived catalog consequences, never write grants. */
     derivedDiagnostics?: readonly string[];
+    /** Independently attested unchanged protected record metadata; the native
+     * catalog can omit a schema-invalid record and report a false deletion. */
+    verifiedCatalogOmissions?: readonly string[];
   },
 ): AssignmentDefect[] {
   if (result.status !== "rejected" || result.exitCode !== 1 ||
@@ -115,10 +120,21 @@ export function nativeMetadataDefects(
     protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[]; findings?: unknown[] };
   } | undefined;
   const protection = report?.protection;
+  const falseDeletion = (value: unknown) => {
+    if (!value || typeof value !== "object") return false;
+    const finding = value as { code?: string; category?: string; kind?: string; path?: string;
+      beforeLocation?: { path?: string }; afterLocation?: unknown; after?: unknown };
+    const path = finding.beforeLocation?.path ?? finding.path;
+    return finding.code === "protected-decision-change" &&
+      (finding.category ?? finding.kind) === "record-deleted" &&
+      !!path && source.verifiedCatalogOmissions?.includes(path) === true &&
+      (finding.afterLocation === undefined || finding.afterLocation === null) &&
+      (finding.after === undefined || finding.after === null);
+  };
   if (!protection || protection.status !== "checked" || protection.base !== source.baseSha ||
-      !Array.isArray(protection.changes) || protection.changes.length ||
-      !Array.isArray(protection.warnings) || protection.warnings.length ||
-      !Array.isArray(protection.findings) || protection.findings.length ||
+      !Array.isArray(protection.changes) || !protection.changes.every(falseDeletion) ||
+      !Array.isArray(protection.warnings) || !protection.warnings.every(falseDeletion) ||
+      !Array.isArray(protection.findings) || !protection.findings.every(falseDeletion) ||
       !Array.isArray(report?.diagnostics) || !report.diagnostics.length)
     throw new ProtocolIntegrityBlockedError("Native rejection is not an unprotected scoped metadata defect");
   const position = (value: unknown): value is number =>
@@ -136,6 +152,55 @@ export function nativeMetadataDefects(
       ...(typeof d.pointer === "string" && d.pointer.length <= 200 && /^\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+){0,15}$/.test(d.pointer)
         ? { pointer: d.pointer } : {}) };
   });
+}
+
+/** The native catalog omits schema-invalid records, so even unchanged
+ * protected decisions can appear deleted. Admit restoration of scoped metadata
+ * only if exact record identity and every decision independently agree with
+ * the committed baseline. This read-only parser is NOT a schema/approval
+ * verifier; native validation and protection must pass before publication. */
+export async function nativeRepairMetadataDefects(job: JobStartResult, head: string,
+  paths: readonly string[], result: ValidationResult, derivedDiagnostics?: readonly string[]) {
+  const report = result.report as { diagnostics?: { code?: string; path?: string }[];
+    protection?: { findings?: { code?: string; category?: string; beforeLocation?: { path?: string } }[] } } | undefined;
+  const omissions = new Set<string>();
+  const parse = (record: string) => {
+    const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(record);
+    if (!header) throw new ProtocolIntegrityBlockedError("Invalid protected record frontmatter");
+    const document = parseDocument(header[1]!, { strict: true, uniqueKeys: true });
+    if (document.errors.length || document.warnings.length)
+      throw new ProtocolIntegrityBlockedError("Cannot attest protected metadata of a malformed record");
+    const data = document.toJS({ maxAliasCount: 0 }) as Record<string, unknown> | null;
+    if (!data || typeof data !== "object" || Array.isArray(data) ||
+        typeof data.id !== "string" || typeof data.type !== "string" || !Array.isArray(data.decisions))
+      throw new ProtocolIntegrityBlockedError("Cannot attest protected record identity and decisions");
+    return { id: data.id, type: data.type, schema: data.schema, decisions: data.decisions };
+  };
+  for (const finding of report?.protection?.findings ?? []) {
+    const path = finding.beforeLocation?.path;
+    if (finding.code !== "protected-decision-change" || finding.category !== "record-deleted" ||
+        !path || !paths.includes(path) || !report?.diagnostics?.some(d => d.path === path && d.code === "schema"))
+      continue;
+    if (omissions.has(path)) continue;
+    if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(path))
+      throw new ProtocolIntegrityBlockedError("Unsafe protected metadata source");
+    const target = join(job.worktreeStoryRoot, path);
+    if (await realpath(target) !== target || !(await lstat(target)).isFile())
+      throw new ProtocolIntegrityBlockedError("Protected record was actually removed or replaced");
+    const repoPath = job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
+    const env = { ...process.env };
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"]) delete env[key];
+    const original = execFileSync("git", ["show", head + ":" + repoPath], {
+      cwd: job.worktreeRoot, env, encoding: "utf8", maxBuffer: 4 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (!isDeepStrictEqual(parse(original), parse(await readFile(target, "utf8"))))
+      throw new ProtocolIntegrityBlockedError("Rejected native repair changed protected record identity or decisions");
+    omissions.add(path);
+  }
+  return nativeMetadataDefects(result, { jobId: job.jobId, baseSha: head,
+    worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths,
+    derivedDiagnostics, verifiedCatalogOmissions: [...omissions] });
 }
 
 type Grant = Readonly<{
@@ -257,6 +322,7 @@ function feedback(defects: readonly AssignmentDefect[]): string {
 async function inspectSettledChain(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
   sessionRoots: string[]; effect: string | null; historical?: boolean; responseKind?: AssignmentResponseKind;
+  initialDefects?: readonly AssignmentDefect[]; initialEffect?: string;
 }): Promise<{ grant: Grant; settled: Settlement }[]> {
   const { proof, directory, sessionId, sessionFile, sessionRoots, effect } = options;
   const policy = responsePolicy(options.responseKind);
@@ -274,6 +340,8 @@ async function inspectSettledChain(options: {
     if (!grant || !submitted || !settled || grant.version !== 1 || grant.ordinal !== ordinal ||
         grant.source !== proof.sourceDigest || grant.sessionId !== sessionId || grant.sessionFile !== sessionFile ||
         grant.previous !== previous || ordinal > 0 && grant.effectBefore !== previousEffect ||
+        ordinal === 0 && (digest(grant.defects) !== digest(options.initialDefects ?? []) ||
+          options.initialEffect !== undefined && grant.effectBefore !== options.initialEffect) ||
         submitted.grant !== digest(grant) || submitted.start !== hash(await readFile(base + ".started.json")) ||
         settled.submission !== digest(submitted) || settled.effect !== submitted.effect ||
         settled.protocol !== hash(await readFile(base + ".initial.json")))
@@ -300,7 +368,8 @@ async function inspectSettledChain(options: {
 
 export async function verifySettledAssignment(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
-  sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind; historical?: boolean;
+  sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind;
+  initialDefects?: readonly AssignmentDefect[]; initialEffect?: string; historical?: boolean;
 }): Promise<void> {
   await inspectSettledChain(options);
 }
@@ -311,6 +380,7 @@ export async function verifySettledAssignment(options: {
 export async function inspectAssignmentFailure(options: {
   directory: string; sourceDigest: string; sessionId: string; sessionFile: string;
   sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind;
+  initialDefects?: readonly AssignmentDefect[]; initialEffect?: string;
 }): Promise<{ proof: AssignmentFailureProof; defects: readonly AssignmentDefect[] } | null> {
   const { directory, sourceDigest, sessionId, sessionFile, sessionRoots, effect } = options;
   const policy = responsePolicy(options.responseKind);
@@ -343,7 +413,8 @@ export async function inspectAssignmentFailure(options: {
     if (ordinal > 0) await inspectSettledChain({ ...options,
       proof: { sourceDigest, ordinal: ordinal - 1, settlementDigest: grant.previous! },
       effect: grant.effectBefore, historical: true });
-    else if (grant.previous !== null || grant.defects.length)
+    else if (grant.previous !== null || digest(grant.defects) !== digest(options.initialDefects ?? []) ||
+        options.initialEffect !== undefined && grant.effectBefore !== options.initialEffect)
       throw new ProtocolIntegrityBlockedError("Initial exhausted invocation has a foreign predecessor");
     try {
       await recheckExhaustedProtocolResponse({ receiptFile: base, sourceDigest: terminal.grant,
@@ -360,6 +431,7 @@ export async function inspectAssignmentFailure(options: {
       proof: { sourceDigest, ordinal, settlementDigest: terminal.settlement } });
     let nonproductive = 0;
     const seen = new Set<string>();
+    if (chain[0]?.grant.defects.length) seen.add(digest({ effect: chain[0].grant.effectBefore, defects: chain[0].grant.defects }));
     let oscillating = false;
     for (let i = 0; i < chain.length; i++) {
       const { grant: original, settled } = chain[i]!;
@@ -394,6 +466,10 @@ type AssignmentRecoveryOptions = {
   responseKind?: AssignmentResponseKind;
   /** Exact prior transcript from a verified, claimed Author Choice. */
   initialTranscriptSha256?: string;
+  /** A caller may seed a previously independently rejected, exact submitted
+   * effect (e.g. native-invalid semantic repair); sourceDigest binds this grant. */
+  initialDefects?: readonly AssignmentDefect[];
+  initialEffect?: string;
   initialPrompt: string;
   authorize: () => Promise<void>;
   effect: () => Promise<string | null>;
@@ -430,7 +506,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await options.authorize();
   const inspectTerminal = async () => inspectAssignmentFailure({ directory, sourceDigest,
-    sessionId: session.sessionId, sessionFile, sessionRoots, responseKind: options.responseKind, effect: await options.effect() });
+    sessionId: session.sessionId, sessionFile, sessionRoots, responseKind: options.responseKind, effect: await options.effect(),
+    initialDefects: options.initialDefects, initialEffect: options.initialEffect });
   const savedTerminal = await inspectTerminal();
   if (savedTerminal) {
     if (savedTerminal.proof.kind === "nonconverging") throw new AssignmentNonconvergenceError();
@@ -441,8 +518,9 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
   }
   let previous: string | null = null;
   let effectBefore: string | null = null;
-  let defects: readonly AssignmentDefect[] = [];
+  let defects: readonly AssignmentDefect[] = options.initialDefects ?? [];
   const seen = new Set<string>();
+  if (options.initialDefects?.length) seen.add(digest({ effect: options.initialEffect, defects: options.initialDefects }));
   let nonproductive = 0;
   let precedingProtocol: { base: string; grantDigest: string; settlement: Settlement } | null = null;
   for (let ordinal = 0; ; ordinal++) {
@@ -471,7 +549,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       if (grant.version !== 1 || grant.ordinal !== ordinal || grant.source !== sourceDigest ||
           grant.sessionId !== session.sessionId || grant.sessionFile !== sessionFile ||
           grant.previous !== previous || (ordinal > 0 && grant.effectBefore !== effectBefore) ||
-          (ordinal === 0 && grant.defects.length !== 0))
+          (ordinal === 0 && (digest(grant.defects) !== digest(options.initialDefects ?? []) ||
+            options.initialEffect !== undefined && grant.effectBefore !== options.initialEffect)))
         throw new ProtocolIntegrityBlockedError("Original assignment grant/source changed");
       // Historical grants are authenticated by the preceding settlement and
       // the exact next transcript prefix. Current corrections are revalidated
@@ -480,6 +559,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       effectBefore = grant.effectBefore;
     } else {
       effectBefore = await options.effect();
+      if (ordinal === 0 && options.initialEffect !== undefined && effectBefore !== options.initialEffect)
+        throw new ProtocolIntegrityBlockedError("Rejected submitted effect changed before initial correction");
       grant = { version: 1, ordinal, source: sourceDigest, sessionId: session.sessionId,
         sessionFile, previous, effectBefore, defects };
       await seal(grantPath, grant);

@@ -30,7 +30,7 @@ import { trustedHead } from "./revision.js";
 import { openSkillSnapshot, pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { resolvePiModel, guardPiBudget } from "./job-pi-policy.js";
+import { resolvePiModel, guardPiBudget, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
@@ -40,11 +40,15 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview, prepareSemanticReview, validateSemanticVerdict, independentReviewResults } from "./semantic-assignment-review.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
-import { usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
+import { usesCheckpointedReviewRounds, usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
 import { foundationDiagnosticReason, postcommitDiagnosticReason, readPostcommitDiagnosis, readSealedPostcommitVerdict, postcommitDiagnosticAdmissionForSource } from "./postcommit-repair-diagnostic.js";
 import { assertReviewCycleSession } from "./review-cycle.js";
 import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError, inspectCompletedProtocolResponse, inspectCompletedProtocolReads } from "./response-contract-recovery.js";
+import { ASSIGNMENT_REPORT, assignmentDraftEffect, nativeRepairMetadataDefects, executeAssignmentRound,
+  verifySettledAssignment, inspectAssignmentFailure, AssignmentNonconvergenceError,
+  type AssignmentDefect, type AssignmentRoundCommand, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { ProtocolExhaustedError } from "./response-contract-recovery.js";
 import type { RecoveryDecision, RecoveryEvidence } from "./generation-recovery-contract.js";
 import { isDeepStrictEqual } from "node:util";
 import { currentSteeringBoundary } from "./steering-boundary.js";
@@ -153,6 +157,13 @@ export interface RepairReceipt {
   sessionBytesBeforeRepair?: number;
   /** Submitted correction attests the completed Pi transcript independently of Git. */
   submittedSessionSha256?: string;
+  /** Exact first rejected native draft inside this semantic Repair receipt.
+   * Further effects use the same immutable assignment-round receipts. */
+  nativeCorrection?: {
+    sourceDigest: string; caseId: string; assignmentKey: string; effect: string; transcriptSha256: string;
+    draftDigest: string; defects: readonly AssignmentDefect[];
+    accepted?: { proof: AssignmentInvocationProof; effect: string };
+  };
   /** Publication fence written before Git changes HEAD; no separate state owner. */
   commitIntent?: RepairCommitIntent;
   phase: RepairPhase;
@@ -445,6 +456,24 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
       JSON.stringify([...state.allowedPaths].sort()) !==
       JSON.stringify([...expectedAmendment.assignment.authority.existingPaths].sort()))
     throw Error("Review repair plan amendment is stale, widened or differs from sealed findings.");
+  if (state.nativeCorrection) {
+    const admission = state.nativeCorrection;
+    if (!HASH.test(admission.caseId) || !HASH.test(admission.assignmentKey) ||
+        admission.sourceDigest !== nativeRepairSource(state, admission, admission))
+      throw new ProtocolIntegrityBlockedError("Native repair receipt lost its original admission");
+    if (admission.accepted) {
+      const published = state.repairedCommitSha;
+      const effect = published
+        ? hash([...(state.paths ?? [])].sort().map(path => [path, hash(gitRaw(job, "show", published + ":" + repoPath(job, path)))]))
+        : admission.accepted.effect;
+      if (effect !== admission.accepted.effect || admission.accepted.proof.sourceDigest !== admission.sourceDigest)
+        throw new ProtocolIntegrityBlockedError("Native repair receipt differs from its verified authored effect");
+      await verifySettledAssignment({ proof: admission.accepted.proof,
+        directory: nativeRepairDirectory(job, state), sessionId: state.origin.sessionId,
+        sessionFile: state.origin.sessionFile, sessionRoots: [dirname(state.origin.sessionFile)],
+        effect, historical: !!published, initialDefects: admission.defects, initialEffect: admission.effect });
+    }
+  }
   if (state.repairedCommitSha) {
     const proof = await readRepairCommitProof(job, "repair-" + sha);
     if (proof.repairPlanDigest && proof.repairPlanDigest !== expectedAmendment.digest)
@@ -798,7 +827,8 @@ export async function finishRejectedRepairDraft(job: JobStartResult, sha: string
 }
 /** Native validation is mandatory; the writer's story_validate output does not
  * stand in for this controller run. Do not discard a failing draft. */
-export async function validateRejectedRepairDraft(job: JobStartResult, sha: string) {
+export async function validateRejectedRepairDraft(job: JobStartResult, sha: string,
+  nativeAdmission?: { caseId: string; assignmentKey: string }) {
   const state = await inspectRejectedRepair(job, sha);
   if (state.phase !== "validating" || await trustedHead(job) !== state.baselineHead ||
       JSON.stringify(changedRepairPaths(job, state)) !== JSON.stringify(state.paths))
@@ -814,7 +844,19 @@ export async function validateRejectedRepairDraft(job: JobStartResult, sha: stri
       report.diagnostics.length || report.protection?.status !== "checked" ||
       report.protection.base !== state.baselineHead ||
       report.protection.changes?.length || report.protection.warnings?.length)
-    throw Error("Native validation/protected-canon gate rejected the repaired draft; preserve its bytes.");
+    {
+      if (!nativeAdmission) throw Error("Native validation/protected-canon gate rejected the repaired draft; preserve its bytes.");
+      const defects = await nativeRepairMetadataDefects(job, state.baselineHead, state.allowedPaths, result,
+        state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined);
+      const effect = await assignmentDraftEffect(job, state.baselineHead);
+      const transcriptSha256 = state.submittedSessionSha256;
+      if (!effect || !transcriptSha256 || hash(await readFile(state.origin.sessionFile)) !== transcriptSha256)
+        throw new ProtocolIntegrityBlockedError("Rejected native repair has no exact submitted effect");
+      const admission = { effect, transcriptSha256, draftDigest: digest, defects };
+      state.nativeCorrection = { ...admission, ...nativeAdmission, sourceDigest: nativeRepairSource(state, nativeAdmission, admission) };
+      await save(job, state);
+      return state;
+    }
   if (state.origin.workItem.startsWith("interactive-choice-")) {
     // Native structure and a prose-focused independent reviewer can both
     // approve a superficially convincing correction that deletes the ONLY
@@ -1327,19 +1369,8 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
   return acceptRejectedRepairCheckpoint(job, sha, point);
 }
 
-/** Production Pi driver. Reopens the original writer transcript; no new agent
- * conversation, reviewer discussion, shell, approval tool or expanded scope. */
-export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
-  // Resolve the pinned skill, model, budget and sandbox before claiming the
-  // one-way Pi turn. A failed preflight must not strand a repair as an
-  // interrupted writer call that never actually began.
-  const state = await inspectRejectedRepair(job, sha);
-  if (state.phase !== "ready" && state.phase !== "prepared")
-    throw Error("No safe original-session repair attempt is ready.");
-  // An uncertain saved claim must be refused BEFORE budget admission, sandbox
-  // provisioning, or a new session. Only the exact pre-dispatch fence permits
-  // continuing an interrupted prepared assignment.
-  if (state.phase === "prepared") await inspectPreparedRepairDispatch(job, sha);
+/** Reopen the exact original scoped writer for either semantic or native repair. */
+async function prepareRepairWriter(job: JobStartResult, state: RepairReceipt) {
   const focus = state.origin.workItem.startsWith("focus:")
     ? state.origin.workItem.slice(6).split(".")[0] : null;
   const skill = state.origin.workItem === "foundation" ? "nt-story-discovery" :
@@ -1356,8 +1387,6 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       ? "nt-worldbuilding" : "nt-character-development";
   if (await openSkillSnapshot(state.origin.snapshot.id) !== state.origin.snapshot.path)
     throw Error("Original specialist's pinned skills changed; preserve the repair receipt.");
-  await guardPiBudget(job, "semantic-repair:" + sha + ":" + (state.attempts + 1),
-    state.origin.sessionFile);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true,
     { discovery: "explicit-only", novelteaSkills: state.origin.snapshot.path,
@@ -1387,20 +1416,40 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
         return tool.execute(...args);
       },
     });
-  const feedback = await prepareRejectedRepairFeedback(job, state);
-  const claimed = state.phase === "ready"
-    ? await claimRejectedRepair(job, sha)
-    : await inspectPreparedRepairDispatch(job, sha);
-  if (claimed.attempts !== state.attempts)
-    throw Error("Repair attempt counter changed before the original Pi session.");
-  const { session } = await createAgentSession({
+  const open = async () => (await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: resolved.model,
     thinkingLevel: resolved.resolution.thinking, resourceLoader: loader, settingsManager,
     sessionManager: SessionManager.open(state.origin.sessionFile,
       dirname(state.origin.sessionFile), project.root),
     customTools: [...scopedTools, createStoryValidateTool(job), createPiStatusTool()],
     noTools: "all", tools: ["read", "edit", "write", "grep", "find", "ls", "story_validate", "report_status"],
-  });
+  })).session;
+  return { open, skill, resolved };
+}
+
+/** Production Pi driver. Reopens the original writer transcript; no new agent
+ * conversation, reviewer discussion, shell, approval tool or expanded scope. */
+export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
+  // Resolve the pinned skill, model, budget and sandbox before claiming the
+  // one-way Pi turn. A failed preflight must not strand a repair as an
+  // interrupted writer call that never actually began.
+  const state = await inspectRejectedRepair(job, sha);
+  if (state.phase !== "ready" && state.phase !== "prepared")
+    throw Error("No safe original-session repair attempt is ready.");
+  // An uncertain saved claim must be refused BEFORE budget admission, sandbox
+  // provisioning, or a new session. Only the exact pre-dispatch fence permits
+  // continuing an interrupted prepared assignment.
+  if (state.phase === "prepared") await inspectPreparedRepairDispatch(job, sha);
+  await guardPiBudget(job, "semantic-repair:" + sha + ":" + (state.attempts + 1),
+    state.origin.sessionFile);
+  const { open, skill, resolved } = await prepareRepairWriter(job, state);
+  const feedback = await prepareRejectedRepairFeedback(job, state);
+  const claimed = state.phase === "ready"
+    ? await claimRejectedRepair(job, sha)
+    : await inspectPreparedRepairDispatch(job, sha);
+  if (claimed.attempts !== state.attempts)
+    throw Error("Repair attempt counter changed before the original Pi session.");
+  const session = await open();
   let reportedOutOfAuthority: string | undefined;
   let reportedDispute: { path: string; line: number; claim: string } | undefined;
   try {
@@ -1795,7 +1844,7 @@ export async function acceptGuidedRepairContinuation(job: JobStartResult,
 /** Existing receipt/effect operations, shared by the remaining unmigrated
  * controller and the checkpointed Foundation child. No scheduling here. */
 async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
-  options: RejectedRepairOptions, foundationChild = false): Promise<RepairCycleOps<RepairReceipt>> {
+  options: RejectedRepairOptions, childWorkItem?: string): Promise<RepairCycleOps<RepairReceipt>> {
   if (!SHA.test(sourceSha)) throw Error("Repair requires one exact reviewed commit.");
   await withStoryJobLock(job, "reconcile-published-repair", async () => {
     await reconcileUnpublishedRepairCommit(job, sourceSha);
@@ -1810,9 +1859,11 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
-  if (!foundationChild && (point.workItem === "foundation" ||
-      point.workItem.startsWith("repair-") && (await readRejectedRepairOrigin(job, point)).workItem === "foundation"))
-    throw Error("Foundation Review correction requires its checkpointed assignment child.");
+  const originWorkItem = point.workItem.startsWith("repair-") ?
+    (await readRejectedRepairOrigin(job, point)).workItem : point.workItem;
+  if (childWorkItem ? childWorkItem !== originWorkItem || !usesCheckpointedReviewRounds(originWorkItem)
+      : usesCheckpointedReviewRounds(originWorkItem))
+    throw Error("Migrated Review correction requires its checkpointed assignment child.");
   if (!options.sharedAssessment && (usesSharedAssignmentReview(point.workItem) ||
       point.workItem.startsWith("repair-") && usesSharedAssignmentReview((await readRejectedRepairOrigin(job, point)).workItem)))
     throw Error("Shared assignment Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
@@ -1917,14 +1968,21 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
   return driveRejectedRepairCycle(await rejectedRepairOperations(job, sourceSha, options));
 }
 
-export type FoundationReviewCommand =
+export type ReviewRoundCommand =
   | { phase: "admit"; sourceSha: string }
   | { phase: "correct"; sourceSha: string; grantDigest: string }
-  | { phase: "verify"; sourceSha: string; successorSha: string };
+  | { phase: "verify"; sourceSha: string; successorSha: string }
+  | { phase: "native-invoke"; sourceSha: string; grantDigest: string }
+  | { phase: "native-verify"; sourceSha: string; proof: AssignmentInvocationProof }
+  | { phase: "native-correct"; sourceSha: string; proof: AssignmentInvocationProof; grantDigest: string };
 
-export type FoundationReviewRound =
+export type ReviewRoundResult =
   | { status: "admitted"; sourceSha: string; grantDigest: string }
   | { status: "committed"; sourceSha: string; successorSha: string }
+  | { status: "native-rejected"; sourceSha: string; grantDigest: string }
+  | { status: "native-settled"; sourceSha: string; proof: AssignmentInvocationProof }
+  | { status: "native-correction"; sourceSha: string; proof: AssignmentInvocationProof; grantDigest: string }
+  | { status: "native-terminal"; sourceSha: string; ref: string; disposition: "protocol-exhausted" | "nonconverging" }
   | { status: "passed" | "failed"; sourceSha: string; successorSha: string }
   | { status: "assess"; sourceSha: string; assessment: ReviewAssessment }
   | { status: "paused"; sourceSha: string; reason: "author-choice" | "author-pause" | "budget" | "provider-unavailable"; ref: string }
@@ -1933,7 +1991,7 @@ export type FoundationReviewRound =
 /** A grant is the existing source-bound repair admission, not a new ledger.
  * Mutable execution phase, attempts, and reviewer transcript suffixes do not
  * change its identity. Author revisions do change it. */
-function foundationRepairGrant(state: RepairReceipt, caseId: string, assignmentKey: string) {
+function reviewRoundGrant(state: RepairReceipt, caseId: string, assignmentKey: string) {
   return hash({ caseId, assignmentKey, root: state.rootFailureSha, source: state.sourceCommitSha,
     review: state.sourceReviewDigest, originalReview: state.originalReviewDigest,
     originalSource: state.originalSource, plan: state.planAmendment.digest,
@@ -1943,19 +2001,148 @@ function foundationRepairGrant(state: RepairReceipt, caseId: string, assignmentK
       thinking: state.reviewer.thinking, originalFile: state.reviewer.sessionFiles[0] } });
 }
 
+type NativeRepairAdmission = NonNullable<RepairReceipt["nativeCorrection"]>;
+function nativeRepairSource(state: RepairReceipt, authority: { caseId: string; assignmentKey: string },
+  admission: Omit<NativeRepairAdmission, "sourceDigest" | "accepted" | "caseId" | "assignmentKey">) {
+  return hash({ repair: reviewRoundGrant(state, authority.caseId, authority.assignmentKey),
+    effect: admission.effect, transcript: admission.transcriptSha256,
+    draft: admission.draftDigest, defects: admission.defects });
+}
+const nativeRepairDirectory = (job: JobStartResult, state: RepairReceipt) =>
+  join(job.stateDir, "review-repairs", "native-rounds", state.sourceCommitSha);
+
+async function runNativeRepairRound(job: JobStartResult, state: RepairReceipt,
+  authority: { caseId: string; assignmentKey: string }, command: AssignmentRoundCommand) {
+  const admission = state.nativeCorrection;
+  if (!admission || admission.sourceDigest !== nativeRepairSource(state, authority, admission))
+    throw new ProtocolIntegrityBlockedError("Native repair lost its original rejected source");
+  const directory = nativeRepairDirectory(job, state);
+  const sessionFile = state.origin.sessionFile;
+  const sessionRoots = [dirname(sessionFile)];
+  const effect = async () => {
+    const paths = changedRepairPaths(job, state);
+    if (!paths.length) throw new ProtocolIntegrityBlockedError("Native repair removed the submitted correction");
+    return assignmentDraftEffect(job, state.baselineHead);
+  };
+  if (state.phase !== "validating")
+    throw new ProtocolIntegrityBlockedError("Native repair is not awaiting validation");
+  const authorize = async () => {
+    const current = await inspectRejectedRepair(job, state.sourceCommitSha);
+    if (current.phase !== "validating" || !isDeepStrictEqual(current.nativeCorrection, admission) ||
+        reviewRoundGrant(current, authority.caseId, authority.assignmentKey) !==
+          reviewRoundGrant(state, authority.caseId, authority.assignmentKey) ||
+        await trustedHead(job) !== state.baselineHead)
+      throw new ProtocolIntegrityBlockedError("Original native repair authority changed");
+    await effect();
+  };
+  const verifyNative = async () => {
+    const result = await validateStoryJob(job, undefined, { ...job, baseSha: state.baselineHead });
+    if (result.status === "rejected") return nativeRepairMetadataDefects(job, state.baselineHead, state.allowedPaths, result,
+      state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined);
+    if (result.status !== "passed") throw new ProtocolIntegrityBlockedError("Native repair validation is unavailable");
+    return [];
+  };
+  await authorize();
+  if (!existsSync(join(directory, "0.started.json"))) {
+    if (await effect() !== admission.effect ||
+        hash(await readFile(sessionFile)) !== admission.transcriptSha256 ||
+        !isDeepStrictEqual(await verifyNative(), admission.defects))
+      throw new ProtocolIntegrityBlockedError("Native repair diagnostic admission no longer matches its original draft");
+  }
+  const { open, resolved } = await prepareRepairWriter(job, state);
+  const session = await open();
+  try {
+    if (session.sessionId !== state.origin.sessionId || session.sessionManager.getSessionFile() !== sessionFile ||
+        resolved.resolution.thinking && session.thinkingLevel !== resolved.resolution.thinking)
+      throw new ProtocolIntegrityBlockedError("Native repair opened a foreign writer session");
+    const result = await executeAssignmentRound({
+      session, directory, sourceDigest: admission.sourceDigest, sessionRoots,
+      initialTranscriptSha256: admission.transcriptSha256, initialDefects: admission.defects,
+      initialEffect: admission.effect, authorize, effect,
+      initialPrompt: "SOURCE-BOUND STORY CORRECTION. Correct only these native diagnostics in the original semantic repair draft, preserve protected decisions and prior Review requirements: " +
+        JSON.stringify(admission.defects) + ". Run story_validate. " + ASSIGNMENT_REPORT,
+      verify: async manifest => {
+        if (!isDeepStrictEqual([...manifest.modifiedRecords as string[]].sort(), changedRepairPaths(job, state)) ||
+            (manifest.architecturalConflicts as string[]).length)
+          throw new ProtocolIntegrityBlockedError("Native repair report differs from its exact owned draft");
+        return verifyNative();
+      },
+      beforeTurn: async () => {
+        const { readJobControl } = await import("./job-control.js");
+        const control = await readJobControl(job);
+        if (control !== "running") {
+          const error = Error("Author control precedes native repair");
+          error.name = control === "cancelled" ? "StoryCancelledError" : "AssignmentAuthorPauseError";
+          throw error;
+        }
+        await guardPiBudget(job, "semantic-repair-native:" + state.sourceCommitSha, sessionFile);
+      },
+      prompt: async text => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, text);
+        await recordPiSession(job, sessionFile);
+      },
+    }, command);
+    if (result.status === "accepted") {
+      const acceptedEffect = await effect();
+      if (!acceptedEffect) throw new ProtocolIntegrityBlockedError("Native correction has no owned effect");
+      state.paths = changedRepairPaths(job, state);
+      state.draftDigest = hash(state.paths.map(path =>
+        ({ path, diff: git(job, "diff", "--binary", "--", repoPath(job, path)) })));
+      state.submittedSessionSha256 = hash(await readFile(sessionFile));
+      state.nativeCorrection = { ...admission, accepted: { proof: result.proof, effect: acceptedEffect } };
+      await save(job, state);
+    }
+    return result;
+  } finally { session.dispose(); }
+}
+
+/** Reauthenticate a terminal native subround of the original Review case.
+ * No new failure owner, retry allowance or writer is admitted here. */
+export async function inspectNativeReviewFailure(job: JobStartResult, root: string, caseId: string) {
+  let sha = root;
+  const seen = new Set<string>();
+  while (existsSync(pathFor(job, sha))) {
+    if (seen.has(sha)) throw Error("Cyclic Review repair source lineage");
+    seen.add(sha);
+    const state = await inspectRejectedRepair(job, sha);
+    if (state.rootFailureSha !== root || !usesCheckpointedReviewRounds(state.origin.workItem))
+      return null;
+    if (state.phase === "failed" && state.repairedCommitSha) {
+      sha = state.repairedCommitSha;
+      continue;
+    }
+    const admission = state.nativeCorrection;
+    if (!admission || admission.accepted || !existsSync(join(nativeRepairDirectory(job, state), "terminal.json"))) return null;
+    if (state.phase !== "validating" || admission.caseId !== caseId || !HASH.test(admission.assignmentKey) ||
+        admission.sourceDigest !== nativeRepairSource(state, admission, admission) ||
+        !await authenticateFoundationReviewHead(job, root) || await trustedHead(job) !== state.baselineHead ||
+        !changedRepairPaths(job, state).length)
+      throw new ProtocolIntegrityBlockedError("Original Review native terminal lost its authority");
+    const directory = nativeRepairDirectory(job, state);
+    const terminal = await inspectAssignmentFailure({ directory, sourceDigest: admission.sourceDigest,
+      sessionId: state.origin.sessionId, sessionFile: state.origin.sessionFile,
+      sessionRoots: [dirname(state.origin.sessionFile)], effect: await assignmentDraftEffect(job, state.baselineHead),
+      initialDefects: admission.defects, initialEffect: admission.effect });
+    if (!terminal) throw new ProtocolIntegrityBlockedError("Original Review native terminal is missing");
+    return { ...terminal, ref: "review-repairs/native-rounds/" + sha + "/terminal.json" };
+  }
+  return null;
+}
+
 /** Compare the immutable negative checkpoint to the original reviewer
  * transcript. Historical successor packets cannot be regenerated from a
  * now-terminal repair phase; attest the sealed packet and exact findings. */
-async function attestFoundationNegative(job: JobStartResult, state: RepairReceipt, point: RecoveryCheckpoint) {
+async function attestNegativeReviewRound(job: JobStartResult, state: RepairReceipt, point: RecoveryCheckpoint) {
   if (!point.assurance || !state.reviewer)
-    throw new ProtocolIntegrityBlockedError("Foundation repair has no independent reviewer evidence");
+    throw new ProtocolIntegrityBlockedError("Repair has no independent reviewer evidence");
   const cycle = await inspectPostcommitReviewCycle(job, state.rootFailureSha, point.assurance.assignmentDigest);
   const round = cycle?.rounds.find(r => r.commitSha === point.commitSha);
   if (!cycle || !round || cycle.turnDigest !== state.originalSource.turnDigest ||
       !state.reviewer.sessionFiles.includes(cycle.reviewer.file) ||
       cycle.provider !== state.reviewer.provider || cycle.model !== state.reviewer.model ||
       cycle.snapshot.id !== state.reviewer.snapshot.id)
-    throw new ProtocolIntegrityBlockedError("Foundation negative verdict has no original reviewer round");
+    throw new ProtocolIntegrityBlockedError("Negative verdict has no original reviewer round");
   assertReviewCycleSession({ id: state.origin.sessionId, file: state.origin.sessionFile }, cycle.reviewer);
   const verdict = await readSealedPostcommitVerdict(cycle, round);
   const review = await readVerifiedFailure(job, point);
@@ -1969,46 +2156,47 @@ async function attestFoundationNegative(job: JobStartResult, state: RepairReceip
       evidence.sourceDigest !== round.packetDigest || !isDeepStrictEqual(findings, review.findings) ||
       !isDeepStrictEqual(evidence.evidence, verdict.evidence.filter(e =>
         e.commitSha === point.commitSha && e.assignmentId === point.assurance!.assignmentId)))
-    throw new ProtocolIntegrityBlockedError("Foundation negative verdict differs from its sealed reviewer response");
+    throw new ProtocolIntegrityBlockedError("Negative verdict differs from its sealed reviewer response");
 }
 
 /** One original Foundation repair round. Admission, writer+native publication,
  * and rereview are separate child transitions. Reentry can authenticate the
  * same settled effects, but cannot schedule another substantive round here. */
-export async function executeFoundationReviewRound(job: JobStartResult,
-  authority: { rootSha: string; caseId: string; assignmentKey: string },
-  command: FoundationReviewCommand, options: RejectedRepairOptions): Promise<FoundationReviewRound> {
+export async function executeReviewRound(job: JobStartResult,
+  authority: { rootSha: string; caseId: string; assignmentKey: string; workItem: string },
+  command: ReviewRoundCommand, options: RejectedRepairOptions): Promise<ReviewRoundResult> {
   const { sourceSha } = command;
-  const { rootSha, caseId, assignmentKey } = authority;
-  if (!SHA.test(sourceSha) || !SHA.test(rootSha) || !caseId || !HASH.test(assignmentKey))
-    throw new ProtocolIntegrityBlockedError("Missing original Foundation Review admission");
-  const ops = await rejectedRepairOperations(job, sourceSha, { ...options, sharedAssessment: true }, true);
+  const { rootSha, caseId, assignmentKey, workItem } = authority;
+  if (!SHA.test(sourceSha) || !SHA.test(rootSha) || !caseId || !HASH.test(assignmentKey) ||
+      !usesCheckpointedReviewRounds(workItem))
+    throw new ProtocolIntegrityBlockedError("Missing original Review admission");
   const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === sourceSha);
   // Never create a repair receipt for a foreign checkpoint, even on replay.
   if (!point || (sourceSha === rootSha
-      ? point.workItem !== "foundation"
+      ? point.workItem !== workItem
       : !point.workItem.startsWith("repair-")))
-    throw new ProtocolIntegrityBlockedError("Foreign Foundation repair source");
+    throw new ProtocolIntegrityBlockedError("Foreign repair source");
   if (sourceSha !== rootSha) {
     const previous = await inspectRejectedRepair(job, point.workItem.slice(7));
-    if (previous.rootFailureSha !== rootSha || previous.origin.workItem !== "foundation" ||
+    if (previous.rootFailureSha !== rootSha || previous.origin.workItem !== workItem ||
         previous.repairedCommitSha !== sourceSha || previous.phase !== "failed")
-      throw new ProtocolIntegrityBlockedError("Foundation repair successor lacks its rejected predecessor");
+      throw new ProtocolIntegrityBlockedError("Repair successor lacks its rejected predecessor");
   }
+  const ops = await rejectedRepairOperations(job, sourceSha, { ...options, sharedAssessment: true }, workItem);
   let state = command.phase === "admit" ? await ops.begin() : await ops.inspect(sourceSha);
   const authenticate = () => {
-    if (state.rootFailureSha !== rootSha || state.origin.workItem !== "foundation" ||
+    if (state.rootFailureSha !== rootSha || state.origin.workItem !== workItem ||
         state.sourceCommitSha !== sourceSha || !state.reviewer)
-      throw new ProtocolIntegrityBlockedError("Foundation repair lost its original assignment or reviewer");
+      throw new ProtocolIntegrityBlockedError("Repair lost its original assignment or reviewer");
   };
   authenticate();
-  const control = async (): Promise<FoundationReviewRound | null> => {
+  const control = async (): Promise<ReviewRoundResult | null> => {
     const { readJobControl } = await import("./job-control.js");
     const status = await readJobControl(job);
     return status === "cancelled" ? { status: "cancelled", sourceSha, ref: "job-control" } :
       status === "paused" ? { status: "paused", sourceSha, reason: "author-pause", ref: "job-control" } : null;
   };
-  const boundary = async (): Promise<FoundationReviewRound | null> => {
+  const boundary = async (): Promise<ReviewRoundResult | null> => {
     const assessment = await foundationReviewBoundary(job, state);
     if (assessment) return { status: "assess", sourceSha, assessment };
     if (state.phase === "awaiting-author")
@@ -2023,31 +2211,87 @@ export async function executeFoundationReviewRound(job: JobStartResult,
     const stop = await boundary();
     if (stop) return stop;
     if (state.phase === "ready" || state.phase === "prepared")
-      await attestFoundationNegative(job, state, point);
-    return { status: "admitted", sourceSha, grantDigest: foundationRepairGrant(state, caseId, assignmentKey) };
+      await attestNegativeReviewRound(job, state, point);
+    return { status: "admitted", sourceSha, grantDigest: reviewRoundGrant(state, caseId, assignmentKey) };
+  }
+  if (command.phase === "native-invoke" || command.phase === "native-verify" || command.phase === "native-correct") {
+    const admission = state.nativeCorrection;
+    if (!admission || admission.sourceDigest !== nativeRepairSource(state, authority, admission) ||
+        command.phase === "native-invoke" && command.grantDigest !== admission.sourceDigest)
+      throw new ProtocolIntegrityBlockedError("Native repair command has no authenticated original admission");
+    // A committed or validated native result is replayed only from the exact
+    // accepted invocation and immutable existing repair publication receipt.
+    if (admission.accepted) {
+      if (command.phase === "native-verify" &&
+          !isDeepStrictEqual(command.proof, admission.accepted.proof))
+        throw new ProtocolIntegrityBlockedError("Native repair verification lost its accepted receipt");
+      if (command.phase === "native-correct") {
+        const accepted = admission.accepted.proof;
+        const grant = JSON.parse(await readFile(join(nativeRepairDirectory(job, state),
+          String(accepted.ordinal) + ".grant.json"), "utf8"));
+        if (command.proof.sourceDigest !== admission.sourceDigest ||
+            command.proof.ordinal + 1 !== accepted.ordinal ||
+            command.proof.settlementDigest !== grant.previous || hash(grant) !== command.grantDigest)
+          throw new ProtocolIntegrityBlockedError("Native repair replay has a foreign corrective grant");
+      }
+      await verifySettledAssignment({ proof: admission.accepted.proof,
+        directory: nativeRepairDirectory(job, state), sessionId: state.origin.sessionId,
+        sessionFile: state.origin.sessionFile, sessionRoots: [dirname(state.origin.sessionFile)],
+        effect: admission.accepted.effect, historical: !!state.repairedCommitSha,
+        initialDefects: admission.defects, initialEffect: admission.effect });
+    } else {
+      const round: AssignmentRoundCommand = command.phase === "native-invoke" ? { phase: "invoke" } :
+        command.phase === "native-verify" ? { phase: "verify", proof: command.proof } :
+          { phase: "correct", proof: command.proof, grantDigest: command.grantDigest };
+      try {
+        const result = await withStoryJobLock(job, "rejected-review-native-round", () =>
+          runNativeRepairRound(job, state, authority, round));
+        if (result.status === "settled") return { status: "native-settled", sourceSha, proof: result.proof };
+        if (result.status === "correction") return { status: "native-correction", sourceSha,
+          proof: result.proof, grantDigest: result.grantDigest };
+        state = await ops.inspect(sourceSha);
+      } catch (error) {
+        if (!(error instanceof AssignmentNonconvergenceError || error instanceof ProtocolExhaustedError)) throw error;
+        const terminal = await inspectAssignmentFailure({ directory: nativeRepairDirectory(job, state),
+          sourceDigest: admission.sourceDigest, sessionId: state.origin.sessionId, sessionFile: state.origin.sessionFile,
+          sessionRoots: [dirname(state.origin.sessionFile)], effect: await assignmentDraftEffect(job, state.baselineHead),
+          initialDefects: admission.defects, initialEffect: admission.effect });
+        if (!terminal) throw error;
+        return { status: "native-terminal", sourceSha, ref: terminal.proof.receiptDigest, disposition: terminal.proof.kind };
+      }
+    }
+    if (state.phase === "validating") state = await ops.validate(sourceSha);
+    if (state.phase === "awaiting-checkpoint") state = await ops.commit(sourceSha);
+    if (!state.repairedCommitSha || !["reviewing", "passed", "failed"].includes(state.phase))
+      throw new ProtocolIntegrityBlockedError("Native repair lacks its verified successor");
+    return { status: "committed", sourceSha, successorSha: state.repairedCommitSha };
   }
   if (command.phase === "correct") {
-    if (command.grantDigest !== foundationRepairGrant(state, caseId, assignmentKey))
-      throw new ProtocolIntegrityBlockedError("Foundation corrective grant differs from its checkpointed admission");
+    if (command.grantDigest !== reviewRoundGrant(state, caseId, assignmentKey))
+      throw new ProtocolIntegrityBlockedError("Review corrective grant differs from its checkpointed admission");
     const stop = await boundary();
     if (stop) return stop;
     if (state.phase === "ready" || state.phase === "prepared") {
-      await attestFoundationNegative(job, state, point);
+      await attestNegativeReviewRound(job, state, point);
       state = await ops.correct(sourceSha);
       authenticate();
       const stop = await boundary();
       if (stop) return stop;
     }
     // No loop, no next writer, and no reviewer invocation in this transition.
-    if (state.phase === "validating") state = await ops.validate(sourceSha);
+    if (state.phase === "validating" && !state.nativeCorrection)
+      state = await withStoryJobLock(job, "rejected-review-validation", () =>
+        validateRejectedRepairDraft(job, sourceSha, authority));
+    if (state.phase === "validating" && state.nativeCorrection)
+      return { status: "native-rejected", sourceSha, grantDigest: state.nativeCorrection.sourceDigest };
     if (state.phase === "awaiting-checkpoint") state = await ops.commit(sourceSha);
     if (!state.repairedCommitSha || !["reviewing", "passed", "failed"].includes(state.phase))
-      throw new ProtocolIntegrityBlockedError("Foundation writer did not settle a native-verified commit");
+      throw new ProtocolIntegrityBlockedError("Repair writer did not settle a native-verified commit");
     return { status: "committed", sourceSha, successorSha: state.repairedCommitSha };
   }
   if (state.repairedCommitSha !== command.successorSha ||
       !["reviewing", "passed", "failed"].includes(state.phase))
-    throw new ProtocolIntegrityBlockedError("Foundation rereview differs from its checkpointed native successor");
+    throw new ProtocolIntegrityBlockedError("Repair rereview differs from its checkpointed native successor");
   if (state.phase === "reviewing") {
     if (await ops.reviewStatus(state) === "required-pending") await ops.rereview(state);
     const stop = await boundary();
@@ -2057,6 +2301,6 @@ export async function executeFoundationReviewRound(job: JobStartResult,
   if (state.phase === "failed" && await ops.shouldYieldForSteering?.(state))
     return { status: "steering", sourceSha, ref: state.sourceReviewDigest };
   if (state.phase !== "passed" && state.phase !== "failed")
-    throw new ProtocolIntegrityBlockedError("Foundation rereview has no sealed disposition");
+    throw new ProtocolIntegrityBlockedError("Repair rereview has no sealed disposition");
   return { status: state.phase, sourceSha, successorSha: command.successorSha };
 }
