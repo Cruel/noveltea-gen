@@ -97,7 +97,7 @@ interface FoundationsReceipt {
 export interface EventOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean;
-  provider?: string; model?: string; task?: string;
+  provider?: string; model?: string; task?: string; turnPlanDigest?: string;
   /** Internal controller-only reassignment, never a model-provided grant. */
   reroute?: { reportDigest: string; sourceSha: string; task: string };
   round?: { assignmentKey: string; command: AssignmentRoundCommand };
@@ -991,7 +991,8 @@ export async function runEventWorkItem(input: EventOptions) {
       const assign = selectedAssignment(job, arch.plan!, source, receipt.milestoneId, receipt.workItemId);
       const task = receipt.blueprintTask ?? "";
       const local = await ensureMilestoneBlueprint(job, arch.plan!, assign, receipt.snapshot!,
-        receipt.provider, receipt.model, task, receipt.expectedHead, receipt.worker === "fixture");
+        receipt.provider, receipt.model, task, receipt.expectedHead, receipt.worker === "fixture",
+        undefined, receipt.assignmentKey, input.turnPlanDigest);
       receipt.blueprintPin = local.pin;
       receipt.blueprintTask = task;
       await persist(receiptFile, receipt);

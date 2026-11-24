@@ -184,7 +184,8 @@ function assertAssignmentOutcome(identity: LifecycleIdentity, outcome: Assignmen
     throw Error("Assignment outcome has no valid typed evidence/commit reference.");
 }
 
-export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = AssignmentIdentity>(adapter: AssignmentAdapter<I>) {
+export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = AssignmentIdentity>(adapter: AssignmentAdapter<I>,
+  checkpointer: true | false = true) {
   return new StateGraph(lifecycleChannels<I>())
     .addNode("preflight", async (state, config) => {
       const key = logicalAssignmentKey(state.identity);
@@ -318,7 +319,7 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       state => state.authorResumePhase === "writer" ? "invoke_original" :
         state.authorResumePhase === "review" ? "verify_original" : "correct_original",
       ["invoke_original", "verify_original", "correct_original"])
-    .compile({ checkpointer: true });
+    .compile({ checkpointer });
 }
 
 /** A returned child already reached END. Re-enter the same logical assignment

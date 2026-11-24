@@ -84,7 +84,7 @@ const reviewed: Record<string, string> = {
   "src/interactive-specialist.ts:authorInteractive": "3:ead2ac03e9f617577a3f416d",
   "src/milestone-blueprint.ts:runMilestoneDiagnosis": "2:8721be40a6fc38955324cbd2",
   "src/milestone-blueprint.ts:sessionFor": "1:38a7ae9f654dd9891686776c",
-  "src/milestone-blueprint.ts:ensureMilestoneBlueprint": "4:46b84c88767dabb9a7ea940f",
+  "src/milestone-blueprint.ts:ensureMilestoneBlueprint": "4:64126f2d4aa21e086a0364a1",
   "src/narrative-review-specialist.ts:sessionFor": "1:5766e269693eafad4bf26752",
   "src/narrative-review-specialist.ts:reviewNarrative": "3:7520c967cbb41f7d7155bbd2",
   "src/narrative-review-specialist.ts:reviewPostcommitDiagnosis": "3:ac31c10351cf7fa8109358b5",

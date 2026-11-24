@@ -213,7 +213,7 @@ function dockerReady() {
     return false;
   }
 }
-const available = dockerReady() && existsSync(resolve("../noveltea-skills/skills/nt-event-design/SKILL.md"));
+const available = dockerReady() && existsSync(resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills", "skills/nt-event-design/SKILL.md"));
 
 test(
   "real sandboxed Event graph corrects malformed Pi report in the original session without replaying edits",
@@ -222,7 +222,7 @@ test(
     timeout: 720_000,
   },
   async () => {
-    const source = resolve("../noveltea-skills");
+    const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
     const temp = mkdtempSync(join(tmpdir(), "nt-event-protocol-graph-"));
     const originalEnv = Object.fromEntries(
       [

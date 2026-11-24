@@ -304,7 +304,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["focused-work.ts", "inspectPendingFocusedInvocation", "a03f63a1f63ef2dfe4993614c5ff5a6a9fa472fb90ea3eeb37b5f90749a6e384"],
     ["focused-work.ts", "inspectFocusedFailure", "82e7bfdf27dcb67bdba4dc62796c4d04edb2f3d3e76ab4f8479b7493fee17f54"],
     ["focused-work.ts", "runFocusedWorkItem", "735741390228b5631f7e66fb27675d1e139744323cf9bdfbc75ecf1fad3d3957"],
-    ["event-work.ts", "runEventWorkItem", "6f6e2a63a01503e82706c11b9c1d6f6b24a323abd51049422d7f976363dcf50c"],
+    ["event-work.ts", "runEventWorkItem", "79a4b4bbdbc40db37b9b2ee069eccd64c509966209ec8b331093d2e036b36023"],
     ["event-work.ts", "eventInvocationSource", "bb2d3f242c24494b33da772668c8764d92084256b5822f75b0123bb298ac9b47"],
     ["dependency-work.ts", "supportingBoundary", "fad02bcf68074d368135eb54027b6dc7009185e49fbaccbe98469e26e936ea8e"],
     ["dependency-work.ts", "supportingWriterRounds", "bcc599e80409ec613505db5f65364782e8164a78d6d8f4d2f9ec21f2b6553f1c"],

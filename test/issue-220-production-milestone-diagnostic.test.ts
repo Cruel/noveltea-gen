@@ -10,6 +10,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream, type AssistantMessage,
@@ -389,14 +391,73 @@ The guard finds a dated register, but no evidence of a prior visit.
     const runtime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
     runtime.registerNativeProvider(scripted(calls));
     await runtime.refresh({ allowNetwork: false });
-    const run = () => withJobModelRuntime(runtime, () =>
-      withStoryJobLock(job, "event-sample", () =>
-        ensureMilestoneBlueprint(job, plan, assignment, snapshot,
-          model.provider, model.id, task, head, false)));
+    // Run the real sandbox-backed Blueprint adapter inside a persistent
+    // parent node, as Event admission does. Discard the first child
+    // checkpoint after a settled writer and after a negative Review.
+    const dbPath = join(job.stateDir, "blueprint-assignment.sqlite");
+    const graphConfig = { configurable: { thread_id: job.threadId + ":blueprint-test" },
+      recursionLimit: 10000, durability: "sync" as const };
+    const channels = Annotation.Root({ result: Annotation<unknown>() });
+    let started = false;
+    let saver = SqliteSaver.fromConnString(dbPath);
+    const graph = () => new StateGraph(channels)
+      .addNode("event_admission", async () => ({
+        result: await ensureMilestoneBlueprint(job, plan, assignment, snapshot,
+          model.provider, model.id, task, head, false),
+      }))
+      .addEdge(START, "event_admission")
+      .addEdge("event_admission", END)
+      .compile({ checkpointer: saver });
+    let parent = graph();
+    const run = async (signal?: AbortSignal) => {
+      try {
+        return await withJobModelRuntime(runtime, () =>
+          withStoryJobLock(job, "event-sample", () =>
+            parent.invoke(started ? null : { result: null }, { ...graphConfig, signal })));
+      } finally { started = true; }
+    };
+    const restart = () => {
+      saver.db.close();
+      saver = SqliteSaver.fromConnString(dbPath);
+      parent = graph();
+    };
     await configurePiPolicy(job, {
       version: 1, profile: { provider: model.provider, model: model.id },
       limits: { modelCalls: 12 },
     });
+    for (const boundary of ["draft", "negative-review"] as const) {
+      const abort = new AbortController();
+      const originalPut = saver.put.bind(saver);
+      const originalWrites = saver.putWrites.bind(saver);
+      let lost = false;
+      const failure = Error("Injected Blueprint checkpoint loss: " + boundary);
+      saver.put = async (...args) => {
+        if (lost) throw failure;
+        return originalPut(...args);
+      };
+      saver.putWrites = async (cfg, writes, taskId) => {
+        if (lost) throw failure;
+        const child = cfg.configurable?.checkpoint_ns?.includes("assignment-");
+        const submission = writes.find(([key]) => key === "submission")?.[1] as
+          { status?: string; receiptRef?: string } | undefined;
+        if (child && (boundary === "draft"
+          ? submission?.status === "milestone-blueprint-draft" && submission.receiptRef?.startsWith("0:")
+          : writes.some(([key, value]) => key === "correction" && value))) {
+          lost = true;
+          abort.abort(failure);
+          throw failure;
+        }
+        return originalWrites(cfg, writes, taskId);
+      };
+      await assert.rejects(run(abort.signal), (error: unknown) => { if (!lost) throw error; return true; });
+      assert.ok(lost, "Must discard actual Blueprint checkpoint at " + boundary);
+      const record = JSON.parse(readFileSync(join(job.stateDir, "milestone-blueprints", "sample.json"), "utf8"));
+      assert.equal(record.phase, boundary === "draft" ? "draft" : "revision");
+      assert.equal(record.rounds.length, boundary === "draft" ? 0 : 1);
+      assert.equal(calls.length, boundary === "draft" ? 2 : 4,
+        "Only the exact writer and reviewer may settle before the injected loss");
+      restart();
+    }
     await assert.rejects(run(), (error: unknown) =>
       error instanceof PiBudgetPause && error.reason === "modelCalls");
     const waiting = await inspectMilestoneBlueprint(job, milestoneId);
@@ -438,6 +499,7 @@ The guard finds a dated register, but no evidence of a prior visit.
     const count = calls.length;
     await assert.rejects(run(), /escalation/);
     assert.equal(calls.length, count, "stopped review never dispatches more Pi work");
+    saver.db.close();
     assert.equal(git("status", "--porcelain"), "", "canonical source repo stays unchanged");
     assert.equal(execFileSync("git", ["status", "--porcelain"],
       { cwd: job.worktreeRoot, encoding: "utf8" }).trim(), "",

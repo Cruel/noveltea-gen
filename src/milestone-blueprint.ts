@@ -5,6 +5,9 @@ import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
+import { getConfig } from "@langchain/langgraph";
+import { createAssignmentLifecycleGraph, assignmentChildConfig, logicalAssignmentKey,
+  type AssignmentIdentity, type AssignmentSubmission, type AssignmentOutcome } from "./generation-assignment-lifecycle.js";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
@@ -348,6 +351,7 @@ interface Receipt {
   reviewStart?: number;
   reviewStarts?: number[];
   stopReason?: string;
+  assignmentKey?: string;
 }
 export interface MilestoneBlueprintPin {
   milestoneId: string; sourceSha: string; digest: string; cycleId: string;
@@ -1236,6 +1240,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   task: string, head: string, fixture: boolean,
   correction?: { candidate: MilestoneBlueprint; supersedes: Supersession; sources: string[];
     exactPatch: boolean; accepts: (draft: MilestoneBlueprint) => boolean },
+  parentAssignmentKey?: string, parentTurnDigest?: string,
 ): Promise<{ blueprint: MilestoneBlueprint; pin: MilestoneBlueprintPin }> {
   if (!MILESTONE.test(assignment.milestoneId) || !plan.items.some(i =>
       i.id === "global-architecture" && i.status === "verified" &&
@@ -1246,160 +1251,227 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     throw Error("Milestone planning requires a clean, current verified canonical source.");
   const binding = await lineage(job, plan, assignment, snapshot,
     fixture ? "fixture" : provider, fixture ? "fixture" : model, task, head);
+  const config = getConfig();
+  const checkpointed = !!config?.configurable?.__pregel_checkpointer;
+  if ((parentAssignmentKey && !HASH.test(parentAssignmentKey)) ||
+      (parentTurnDigest && (!HASH.test(parentTurnDigest) || !parentAssignmentKey || !checkpointed)))
+    throw Error("Milestone Blueprint lacks its checkpointed parent assignment.");
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+    graphThreadId: checkpointed ? String(config!.configurable!.thread_id) : job.threadId,
+    turnDigest: correction?.supersedes.turnDigest ?? parentTurnDigest ?? null,
+    assignmentId: "milestone-blueprint:" + assignment.milestoneId,
+    planVersion: plan.version, sourceHeadSha: head,
+    scopeDigest: sha({ binding, parentAssignmentKey: parentAssignmentKey ?? null,
+      supersedes: correction?.supersedes ?? null }),
+  };
+  const key = logicalAssignmentKey(identity);
   const file = fileFor(job, assignment.milestoneId);
-  let receipt = await load(job, assignment.milestoneId);
-  if (receipt) {
-    validateReceiptShape(receipt, assignment.milestoneId);
-    assertLineage(receipt.lineage, binding);
-    if (JSON.stringify(receipt.supersedes) !== JSON.stringify(correction?.supersedes))
+  let loaded = await load(job, assignment.milestoneId);
+  if (loaded) {
+    validateReceiptShape(loaded, assignment.milestoneId);
+    assertLineage(loaded.lineage, binding);
+    if (JSON.stringify(loaded.supersedes) !== JSON.stringify(correction?.supersedes))
       throw Error("Blueprint replacement belongs to a different correction grant.");
-    assertRounds(receipt, assignment);
-    await assertDiagnostics(job, receipt);
-    if (receipt.phase === "approved") {
-      const pin = pinOf(receipt);
-      return { blueprint: await readReviewedMilestoneBlueprint(job, pin, assignment), pin };
+    assertRounds(loaded, assignment);
+    await assertDiagnostics(job, loaded);
+    if (loaded.phase === "approved") {
+      if (loaded.assignmentKey !== key) throw Error("Approved Milestone Blueprint belongs to another assignment.");
+      const pin = pinOf(loaded);
+      return { blueprint: await readReviewedMilestoneBlueprint(job, pin, assignment, binding), pin };
     }
-    if (receipt.phase === "planning" || receipt.phase === "reviewing")
+    if (loaded.phase === "planning" || loaded.phase === "reviewing")
       throw Error("Interrupted Milestone Blueprint Pi session; inspect original transcripts before recovery.");
-    if (receipt.phase === "diagnosing") {
-      const recovered = await readSealedDiagnosis(job, receipt, receipt.rounds.length - 1);
+    if (loaded.phase === "diagnosing") {
+      const recovered = await readSealedDiagnosis(job, loaded, loaded.rounds.length - 1);
       if (!recovered)
         throw Error("Interrupted Milestone diagnostic has no sealed answer; preserve original transcript for reconciliation.");
-      await applyMilestoneDiagnosis(job, receipt, recovered);
+      await applyMilestoneDiagnosis(job, loaded, recovered);
     }
-    if (receipt.phase === "stopped")
-      throw Error(receipt.stopReason ?? "Milestone diagnostic review safely stopped execution.");
-    if (receipt.writer) await verifySeal(job, receipt.writer, "writer");
-    if (receipt.reviewer) await verifySeal(job, receipt.reviewer, receipt.reviewerRole ?? "reviewer");
+    if (loaded.phase === "stopped")
+      throw Error(loaded.stopReason ?? "Milestone diagnostic review safely stopped execution.");
+    if (loaded.assignmentKey !== key)
+      throw Error("Unfinished Milestone Blueprint does not belong to this admitted assignment.");
+    if (loaded.writer) await verifySeal(job, loaded.writer, "writer");
+    if (loaded.reviewer) await verifySeal(job, loaded.reviewer, loaded.reviewerRole ?? "reviewer");
   } else {
-    receipt = { schema: "noveltea-milestone-plan-receipt/v1",
-      lineage: binding, phase: "admitted", rounds: [], ...(correction ? { supersedes: correction.supersedes } : {}) };
-    await persist(file, receipt);
+    loaded = { schema: "noveltea-milestone-plan-receipt/v1",
+      lineage: binding, phase: "admitted", rounds: [], assignmentKey: key, ...(correction ? { supersedes: correction.supersedes } : {}) };
+    await persist(file, loaded);
   }
+  let receipt: Receipt = loaded;
   const checkCandidate = (draft: MilestoneBlueprint) => {
     if (correction && !correction.accepts(draft))
       throw Error("Correction changed material outside the exact authorized Blueprint patch.");
     return draft;
   };
-  if (fixture) {
-    const proposed = correction?.candidate ?? fixtureDraft(assignment);
-    if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-interactive")
-      proposed.downstream.push({ owner: "interactive", obligation: "Keep this opening Event-only; the consequential Choice occurs later." });
-    if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge")
-      proposed.events[0]!.knowledge = "Ada never sees the original signed transfer ledger.";
-    const draft = parseMilestoneBlueprint(JSON.stringify(proposed), assignment);
-    const reject = correction?.exactPatch && process.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT === "revise";
-    const review = parseMilestoneBlueprintReview(JSON.stringify({
-      schema: correction ? "noveltea-milestone-blueprint-review/v5" : "noveltea-milestone-blueprint-review/v1", status: reject ? "revise" : "pass",
-      findings: reject ? [{ anchorPath: assignment.milestonePath, requirement: "Preserve the approved delivery scope", reason: "The proposed removal loses a required obligation.",
-        correction: "Reassess scope before dropping the obligation", evidence: { target: "missing-downstream", owner: "interactive", quote: JSON.stringify(draft.downstream), repair: "extend" } }] : [],
-      ...(correction ? { prior: [] } : {}),
-    }), draft, assignment);
-    receipt.draft = draft;
-    receipt.rounds = [{ draft, review, draftDigest: sha(draft), reviewDigest: sha(review) }];
-    if (review.status === "revise") {
+  // Each graph transition runs at most one substantive writer or reviewer
+  // turn. The receipt is the authority; the checkpoint only carries its
+  // source-bound reference. A crash after publication reuses that receipt.
+  const assertSource = async () => {
+    if (git(job, "rev-parse", "HEAD").trim() !== head ||
+        git(job, "status", "--porcelain").trim() ||
+        await sourceDigest(job, assignment.sourcePaths, head) !== binding.sourceDigest)
+      throw Error("Milestone Blueprint source changed before its next effect.");
+    const current = await load(job, assignment.milestoneId);
+    if (!current || current.assignmentKey !== key)
+      throw Error("Milestone Blueprint lost its original assignment receipt.");
+    validateReceiptShape(current, assignment.milestoneId);
+    assertLineage(current.lineage, binding);
+    if (JSON.stringify(current.supersedes) !== JSON.stringify(correction?.supersedes))
+      throw Error("Milestone Blueprint correction grant changed.");
+    assertRounds(current, assignment);
+    await assertDiagnostics(job, current);
+    if (current.writer) await verifySeal(job, current.writer, "writer");
+    if (current.reviewer) await verifySeal(job, current.reviewer, current.reviewerRole ?? "reviewer");
+    if (!fixture && !["admitted", "planning", "reviewing"].includes(current.phase)) {
+      const starts = current.reviewStarts ?? (current.reviewStart ? [current.reviewStart] : []);
+      const drafts = current.rounds.filter((_, index) => !starts.includes(index)).map(r => r.draftDigest);
+      if (current.phase === "draft" && current.reviewStart !== current.rounds.length && current.draft)
+        drafts.push(sha(current.draft));
+      if (!current.writer) throw Error("Settled Milestone Blueprint lacks its writer.");
+      await assertBlueprintReplies(current.writer, drafts);
+      const reviewers = [...(current.reviewerHistory ?? []).map(h => h.session),
+        ...(current.reviewer ? [current.reviewer] : [])];
+      if (reviewers.length !== starts.length + (current.reviewer ? 1 : 0))
+        throw Error("Incomplete Milestone Blueprint reviewer lineage.");
+      const identities = new Set([current.writer.id]);
+      for (const [index, session] of reviewers.entries()) {
+        if (identities.has(session.id)) throw Error("Milestone Blueprint reused a reviewer identity.");
+        identities.add(session.id);
+        await assertBlueprintReplies(session, current.rounds.slice(index ? starts[index - 1] : 0, starts[index]).map(r => r.reviewDigest));
+      }
+      for (const diagnostic of current.diagnostics ?? [])
+        await assertBlueprintReplies(diagnostic.session, [sha(diagnostic.diagnosis)]);
+    }
+    receipt = current;
+  };
+  const draftSubmission = (round: number, draft: MilestoneBlueprint): AssignmentSubmission => ({
+    status: "milestone-blueprint-draft",
+    receiptRef: round + ":" + sha({ key, round, draftDigest: sha(draft) }), headSha: head,
+  });
+  const submittedRound = (submission: AssignmentSubmission): number => {
+    const round = Number(submission.receiptRef.split(":")[0]);
+    const draft = receipt.rounds[round]?.draft ??
+      (round === receipt.rounds.length ? receipt.draft : undefined);
+    if (!Number.isSafeInteger(round) || round < 0 || !draft ||
+        JSON.stringify(submission) !== JSON.stringify(draftSubmission(round, draft)))
+      throw Error("Milestone Blueprint checkpoint lost its exact settled draft.");
+    return round;
+  };
+  const correctionGrant = (round: number) => sha({ key, round,
+    rejected: receipt.rounds[round]?.reviewDigest,
+    diagnostic: receipt.diagnostics?.find(d => d.round === round) ?? null });
+  const stopped = (): AssignmentOutcome => ({
+    status: "unresolved", assignmentKey: key, evidenceRef: sha(receipt),
+    dispositionRef: receipt.stopReason ?? "Milestone Blueprint unresolved",
+  });
+  const verifyApproved = async (): Promise<AssignmentOutcome> => {
+    const pin = pinOf(receipt);
+    await readReviewedMilestoneBlueprint(job, pin, assignment, binding);
+    return { status: "verified", assignmentKey: key, evidenceRef: sha(pin),
+      headSha: head, reviewRef: receipt.rounds.at(-1)!.reviewDigest };
+  };
+  const writeDraft = async (): Promise<AssignmentSubmission> => {
+    if (receipt.phase !== "admitted" && receipt.phase !== "revision")
+      throw Error("Milestone Blueprint writer has no admitted revision.");
+    if (fixture) {
+      const proposed = correction?.candidate ?? fixtureDraft(assignment);
+      if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-interactive")
+        proposed.downstream.push({ owner: "interactive", obligation: "Keep this opening Event-only; the consequential Choice occurs later." });
+      if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge")
+        proposed.events[0]!.knowledge = "Ada never sees the original signed transfer ledger.";
+      const draft = parseMilestoneBlueprint(JSON.stringify(proposed), assignment);
+      receipt.draft = checkCandidate(draft);
+      receipt.phase = "draft";
+      await persist(file, receipt);
+      return draftSubmission(receipt.rounds.length, draft);
+    }
+    const previousPhase = receipt.phase;
+    // Seal ambiguity BEFORE the SDK may create a Pi transcript. A crash in
+    // the creation-to-start gap cannot be mistaken for an unstarted planner.
+    receipt.phase = "planning";
+    await persist(file, receipt);
+    let writer: Awaited<ReturnType<typeof sessionFor>>;
+    try {
+      writer = await sessionFor(job, snapshot, assignment, provider, model,
+        "writer", binding.reviewCycleId, receipt.writer);
+    } catch (error) {
+      if (error instanceof PiBudgetPause) {
+        // sessionFor preflights budget before creating the Pi SDK session.
+        receipt.phase = previousPhase;
+        await persist(file, receipt);
+      }
+      throw error;
+    }
+    try {
+      const start = writer.session.messages.length;
+      if (previousPhase === "revision") await reportControllerReviewPhase("correcting");
+      await promptStorySpecialist(writer.session, writer.context.contextNote +
+        plannerPrompt(assignment, task, receipt.rounds.at(-1)));
+      verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment, correction?.sources);
+      let draft: MilestoneBlueprint;
+      try {
+        draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
+      } catch (error) {
+        // This is a strict response-contract correction, not a fresh
+        // planner or authority to edit the Story. The original invalid
+        // reply stays in the SAME read-only Pi conversation; a crash before
+        // a sealed draft remains ambiguous and is never replayed.
+        await writer.context.beforeTurn(writer.session.sessionManager.getSessionFile());
+        await reportControllerReviewPhase("correcting");
+        await promptStorySpecialist(writer.session,
+          "READ-ONLY MILESTONE BLUEPRINT PROTOCOL CORRECTION. The previous " +
+          "plan was rejected by the canonical schema verifier: " +
+          (error instanceof Error ? error.message : String(error)) +
+          ". Keep the same source Milestone, approved causal obligations and " +
+          "protected Character IDs. Re-read any missing pinned sources. " +
+          "Return ONE complete valid noveltea-milestone-blueprint/v1 JSON " +
+          "object with existing sourcePaths, ordered existing event dependencies, " +
+          "participants ONLY from " + JSON.stringify(assignment.characterIds) +
+          " (or [] if empty), evidence, routes and a Composition owner. " +
+          "Each Event's knowledge MUST be ONE nonempty STRING, NOT an array " +
+          "of fact transitions, an object or nested JSON. Summarize concrete " +
+          "Character knowledge and its limits in this single prose string. " +
+          "Do not write any Story file or start a new plan.");
+        verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment, correction?.sources);
+        draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
+      }
+      await writer.context.completed(writer.session.sessionManager.getSessionFile()!, writer.session.sessionId);
+      receipt.writer = await seal(writer.session);
+      receipt.draft = checkCandidate(draft);
+      receipt.phase = "draft";
+      await persist(file, receipt);
+    } finally { writer.session.dispose(); }
+
+    return draftSubmission(receipt.rounds.length, receipt.draft!);
+  };
+  const settleReview = async (review: MilestoneBlueprintReview, draft: MilestoneBlueprint) => {
+    receipt.rounds.push({ draft, review,
+      draftDigest: sha(draft), reviewDigest: sha(review) });
+
+    if (review.status === "pass") {
+      receipt.approvedDigest = sha(draft);
+      receipt.phase = "approved";
+    } else if (correction?.exactPatch) {
       receipt.phase = "stopped";
       receipt.stopReason = "Independent reviewer rejected the exact authorized patch; a different correction needs controller reassessment.";
-      await persist(file, receipt);
-      throw Error(receipt.stopReason);
-    }
-    receipt.approvedDigest = sha(draft);
-    receipt.phase = "approved";
+    } else receipt.phase = "revision";
     await persist(file, receipt);
-    return { blueprint: draft, pin: pinOf(receipt) };
-  }
-  // The writer and reviewer remain independent read-only Pi sessions across
-  // substantive corrections. A partial prompt is never automatically replayed.
-  for (;;) {
-    if (receipt.phase === "revision") {
-      const reviewStart = receipt.reviewStart ?? 0;
-      const active = receipt.rounds.slice(reviewStart);
-      const diagnosedAt = (receipt.diagnostics ?? []).filter(d => d.round >= reviewStart)
-        .map(d => d.round + 1 - reviewStart);
-      const stalled = milestoneReviewStagnation(active);
-      const trigger = milestoneDiagnosticTrigger(active, diagnosedAt, stalled);
-      // A CONTINUE recommendation is a concrete one-turn writer grant, not
-      // a new review verdict. On restart the original writer must receive
-      // that turn before the unchanged rounds can trigger another stop.
-      const continuationDue = receipt.diagnostics?.at(-1)?.diagnosis.action === "continue" &&
-        receipt.diagnostics.at(-1)!.round === receipt.rounds.length - 1;
-      if (trigger && !continuationDue) {
-        const last = receipt.rounds.at(-1)!;
-        const fingerprint = milestoneDiagnosticFingerprint(binding.reviewCycleId,
-          last.draft, last.review.findings, { task, contract: plan.contract });
-        const repeated = (receipt.diagnostics ?? []).some(d => d.caseFingerprint === fingerprint);
-        if (repeated) {
-          receipt.phase = "stopped";
-          receipt.stopReason = milestoneDiagnosticDecision("continue", true).reason;
-          await persist(file, receipt);
-          throw Error(receipt.stopReason);
-        }
-        receipt.phase = "diagnosing";
-        await persist(file, receipt);
-        const diagnostic = await runMilestoneDiagnosis(job, snapshot, assignment,
-          provider, model, task, receipt, plan.contract, trigger);
-        await applyMilestoneDiagnosis(job, receipt, diagnostic);
-        if (receipt.stopReason) throw Error(receipt.stopReason);
-        continue;
-      }
-    }
-    if (receipt.phase === "admitted" || receipt.phase === "revision") {
-      const previousPhase = receipt.phase;
-      // Seal ambiguity BEFORE the SDK may create a Pi transcript. A crash in
-      // the creation-to-start gap cannot be mistaken for an unstarted planner.
-      receipt.phase = "planning";
-      await persist(file, receipt);
-      let writer: Awaited<ReturnType<typeof sessionFor>>;
-      try {
-        writer = await sessionFor(job, snapshot, assignment, provider, model,
-          "writer", binding.reviewCycleId, receipt.writer);
-      } catch (error) {
-        if (error instanceof PiBudgetPause) {
-          // sessionFor preflights budget before creating the Pi SDK session.
-          receipt.phase = previousPhase;
-          await persist(file, receipt);
-        }
-        throw error;
-      }
-      try {
-        const start = writer.session.messages.length;
-        if (previousPhase === "revision") await reportControllerReviewPhase("correcting");
-        await promptStorySpecialist(writer.session, writer.context.contextNote +
-          plannerPrompt(assignment, task, receipt.rounds.at(-1)));
-        verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment, correction?.sources);
-        let draft: MilestoneBlueprint;
-        try {
-          draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
-        } catch (error) {
-          // This is a strict response-contract correction, not a fresh
-          // planner or authority to edit the Story. The original invalid
-          // reply stays in the SAME read-only Pi conversation; a crash before
-          // a sealed draft remains ambiguous and is never replayed.
-          await writer.context.beforeTurn(writer.session.sessionManager.getSessionFile());
-          await reportControllerReviewPhase("correcting");
-          await promptStorySpecialist(writer.session,
-            "READ-ONLY MILESTONE BLUEPRINT PROTOCOL CORRECTION. The previous " +
-            "plan was rejected by the canonical schema verifier: " +
-            (error instanceof Error ? error.message : String(error)) +
-            ". Keep the same source Milestone, approved causal obligations and " +
-            "protected Character IDs. Re-read any missing pinned sources. " +
-            "Return ONE complete valid noveltea-milestone-blueprint/v1 JSON " +
-            "object with existing sourcePaths, ordered existing event dependencies, " +
-            "participants ONLY from " + JSON.stringify(assignment.characterIds) +
-            " (or [] if empty), evidence, routes and a Composition owner. " +
-            "Each Event's knowledge MUST be ONE nonempty STRING, NOT an array " +
-            "of fact transitions, an object or nested JSON. Summarize concrete " +
-            "Character knowledge and its limits in this single prose string. " +
-            "Do not write any Story file or start a new plan.");
-          verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment);
-          draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
-        }
-        await writer.context.completed(writer.session.sessionManager.getSessionFile()!, writer.session.sessionId);
-        receipt.writer = await seal(writer.session);
-        receipt.draft = checkCandidate(draft);
-        receipt.phase = "draft";
-        await persist(file, receipt);
-      } finally { writer.session.dispose(); }
+  };
+  const reviewDraft = async () => {
+    if (fixture) {
+      const draft = receipt.draft;
+      if (receipt.phase !== "draft" || !draft) throw Error("Fixture Blueprint has no settled draft.");
+      const reject = correction?.exactPatch && process.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT === "revise";
+      const review = parseMilestoneBlueprintReview(JSON.stringify({
+        schema: correction ? "noveltea-milestone-blueprint-review/v5" : "noveltea-milestone-blueprint-review/v1", status: reject ? "revise" : "pass",
+        findings: reject ? [{ anchorPath: assignment.milestonePath, requirement: "Preserve the approved delivery scope", reason: "The proposed removal loses a required obligation.",
+          correction: "Reassess scope before dropping the obligation", evidence: { target: "missing-downstream", owner: "interactive", quote: JSON.stringify(draft.downstream), repair: "extend" } }] : [],
+        ...(correction ? { prior: [] } : {}),
+      }), draft, assignment);
+      await settleReview(review, draft);
+      return;
     }
     if (receipt.phase !== "draft" || !receipt.draft || !receipt.writer)
       throw Error("Milestone Blueprint is not at a sealed review boundary.");
@@ -1462,7 +1534,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
           "do not manufacture a pass. Re-read pinned sources if missing. Return " +
           "ONE complete v5 review JSON object with source-linked findings and " +
           "a prior assessment for each sealed historical blocker.");
-        verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment);
+        verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment, correction?.sources);
         verdict = parseVerdict();
       }
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
@@ -1472,22 +1544,87 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
           (previousRound.draftDigest === sha(receipt.draft) ||
             !milestonePassCorrections(receipt.draft, reviewHistory, verdict)))
         throw Error("Milestone reviewer cannot approve without repairing the exact rejected material field.");
-      receipt.rounds.push({ draft: receipt.draft, review: verdict,
-        draftDigest: sha(receipt.draft), reviewDigest: sha(verdict) });
-      if (verdict.status === "pass") {
-        receipt.approvedDigest = sha(receipt.draft);
-        receipt.phase = "approved";
-        await persist(file, receipt);
-        return { blueprint: receipt.draft, pin: pinOf(receipt) };
-      }
-      if (correction?.exactPatch) {
-        receipt.phase = "stopped";
-        receipt.stopReason = "Independent reviewer rejected the exact authorized patch; a different correction needs controller reassessment.";
-        await persist(file, receipt);
-        throw Error(receipt.stopReason);
-      }
-      receipt.phase = "revision";
-      await persist(file, receipt);
+      await settleReview(verdict, receipt.draft);
     } finally { reviewer.session.dispose(); }
-  }
+  };
+  const assessNegative = async (round: number) => {
+    if (receipt.phase !== "revision" || round !== receipt.rounds.length - 1)
+      throw Error("Milestone Blueprint diagnosis lacks its sealed negative Review.");
+    const reviewStart = receipt.reviewStart ?? 0;
+    const active = receipt.rounds.slice(reviewStart);
+    const diagnosedAt = (receipt.diagnostics ?? []).filter(d => d.round >= reviewStart)
+      .map(d => d.round + 1 - reviewStart);
+    const trigger = milestoneDiagnosticTrigger(active, diagnosedAt, milestoneReviewStagnation(active));
+    const continuationDue = receipt.diagnostics?.at(-1)?.diagnosis.action === "continue" &&
+      receipt.diagnostics.at(-1)!.round === round;
+    if (!trigger || continuationDue) return;
+    const last = receipt.rounds[round]!;
+    const fingerprint = milestoneDiagnosticFingerprint(binding.reviewCycleId,
+      last.draft, last.review.findings, { task, contract: plan.contract });
+    if ((receipt.diagnostics ?? []).some(d => d.caseFingerprint === fingerprint)) {
+      receipt.phase = "stopped";
+      receipt.stopReason = milestoneDiagnosticDecision("continue", true).reason;
+      await persist(file, receipt);
+      return;
+    }
+    receipt.phase = "diagnosing";
+    await persist(file, receipt);
+    const diagnostic = await runMilestoneDiagnosis(job, snapshot, assignment,
+      provider, model, task, receipt, plan.contract, trigger);
+    await applyMilestoneDiagnosis(job, receipt, diagnostic);
+  };
+  const child = createAssignmentLifecycleGraph({
+    preflight: async state => {
+      if (logicalAssignmentKey(state.identity) !== key)
+        throw Error("Milestone Blueprint checkpoint belongs to another assignment.");
+      await assertSource();
+      return null;
+    },
+    invoke: async () => {
+      await assertSource();
+      if (receipt.phase === "admitted") return writeDraft();
+      if (receipt.phase === "draft") return draftSubmission(receipt.rounds.length, receipt.draft!);
+      if (receipt.phase === "revision" || receipt.phase === "approved")
+        return draftSubmission(receipt.rounds.length - 1, receipt.rounds.at(-1)!.draft);
+      if (receipt.phase === "stopped") return stopped();
+      throw Error("Interrupted Milestone Blueprint has no settled writer receipt.");
+    },
+    verify: async state => {
+      await assertSource();
+      const round = submittedRound(state.submission!);
+      if (round === receipt.rounds.length && receipt.phase === "draft")
+        await reviewDraft();
+      if (round !== receipt.rounds.length - 1)
+        throw Error("Milestone Blueprint review advanced beyond its original submission.");
+      if (receipt.phase === "approved") return verifyApproved();
+      if (receipt.phase === "stopped") return stopped();
+      if (receipt.phase === "revision") { await assessNegative(round); await assertSource(); }
+      if ((receipt.phase as Phase) === "stopped") return stopped();
+      if (receipt.phase === "draft" && receipt.reviewStart === receipt.rounds.length)
+        return { submission: draftSubmission(receipt.rounds.length, receipt.draft!), reviewPending: true as const };
+      if (receipt.phase !== "revision")
+        throw Error("Milestone Blueprint negative Review has no settled continuation.");
+      return { correctionRef: correctionGrant(round), rejectedReceiptRef: state.submission!.receiptRef };
+    },
+    correct: async state => {
+      await assertSource();
+      const round = submittedRound(state.submission!);
+      if (round !== receipt.rounds.length - 1 || state.correction!.correctionRef !== correctionGrant(round))
+        throw Error("Milestone Blueprint correction lacks its original negative Review grant.");
+      if (receipt.phase === "draft" && receipt.reviewStart !== receipt.rounds.length)
+        return draftSubmission(receipt.rounds.length, receipt.draft!);
+      return writeDraft();
+    },
+  }, checkpointed);
+  const finished = await child.invoke({ identity, submission: null, submissionKey: null,
+    outcome: null, continuationRef: null }, checkpointed
+    ? { ...assignmentChildConfig(config!, identity), durability: "sync" }
+    : { recursionLimit: 10000 });
+  if (finished.outcome?.status !== "verified")
+    throw Error(receipt.stopReason ?? "Milestone Blueprint did not produce an independently approved pin.");
+  await assertSource();
+  const pin = pinOf(receipt);
+  if (finished.outcome.evidenceRef !== sha(pin))
+    throw Error("Milestone Blueprint child returned a foreign approval.");
+  return { blueprint: await readReviewedMilestoneBlueprint(job, pin, assignment, binding), pin };
 }
