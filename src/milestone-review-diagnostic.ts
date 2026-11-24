@@ -2,6 +2,7 @@
  * Diagnostic advice is never a review verdict, approval or write authority. */
 import { createHash } from "node:crypto";
 import type { MilestoneBlueprint, MilestoneBlueprintReview } from "./milestone-blueprint.js";
+import { sourceReviewDiagnosticTrigger } from "./review-cycle.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const exact = (value: unknown, keys: string[]): value is Record<string, unknown> =>
@@ -35,11 +36,12 @@ export function milestoneDiagnosticTrigger(
   rounds: readonly { review: { status: "pass" | "revise" } }[],
   diagnosedAt: readonly number[], stalled: number,
 ): MilestoneDiagnosticTrigger | null {
-  if (rounds.at(-1)?.review.status !== "revise" || diagnosedAt.length >= 2) return null;
-  const since = rounds.length - (diagnosedAt.at(-1) ?? 0);
-  if (since <= 0) return null;
-  if (stalled >= 2 && rounds.length >= 3 && (!diagnosedAt.length || since >= 2)) return "stagnation";
-  return since >= 5 ? "review-depth" : null;
+  // Milestone review evidence does not encode late-blocker origin; do not
+  // fabricate it. The common policy still owns stagnation and depth.
+  const trigger = sourceReviewDiagnosticTrigger(rounds.map(({ review }) => ({
+    verdict: { status: review.status, findings: [] },
+  })), rounds.length >= 3 ? stalled : 0, diagnosedAt.length, diagnosedAt.at(-1) ?? 0);
+  return trigger === "late-blockers" ? null : trigger;
 }
 
 export function milestoneDiagnosticFingerprint(cycleId: string, draft: MilestoneBlueprint,

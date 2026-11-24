@@ -4,6 +4,7 @@
  * Diagnostic reassessment is a separate independent review, never an approval. */
 import { createHash } from "node:crypto";
 import type { CausalBlueprint } from "./architecture-blueprint.js";
+import { reviewRoundProgress } from "./review-cycle.js";
 
 export type ReviewCitation =
   | { beatId: string; quote: string; field?: never }
@@ -145,21 +146,18 @@ export function evaluateReviewConvergence(
   // needs to account for all historical blockers. Never infer progress from
   // fresh blocker discovery or the number of added words.
   const last = previous.at(-1)?.blueprint;
-  const oscillating = previous.some(item => digest(item.blueprint) === digest(blueprint));
   const material = !!last && reviewValid.prior.some(prior => {
     if (prior.status !== "resolved" && prior.status !== "improved") return false;
     const old = previous[prior.round]!.verdict.findings[prior.findingIndex]!;
     return cited(blueprint, prior.evidence, old.beatId) &&
       !cited(last, prior.evidence);
   });
-  const regressed = reviewValid.prior.some(item => item.status === "regressed");
-  const productive = !!last && !oscillating && material && !regressed;
-  if (reviewValid.status === "pass" && last && !productive && !independentReplacement)
-    throw Error("Convergent Blueprint pass has no verified material source progress or repeats an old draft.");
-  // A separately authenticated reviewer may settle a disputed negative judgment
-  // on exactly the same source. This is allowed only at the diagnostic replacement
-  // boundary; it never turns the diagnostic's opinion into a passing verdict.
-  const stalled = !last || productive ? 0 : stalledBefore + 1;
-  return { review: reviewValid, productive, stalled,
-    reassess: reviewValid.status === "revise" && stalled >= 2, oscillating };
+  // A separately authenticated replacement reviewer may settle a disputed
+  // negative verdict on unchanged source; a diagnostic opinion alone cannot.
+  return { review: reviewValid, ...reviewRoundProgress({
+    previousDigests: previous.map(round => digest(round.blueprint)),
+    draftDigest: digest(blueprint), material,
+    regressed: reviewValid.prior.some(item => item.status === "regressed"),
+    stalledBefore, status: reviewValid.status, independentReplacement,
+  }) };
 }

@@ -20,7 +20,8 @@ import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { openSkillSnapshot } from "./snapshot.js";
-import { reviewCycleId, assertReviewCycleSession, sourceReviewConvergence } from "./review-cycle.js";
+import { reviewCycleId, assertReviewCycleSession, sourceReviewConvergence,
+  sourceReviewDiagnosticTrigger } from "./review-cycle.js";
 import { parseArchitectureDraftDiagnosis } from "./architecture-draft-diagnosis.js";
 
 const sha = (input: unknown) =>
@@ -479,6 +480,7 @@ export async function createArchitectureDraftReviewCycle(
     const history: ArchitectureDraftRound[] = [];
     let stalled = 0;
     let diagnosticsUsed = 0;
+    let lastDiagnosedRound = 0;
     let lastDigest: string | null = null;
     let lastPin: ArchitectureDraftReviewPin | undefined;
 
@@ -679,13 +681,17 @@ export async function createArchitectureDraftReviewCycle(
         lastDigest = sha(receipt);
         history.push({ sources, verdict });
         lastPin = verdict.status === "pass" ? { cycleId, round, receiptDigest: lastDigest } : undefined;
-        return { verdict, convergence, pin: lastPin };
+        const diagnosticTrigger = sourceReviewDiagnosticTrigger(history, stalled,
+          diagnosticsUsed, lastDiagnosedRound);
+        return { verdict, convergence, pin: lastPin, diagnosticTrigger };
       },
       async diagnose() {
-        if (stalled < 2 || history.at(-1)?.verdict.status !== "revise")
-          throw Error("Architecture diagnosis is only available after nonproductive sealed reviews.");
         if (diagnosticsUsed >= 2)
           throw Error("Architecture review exhausted bounded independent diagnostic reassessment.");
+        const trigger = sourceReviewDiagnosticTrigger(history, stalled,
+          diagnosticsUsed, lastDiagnosedRound);
+        if (!trigger)
+          throw Error("Architecture diagnosis requires a shared reassessment trigger on sealed negative reviews.");
         const round = history.length - 1;
         const file = join(cycleDirectory(job, cycleId), "diagnostic-" + round + ".json");
         if (existsSync(file))
@@ -719,8 +725,8 @@ export async function createArchitectureDraftReviewCycle(
           const start = opened.messages.length;
           const prompt =
             "INDEPENDENT READ-ONLY ARCHITECTURE DIAGNOSTIC. You are neither the writer " +
-            "nor the original read-only reviewer. The last two attempted corrections did " +
-            "not resolve source-grounded blockers. Review the exact current dirty Arc/Milestone " +
+            "nor the original read-only reviewer. The shared Review policy requested " + trigger +
+            " reassessment. Review the exact current dirty Arc/Milestone " +
             "draft, the original requirements, all sealed negative verdicts and their source " +
             "lineage. Read the pinned nt-story-architecture and nt-catalog methods, the " +
             "Foundation and EVERY authorized current draft path. Diagnose reviewer drift, " +
@@ -776,6 +782,7 @@ export async function createArchitectureDraftReviewCycle(
             transcriptDigest: sha(bytes.toString("utf8")),
           }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
           diagnosticsUsed++;
+          lastDiagnosedRound = history.length;
           if (diagnosis.action === "continue") stalled = 0;
           return diagnosis;
         } finally { opened.dispose(); }

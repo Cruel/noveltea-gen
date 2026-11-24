@@ -26,7 +26,7 @@ export type AssignmentIdentity = Readonly<{
 /** Review cycles migrated to the common assessor. Native work-item IDs and
  * parent execution assignment IDs are distinct, so both forms are explicit. */
 export function usesSharedAssignmentReview(workItem: string | undefined | null): boolean {
-  return ["foundation", "foundations", "world-foundations", "character-foundations"].includes(workItem ?? "") ||
+  return ["foundation", "foundations", "world-foundations", "character-foundations", "architecture", "global-architecture"].includes(workItem ?? "") ||
     /^interactive-(?:choice|puzzle)-[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
     /^(?:interactive|choice|puzzle):milestone\.[a-z][a-z0-9-]*$/.test(workItem ?? "");
 }

@@ -581,6 +581,43 @@ function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) 
     piSessionId: state.piSessionId, piSessionFile: state.piSessionFile,
     skillReads: state.skillReads, skillSnapshot: state.snapshot?.id };
 }
+/** Read-only verification of the exact settled canonical Architecture receipt.
+ * A reused plan can have no new Git effect; verify its native scope at the
+ * admitted source rather than manufacturing a checkpoint for the reuse. */
+export async function verifyArchitectureAssignmentResult(
+  job: JobStartResult, input: Pick<ArchitectureOptions, "validatorSource" | "skillsSource" | "fixture">,
+  version: number, sourceHead: string, resultHead: string,
+): Promise<"commit" | "adopted"> {
+  const state = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as Receipt;
+  if (state.format !== 1 || state.jobId !== job.jobId || state.baseSha !== job.baseSha ||
+      state.branch !== job.branch || state.worktreeRoot !== job.worktreeRoot ||
+      state.threadId !== job.threadId || state.worker !== (input.fixture ? "fixture" : "pi") ||
+      state.phase !== "committed" || state.plan?.version !== version ||
+      state.expectedHead !== resultHead || state.plan.items[0]?.status !== "verified" ||
+      state.plan.items[0]?.verifiedSha !== resultHead)
+    throw Error("Architecture result does not match its original settled assignment.");
+  verifyPlanHistory(job, state);
+  const verified = await reconcile(job, state);
+  if (verified.status !== "ready" || verified.changes.length)
+    throw Error("Architecture result could not be reconciled: " + verified.reason);
+  if (state.paths?.length) {
+    if (verified.actualHead !== resultHead ||
+        git(job, "rev-parse", resultHead + "^").trim() !== sourceHead)
+      throw Error("Architecture commit does not match the admitted source.");
+    return "commit";
+  }
+  if (verified.actualHead !== sourceHead || await trustedHead(job) !== sourceHead)
+    throw Error("Architecture adoption advanced the original source.");
+  const latest = await validateStoryJob(job, input.validatorSource ?? input.skillsSource,
+    { ...job, baseSha: sourceHead });
+  const report = reportOf(latest);
+  if (latest.status !== "passed" || report.protection.status !== "checked" ||
+      report.protection.changes.length || report.protection.warnings.length)
+    throw Error("Architecture adoption lacks current native verification.");
+  checkArchitecture(report, state.plan.contract);
+  return "adopted";
+}
+
 export async function runArchitectureJob(input: ArchitectureOptions, alreadyLocked = false) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const file = join(job.stateDir, "architecture.json");
@@ -753,7 +790,9 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         if (!git(job, "log", "-1", "--format=%B").includes(`NovelTea-Architecture: ${state.contentDigest}`)) {
           throw new Error("Committed architecture provenance changed; refusing verified-head repair.");
         }
-        await publishVerifiedHead(job, git(job, "rev-parse", "HEAD^").trim(), state.expectedHead);
+        const parent = git(job, "rev-parse", "HEAD^").trim();
+        await publishVerifiedHead(job, parent, state.expectedHead);
+        await finalizeRecoveryCheckpoint(job, "global-architecture", parent, state.expectedHead);
       }
       return output(job, state);
     }

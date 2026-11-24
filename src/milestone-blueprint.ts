@@ -19,7 +19,7 @@ import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tool
 import { promptStorySpecialist } from "./story-interruption.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
-import { assertReviewCycleSession, reviewCycleId } from "./review-cycle.js";
+import { assertReviewCycleSession, reviewCycleId, reviewRoundProgress } from "./review-cycle.js";
 import { milestoneDiagnosticDecision, milestoneDiagnosticEvidence, milestoneDiagnosticFingerprint,
   milestoneDiagnosticTrigger, parseMilestoneDiagnosis,
   type MilestoneDiagnosis, type MilestoneDiagnosticTrigger } from "./milestone-review-diagnostic.js";
@@ -273,8 +273,7 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
   for (let i = 1; i < rounds.length; i++) {
     const prior = rounds[i - 1]!;
     const current = rounds[i]!;
-    const oscillating = rounds.slice(0, i).some(r => r.draftDigest === current.draftDigest);
-    const improved = !oscillating && (current.review.prior ?? []).some(p => {
+    const material = (current.review.prior ?? []).some(p => {
       if (p.status !== "resolved" && p.status !== "improved") return false;
       const source = rounds[p.round];
       const finding = source?.review.findings[p.findingIndex];
@@ -316,7 +315,15 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
         JSON.stringify(after).includes(legacy.quote) &&
         !JSON.stringify(before).includes(legacy.quote);
     });
-    stalled = improved ? 0 : stalled + 1;
+    // The Milestone parser separately verifies a passing verdict and its
+    // rejected-field corrections; this reconstruction accounts for negative
+    // review progress only, from exactly the same sealed source evidence.
+    stalled = reviewRoundProgress({
+      previousDigests: rounds.slice(0, i).map(round => round.draftDigest),
+      draftDigest: current.draftDigest, material,
+      regressed: (current.review.prior ?? []).some(p => p.status === "regressed"),
+      stalledBefore: stalled, status: "revise",
+    }).stalled;
   }
   return stalled;
 }

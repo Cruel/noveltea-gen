@@ -47,7 +47,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:18,status:1,blocked:1,operationFailure:5,throws:5",
+  specialist_dispatch: "returns:19,status:1,blocked:1,operationFailure:5,throws:5",
   dependency_amendment: "returns:5,blocked:1,operationFailure:1,authorBoundary:1,throws:6",
   independent_assignment_review: "returns:8,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:6",
@@ -204,6 +204,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const reviewed = [
     [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
     [file, "runFoundationAssignmentChild", "329033ddaaf952f13386641642ea670fdf9a4455deeb408cead3bb70a89419a1"],
+    [file, "runArchitectureAssignmentChild", "de81c4f2d41329138a92e9d69ec13045b5add3e08edf017078a675143cdd4957"],
     [file, "runCharacterWorldAssignmentChild", "7009d6ba4919502568060a2a10da49b4150cd03ebe872a27160aba2d36e18d9e"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
     [file, "runFocusedAssignmentChild", "692eb56fd45ccc7ae2ad323c14876207b68817086db494098bc18ea7f421028b"],

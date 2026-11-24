@@ -8,6 +8,7 @@ import {
   type ArchitectureDraftRound,
 } from "../src/architecture-draft-review.js";
 import { parseArchitectureDraftDiagnosis } from "../src/architecture-draft-diagnosis.js";
+import { sourceReviewDiagnosticTrigger } from "../src/review-cycle.js";
 
 const paths = ["arcs/arc-one.md", "milestones/milestone-one.md"];
 const requirements = {
@@ -177,6 +178,20 @@ test("Architecture stage and source authorization fail closed", () => {
       ),
     /unresolved findings/,
   );
+});
+
+test("Architecture reassessment respects late blockers, productive depth and the prior diagnostic boundary", () => {
+  const negative = (origin: string) => ({ verdict: {
+    status: "revise" as const, findings: [{ origin }],
+  } });
+  const stable = Array.from({ length: 5 }, () => negative("continuing"));
+  assert.equal(sourceReviewDiagnosticTrigger(stable.slice(0, 4), 0), null);
+  assert.equal(sourceReviewDiagnosticTrigger(stable, 0), "review-depth");
+  assert.equal(sourceReviewDiagnosticTrigger([...stable.slice(0, 2),
+    negative("introduced"), negative("overlooked")], 0), "late-blockers");
+  assert.equal(sourceReviewDiagnosticTrigger(stable, 0, 1, 4), null);
+  assert.equal(sourceReviewDiagnosticTrigger([...stable, negative("continuing")], 2, 1, 4), "stagnation");
+  assert.equal(sourceReviewDiagnosticTrigger(stable, 2, 2, 3), null);
 });
 
 test("Architecture nonprogress, stale proof, new blocker churn and oscillation never authorize a pass", () => {

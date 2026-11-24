@@ -402,7 +402,7 @@ export async function authorArchitecture(
           draftReview = result.pin;
           break;
         }
-        if (result.convergence.reassess) {
+        if (result.diagnosticTrigger || result.convergence.reassess) {
           // Do not invoke the original writer again until a third, independent
           // read-only Diagnostic has examined the sealed source and verdicts.
           const diagnosis = await cycle.diagnose();

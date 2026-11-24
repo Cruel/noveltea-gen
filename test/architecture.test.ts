@@ -9,7 +9,7 @@ import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { architectureMilestoneOrder, unapprovedArchitectureDecisionIds } from "../src/architecture-specialist.js";
-import { verifiedArchitectureMilestoneOrder } from "../src/architecture.js";
+import { verifiedArchitectureMilestoneOrder, verifyArchitectureAssignmentResult } from "../src/architecture.js";
 import { authorizedArchitectureRecordPath } from "../src/architecture-record-path.js";
 
 test("Architecture's sealed causal order names exactly its canonical Milestones", () => {
@@ -115,7 +115,7 @@ function contract(name: string, kind = "partial", depth = "architecture") {
   return path;
 }
 
-test("public job builds planning-stage architecture and exposes its dependent realization obligations", { skip: !available }, () => {
+test("public job builds planning-stage architecture and exposes its dependent realization obligations", { skip: !available }, async () => {
   const { cli, job, repo, baseline } = setup("partial");
   const result = cli("architecture", "run", "--contract", contract("partial"), "--fixture", "--skills-source", source);
   assert.equal(result.status, 0, result.stderr);
@@ -149,6 +149,14 @@ test("public job builds planning-stage architecture and exposes its dependent re
   assert.equal(replay.status, 0, replay.stderr);
   assert.equal(JSON.parse(replay.stdout).plan.items[0].verifiedSha, data.plan.items[0].verifiedSha);
   assert.equal(JSON.parse(readFileSync(verifiedHeadFile, "utf8")).headSha, data.headSha);
+  const assignment = { fixture: true, skillsSource: source };
+  assert.equal(await verifyArchitectureAssignmentResult(job, assignment, 1, baseline, data.headSha), "commit");
+  await assert.rejects(verifyArchitectureAssignmentResult(job, assignment, 2, baseline, data.headSha),
+    /original settled assignment/);
+  await assert.rejects(verifyArchitectureAssignmentResult(job, assignment, 1, data.headSha, data.headSha),
+    /admitted source/);
+  await assert.rejects(verifyArchitectureAssignmentResult(job, assignment, 1, baseline, baseline),
+    /original settled assignment/);
 });
 
 test("approved production preferences remain source-bound and surface soft overruns before Event authoring", { skip: !available }, () => {

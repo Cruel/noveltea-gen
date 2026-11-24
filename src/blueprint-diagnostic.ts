@@ -3,7 +3,8 @@
  * can pass a draft. No semantic finding identity or second scheduler. */
 import { createHash } from "node:crypto";
 import type { CausalBlueprint } from "./architecture-blueprint.js";
-import { cited, type ConvergentReview, type ReviewRound, type ReviewCitation } from "./review-convergence.js";
+import { cited, type ReviewRound, type ReviewCitation } from "./review-convergence.js";
+import { sourceReviewDiagnosticTrigger } from "./review-cycle.js";
 
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -28,21 +29,12 @@ export interface BlueprintDiagnosis {
 }
 
 export function diagnosticTrigger(rounds: readonly ReviewRound[], stalled: number,
-  diagnosedCount = 0): DiagnosticTrigger | null {
-  const latest = rounds.at(-1)?.verdict;
-  if (!latest || latest.status !== "revise") return null;
-  if (diagnosedCount >= 2) return null; // never endlessly diagnose a drifting cycle
-  if (stalled >= 2) return "stagnation";
-  const late = rounds.slice(-3).filter((round, index) => {
-    const v = round.verdict;
-    return rounds.length - Math.min(3, rounds.length) + index >= 2 &&
-      "schema" in v && v.schema === "noveltea-blueprint-review/v2" &&
-      (v as ConvergentReview).findings.some(f =>
-        f.origin === "introduced" || f.origin === "overlooked");
-  });
-  if (late.length >= 2) return "late-blockers";
-  if (rounds.length >= 5) return "review-depth";
-  return null;
+  diagnosedCount = 0, lastDiagnosedRound = 0): DiagnosticTrigger | null {
+  return sourceReviewDiagnosticTrigger(rounds.map(({ verdict }) => ({
+    verdict: { status: verdict.status, findings: verdict.findings.map(finding => ({
+      origin: "origin" in finding ? String(finding.origin) : undefined,
+    })) },
+  })), stalled, diagnosedCount, lastDiagnosedRound);
 }
 
 export function diagnosticEvidence(cycleId: string, rounds: readonly ReviewRound[],

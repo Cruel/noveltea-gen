@@ -1007,6 +1007,164 @@ async function runFoundationAssignmentChild(
       resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
 }
 
+/** Canonical Architecture enters the shared assignment lifecycle; the private
+ * Story Blueprint remains an independently reviewed input, never a Git effect. */
+async function runArchitectureAssignmentChild(
+  s: State, config: RunnableConfig,
+  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+  correctionSelected = false,
+): Promise<Partial<State>> {
+  if (s.active?.stage !== "architecture" || !s.inventory ||
+      config.configurable?.thread_id !== s.graphThreadId || !s.graphThreadId)
+    throw Error("Architecture child requires its original parent assignment and Thread.");
+  const job = await openJob(s);
+  const saved = await checkPlan(job, s.request, s.planVersion);
+  const version = s.planVersion ?? 1;
+  const correction = correctionSelected ? s.recoveryLifecycle.active : null;
+  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const original = points.find(p => p.workItem === "global-architecture" &&
+    p.planVersion === version && p.validation.status === "passed" &&
+    p.commitSha === (correction?.origin.sourceHeadSha ?? saved?.expectedHead) &&
+    (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+  const sourceHead = original?.parentSha ?? saved?.executionHead ??
+    (saved?.phase !== "committed" ? saved?.expectedHead : undefined) ?? s.inventory.headSha;
+  if (!correction && sourceHead !== s.inventory.headSha &&
+      original?.commitSha !== s.inventory.headSha)
+    throw Error("Architecture receipt source differs from its parent inventory.");
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
+    jobThreadId: job.threadId, graphThreadId: s.graphThreadId,
+    turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
+      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId: s.graphThreadId,
+      turnDigest: null, fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
+    }),
+    assignmentId: s.active.id, planVersion: version, sourceHeadSha: sourceHead,
+    scopeDigest: createHash("sha256").update(JSON.stringify({
+      task: s.request.task, contract: s.request.contract, version,
+    })).digest("hex"),
+  };
+  const key = logicalAssignmentKey(identity);
+  const receiptRef = "architecture.json";
+  const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
+    extra: Record<string, string>): AssignmentOutcome =>
+    ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome;
+  const authenticateCorrection = async () => {
+    if (!correction || !original || s.result?.headSha !== original.commitSha ||
+        correction.origin.assignmentId !== identity.assignmentId ||
+        s.recoveryLifecycle.phase !== "correcting" || s.recoveryLifecycle.assessorPending ||
+        !s.recoveryLifecycle.decision) return false;
+    return (await import("./generation-operation-strategy.js")).authenticateOperationReviewProof(
+      job, s, correction, s.recoveryLifecycle.decision);
+  };
+  let reviewPatch: Partial<State> | undefined;
+  const child = createAssignmentLifecycleGraph({
+    authenticateContinuation: async state =>
+      state.continuationRef === correction?.id && await authenticateCorrection(),
+    preflight: async () => {
+      const control = await readJobControl(job);
+      if (control === "cancelled") {
+        const error = Error("Original Turn was cancelled before Architecture dispatch.");
+        error.name = "StoryCancelledError"; throw error;
+      }
+      if (control === "paused")
+        return outcome("paused", "job-control", { controlRef: "job-control" });
+      if (correctionSelected && !await authenticateCorrection())
+        throw Error("Architecture correction lacks the original independent Review proof.");
+      if (!correctionSelected && !saved && await trustedHead(job) !== sourceHead)
+        throw Error("Architecture source differs from its parent assignment.");
+      return null;
+    },
+    invoke: async () => {
+      // The existing Architecture workflow owns exact Pi/Git reconciliation,
+      // including its independently sealed provisional Blueprint.
+      const result = await dispatch(s);
+      return { receiptRef, status: result.status, headSha: result.headSha };
+    },
+    verify: async state => {
+      const submission = state.submission!;
+      if (submission.receiptRef !== receiptRef || !submission.headSha ||
+          !accepted.architecture.includes(submission.status))
+        return outcome("unresolved", receiptRef, { dispositionRef: receiptRef });
+      const candidate = { ...s, result: { status: submission.status, headSha: submission.headSha } };
+      let disposition: "commit" | "adopted" = "commit";
+      try {
+        if (!correction) disposition = await (await import("./architecture.js")).verifyArchitectureAssignmentResult(
+          job, s.request, version, sourceHead, submission.headSha);
+        if (disposition === "commit" && !correction &&
+            !(await inspectRecoveryCheckpoints(job)).some(p => p.eligible &&
+              p.workItem === "global-architecture" && p.planVersion === version &&
+              p.commitSha === submission.headSha && p.parentSha === sourceHead &&
+              p.validation.status === "passed" &&
+              (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest)))
+          throw Error("Architecture commit lacks its original native checkpoint.");
+      } catch (error) {
+        reviewPatch = await operationFailure(candidate, job, "commit-verification", error,
+          { reference: "generation-checkpoints", assignmentId: identity.assignmentId });
+        return outcome("unresolved", receiptRef, { dispositionRef: "generation-verification" });
+      }
+      try {
+        reviewPatch = await reviewBoundary(candidate, correctionSelected);
+      } catch (error) {
+        reviewPatch = await operationFailure(candidate, job, "independent-review", error,
+          { reference: "review-checkpoints", assignmentId: identity.assignmentId });
+        return outcome("unresolved", receiptRef, { dispositionRef: "review-checkpoints" });
+      }
+      if (reviewPatch.status === "paused" || reviewPatch.reviewSteeringHandoff)
+        return outcome("paused", receiptRef, { controlRef: "review-checkpoints" });
+      if (reviewPatch.reviewAssessmentRequested || reviewPatch.reviewDependencyRequest ||
+          reviewPatch.status || reviewPatch.operationRecovery || reviewPatch.recovery ||
+          reviewPatch.unknownRecovery || reviewPatch.escalation)
+        return outcome("unresolved", receiptRef, { dispositionRef: "review-checkpoints" });
+      const head = await trustedHead(job);
+      if (correction) {
+        if (!await (await import("./generation-recovery-resolution.js"))
+          .verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
+          throw Error("Architecture correction lacks its independently passing successor.");
+      } else if (disposition === "commit" && !s.request.fixture) {
+        const current = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const reviews = await resolvedCheckpointReviews(job, current);
+        const point = current.find(p => p.commitSha === submission.headSha);
+        if (!point || !["passed", "not-required"].includes(reviews.get(point.commitSha) ?? point.semanticReview))
+          throw Error("Architecture commit lacks independently passing Review.");
+      }
+      return outcome("verified", receiptRef, { headSha: head,
+        reviewRef: disposition === "adopted" ? receiptRef : "review-checkpoints:" + head });
+    },
+  });
+  const finished = await child.invoke({
+    identity, submission: correction && s.result
+      ? { receiptRef, status: s.result.status, headSha: s.result.headSha } : null,
+    submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null,
+  }, assignmentChildConfig(config, identity, correction ? "correction" : "original"));
+  if (!finished.outcome || finished.outcome.assignmentKey !== key)
+    throw Error("Architecture child returned no authenticated outcome.");
+  if (finished.outcome.status === "verified")
+    return { ...reviewPatch, result: { status: finished.submission!.status,
+      headSha: s.request.fixture ? finished.submission!.headSha : finished.outcome.headSha } };
+  if (finished.submission && reviewPatch)
+    return { ...reviewPatch, result: { status: finished.submission.status,
+      headSha: finished.submission.headSha } };
+  if (finished.submission && (finished.outcome.status === "paused" ||
+      finished.outcome.status === "unresolved" && finished.outcome.dispositionRef === "review-checkpoints")) {
+    const candidate = { ...s, result: { status: finished.submission.status, headSha: finished.submission.headSha } };
+    // A crash after the child END loses the in-memory patch, not the sealed
+    // verdict. Reconcile the original Review rather than invoking the writer.
+    if (!reviewPatch && !correctionSelected) reviewPatch = await reviewBoundary(candidate);
+    if (!reviewPatch && correctionSelected) {
+      if (await (await import("./rejected-review-repair.js")).inspectFoundationReviewBoundary(job,
+        correction!.origin.sourceHeadSha))
+        reviewPatch = { reviewAssessmentRequested: true, reason: "Assessing the sealed Architecture Review boundary." };
+      else throw Error("Architecture correction handoff requires reconciliation of its original Review.");
+    }
+    if (reviewPatch) return { ...reviewPatch, result: candidate.result };
+  }
+  if (finished.outcome.status === "paused")
+    return { status: "paused", reason: "Original Architecture assignment is suspended." };
+  return operationFailure(s, job, "specialist-result", "Architecture returned an unverified result.",
+    { reference: "specialist-receipt", assignmentId: identity.assignmentId,
+      resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
+}
+
 /** World and Character each enter the shared lifecycle with their own original
  * source and independently receipted writer. The parent composite assignment
  * remains incomplete at the World Review boundary. */
@@ -3150,6 +3308,8 @@ export function createGenerationGraph(
       // including a commit published before its receipt; never invent a new writer.
       if (s.result) return {};
       try {
+        if (s.active?.stage === "architecture")
+          return await runArchitectureAssignmentChild(s, config, reviewBoundary);
         if (s.active?.stage === "foundations")
           return await runCharacterWorldAssignmentChild(s, config, reviewBoundary);
         if (s.active?.stage === "focus" && s.request.turnPlanDigest)
@@ -3389,7 +3549,9 @@ export function createGenerationGraph(
           r.sourceSha === selected.active?.origin.sourceHeadSha &&
           r.action === "controller-amendment-required");
         reviewed = originalRequest ? { reviewDependencyRequest: originalRequest } :
-          correction && s.active?.stage === "foundation"
+          correction && s.active?.stage === "architecture"
+            ? await runArchitectureAssignmentChild(s, config, reviewBoundary, true)
+            : correction && s.active?.stage === "foundation"
             ? await runFoundationAssignmentChild(s, config, reviewBoundary, true)
             : correction && s.active?.stage === "foundations"
               ? await runCharacterWorldAssignmentChild(s, config, reviewBoundary, true)
