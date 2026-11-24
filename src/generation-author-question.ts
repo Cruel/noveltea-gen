@@ -12,6 +12,7 @@ import { activeSpecialistChoice, bindSpecialistChoice, verifySpecialistChoice, i
   SpecialistChoiceRequiredError, withSpecialistAnswerAuthority, type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { readJobControl } from "./job-control.js";
+import { guardPiBudget, PiBudgetPause } from "./job-pi-policy.js";
 import type { JobStartResult } from "./job.js";
 
 type QuestionOutcome = Extract<AssignmentOutcome, { status: "awaiting-author" }>;
@@ -30,14 +31,16 @@ function assertNoWriter(job: JobStartResult) {
     throw Error("Author interrupt cannot retain an active Story writer.");
 }
 export function createGenerationQuestionGraph(job: JobStartResult, identity: AssignmentIdentity,
-  expectedWorkItem: string, adapter: AssignmentAdapter) {
+  expectedWorkItem: string, adapter: AssignmentAdapter,
+  authenticateSuccessor?: (head: string) => Promise<boolean>) {
   const key = logicalAssignmentKey(identity);
   const question = async (config: RunnableConfig): Promise<QuestionOutcome> => {
     assertNoWriter(job);
     const bound = await withStoryJobLock(job, "generation-question-binding", async () => {
       const pending = await activeSpecialistChoice(job);
       if (!pending || pending.workItem !== expectedWorkItem ||
-          pending.headSha !== identity.sourceHeadSha || pending.phase !== "awaiting-author")
+          (pending.headSha !== identity.sourceHeadSha && !await authenticateSuccessor?.(pending.headSha)) ||
+          pending.phase !== "awaiting-author")
         throw Error("Author question is not bound to the original specialist source.");
       return bindSpecialistChoice(job, pending.id, {
         identity, namespace: childNamespace(config), resumePhase: "writer",
@@ -52,8 +55,8 @@ export function createGenerationQuestionGraph(job: JobStartResult, identity: Ass
       try {
         const state = args[0] as Parameters<AssignmentAdapter["invoke"]>[0];
         const active = await activeSpecialistChoice(job);
-        if (active?.assignment && active.phase === "answered") {
-          if (!isDeepStrictEqual(active.assignment.identity, identity) ||
+        if (active?.workItem === expectedWorkItem && active.phase === "answered") {
+          if (!active.assignment || !isDeepStrictEqual(active.assignment.identity, identity) ||
               !isDeepStrictEqual(state.authorAnswerRef, answerRef(active)))
             throw Error("No authenticated child gate for the submitted specialist answer.");
           return await withSpecialistAnswerAuthority(job, active, () => fn(...args));
@@ -79,7 +82,8 @@ export function createGenerationQuestionGraph(job: JobStartResult, identity: Ass
       const choice = await activeSpecialistChoice(job);
       if (!choice || choice.phase !== "answered" || choice.workItem !== expectedWorkItem ||
           !choice.assignment || !isDeepStrictEqual(choice.assignment.identity, identity) ||
-          ref(choice) !== state.outcome.questionRef) return false;
+          ref(choice) !== state.outcome.questionRef ||
+          (choice.headSha !== identity.sourceHeadSha && !await authenticateSuccessor?.(choice.headSha))) return false;
       await verifySpecialistChoice(job, choice.id, "answered");
       return isDeepStrictEqual(answer, answerRef(choice));
     },
@@ -115,6 +119,9 @@ export async function pendingGenerationQuestion(job: JobStartResult, saver: Sqli
   const outcome = state?.outcome as QuestionOutcome | undefined;
   if (!nested || !isDeepStrictEqual(state?.identity, binding.identity))
     throw Error("Author choice is not bound to the original nested SQLite task.");
+  if (snapshot.values.request?.job !== undefined && snapshot.values.request.job !== job.jobId ||
+      snapshot.values.request?.story !== undefined && snapshot.values.request.story !== job.storyRoot)
+    throw Error("Pending question belongs to a different Story job.");
   if (principal && choice.answer && choice.answer.principal !== principal)
     throw Error("Accepted answer belongs to a different author.");
   if (outcome?.status === "awaiting-author" && outcome.questionRef === ref(choice) &&
@@ -145,4 +152,26 @@ export function generationQuestionResume(pending: NonNullable<Awaited<ReturnType
   if (pending.choice.phase !== "answered" || !pending.choice.answerSeal)
     throw Error("The original Question Set has no submitted answer.");
   return new Command<unknown, never, never>({ resume: { [pending.interruptId]: answerRef(pending.choice) } });
+}
+
+/** Keep the original interrupt pending when the cumulative budget is already
+ * exhausted. The specialist repeats the same step guard under its writer
+ * lease before claiming the accepted answer; no fresh step or call is charged. */
+export async function pendingQuestionBudgetPause(job: JobStartResult,
+  pending: NonNullable<Awaited<ReturnType<typeof pendingGenerationQuestion>>>) {
+  if (pending.phase !== "interrupt" || pending.choice.phase !== "answered") return null;
+  const identity = pending.choice.assignment!.identity;
+  const workItem = pending.choice.workItem;
+  const step = workItem === "world-foundations" ? "foundations:world" :
+    workItem === "character-foundations" ? "foundations:character" :
+    workItem.startsWith("event-") ? "event:" + workItem :
+    identity.assignmentId.startsWith("focus:") ? identity.assignmentId + ":" + identity.planVersion : null;
+  if (!step) throw Error("Author question has no original specialist budget step.");
+  try {
+    await withStoryJobLock(job, "generation-answer-budget", () => guardPiBudget(job, step));
+    return null;
+  } catch (error) {
+    if (!(error instanceof PiBudgetPause)) throw error;
+    return error.message;
+  }
 }

@@ -618,7 +618,7 @@ async function sealFixtureGenerationCheckpoint(f: ReturnType<typeof setup>, work
     const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
     Object.assign(process.env, f.env);
     try {
-      const job = await startStoryJob({ story: f.story, job: "single" }, false);
+      const job = await startStoryJob({ story: f.story, job: f.job.jobId }, false);
       const point = (await inspectRecoveryCheckpoints(job)).filter(p =>
         p.eligible && p.workItem === workItem).at(-1);
       assert.ok(point?.assurance, "Missing native-validated " + workItem);
@@ -5465,17 +5465,76 @@ for (const needsCharacter of [false, true]) test("R14D Event native correction a
     restoreSandbox();
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
 
-test("R14I production World question resumes the same child and Pi session", { skip: !available, timeout: 120_000 }, async () => {
-  const f = setup("r14i-world-question");
+for (const mode of ["crash", "public-cli", "studio"] as const) test("R14I production World question resumes the same child and Pi session " + mode, { skip: !available, timeout: 120_000 }, async () => {
+  const f = setup("r14i-world-question-" + mode);
+  let studio: Awaited<ReturnType<typeof import("./generation-author-studio-fixture.js").prepareAuthorStudio>> | null = null;
+  if (mode === "studio") {
+    const { prepareAuthorStudio } = await import("./generation-author-studio-fixture.js");
+    Object.assign(f.env, { NT_GIT_CACHE_DIR: join(root, "r14i-studio-cache"),
+      PI_OFFLINE: "1", NT_PI_CREDENTIAL_KEY: Buffer.alloc(32, 9).toString("base64"),
+      NT_REQUIRE_USER_PI_RUNTIME: "1" });
+    const prior = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, f.env);
+    try { studio = await prepareAuthorStudio(root, f.repo, f.initial, f.start[3]!); }
+    finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+    f.job = studio.job;
+    f.story = studio.job.storyRoot;
+    f.cli = (args: string[], success = true) => {
+      const result = spawnSync(process.execPath, [...cliEntry(), "job", ...args, "--story", f.story, "--job", f.job.jobId],
+        { encoding: "utf8", env: f.env, timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });
+      if (!success) { assert.notEqual(result.status, 0); return result.stderr; }
+      assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout);
+    };
+  }
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   saveFixtureTurn(f.job, contract, f.start[3]!, ["Keep the original archive mystery objective."]);
-  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "foundation");
-  const paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
-  assert.equal(paused.status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "global-architecture");
   const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  let paused: any;
+  if (studio) {
+    // Seed only the already validated prerequisite commits on the eventual
+    // server Thread. The real writer starts after authenticated server claim.
+    const checkpointPath = join(f.job.stateDir, "web-generation.sqlite");
+    const threadId = f.job.threadId + ":generation:web";
+    const seedSaver = SqliteSaver.fromConnString(checkpointPath);
+    const seedGraph = createGenerationGraph(seedSaver, "server");
+    const cfg = { configurable: { thread_id: threadId }, recursionLimit: 1000 };
+    const before = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+    Object.assign(process.env, f.env);
+    try {
+      const request = { story: f.story, job: f.job.jobId, task: f.start[3]!, contract,
+        fixture: true, skillsSource: source, turnPlanDigest: turnDigest, orchestrationPolicy: "explicit" as const };
+      const foundation = await seedGraph.invoke({ request, pauseAfter: "foundation" }, cfg);
+      assert.equal(foundation.status, "paused", foundation.reason ?? "");
+      await sealFixtureGenerationCheckpoint(f, "foundation");
+      const architecture = await seedGraph.invoke({ request, pauseAfter: "architecture" }, cfg);
+      assert.equal(architecture.status, "paused", architecture.reason ?? "");
+      paused = { ...architecture, checkpointPath, threadId };
+      await sealFixtureGenerationCheckpoint(f, "global-architecture");
+      // Deterministic prerequisite fixture only: replace the fixture transport
+      // request with the real scripted Pi request before Studio admission.
+      // Both checkpoints retain the same web Thread; no production owner changes.
+      unlinkSync(join(f.job.stateDir, "generation-server-owner.json"));
+    } finally {
+      seedSaver.db.close();
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  } else {
+    assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+    await sealFixtureGenerationCheckpoint(f, "foundation");
+    paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+    assert.equal(paused.status, "paused");
+    await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  }
   const paths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
   const world = "---\nschema: '0.1'\ntype: world-entity\nid: world-entity.archive\ntitle: Archive\nstatus: draft\ndecisions: []\ndescription: A public archive with a restricted ledger\n---\n\nThe custodian guards the sealed ledger.\n";
   const fact = "---\nschema: '0.1'\ntype: fact\nid: fact.evidence-concealed\ntitle: Hidden evidence\nstatus: draft\ndecisions: []\ninitial: true\n---\n\nNeri concealed an entry implicating an official.\n";
@@ -5502,6 +5561,13 @@ test("R14I production World question resumes the same child and Pi session", { s
         evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: paths[0], line: 1, explanation: "The custodian protects the sealed ledger." }] }), reason: "stop" };
     }
+    if (mode !== "crash" && i === 6) return { content: scriptedReadCalls(
+      ["nt-character-development/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
+        "nt-catalog/references/progression.md", "nt-catalog/references/authority-and-validation.md",
+        "nt-catalog/references/glossary.md"].map(p => "skill://" + p), i), reason: "toolUse" };
+    if (mode !== "crash" && i === 7) return { content: scriptedText({
+      authorDecisionRequest: { kind: "free-text", question: "Why does the witness protect the custodian?" },
+      modifiedRecords: [] }), reason: "stop" };
     throw Error("Unexpected extra specialist/reviewer call " + i);
   });
   const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
@@ -5511,15 +5577,36 @@ test("R14I production World question resumes the same child and Pi session", { s
   const { answerSpecialistChoice, inspectSpecialistChoice } = await import("../src/specialist-choice.js");
   let saver = SqliteSaver.fromConnString(paused.checkpointPath);
   try {
-    let graph = createGenerationGraph(saver, "cli");
+    let graph = createGenerationGraph(saver, studio ? "server" : "cli");
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
     const initial = (await graph.getState(cfg)).values;
     const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "foundations");
+    const request = { ...initial.request, fixture: false, turnPlanDigest: turnDigest,
+      provider: scriptedModel.provider, model: scriptedModel.id };
+    if (studio) await studio.admit(request, paused.threadId);
     await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
-      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
+      request,
     }, "author_update_intake");
     await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
     assert.equal(observed.length, 2);
+    if (studio) {
+      const pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:" + studio.owner);
+      assert.ok(pending);
+      const original = pending.choice;
+      saver.db.close();
+      await studio.resume(original, runtime);
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      const snapshot = await createGenerationGraph(saver, "server").getState(cfg);
+      const next = await pendingGenerationQuestion(f.job, saver, snapshot, paused.threadId, "user:" + studio.owner);
+      assert.equal(next?.choice.question.question, "Why does the witness protect the custodian?");
+      assert.equal(observed.length, 8);
+      assert.equal((await inspectSpecialistChoice(f.job, original.id)).phase, "consumed");
+      const unit = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")).units[0];
+      assert.equal(unit.phase, "committed");
+      assert.equal(unit.piSessionId, original.sessionId);
+      assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === unit.commitSha)?.semanticReview, "passed");
+      return;
+    }
     let pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
     assert.ok(pending, JSON.stringify({tasks:(await graph.getState(cfg)).tasks, values:(await graph.getState(cfg)).values}));
     assert.equal(pending.choice.phase, "awaiting-author");
@@ -5530,8 +5617,39 @@ test("R14I production World question resumes the same child and Pi session", { s
     graph = createGenerationGraph(saver, "cli");
     pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
     assert.equal(pending?.choice.id, original.id);
-    await answerSpecialistChoice(f.job, original.id, original.proposalSha256,
-      { kind: "custom", text: "The sealed ledger.", note: "" }, "user:cli");
+    const response = { kind: "custom" as const, text: "The sealed ledger.", note: "" };
+    const receiptPath = join(f.job.stateDir, "specialist-choices", original.id + ".json");
+    const originalReceipt = readFileSync(receiptPath, "utf8");
+    const snapshotBefore = await graph.getState(cfg);
+    await assert.rejects(pendingGenerationQuestion(f.job, saver, snapshotBefore, "wrong-thread", "user:cli"), /original assignment/);
+    await assert.rejects(pendingGenerationQuestion(f.job, saver, {
+      ...snapshotBefore, values: { ...snapshotBefore.values, planVersion: 999 },
+    }, paused.threadId, "user:cli"), /original assignment/);
+    if (mode === "public-cli") {
+      const inspection = f.cli(["generate", "inspect"]);
+      assert.equal(inspection.status, "paused", JSON.stringify(inspection));
+      assert.equal(inspection.authorQuestion.id, original.id);
+      const answerFile = join(root, "r14i-public-answer.json");
+      writeFileSync(answerFile, JSON.stringify({ id: original.id,
+        proposalSha256: original.proposalSha256, answer: response }));
+      await setJobControl(f.job, "paused");
+      const answered = f.cli(["generate", "resume", "--answer", answerFile]);
+      assert.equal(answered.status, "paused");
+      assert.equal(answered.authorQuestion.phase, "answered");
+      const repeat = f.cli(["generate", "resume", "--answer", answerFile]);
+      assert.equal(repeat.authorQuestion.phase, "answered");
+      await setJobControl(f.job, "running");
+    } else {
+      await answerSpecialistChoice(f.job, original.id, original.proposalSha256, response, "user:cli");
+    }
+    const acceptedBytes = readFileSync(receiptPath, "utf8");
+    const changed = JSON.parse(acceptedBytes);
+    changed.answer.text = "Forged answer";
+    writeFileSync(receiptPath, JSON.stringify(changed));
+    try { await assert.rejects(pendingGenerationQuestion(f.job, saver, snapshotBefore, paused.threadId, "user:cli"), /immutable accepted receipt/); }
+    finally { writeFileSync(receiptPath, acceptedBytes); }
+    assert.notEqual(originalReceipt, acceptedBytes);
+    assert.equal(observed.length, 2);
     pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
     assert.ok(pending);
     await assert.rejects(pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:other"), /different author/);
@@ -5542,6 +5660,38 @@ test("R14I production World question resumes the same child and Pi session", { s
     graph = createGenerationGraph(saver, "cli");
     pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
     assert.ok(pending);
+    if (mode === "public-cli") {
+      saver.db.close();
+      const { runStoryGeneration } = await import("../src/generation.js");
+      const { configurePiPolicy, inspectPiPolicy } = await import("../src/job-pi-policy.js");
+      const policy = await inspectPiPolicy(f.job);
+      await configurePiPolicy(f.job, { ...policy.policy, limits: { ...policy.policy.limits, modelCalls: policy.budget.modelCalls } });
+      const resource = await withJobModelRuntime(runtime, () => runStoryGeneration({ story: f.story, job: "single", action: "resume" }));
+      assert.equal(resource.status, "paused", JSON.stringify({reason: resource.reason, authorQuestion: resource.authorQuestion}));
+      assert.equal(resource.authorQuestion, null, "An accepted answer is not a new author question during a budget pause");
+      assert.equal(observed.length, 2);
+      await configurePiPolicy(f.job, { ...policy.policy, limits: { ...policy.policy.limits, modelCalls: policy.budget.modelCalls + 20 } });
+      const resumed = await withJobModelRuntime(runtime, () => runStoryGeneration({
+        story: f.story, job: "single", action: "resume",
+      }));
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      assert.equal(resumed.status, "paused", JSON.stringify({ reason: resumed.reason, authorQuestion: resumed.authorQuestion, operationRecovery: resumed.operationRecovery, recoverySources: resumed.recoverySources }));
+      assert.equal(resumed.authorQuestion?.question.question, "Why does the witness protect the custodian?");
+      assert.equal(observed.length, 8);
+      assert.equal((await inspectSpecialistChoice(f.job, original.id)).phase, "consumed");
+      const unit = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")).units[0];
+      assert.equal(unit.phase, "committed");
+      assert.equal(unit.piSessionId, original.sessionId);
+      assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === unit.commitSha)?.semanticReview, "passed");
+      await setJobControl(f.job, "cancelled");
+      const cancelled = await withJobModelRuntime(runtime, () => runStoryGeneration({
+        story: f.story, job: "single", action: "resume",
+      }));
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(cancelled.authorQuestion, null);
+      assert.equal(observed.length, 8);
+      return;
+    }
     const put = saver.put.bind(saver);
     const putWrites = saver.putWrites.bind(saver);
     const abort = new AbortController();
@@ -5580,6 +5730,7 @@ test("R14I production World question resumes the same child and Pi session", { s
   } finally {
     saver.db.close();
     restoreSandbox();
+    await studio?.close();
     for (const [key, value] of Object.entries(old)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

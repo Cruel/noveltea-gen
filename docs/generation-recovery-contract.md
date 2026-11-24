@@ -613,9 +613,15 @@ via `generate resume --answer <file>`; server-owned runs remain server-owned.
 
 World/Character, Narrative Event and focused original writer adapters use the
 shared boundary. The protected Foundation decision and rejected Review disputes
-remain existing parent decision paths; the latter's unchanged-scope corrective
-continuation requires further qualification. The scripted production World
-regression covers a real interrupt, restart before and after answer, and lost
-checkpoint after the resumed writer settles, including original session and
-independent Review. Event, focused and native Studio queue/worker end-to-end
-qualification are not established by this regression.
+remain existing parent decision paths; neither is a writer grant. The Focused
+question after prerequisite support authenticates the verified successor HEAD
+against the existing support receipt without changing its logical assignment.
+The scripted production World regression covers a real interrupt, restart
+before and after answer, and lost checkpoint after the resumed writer settles,
+including original session and independent Review. The public CLI answer-file
+variant resumes into the next Character question and checks terminal
+cancellation. The Studio variant uses a registered owner and Story Chat,
+reloads the draft from reopened persistence, submits through the authenticated
+HTTP boundary, and executes the queued production worker to the next Character
+question. Event and Focused direct transport regressions are not established
+by the World regression.

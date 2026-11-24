@@ -1,6 +1,6 @@
 import { parseAuthorAnswer } from "./author-question.js";
 import { answerSpecialistChoice } from "./specialist-choice.js";
-import { createGenerationQuestionGraph, pendingGenerationQuestion, generationQuestionResume } from "./generation-author-question.js";
+import { createGenerationQuestionGraph, pendingGenerationQuestion, generationQuestionResume, pendingQuestionBudgetPause } from "./generation-author-question.js";
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2106,7 +2106,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
       return { status: "unresolved", assignmentKey: key, evidenceRef: active.id,
         dispositionRef: "review-checkpoints" };
     },
-  });
+  }, async head => !!pin && await authenticate() && await trustedHead(job) === head);
   const finished = await child.invoke({ identity, submission: null, submissionKey: null,
     outcome: null, continuationRef: pin?.supportRef ?? null, suspension: pin?.suspension ?? null }, { ...assignmentChildConfig(config, identity), durability: "sync" });
   if (finished.outcome?.status === "needs-prerequisite")
@@ -4710,6 +4710,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         throw new Error("Cannot start generation for a terminally cancelled Story job.");
       }
       let preflightStopped = untrustedModern;
+      let answerBudgetPause: string | null = null;
       if (options.action !== "inspect") {
         try { await requireGenerationTurn(job, state.request, !!state.graphThreadId); }
         catch (error) { state = { ...state, ...blocked(error) }; preflightStopped = true; }
@@ -4790,7 +4791,9 @@ export async function runStoryGeneration(options: GenerationOptions) {
                 "user:cli"));
             pendingQuestion = await pendingGenerationQuestion(job, saver, saved, config.configurable.thread_id, "user:cli");
           }
-          const outcome = pendingQuestion
+          if (pendingQuestion && await readJobControl(job) === "running")
+            answerBudgetPause = await pendingQuestionBudgetPause(job, pendingQuestion);
+          const outcome = answerBudgetPause ? { ...state, status: "paused" as const, reason: answerBudgetPause } : pendingQuestion
             ? (pendingQuestion.phase === "continuation" || pendingQuestion.choice.phase === "answered") && await readJobControl(job) === "running"
               ? await graph.invoke(generationQuestionResume(pendingQuestion), config)
               : state
@@ -4869,8 +4872,11 @@ export async function runStoryGeneration(options: GenerationOptions) {
       } else if (selectionFailure) {
         current = blocked(selectionFailure);
       }
-      if (pendingQuestion?.phase === "interrupt" && !cancelled && !preflightStopped && !selectionFailure)
-        current = { status: "paused", reason: "Specialist Author Question is pending." };
+      if (pendingQuestion?.phase === "interrupt" && !cancelled && !preflightStopped && !selectionFailure) {
+        const budget = pendingQuestion.choice.phase === "answered" ? (await (await import("./job-pi-policy.js")).inspectPiPolicy(job)).budget : null;
+        answerBudgetPause ??= budget?.pause ? "Pi budget exhausted at safe boundary: " + budget.pause.reason + ". Increase the job budget and resume." : null;
+        current = { status: "paused", reason: answerBudgetPause ?? "Specialist Author Question is pending." };
+      }
       const visible = { ...state, ...current };
       const recoveryCheckpoints = await inspectRecoveryCheckpoints(job);
       // Inspection is strictly read-only. Report the last source-bound
@@ -4927,7 +4933,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         unknownRecovery: await inspectUnknownRecoveryStatus(job, visible.unknownRecovery ?? null),
         recoveryInspection,
         correctiveAssignment,
-        authorQuestion: pendingQuestion?.phase === "interrupt" ? {
+        authorQuestion: !cancelled && !answerBudgetPause && pendingQuestion?.phase === "interrupt" ? {
           id: pendingQuestion.choice.id, proposalSha256: pendingQuestion.choice.proposalSha256,
           phase: pendingQuestion.choice.phase, question: pendingQuestion.choice.question,
           delegationAllowed: pendingQuestion.choice.delegationAllowed === true,

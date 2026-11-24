@@ -1,3 +1,4 @@
+import { readJobControl } from '../../../src/job-control'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { pendingGenerationQuestion } from '../../../src/generation-author-question'
@@ -174,6 +175,7 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
       const completed = await withStoryJobLock(job, 'specialist-author-choice', async () => {
         const active = await inspectSpecialistChoice(job, input.id as string)
         if (active.phase === 'awaiting-author') {
+          if (['cancelled', 'completed'].includes(await readJobControl(job))) throw Error('Terminal job cannot accept an author answer.')
           if (!recoverable || row?.status !== 'paused') throw Error('Generation is not awaiting an author.')
           await checkQuestion(job, saved?.threadId, user.id, active)
           const draft = await readSpecialistQuestionDraft(job, active, user.id)

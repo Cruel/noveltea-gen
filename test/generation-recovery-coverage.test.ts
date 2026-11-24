@@ -58,7 +58,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independentAssignmentBoundary: "returns:15,status:6,operationFailure:2,throws:8",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
-  runStoryGeneration: "returns:5,status:9,blocked:6,reconcile:1,throws:17",
+  runStoryGeneration: "returns:5,status:10,blocked:6,reconcile:1,throws:17",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
   recoveryNode: "returns:24,status:18,throws:14",
 };
@@ -207,15 +207,15 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "dispatch", "a6f2c5ec831eeac034b8a2e1c1fb27e006795d7292fa54a6cfcecffc6d3715fe"],
     [file, "runFoundationAssignmentChild", "14f0bcfef6a2e02ff4ffbf35b9dae088bde0573cee138c7151421bc4ebc835d0"],
     [file, "runArchitectureAssignmentChild", "5ebd95013c61fd3b68285cce3ea262e5a3df1e290a8bae15e47b9ff8647a0c77"],
-    [file, "runCharacterWorldAssignmentChild", "63e941b5033a0c99fc1186ab145c3559b840b21a96f0563b6bca3b1b8f25d802"],
+    [file, "runCharacterWorldAssignmentChild", "020b14f8a2f432ac84c587b00ed815c59b23a9a821f14c8db30b4c7c79eed6a5"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
-    [file, "runNarrativeAssignmentChild", "eff7fce78296617d7f4f1d1d8d5b8f7ee3d5e8f86a57ef4b1a762d1e7fed6f7a"],
+    [file, "runNarrativeAssignmentChild", "0ed6e8ca371613713a7c3e1347f2f2cde19bbcc8fc01e8f06fcb7c47256888ad"],
     [file, "runReviewPrerequisiteChild", "738607cc1a495fe1cb04495cb7eef5e850aebc94d76d1d2ce05ef442135ea4c7"],
     [file, "pendingNarrativeForResume", "fd9a869e198615e191c6143a4e8cb75fe4fc3d79c5cce6ccdecd923aafa8131d"],
     [file, "inspectOriginalSpecialistCommitForResume", "9f127bc2631027cef2b60ef0181883dfebe1210e8470afb6a775283ff7d54d1f"],
     [child, "usesSharedAssignmentReview", "7698acfab91148b916f81886f703eea2a19ca44cbe423c718dd4990e1a7ed850"],
-    [file, "runFocusedAssignmentChild", "e1dc74bee5785bfd58a557f035741fddd1baf596437a8d3fbadb059b472b2ec5"],
-    [child, "createAssignmentLifecycleGraph", "5ea8e3f06e6bc4043d45182c853d93e761bae03fed84fd8a998f0ecd717da0bb"],
+    [file, "runFocusedAssignmentChild", "7147939248a9f6dd2078e50960a800bedd07ab398e3cd740192a0087ae3426ea"],
+    [child, "createAssignmentLifecycleGraph", "adca56c75e461edaec189699e29b22a99608fc5af4f1d22beba778589b5bfe8c"],
     [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
     [writer, "subunitRoundProof", "e96aea128cea5b5684c76de341552399255a2ed79329e8c161e4552a278a514a"],
     [writer, "subunitWriterResult", "f37d39dce1f50b1cb032b235712bd6e37ef55f1de8b7b3dc36b0b1ea0ab05e56"],
@@ -254,7 +254,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["assignment-metadata-recovery.ts", "runAssignmentReceipts", "9da8bfc91567911f984165cd16850debb568c23ae8f4ea984f200e58874b9a45"],
     ["assignment-metadata-recovery.ts", "recoverSubmittedAssignment", "bee3d42257382337c2f3da9ecc6ced3d036c029806cbf37b93c53f48a38774e7"],
     ["cross-domain-prerequisite-controller.ts", "preflightCompositionBoundary", "1485e8f736a11e3b77cc1d17a460880d41ae4f24431c3a984e3ca5ddaa4617ec"],
-    ["character-world.ts", "runCharacterWorldJob", "bb7888f1a8f51af39b8df3c8af6c4b63bc77ba0a866c4ba8fc987771c4255f8a"],
+    ["character-world.ts", "runCharacterWorldJob", "b857af3cafdc601a04c520be7d368d2889eef88e786fa4be1a27a1d45345dc2f"],
     ["character-world.ts", "invocationSource", "203ae344e2447dc4efef389cb44649b679f023b641f7fe861ee1ec98908ac04e"],
     ["interactive-work.ts", "runInteractiveWorkItem", "450d505d4c3c7e96929108fcb4549a79183da83716952e0602e98eee8ff05353"],
     ["interactive-work.ts", "interactiveSourceDigest", "05a9b608bc9b0f6f086aa75dee55eae1949885679b5629576ec8c57fe468ed02"],
@@ -694,7 +694,7 @@ const reviewedDirectStopFamilies = {
     regression: ["test/generation.test.ts", "generation start and read-only inspect preserve invalid corrective evidence without replay"],
     sites: [
       "runStoryGeneration/status#3", "runStoryGeneration/status#4",
-      "runStoryGeneration/status#5", "runStoryGeneration/status#7",
+      "runStoryGeneration/status#6", "runStoryGeneration/status#8",
     ],
   },
 } as const;
@@ -747,15 +747,16 @@ test("new terminal returns, throws or recovery bypass sites require explicit exi
 // R14I: the nested interrupt, receipt and public dispatch gates are reviewed together.
 test("R14I author questions retain the reviewed receipt and nested resume gates", () => {
   const gates = [
+    ["src/generation-author-question.ts", "pendingQuestionBudgetPause", "201cc4bab7c5d269de8eb04c121c2edfc7bcd3f1c291d60a4cf7bef7fb9992e5"],
     [
       "src/generation-author-question.ts",
       "createGenerationQuestionGraph",
-      "302856f281f371c16818d1118b4eabc7de709b6079d568e1c310d045538c6f73"
+      "4f1485c01456dbc72cdb86f3104de473fe40217aa940c683505631d72c166027"
     ],
     [
       "src/generation-author-question.ts",
       "pendingGenerationQuestion",
-      "4376bc0c45d0b770789dc5d609ce385da91aed10d90d4d9636e1757751bc131b"
+      "7dfd1ccdf4bee25d76681d4f4dcead35b2142cc281b18999f6cdf9fd2b6ff8c0"
     ],
     [
       "src/generation-author-question.ts",
@@ -780,7 +781,7 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/agent-runner.ts",
       "runPersistedGeneration",
-      "e0454188ffdcdd9611e6d6c2b3347f02581b504412ddc41ab5aea7d4b2e2b804"
+      "327334a9e804bfbcc4c14c1b34eaf26c8b568095ef765795d641938d157a424f"
     ],
     [
       "web/src/lib/generation-controls.server.ts",
@@ -790,7 +791,7 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/lib/author-interactions.server.ts",
       "authorInteractionRequest",
-      "96162f4721610e0ee8d8fe2a61616cb857ce1540cc451870d96f54a86afd1870"
+      "f9b7ac826ccdc67ca0b62bc7eb0f43d5a769fbe7feeb801a843a367ae3b59241"
     ]
   ];
   const printer = ts.createPrinter({ removeComments: true });

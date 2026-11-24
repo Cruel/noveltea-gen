@@ -173,8 +173,7 @@ and no live Pi usage is claimed by this inventory.
 - [Receipt](../src/specialist-choice.ts): immutable accepted answer seal,
   duplicate submission check and scoped child claim authority. Drafts do not
   confer authority. Existing protected Foundation and rejected Review dispute
-  decisions remain parent-owned, with unchanged-scope Review continuation
-  still requiring qualification.
+  decisions remain parent-owned, not independent writer authorization.
 - [CLI](../src/generation.ts), [Studio admission](../web/src/lib/generation-controls.server.ts),
   [HTTP](../web/src/lib/author-interactions.server.ts) and
   [worker](../web/src/agent-runner.ts): ordinary pause alone is not author
@@ -184,6 +183,7 @@ and no live Pi usage is claimed by this inventory.
 - Regression evidence: [production World restart](../test/generation.test.ts),
   [child lifecycle](../test/generation-assignment-lifecycle.test.ts),
   [receipt checks](../test/specialist-choice.test.ts) and
-  [HTTP boundary](../web/test/author-decisions-api.test.ts). The HTTP test
-  stages a real nested interrupt in a fixture; it is not a production Studio
-  worker end-to-end certification.
+  [HTTP boundary](../web/test/author-decisions-api.test.ts). The production
+  World variants certify CLI submission and the registered Studio Chat/HTTP/
+  queue-worker flow through the next Character question; the standalone HTTP
+  test separately checks draft/revision and receipt controls.

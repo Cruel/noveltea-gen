@@ -1,4 +1,4 @@
-import { pendingGenerationQuestion, generationQuestionResume } from '../../src/generation-author-question'
+import { pendingGenerationQuestion, generationQuestionResume, pendingQuestionBudgetPause } from '../../src/generation-author-question'
 import { assertNativeVersion } from '../../src/native-cli-version';
 import { withPiStatusReporter } from '../../src/pi-work-status'
 import { withControllerReviewPhase } from '../../src/controller-review-phase'
@@ -193,7 +193,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       const stages = (prior.values as { completedStages?: GenerationEvidence[] }).completedStages ?? []
       let working = '', verified = stages.length
       let previousHead = stages.at(-1)?.headSha ?? job.headSha
-      for await (const patch of await graph.stream(pending ? generationQuestionResume(pending) : { request: pinned,
+      const answerBudgetPause = pending ? await pendingQuestionBudgetPause(job, pending) : null
+      for await (const patch of answerBudgetPause ? [] : await graph.stream(pending ? generationQuestionResume(pending) : { request: pinned,
         fixPickup: fix && indexedStop ? { id: fix.id, check: fix.check,
           failedVersion: fix.failedVersion, signature: indexedStop.signature } : null,
         pauseAfter: item.intent === 'start' && (pinned.fixture || config?.pauseAfter === 'foundation')
@@ -265,14 +266,14 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         recoverySources: outcome.recoverySources,
       })
       const waiting = await pendingGenerationQuestion(job, saver, snapshot, threadId, 'user:' + item.ownerId)
-      const state = waiting?.phase === 'interrupt' ? 'paused' : ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
+      const state = await readJobControl(job) === 'cancelled' ? 'cancelled' : waiting?.phase === 'interrupt' ? 'paused' : ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
       // The graph owns the author-input distinction; a generic pause must
       // never be presented as a request for creative approval.
-      const needsAuthor = waiting?.phase === 'interrupt' || (state === 'paused' || state === 'blocked') &&
+      const needsAuthor = state !== 'cancelled' && !answerBudgetPause && (waiting?.phase === 'interrupt' || (state === 'paused' || state === 'blocked') &&
         typeof outcome.reason === 'string' &&
-        /author (decision|choice|approval|question|input)|waiting for (your|an author)|approval required|author review/i.test(outcome.reason)
+        /author (decision|choice|approval|question|input)|waiting for (your|an author)|approval required|author review/i.test(outcome.reason))
       if (!await store.persistence.generation.jobs.finish(
         item.ownerId, row.id, threadId, state as 'paused' | 'blocked' | 'completed' | 'cancelled',
         needsAuthor, item.workerId!, new Date().toISOString(),

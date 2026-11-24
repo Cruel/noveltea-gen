@@ -187,7 +187,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     // adopt the same claim without a second thread or CLI writer.
     await claimServerGeneration(acquired, acquired.threadId + ':generation:web', {
       story: acquired.storyRoot, job: jobId, task: payload.task,
-      contract: parseGenerationContract(contract), fixture: true, skillsSource: skills,
+      contract: parseGenerationContract(contract), fixture: true, skillsSource: skills, orchestrationPolicy: 'explicit',
     })
     const orphaned = await api('GET', undefined, aliceCookie)
     assert.equal(orphaned.body.job.status, 'interrupted')
@@ -204,7 +204,7 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(liveStream.status, 200)
     const liveReader = liveStream.body!.getReader()
     const admitted = await api('POST', payload, aliceCookie)
-    assert.equal(admitted.status, 202)
+    assert.equal(admitted.status, 202, JSON.stringify(admitted.body))
     assert.equal(admitted.body.job.status, 'queued')
     // Start the genuine agent entrypoint in a separate OS process. Studio
     // remains live with a separate SQLite connection and cannot pump the queue.
