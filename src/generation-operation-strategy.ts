@@ -19,6 +19,8 @@ import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { inspectSettledAdaptiveReconciliation } from "./adaptive-reconciliation.js";
 import type { RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
+import { inspectFoundationDiagnosticFailure } from "./foundation.js";
+import { pendingDigest } from "./pending-work-amendments.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
 import { inspectRejectedRepair, authenticateFoundationReviewHead, inspectFoundationReviewBoundary,
@@ -33,7 +35,7 @@ import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnk
   operationDiagnosisCase, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { assessBoundedAssignmentFailure, decideRecovery, finishVerifiedRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
 import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "./generation-diagnostic-controller.js";
-import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle } from "./generation-recovery-contract.js";
+import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle, RecoveryAttempt } from "./generation-recovery-contract.js";
 
 type State = GenerationGraphState;
 const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
@@ -307,6 +309,41 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
   if (point.semanticReview !== "passed" && point.semanticReview !== "not-required") return null;
   return { store: "review-checkpoint", ref: head, digest: point.proofDigest };
 }
+/** Reconstruct the settled independent verdict from its authenticated transcript. */
+async function authenticateSettledReviewVerdict(job: JobStartResult,
+  point: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>[number],
+  result: NonNullable<NonNullable<Awaited<ReturnType<typeof inspectCheckpointReview>>>["result"]>,
+  cycle: NonNullable<Awaited<ReturnType<typeof inspectPostcommitReviewCycle>>>,
+  round: NonNullable<Awaited<ReturnType<typeof inspectPostcommitReviewCycle>>>["rounds"][number],
+  expected: "pass" | "fail"): Promise<boolean> {
+  // The per-checkpoint result file is mutable private state, not a signature.
+  // Reconstruct its accepted verdict from the *original settled Pi transcript*
+  // and compare both the review-cycle digest and controller-sealed findings.
+  // Later independent correction rounds may append to the same conversation.
+  const { prepareSemanticReview, independentReviewResults } =
+    await import("./semantic-assignment-review.js");
+  const { assignmentVerdictResponseContract } =
+    await import("./narrative-review-specialist.js");
+  const packet = await prepareSemanticReview(job, [point]);
+  if (packet.sourceDigest !== round.packetDigest) return false;
+  const transcript = (await readFile(cycle.reviewer.file)).subarray(0, round.transcriptBytes)
+    .toString("utf8").trim().split("\n").map(line => JSON.parse(line) as {
+      type?: string; message?: { role?: string; stopReason?: string;
+        content?: Array<{ type?: string; text?: string }> } });
+  const accepted = transcript.filter(r => r.type === "message" && r.message?.role === "assistant" &&
+    r.message.stopReason === "stop").at(-1)?.message;
+  if (!accepted) return false;
+  const text = (accepted.content ?? []).filter(c => c.type === "text")
+    .map(c => c.text ?? "").join("\n");
+  const verdict = assignmentVerdictResponseContract(packet).parse(text);
+  if (verdict.verdict !== expected ||
+      createHash("sha256").update(JSON.stringify(verdict)).digest("hex") !== round.verdictDigest ||
+      !isDeepStrictEqual(independentReviewResults(packet, verdict,
+        "independent-pi-assignment-review")[0], result))
+    return false;
+  return true;
+}
+
 /** The sealed failed independent verdict, not a reviewer string, grants
  * reentry to the ORIGINAL Review/Repair controller after assessor selection.
  * This is read-only and cannot increment a Pi correction attempt. */
@@ -337,31 +374,7 @@ export async function originalFailedReviewProof(job: JobStartResult, s: State,
   const cycle = await inspectPostcommitReviewCycle(job, point.commitSha, point.assurance.assignmentDigest);
   const round = cycle?.rounds.find(r => r.commitSha === point.commitSha);
   if (!cycle || cycle.turnDigest !== c.origin.turnDigest || !round) return null;
-  // The per-checkpoint result file is mutable private state, not a signature.
-  // Reconstruct its accepted verdict from the *original settled Pi transcript*
-  // and compare both the review-cycle digest and controller-sealed findings.
-  // Later independent correction rounds may append to the same conversation.
-  const { prepareSemanticReview, independentReviewResults } =
-    await import("./semantic-assignment-review.js");
-  const { assignmentVerdictResponseContract } =
-    await import("./narrative-review-specialist.js");
-  const packet = await prepareSemanticReview(job, [point]);
-  if (packet.sourceDigest !== round.packetDigest) return null;
-  const transcript = (await readFile(cycle.reviewer.file)).subarray(0, round.transcriptBytes)
-    .toString("utf8").trim().split("\n").map(line => JSON.parse(line) as {
-      type?: string; message?: { role?: string; stopReason?: string;
-        content?: Array<{ type?: string; text?: string }> } });
-  const accepted = transcript.filter(r => r.type === "message" && r.message?.role === "assistant" &&
-    r.message.stopReason === "stop").at(-1)?.message;
-  if (!accepted) return null;
-  const text = (accepted.content ?? []).filter(c => c.type === "text")
-    .map(c => c.text ?? "").join("\n");
-  const verdict = assignmentVerdictResponseContract(packet).parse(text);
-  if (verdict.verdict !== "fail" ||
-      createHash("sha256").update(JSON.stringify(verdict)).digest("hex") !== round.verdictDigest ||
-      !isDeepStrictEqual(independentReviewResults(packet, verdict,
-        "independent-pi-assignment-review")[0], reviewed.result))
-    return null;
+  if (!await authenticateSettledReviewVerdict(job, point, reviewed.result, cycle, round, "fail")) return null;
   return { store: "review-checkpoint", ref: point.commitSha,
     digest: createHash("sha256").update(JSON.stringify({
       assurance: point.assurance, verdict: reviewed.result,
@@ -530,10 +543,111 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
   return !!original && isDeepStrictEqual(original, d.evidence.at(-1)) &&
     isDeepStrictEqual(d.evidence.slice(0, -1), c.evidence);
 }
+/** A diagnostic may only select this bounded, existing Foundation writer
+ * adapter. Owner, scope, source, defect and actual prerequisites are checked
+ * independently; prose is never a writer grant. */
+function foundationDiagnosticDecision(c: RecoveryCase,
+  diagnostic: RecoveryDecision, proposal: RecoveryDiagnosticProposal): RecoveryDecision | null {
+  const proof = diagnostic.evidence.at(-1);
+  if (c.origin.operation !== "specialist-result" || c.origin.assignmentId !== "foundation" ||
+      c.kind !== "semantic" || c.observation !== "returned-failure" ||
+      proposal.strategy !== "local-repair" || proposal.category !== "defect" ||
+      proposal.owner !== "foundation" || proposal.scopeRef !== proposal.sourceRef ||
+      proposal.prerequisites.length || !proof?.digest || proof.store !== "specialist-receipt" ||
+      proposal.sourceRef !== [proof.store, proof.ref, proof.digest].join(":") ||
+      !isDeepStrictEqual(diagnostic.evidence.slice(0, -1), c.evidence) ||
+      diagnostic.caseId !== c.id || diagnostic.checkedSourceHeadSha !== c.origin.sourceHeadSha)
+    return null;
+  return { ...base(c, proof), action: "known-correction", adapter: "assignment-diagnostic", receipt: proof };
+}
+
+function foundationDiagnosticDefects(failure: { defects: readonly import("./assignment-metadata-recovery.js").AssignmentDefect[] }) {
+  return failure.defects.length > 0 && failure.defects.every(d =>
+    d.path.startsWith("creative-direction/") &&
+    (d.kind === "metadata" && ["schema", "yaml", "frontmatter"].includes(d.code) ||
+     d.kind === "provenance" && d.code === "missing-author-provenance"));
+}
+
+/** A pause retains the original diagnostic decision's receipt, not a new
+ * writer allowance. The actual proposal/attempt is re-read on resumption. */
+export function foundationDiagnosticDecisionForLifecycle(l: RecoveryLifecycle): RecoveryDecision | null {
+  const d = l.decision;
+  if (l.active?.origin.operation !== "specialist-result" ||
+      l.active.origin.assignmentId !== "foundation" || l.attempt?.purpose !== "diagnosis") return null;
+  if (d?.action === "known-correction" && d.adapter === "assignment-diagnostic") return d;
+  if (d?.action === "pause" && d.resumeRef?.store === "specialist-receipt" &&
+      isDeepStrictEqual(d.resumeRef, d.evidence.at(-1)))
+    return { ...base(l.active, d.resumeRef), action: "known-correction",
+      adapter: "assignment-diagnostic", receipt: d.resumeRef };
+  return null;
+}
+
+/** Re-read the exact diagnosis, not its graph projection, and reauthenticate
+ * the original terminal and any already admitted successor. */
+export async function authenticateFoundationDiagnosticDecision(job: JobStartResult,
+  c: RecoveryCase, source: GenerationOperationRecovery, d: RecoveryDecision,
+  expectedAttempt?: RecoveryAttempt | null, historicalHead?: string) {
+  if (d.action !== "known-correction" || d.adapter !== "assignment-diagnostic" ||
+      c.origin.jobId !== job.jobId || c.origin.jobThreadId !== job.threadId ||
+      source.source.jobId !== job.jobId || source.source.threadId !== c.origin.graphThreadId ||
+      source.operation !== "specialist-result" || source.evidence.assignmentId !== "foundation" ||
+      source.outcome !== "returned-failure" || source.source.headSha !== c.origin.sourceHeadSha ||
+      source.source.turnDigest !== c.origin.turnDigest || source.source.planVersion !== c.origin.planVersion ||
+      source.evidence.assignmentFailure?.proof.kind !== "nonconverging" ||
+      source.evidence.assignmentFailure.sourceHeadSha !== c.origin.sourceHeadSha ||
+      source.evidence.assignmentFailure.proof.receiptDigest !== d.receipt.digest)
+    return null;
+  const target = diagnosticCaseForDecision(c, d);
+  const proposal = await inspectOriginalUnknownDiagnosis(job, target);
+  if (!("strategy" in proposal) || !isDeepStrictEqual(d, foundationDiagnosticDecision(c, d, proposal))) return null;
+  const attempt = await inspectDiagnosticAttempt(job, target, c.id);
+  if (attempt.phase !== "settled" || attempt.mode !== "read-only" ||
+      (expectedAttempt !== undefined && !isDeepStrictEqual(attempt, expectedAttempt))) return null;
+  const authorization = { terminalDigest: d.receipt.digest!,
+    decisionDigest: pendingDigest({ decision: d, attempt, proposal }), advice: proposal.diagnosis };
+  const terminal = await inspectFoundationDiagnosticFailure(job, c.origin.sourceHeadSha,
+    source.evidence.assignmentFailure.proof, authorization, historicalHead);
+  if (!terminal || terminal.ref !== d.receipt.ref || !foundationDiagnosticDefects(terminal)) return null;
+  return { terminal, authorization };
+}
+
+export async function authenticateFoundationDiagnosticDischarge(job: JobStartResult, c: RecoveryCase,
+  source: GenerationOperationRecovery, correction: RecoveryEvidence, head: string): Promise<boolean> {
+  if (correction.store !== "specialist-receipt" || c.origin.assignmentId !== "foundation" ||
+      !source.evidence.assignmentFailure || head === c.origin.sourceHeadSha) return false;
+  const proof = { store: "specialist-receipt" as const, ref: correction.ref,
+    digest: source.evidence.assignmentFailure.proof.receiptDigest };
+  const d = { ...base(c, proof), action: "known-correction" as const, adapter: "assignment-diagnostic" as const, receipt: proof };
+  const original = await authenticateFoundationDiagnosticDecision(job, c, source, d, undefined, head);
+  if (!original || correction.digest !== original.authorization.decisionDigest ||
+      original.terminal.invocationProof?.ordinal !== original.terminal.proof.ordinal + 1) return false;
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+    p.workItem === "foundation" && p.commitSha === head && p.parentSha === c.origin.sourceHeadSha &&
+    p.validation.status === "passed" && p.semanticReview === "passed" &&
+    p.assurance?.turnDigest === c.origin.turnDigest && p.planVersion === c.origin.planVersion);
+  if (!point?.assurance) return false;
+  const reviewed = await inspectCheckpointReview(job, point);
+  if (reviewed?.status !== "passed" || reviewed.result?.status !== "passed" ||
+      reviewed.result.reviewer !== "independent-pi-assignment-review") return false;
+  const cycle = await inspectPostcommitReviewCycle(job, head, point.assurance.assignmentDigest);
+  const round = cycle?.rounds.find(r => r.commitSha === head);
+  return !!cycle && cycle.turnDigest === c.origin.turnDigest && !!round &&
+    cycle.reviewer.id !== original.terminal.sessionId &&
+    await authenticateSettledReviewVerdict(job, point, reviewed.result, cycle, round, "pass");
+}
+
 /** The proposal cannot select an adaptive reconciliation unless the original
  * controller admission and the actual Pi transcript independently agree. */
 export async function authorizeOperationDiagnosticStrategy(job: JobStartResult, s: State, c: RecoveryCase,
   diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>, proposal: RecoveryDiagnosticProposal) {
+  const local = foundationDiagnosticDecision(c, diagnostic, proposal);
+  if (local) {
+    const original = await originalAssignmentFailure(job, s, c);
+    if (!original || original.proof.kind !== "nonconverging" ||
+        !foundationDiagnosticDefects(original) || original.ref !== local.evidence.at(-1)?.ref ||
+        original.proof.receiptDigest !== local.evidence.at(-1)?.digest) return null;
+    return local;
+  }
   const adaptive = c.origin.operation === "adaptive-admission" ?
     await inspectSettledAdaptiveReconciliation(job, s.request, c.origin) : null;
   return authorizeDiagnosticStrategy(s, c, diagnostic, proposal, adaptive?.receipt);
@@ -754,10 +868,15 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       const target = diagnosticCaseForDecision(c, d);
       const { policy } = await inspectPiPolicy(job);
       const packet = diagnosticPacket(s, c, target);
-      if (originalDraft) packet.existingFindings = {
-        original: packet.existingFindings, assignmentDefects: originalDraft.defects,
-        observation: "Repeated source-bound native/provenance correction did not converge; draft remains uncommitted.",
-      };
+      if (originalDraft) {
+        packet.existingFindings = {
+          original: packet.existingFindings, assignmentDefects: originalDraft.defects,
+          observation: "Repeated source-bound native/provenance correction did not converge; draft remains uncommitted.",
+        };
+        if (c.origin.assignmentId === "foundation" && c.origin.operation === "specialist-result" &&
+            foundationDiagnosticDefects(originalDraft))
+          packet.availableAdapters = ["local-repair: owner=foundation, scopeRef=exact sourceRef; only original native defects, no other owner or new prerequisites"];
+      }
       await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider,
         s.request.model ?? policy.profile.model, packet);
       await assertSource(job, s, c);

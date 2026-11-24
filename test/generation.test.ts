@@ -4421,6 +4421,134 @@ test("C04 Review strategy demands the original sealed failed Pi cycle before any
 });
 
 
+for (const accepted of [true, false]) test(
+  "R14H original parent adaptive planner " + (accepted ? "reconciles accepted effect" : "refuses rejected proposal"),
+  { skip: !available, timeout: 180_000 }, async () => {
+  const f = setup("r14h-adaptive-" + accepted, story => {
+    mkdirSync(join(story, "creative-direction"), { recursive: true });
+    writeFileSync(join(story, "creative-direction/foundation.md"), [
+      "---", "schema: '0.1'", "type: creative-direction", "id: creative-direction.foundation",
+      'title: "The archive witness"', "status: approved", "decisions: []",
+      'premise: "A witness disappeared after a disputed ledger transfer"',
+      'central_conflict: "Verify the ledger before the later disclosure choice"',
+      'genre: "Mystery"', 'tone: "Investigative"',
+      'player_experience: "Source-grounded investigation followed by consequential disclosure"',
+      'scope: "A short dialogue-led Story with two characters"',
+      "planning:", "  choice_frequency: none", "  puzzle_emphasis: none",
+      "---", "", "The opening must establish the verified transfer before later player decisions.", "",
+    ].join("\n"));
+  });
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  contract.constraints = ["Preserve all original verified facts and author decisions."];
+  writeFileSync(f.contract, JSON.stringify(contract));
+  saveFixtureTurn(f.job, contract, f.start[3]!, ["Preserve the source-bound original Story objective."]);
+  const paused = f.cli([...f.start, "--pause-after", "architecture"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const env = Object.fromEntries([...Object.keys(f.env), "NT_ADAPTIVE_PLANNING"].map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env, { NT_ADAPTIVE_PLANNING: "1" });
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const { runtime, observed } = await scriptedStoryRuntime((i, context) => {
+      if (i === 0 || i === 2) return { content: scriptedReadCalls(requiredOrchestratorSkillReads("autonomous")
+        .map(path => "skill://" + path), i), reason: "toolUse" };
+      if (i === 1) return { content: scriptedText({ sourceSha: f.job.baseSha, turnDigest: turn.digest,
+        assignments: turn.assignments.map((a: {id:string}) => ({ id:a.id, reason:"Preserve the original approved objective." })) }), reason: "stop" };
+      if (i === 3) {
+        const prompt = context.messages.flatMap(m => m.role === "user" && Array.isArray(m.content) ?
+          m.content.filter(c => c.type === "text").map(c => c.text) : []).findLast(t => t.includes("Only currently pending IDs:"));
+        const pending = JSON.parse(prompt!.match(/Only currently pending IDs: (\[[^\n]*\])/)![1]!);
+        const target = "milestones/disclosure.md";
+        const hash = createHash("sha256").update(milestoneFulfillmentProjection(
+          readFileSync(join(f.job.worktreeStoryRoot, target), "utf8"))).digest("hex");
+        return { content: scriptedText({ sourceSha: head, turnDigest: turn.digest, beforeVersion: 1,
+          reason: "Keep the original milestone work bounded to independently verifiable evidence.",
+          actions: [{ kind: "narrow", item: "event:milestone.disclosure", sourcePath: target,
+            sourceHash: accepted ? hash : "0".repeat(64), outcome: "Verify the original archive evidence and preserve the existing causal objective." }],
+          order: pending }), reason: "stop" };
+      }
+      assert.equal(i, 4, "No new writer or planner may run while resolving the original parent check");
+      const serialized = JSON.stringify(context.messages);
+      const signature = serialized.match(/signature=([a-f0-9]{64})/)?.[1];
+      const sourceRef = serialized.match(/sourceRef=([^;]+); category=/)?.[1];
+      assert.ok(signature && sourceRef);
+      return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1",
+        signature, sourceRef, category: "infrastructure",
+        diagnosis: "Reconcile only the original sealed adaptive controller admission; do not invent a plan.",
+        strategy: "reconcile-original", owner: null, scopeRef: null, prerequisites: [],
+        uncertainty: "A rejected original proposal cannot be admitted." }), reason: "stop" };
+    });
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 10000 };
+    const values = (await graph.getState(cfg)).values;
+    const selectedFile = join(f.job.stateDir, "orchestrator-selection.json");
+    if (existsSync(selectedFile)) unlinkSync(selectedFile);
+    const selected = await selectStoryOrchestrator(f.job, paused.threadId,
+      { task: f.start[3]!, kind: "full-story", turnPlanDigest: turn.digest }, source);
+    const { runPinnedObjectivePlanner } = await import("../src/orchestrator-planner.js");
+    const planning = await withJobModelRuntime(runtime, () =>
+      runPinnedObjectivePlanner(f.job, selected, turn, scriptedModel.provider, scriptedModel.id));
+    const initial = { request: { ...values.request, fixture: false, orchestrationPolicy: "explicit" as const,
+        provider: scriptedModel.provider, model: scriptedModel.id, turnPlanDigest: turn.digest },
+      orchestratorSnapshotId: selected.receipt.skillSnapshot.id,
+      orchestratorOrder: planning.proposal!.assignments.map(a => a.id),
+      orchestratorPlanningDigest: planning.digest, status: "running" as const,
+      inventory: values.inventory, active: null, result: null, ideaTask: null, escalation: null,
+      causalAmendment: null, pauseAfter: null, adaptiveVersion: null, pendingOrder: null };
+    await graph.updateState(cfg, initial, "schedule");
+    const first = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+      ...cfg, interruptAfter: ["author_update_intake"] }));
+    assert.equal(observed.length, 4, JSON.stringify(first));
+    const ledger = join(f.job.stateDir, "adaptive-plan.json");
+    const originalBytes = readFileSync(ledger, "utf8");
+    assert.equal(JSON.parse(originalBytes).attempts.at(-1).phase, accepted ? "admitted" : "rejected");
+    if (accepted) {
+      assert.equal(first.adaptiveVersion, 2);
+      // A stale physical parent checkpoint predates the sealed accepted
+      // receipt; a disabled rollout refuses fallback until the original
+      // planner effect is independently restored. No new model effect.
+      process.env.NT_ADAPTIVE_PLANNING = "0";
+      await graph.updateState(cfg, initial, "schedule");
+      const failure = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      assert.equal(failure.recoveryLifecycle.active?.origin.operation, "adaptive-admission", JSON.stringify(failure));
+      process.env.NT_ADAPTIVE_PLANNING = "1";
+    } else assert.equal(first.recoveryLifecycle.active?.origin.operation, "adaptive-admission");
+    const chosen = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+    assert.equal(chosen.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify(chosen));
+    const diagnosed = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+      ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(diagnosed.recoveryLifecycle.decision?.action, accepted ? "reconcile-effects" : "diagnostic-stop",
+      JSON.stringify(diagnosed));
+    assert.equal(observed.length, 5);
+    assert.deepEqual(observed.at(-1)!.tools, []);
+    if (accepted) {
+      const resumed = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+      assert.equal(resumed.recoveryLifecycle.active, null, JSON.stringify(resumed));
+      assert.equal(resumed.adaptiveVersion, 2);
+      assert.equal(resumed.recoveryLifecycle.discharged.at(-1)?.case.id, diagnosed.recoveryLifecycle.active?.id);
+      assert.deepEqual((await graph.getState(cfg)).next, ["author_update_intake"]);
+      assert.ok(resumed.active);
+      assert.deepEqual(resumed.inventory, first.inventory);
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), resumed.recoveryLifecycle);
+    } else {
+      assert.equal(diagnosed.status, "blocked");
+      assert.equal(diagnosed.recoveryLifecycle.discharged.length, 0);
+    }
+    assert.equal(observed.length, 5);
+    assert.equal(readFileSync(ledger, "utf8"), originalBytes);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  } finally {
+    saver.db.close(); restoreSandbox();
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 for (const mode of ["event-only", "required-interactive", "story-wide-required", "event-only-complete", "event-only-incomplete"] as const)
 test(mode === "event-only-complete"
   ? "#244 C07 original-Thread Event-only correction reaches reviewed Composition and completed Turn"
@@ -6602,15 +6730,16 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-native", "review-native-steer", "review-native-protected", "review-native-protocol", "review-native-stall", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "nonconverging-continue", "nonconverging-continue-crash", "nonconverging-continue-budget", "nonconverging-continue-tamper", "nonconverging-continue-transcript", "nonconverging-continue-uncertain", "nonconverging-continue-foreign-file", "nonconverging-continue-cancel", "nonconverging-unsafe", "nonconverging-foreign", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-native", "review-native-steer", "review-native-protected", "review-native-protocol", "review-native-stall", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
   skip: !available, timeout: 240_000,
 }, async () => {
   const owner = scenario === "cli" ? "cli" : "server";
-  const terminal = scenario === "protocol-exhausted" || scenario === "nonconverging";
+  const diagnosticContinue = scenario.startsWith("nonconverging-continue");
+  const terminal = scenario === "protocol-exhausted" || scenario.startsWith("nonconverging");
   const realReview = scenario.startsWith("review-");
   const crashRounds = scenario.startsWith("crash-");
-  const actualReviewer = realReview || crashRounds;
+  const actualReviewer = realReview || crashRounds || diagnosticContinue;
   const stalled = scenario === "review-stalled" || scenario === "review-stalled-continue";
   const dispute = scenario === "review-dispute";
   const scopeRevision = scenario === "review-scope";
@@ -6667,7 +6796,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }], reason: "toolUse" };
       if (scenario === "protocol-exhausted" && i >= 3 && i <= 5)
         return { content: scriptedText("Malformed report " + i), reason: "stop" };
-      if (scenario === "nonconverging") {
+      if (scenario.startsWith("nonconverging")) {
         if (i === 3 || i === 5 || i === 7) return { content: scriptedText(report), reason: "stop" };
         if (i === 4 || i === 6) return { content: [{
           type: "toolCall", name: "write", id: "r02-repeat-invalid-" + i,
@@ -6682,10 +6811,23 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1",
             signature, sourceRef, category: "defect",
             diagnosis: "The original metadata correction repeatedly retained the same invalid schema field.",
-            strategy: "review-adjudication", owner: null, scopeRef: null, prerequisites: [],
-            uncertainty: "No currently admitted successor correction." }), reason: "stop" };
+            strategy: diagnosticContinue || scenario === "nonconverging-foreign" ? "local-repair" :
+              scenario === "nonconverging-unsafe" ? "unsafe" : "review-adjudication",
+            owner: diagnosticContinue ? "foundation" : scenario === "nonconverging-foreign" ? "composition" : null,
+            scopeRef: diagnosticContinue || scenario === "nonconverging-foreign" ? sourceRef : null, prerequisites: [],
+            uncertainty: diagnosticContinue ? "Native validation must confirm the exact corrected metadata." : "No currently admitted successor correction." }), reason: "stop" };
         }
-        throw Error("Nonconverging writer must not replay.");
+        if (diagnosticContinue && i === 9) {
+          assert.match(JSON.stringify(context.messages), /INDEPENDENT DIAGNOSTIC FOLLOW-UP/);
+          if (scenario === "nonconverging-continue-uncertain") throw Error("Injected transport loss after writer start");
+          return { content: [{ type: "toolCall", name: "write", id: "r14h-diagnostic-successor",
+            arguments: { path: target, content: authored } }], reason: "toolUse" };
+        }
+        if (diagnosticContinue && i === 10) return { content: scriptedText(report), reason: "stop" };
+        if (diagnosticContinue && i === 11)
+          return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
+            .map(path => "skill://" + path), i), reason: "toolUse" };
+        if (!diagnosticContinue || i !== 12) throw Error("Nonconverging writer must not replay.");
       }
       if (i === 3) {
         if (scenario === "author-pause") {
@@ -6776,14 +6918,14 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           arguments: { path: target, content: authored + "\n" + revisions.slice(0, correction).join("\n") + "\n" } }], reason: "toolUse" };
       if (revising && correction && correctionStep === 1)
         return { content: scriptedText("Corrected the source-linked witness obligation."), reason: "stop" };
-      if (actualReviewer && (i === 10 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15)) {
+      if (actualReviewer && (i === 10 || diagnosticContinue && i === 12 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15)) {
         const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
         const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
           .map(c => c.text ?? "").findLast(text => text.includes("\nIMMUTABLE REVIEW PACKET\n"));
         assert.ok(prompt, "Original reviewer receives the source-bound packet");
         const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
         const item = packet.items[0];
-        const pass = crashRounds || reviewCrash && correction === 1 || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
+        const pass = diagnosticContinue || crashRounds || reviewCrash && correction === 1 || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
         const finding = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: target, line: 1, kind: "missing-requirement",
           message: "The witness causal connection still needs the next specific link.",
@@ -7244,6 +7386,163 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           calls: observed.length, recoverySources: first.recoverySources }, null, 2));
         assert.equal(first.recoveryLifecycle.active?.kind, scenario === "protocol-exhausted" ? "protocol" : "semantic");
         const caseId = first.recoveryLifecycle.active!.id;
+        if (diagnosticContinue) {
+          const before = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+          const terminalFile = join(f.job.stateDir, "foundation-invocations", before.piSessionId, "terminal.json");
+          const terminalBytes = readFileSync(terminalFile, "utf8");
+          const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["assess_recovery"] }));
+          assert.equal(chosen.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify(chosen.recoveryLifecycle));
+          const crashAt = async (match: (namespace: string, writes: Array<[string, unknown]>) => boolean,
+            calls: number) => {
+            const abort = new AbortController();
+            const put = saver.put.bind(saver);
+            const writes = saver.putWrites.bind(saver);
+            const failure = Error("R14H injected SQLite checkpoint loss");
+            let crashed = false;
+            saver.put = async (...args) => {
+              if (crashed) throw failure;
+              return put(...args);
+            };
+            saver.putWrites = async (cfg, entries, task) => {
+              if (crashed) throw failure;
+              if (match(String(cfg.configurable?.checkpoint_ns ?? ""), entries)) {
+                crashed = true; abort.abort(failure); throw failure;
+              }
+              return writes(cfg, entries, task);
+            };
+            await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(null, {
+              ...config, interruptAfter: ["assess_recovery"], signal: abort.signal, durability: "sync",
+            })));
+            assert.ok(crashed, "The actual durable graph boundary must be lost");
+            assert.equal(observed.length, calls);
+            assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+            saver.db.close();
+            saver = SqliteSaver.fromConnString(checkpointFile);
+            graph = makeGraph();
+          };
+          if (scenario === "nonconverging-continue-crash")
+            await crashAt((ns, writes) => !ns && writes.some(([channel, value]) =>
+              channel === "recoveryLifecycle" &&
+              (value as {decision?: {adapter?: string}})?.decision?.adapter === "assignment-diagnostic"), 11);
+          const admitted = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["assess_recovery"] }));
+          assert.equal(admitted.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(admitted));
+          assert.equal(admitted.recoveryLifecycle.decision?.adapter, "assignment-diagnostic");
+          assert.equal(admitted.recoveryLifecycle.active?.id, caseId);
+          assert.equal(admitted.recoveryLifecycle.attempt?.phase, "settled");
+          assert.equal(observed.length, 11);
+          assert.deepEqual(observed.at(-1)!.tools, []);
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+            admitted.recoveryLifecycle);
+          const ordinal = JSON.parse(terminalBytes).ordinal + 1;
+          const dir = dirname(terminalFile);
+          const grantFile = join(dir, ordinal + ".grant.json");
+          const startedFile = join(dir, ordinal + ".started.json");
+          const settledFile = join(dir, ordinal + ".settled.json");
+          if (scenario === "nonconverging-continue-crash" || scenario === "nonconverging-continue-tamper" ||
+              scenario === "nonconverging-continue-transcript") {
+            await crashAt((ns, writes) => ns.includes("assignment-") &&
+              writes.some(([channel, value]) => channel === "correction" &&
+                (value as {rejectedReceiptRef?: string})?.rejectedReceiptRef?.split(":")[1] === String(ordinal - 1)), 11);
+            assert.ok(existsSync(grantFile));
+            assert.ok(!existsSync(startedFile));
+            if (scenario !== "nonconverging-continue-crash") {
+              if (scenario === "nonconverging-continue-tamper")
+                writeFileSync(grantFile, JSON.stringify({ ...JSON.parse(readFileSync(grantFile, "utf8")),
+                  diagnostic: "0".repeat(64) }));
+              else writeFileSync(before.piSessionFile, readFileSync(before.piSessionFile, "utf8").replace("unsupported_field", "substituted_field"));
+              const fenced = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+              assert.equal(fenced.status, "blocked");
+              assert.ok(fenced.recoveryLifecycle.inspectionFences.length);
+              assert.equal(fenced.recoveryLifecycle.active?.id, caseId);
+              assert.equal(observed.length, 11);
+              assert.ok(!existsSync(startedFile));
+              return;
+            }
+            await crashAt((ns, writes) => ns.includes("assignment-") &&
+              writes.some(([channel, value]) => channel === "submission" &&
+                (value as {receiptRef?: string})?.receiptRef?.split(":")[1] === String(ordinal)), 13);
+            assert.ok(existsSync(settledFile));
+            assert.equal(readFileSync(terminalFile, "utf8"), terminalBytes);
+          }
+          if (scenario === "nonconverging-continue-budget") {
+            await configurePiPolicy(f.job, { version: 1,
+              profile: { provider: scriptedModel.provider, model: scriptedModel.id }, limits: { modelCalls: 11 } });
+            const paused = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+            assert.equal(paused.status, "paused", JSON.stringify(paused));
+            assert.equal(paused.recoveryLifecycle.decision?.action, "pause");
+            assert.equal(paused.recoveryLifecycle.decision?.reason, "budget");
+            assert.equal(observed.length, 11);
+            assert.ok(existsSync(grantFile));
+            assert.ok(!existsSync(startedFile));
+            assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+              paused.recoveryLifecycle);
+            await configurePiPolicy(f.job, { version: 1,
+              profile: { provider: scriptedModel.provider, model: scriptedModel.id }, limits: { modelCalls: 50 } });
+            const resumed = await withJobModelRuntime(runtime, () => graph.invoke(input, {
+              ...config, interruptAfter: ["assess_recovery"] }));
+            assert.equal(resumed.recoveryLifecycle.active, null, JSON.stringify(resumed));
+            assert.equal(observed.length, 15);
+            assert.equal(resumed.recoveryLifecycle.discharged.at(-1)?.case.id, caseId);
+            return;
+          }
+          if (scenario === "nonconverging-continue-foreign-file" || scenario === "nonconverging-continue-cancel") {
+            if (scenario === "nonconverging-continue-foreign-file")
+              writeFileSync(join(f.job.worktreeStoryRoot, "unrelated.md"), "Unrelated draft");
+            else await setJobControl(f.job, "cancelled");
+            const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+            assert.equal(stopped.status, scenario === "nonconverging-continue-cancel" ? "cancelled" : "blocked");
+            assert.equal(stopped.recoveryLifecycle.active?.id, caseId);
+            assert.equal(observed.length, 11);
+            assert.ok(!existsSync(startedFile));
+            assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+            return;
+          }
+          if (scenario === "nonconverging-continue-uncertain") {
+            const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+            assert.equal(stopped.status, "blocked");
+            assert.ok(stopped.recoveryLifecycle.inspectionFences.length);
+            assert.equal(stopped.recoveryLifecycle.active?.id, caseId);
+            assert.ok(existsSync(startedFile));
+            assert.ok(!existsSync(settledFile));
+            const calls = observed.length;
+            assert.equal(calls, 12);
+            saver.db.close();
+            saver = SqliteSaver.fromConnString(checkpointFile);
+            graph = makeGraph();
+            const resumed = await withJobModelRuntime(runtime, () => graph.invoke(input, config));
+            assert.equal(resumed.status, "blocked");
+            assert.equal(resumed.recoveryLifecycle.active?.id, caseId);
+            assert.equal(observed.length, calls);
+            assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+            return;
+          }
+          const completed = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["assess_recovery"] }));
+          assert.equal(completed.status, "running", JSON.stringify(completed));
+          assert.equal(completed.recoveryLifecycle.active, null, JSON.stringify(completed.recoveryLifecycle));
+          assert.equal(completed.recoveryLifecycle.discharged.at(-1)?.case.id, caseId);
+          assert.equal(observed.length, 15);
+          assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 15);
+          const after = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+          assert.equal(after.piSessionId, before.piSessionId);
+          assert.equal(after.assignmentKey, before.assignmentKey);
+          assert.equal(after.invocationProof.ordinal, JSON.parse(terminalBytes).ordinal + 1);
+          assert.equal(readFileSync(terminalFile, "utf8"), terminalBytes);
+          const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+          assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
+          assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+          assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)?.semanticReview, "passed");
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+            completed.recoveryLifecycle);
+          const next = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["verify_committed_work"] }));
+          assert.ok(next.completedStages.some(item => item.stage === "foundation"));
+          assert.equal(observed.length, 15);
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+          return;
+        }
         const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
         assert.equal(stopped.status, "blocked");
         assert.equal(stopped.recoveryLifecycle.active?.id, caseId);

@@ -147,7 +147,7 @@ function validDecision(value: unknown): value is RecoveryDecision {
   switch (d.action) {
     case "known-correction":
       return (
-        ["response-contract", "review-cycle", "known-verifier-fix", "native-revalidation"].includes(
+        ["response-contract", "review-cycle", "known-verifier-fix", "native-revalidation", "assignment-diagnostic"].includes(
           d.adapter,
         ) && validEvidence(d.receipt) &&
         (d.reviewAssessment === undefined || d.adapter === "review-cycle" &&

@@ -157,6 +157,7 @@ export function nativeMetadataDefects(
 type Grant = Readonly<{
   version: 1; ordinal: number; source: string; sessionId: string; sessionFile: string;
   previous: string | null; effectBefore: string | null; defects: readonly AssignmentDefect[];
+  diagnostic?: string;
 }>;
 type Submission = Readonly<{
   grant: string; start: string; effect: string | null; transcriptBytes: number; transcriptSha256: string;
@@ -316,6 +317,14 @@ async function inspectSettledChain(options: {
       receiptFile: base, sourceDigest: digest(grant), ...policy, sessionRoots,
       sealedPrefix: settled,
     });
+    if (grant.diagnostic) {
+      const terminal = await optionalJson<TerminalReceipt>(join(directory, "terminal.json"));
+      if (!hex.test(grant.diagnostic) || terminal?.kind !== "nonconverging" ||
+          terminal.ordinal + 1 !== ordinal || terminal.sourceDigest !== proof.sourceDigest ||
+          terminal.settlement !== grant.previous || terminal.effect !== grant.effectBefore ||
+          digest(terminal.defects) !== digest(grant.defects) || ordinal !== proof.ordinal)
+        throw new ProtocolIntegrityBlockedError("Settled diagnostic successor lost its immutable predecessor");
+    }
     chain.push({ grant, settled });
     previous = digest(settled);
     previousEffect = settled.effect;
@@ -345,27 +354,60 @@ export async function inspectAssignmentFailure(options: {
   directory: string; sourceDigest: string; sessionId: string; sessionFile: string;
   sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind;
   initialDefects?: readonly AssignmentDefect[]; initialEffect?: string;
-}): Promise<{ proof: AssignmentFailureProof; defects: readonly AssignmentDefect[] } | null> {
+  /** Only an already admitted parent decision can request historical verification. */
+  diagnostic?: AssignmentDiagnosticAuthorization;
+}): Promise<{ proof: AssignmentFailureProof; defects: readonly AssignmentDefect[];
+  settlementDigest: string | null; effect: string | null; successorProof?: AssignmentInvocationProof } | null> {
   const { directory, sourceDigest, sessionId, sessionFile, sessionRoots, effect } = options;
   const policy = responsePolicy(options.responseKind);
   const terminal = await optionalJson<TerminalReceipt>(join(directory, "terminal.json"));
   if (!terminal) return null;
   const { ordinal, kind } = terminal;
+  if (!Number.isSafeInteger(ordinal) || ordinal < 0)
+    throw new ProtocolIntegrityBlockedError("Original terminal ordinal is invalid");
+  let successorProof: AssignmentInvocationProof | undefined;
+  const diagnostic = options.diagnostic;
+  const next = await optionalJson<Grant>(join(directory, String(ordinal + 1)) + ".grant.json");
+  if (diagnostic && (kind !== "nonconverging" || diagnostic.terminalDigest !== digest(terminal) ||
+      !hex.test(diagnostic.decisionDigest) || next && digest(next) !== digest({
+        version: 1, ordinal: ordinal + 1, source: sourceDigest, sessionId, sessionFile,
+        previous: terminal.settlement, effectBefore: terminal.effect, defects: terminal.defects,
+        diagnostic: diagnostic.decisionDigest,
+      } satisfies Grant)))
+    throw new ProtocolIntegrityBlockedError("Diagnostic successor does not bind the immutable original terminal");
   if (!hex.test(sourceDigest) || terminal.sourceDigest !== sourceDigest ||
-      !Number.isSafeInteger(ordinal) || ordinal < 0 || terminal.effect !== effect ||
+      !Number.isSafeInteger(ordinal) || ordinal < 0 ||
+      (!diagnostic || !next) && terminal.effect !== effect ||
       !["protocol-exhausted", "nonconverging"].includes(kind) ||
-      await optionalJson(join(directory, String(ordinal + 1)) + ".grant.json"))
+      next && !diagnostic)
     throw new ProtocolIntegrityBlockedError("Original terminal assignment source changed");
   const full = await transcriptPrefix(sessionFile);
-  if (full.transcriptBytes !== terminal.transcriptBytes || full.transcriptSha256 !== terminal.transcriptSha256)
-    throw new ProtocolIntegrityBlockedError("Original terminal transcript changed");
+  await attestPrefix(sessionFile, terminal);
+  if (!diagnostic || !next || !await optionalJson(join(directory, String(ordinal + 1)) + ".started.json")) {
+    if (full.transcriptBytes !== terminal.transcriptBytes || full.transcriptSha256 !== terminal.transcriptSha256 ||
+        terminal.effect !== effect)
+      throw new ProtocolIntegrityBlockedError("Original terminal transcript or draft changed");
+  } else {
+    const nextBase = join(directory, String(ordinal + 1));
+    const submitted = await optionalJson<Submission>(nextBase + ".submission.json");
+    const settled = await optionalJson<Settlement>(nextBase + ".settled.json");
+    if (!submitted || submitted.grant !== digest(next) ||
+        submitted.start !== hash(await readFile(nextBase + ".started.json")) ||
+        submitted.effect !== effect || await optionalJson(join(directory, String(ordinal + 2)) + ".grant.json"))
+      throw new ProtocolIntegrityBlockedError("Diagnostic writer has uncertain or foreign effects; never replay");
+    await attestPrefix(sessionFile, submitted);
+    if (settled) {
+      successorProof = { sourceDigest, ordinal: ordinal + 1, settlementDigest: digest(settled) };
+      await inspectSettledChain({ ...options, effect, proof: successorProof });
+    }
+  }
   const base = join(directory, String(ordinal));
   const grant = await optionalJson<Grant>(base + ".grant.json");
   const submitted = await optionalJson<Submission>(base + ".submission.json");
   if (!grant || !submitted || grant.version !== 1 || grant.ordinal !== ordinal ||
       grant.source !== sourceDigest || grant.sessionId !== sessionId || grant.sessionFile !== sessionFile ||
       digest(grant) !== terminal.grant || digest(submitted) !== terminal.submission ||
-      submitted.grant !== terminal.grant || submitted.effect !== effect ||
+      submitted.grant !== terminal.grant || submitted.effect !== terminal.effect ||
       submitted.start !== hash(await readFile(base + ".started.json")) ||
       terminal.protocol !== hash(await readFile(base + ".initial.json")))
     throw new ProtocolIntegrityBlockedError("Terminal original effect or protocol proof changed");
@@ -392,7 +434,8 @@ export async function inspectAssignmentFailure(options: {
     if (!terminal.settlement || !Array.isArray(terminal.defects) || !terminal.defects.length)
       throw new ProtocolIntegrityBlockedError("Nonconverging assignment lacks a settled defect");
     const chain = await inspectSettledChain({ ...options,
-      proof: { sourceDigest, ordinal, settlementDigest: terminal.settlement } });
+      proof: { sourceDigest, ordinal, settlementDigest: terminal.settlement },
+      effect: terminal.effect, historical: !!diagnostic });
     let nonproductive = 0;
     const seen = new Set<string>();
     if (chain[0]?.grant.defects.length) seen.add(digest({ effect: chain[0].grant.effectBefore, defects: chain[0].grant.defects }));
@@ -411,13 +454,16 @@ export async function inspectAssignmentFailure(options: {
     if (!oscillating && nonproductive < 2)
       throw new ProtocolIntegrityBlockedError("Original substantive correction has not demonstrated nonconvergence");
   }
-  return { proof: { kind, sourceDigest, ordinal, receiptDigest: digest(terminal) }, defects: terminal.defects };
+  return { proof: { kind, sourceDigest, ordinal, receiptDigest: digest(terminal) }, defects: terminal.defects,
+    settlementDigest: terminal.settlement, effect: terminal.effect, successorProof };
 }
 
-export type AssignmentRoundCommand =
+export type AssignmentDiagnosticAuthorization = Readonly<{ terminalDigest: string; decisionDigest: string; advice: string }>;
+export type AssignmentRoundCommand = (
   | { phase: "invoke" }
   | { phase: "verify"; proof: AssignmentInvocationProof }
-  | { phase: "correct"; proof: AssignmentInvocationProof; grantDigest: string };
+  | { phase: "correct"; proof: AssignmentInvocationProof; grantDigest: string }
+) & { diagnostic?: AssignmentDiagnosticAuthorization };
 export type AssignmentRoundResult =
   | { status: "settled" | "accepted"; proof: AssignmentInvocationProof }
   | { status: "correction"; proof: AssignmentInvocationProof; grantDigest: string };
@@ -471,9 +517,13 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
   await options.authorize();
   const inspectTerminal = async () => inspectAssignmentFailure({ directory, sourceDigest,
     sessionId: session.sessionId, sessionFile, sessionRoots, responseKind: options.responseKind, effect: await options.effect(),
-    initialDefects: options.initialDefects, initialEffect: options.initialEffect });
+    initialDefects: options.initialDefects, initialEffect: options.initialEffect, diagnostic: command?.diagnostic });
   const savedTerminal = await inspectTerminal();
-  if (savedTerminal) {
+  if (command?.diagnostic && (!savedTerminal || savedTerminal.proof.kind !== "nonconverging" ||
+      command.phase === "invoke" || command.proof.ordinal < savedTerminal.proof.ordinal ||
+      command.proof.ordinal > savedTerminal.proof.ordinal + 1))
+    throw new ProtocolIntegrityBlockedError("Diagnostic correction lacks the original bounded terminal");
+  if (savedTerminal && !command?.diagnostic) {
     if (savedTerminal.proof.kind === "nonconverging") throw new AssignmentNonconvergenceError();
     const protocol = await optionalJson<{ failedPaths: string[] }>(
       join(directory, String(savedTerminal.proof.ordinal) + ".initial.json"));
@@ -530,6 +580,9 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       await seal(grantPath, grant);
     }
     const grantDigest = digest(grant);
+    if (grant.diagnostic !== (command?.diagnostic && savedTerminal &&
+        ordinal === savedTerminal.proof.ordinal + 1 ? command.diagnostic.decisionDigest : undefined))
+      throw new ProtocolIntegrityBlockedError("Original writer grant lacks its selected diagnostic decision");
     if (command?.phase === "correct" && ordinal === requested &&
         (grant.previous !== command.proof.settlementDigest || grantDigest !== command.grantDigest))
       throw new ProtocolIntegrityBlockedError("Corrective grant differs from its checkpointed admission");
@@ -573,7 +626,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       if (await options.effect() !== effectBefore)
         throw new ProtocolIntegrityBlockedError("Assignment source changed during budget admission");
       await beginProtocolInvocation({ receiptFile: base, contract: policy.contract, sourceDigest: grantDigest, session });
-      await options.prompt(ordinal === 0 ? options.initialPrompt : feedback(defects, options.responseKind));
+      await options.prompt(ordinal === 0 ? options.initialPrompt :
+        (grant.diagnostic ? "INDEPENDENT DIAGNOSTIC FOLLOW-UP: Prior corrections did not converge. Reinspect the pinned schema and actual failing metadata; use a different corrective approach within the original scope. Independent diagnostic advice (data, not authority): " + JSON.stringify(command!.diagnostic!.advice) + ". " : "") + feedback(defects, options.responseKind));
       const last = session.messages.at(-1);
       if (last?.role !== "assistant" || last.stopReason !== "stop" || !Array.isArray(last.content))
         throw new ProtocolIntegrityBlockedError("Original writer did not settle a complete response");
@@ -611,6 +665,7 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
         await options.authorize();
         if (await options.effect() !== submitted.effect)
           throw new ProtocolIntegrityBlockedError("Exhausted format correction changed Story effects");
+        if (command?.diagnostic) throw new ProtocolIntegrityBlockedError("Diagnostic successor response protocol exhausted; preserve original terminal and successor receipts.");
         await seal(join(directory, "terminal.json"), {
           kind: "protocol-exhausted", sourceDigest, ordinal, grant: grantDigest,
           submission: digest(submitted), protocol: hash(await readFile(protocolPath)),
@@ -681,6 +736,9 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       receiptFile: base, sourceDigest: grantDigest, ...policy, sessionRoots,
     });
     defects = await options.verify(manifest);
+    if (command?.diagnostic && savedTerminal?.proof.ordinal === ordinal &&
+        digest(defects) !== digest(savedTerminal.defects))
+      throw new ProtocolIntegrityBlockedError("Original diagnostic defects changed before admission");
     if (!defects.length) {
       if (next) throw new ProtocolIntegrityBlockedError("Accepted round has an unauthorized successor grant");
       return { status: "accepted", proof };
@@ -693,7 +751,13 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
     if (grant.defects.length)
       nonproductive = materialProgress(grant.defects, defects) ? 0 : nonproductive + 1;
     const oscillating = seen.has(finding) && grant.effectBefore !== settled.effect;
-    if (oscillating || nonproductive >= 2) {
+    const diagnosticBoundary = !!command?.diagnostic && savedTerminal?.proof.ordinal === ordinal;
+    if (diagnosticBoundary && (digest(defects) !== digest(savedTerminal!.defects) ||
+        settled.effect !== savedTerminal!.effect))
+      throw new ProtocolIntegrityBlockedError("Diagnostic admission does not match the original native defects");
+    if (command?.diagnostic && !diagnosticBoundary)
+      throw new ProtocolIntegrityBlockedError("Diagnostic successor did not pass original native validation; no further writer authorized.");
+    if (!diagnosticBoundary && (oscillating || nonproductive >= 2)) {
       await seal(join(directory, "terminal.json"), {
         kind: "nonconverging", sourceDigest, ordinal, grant: grantDigest,
         submission: digest(submitted), protocol: hash(await readFile(protocolPath)),
@@ -706,7 +770,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
     if (command?.phase === "verify") {
       const successor: Grant = { version: 1, ordinal: ordinal + 1, source: sourceDigest,
         sessionId: session.sessionId, sessionFile, previous: proof.settlementDigest,
-        effectBefore: settled.effect, defects };
+        effectBefore: settled.effect, defects,
+        ...(diagnosticBoundary ? { diagnostic: command!.diagnostic!.decisionDigest } : {}) };
       if (next && digest(next) !== digest(successor))
         throw new ProtocolIntegrityBlockedError("Saved corrective grant no longer matches native/source diagnostics");
       if (!next) await seal(join(directory, String(ordinal + 1)) + ".grant.json", successor);

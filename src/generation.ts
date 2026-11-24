@@ -27,11 +27,11 @@ import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
 import { selectOperationStrategy, executeOperationStrategy,
   authenticateSealedDiagnosticStop, diagnosticCaseForDecision,
-  authenticateOperationDiagnosticProof, authorizeOperationDiagnosticStrategy } from "./generation-operation-strategy.js";
+  authenticateOperationDiagnosticProof, authorizeOperationDiagnosticStrategy, authenticateFoundationDiagnosticDecision, authenticateFoundationDiagnosticDischarge, foundationDiagnosticDecisionForLifecycle } from "./generation-operation-strategy.js";
 import { inspectSettledAdaptiveReconciliation } from "./adaptive-reconciliation.js";
 import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
-  recordRecoveryOutcome, resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
+  recordRecoveryOutcome, finishVerifiedRecovery, resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
@@ -804,6 +804,7 @@ async function runFoundationAssignmentChild(
   s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
   correctionSelected = false,
+  diagnostic?: NonNullable<Awaited<ReturnType<typeof authenticateFoundationDiagnosticDecision>>>,
 ): Promise<Partial<State>> {
   if (s.active?.stage !== "foundation" || !s.inventory)
     throw Error("R01 child requires the parent-admitted Foundation assignment.");
@@ -815,6 +816,8 @@ async function runFoundationAssignmentChild(
   // effect but before the original assignment is recorded complete. Recover
   // the immutable source from the eligible native receipt, not refreshed HEAD.
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
+  const diagnosisCase = diagnostic ? s.recoveryLifecycle.active : null;
+  const continuation = correction?.id ?? diagnosisCase?.id ?? null;
   const published = (await inspectRecoveryCheckpoints(job)).find(p =>
     p.eligible && p.workItem === "foundation" &&
     p.commitSha === (correction?.origin.sourceHeadSha ?? s.inventory!.headSha) &&
@@ -854,6 +857,17 @@ async function runFoundationAssignmentChild(
     return !!s.recoveryLifecycle.decision &&
       await authenticateOperationReviewProof(job, s, correction, s.recoveryLifecycle.decision);
   };
+  const authenticateDiagnosis = async () => {
+    const source = diagnosisCase && s.recoverySources.find(x => x.caseId === diagnosisCase.id && x.channel === "operationRecovery");
+    const decision = s.recoveryLifecycle.decision;
+    if (!diagnosisCase || !source || !decision || !diagnostic ||
+        s.recoveryLifecycle.phase !== "correcting" || diagnosisCase.origin.assignmentId !== identity.assignmentId)
+      return false;
+    const current = await authenticateFoundationDiagnosticDecision(job, diagnosisCase,
+      source.input as unknown as GenerationOperationRecovery, decision, s.recoveryLifecycle.attempt);
+    return !!current && current.terminal.assignmentKey === key &&
+      isDeepStrictEqual(current.authorization, diagnostic.authorization);
+  };
   const preflight = async () => {
     const control = await readJobControl(job);
     if (control === "cancelled") {
@@ -868,6 +882,10 @@ async function runFoundationAssignmentChild(
     // a blanket clean-worktree gate here would prevent safe verification.
     await checkPlan(job, s.request, s.planVersion);
     if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
+    if (diagnostic) {
+      if (!await authenticateDiagnosis()) throw Error("Foundation diagnostic correction lost its original assignment admission.");
+      return null;
+    }
     if (correctionSelected) {
       if (!await authenticateCorrection())
         throw Error("Foundation correction lacks its original admitted Review case.");
@@ -911,7 +929,7 @@ async function runFoundationAssignmentChild(
       const stopped = await preflight();
       if (stopped) return stopped;
       const result = await runFoundationJob({ ...s.request, envelope: JSON.stringify(s.request.contract.envelope),
-        round: { assignmentKey: key, command } });
+        round: { assignmentKey: key, command: diagnostic ? { ...command, diagnostic: diagnostic.authorization } : command } });
       if ("round" in result && result.round) {
         const ref = roundRef(result.round.proof);
         if (result.round.status === "correction")
@@ -934,7 +952,7 @@ async function runFoundationAssignmentChild(
     }
   };
   const assertChildIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
-    if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
+    if (logicalAssignmentKey(saved) !== key || continuationRef !== continuation)
       throw new ProtocolIntegrityBlockedError("Foundation checkpoint belongs to another admitted logical assignment.");
   };
   const invokeRound = async (command: AssignmentRoundCommand) => {
@@ -1047,7 +1065,8 @@ async function runFoundationAssignmentChild(
   });
   const child = createAssignmentLifecycleGraph({
     authenticateContinuation: async state =>
-      state.continuationRef === correction?.id && await authenticateCorrection(),
+      state.continuationRef === continuation &&
+      (diagnostic ? await authenticateDiagnosis() : await authenticateCorrection()),
     preflight: async state => { assertChildIdentity(state.identity, state.continuationRef); return preflight(); },
     invoke: async state => { assertChildIdentity(state.identity, state.continuationRef); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
@@ -1074,11 +1093,16 @@ async function runFoundationAssignmentChild(
   // LangGraph passes the parent's persistent SQLite checkpointer to the
   // nested graph. No standalone child scheduler, database, or recovery ledger.
   const finished = await child.invoke({
-    identity, submission: correction && s.result
+    identity, submission: diagnostic ? {
+      receiptRef: roundRef(diagnostic.terminal.invocationProof ?? diagnostic.terminal.successorProof ?? {
+        sourceDigest: diagnostic.terminal.proof.sourceDigest, ordinal: diagnostic.terminal.proof.ordinal,
+        settlementDigest: diagnostic.terminal.settlementDigest!,
+      }), status: "writer-round",
+    } : correction && s.result
       ? { receiptRef: "foundation.json", status: s.result.status, headSha: s.result.headSha } : null,
-    submissionKey: correction ? key : null,
-    outcome: null, continuationRef: correction?.id ?? null,
-  }, { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
+    submissionKey: correction || diagnostic ? key : null,
+    outcome: null, continuationRef: continuation,
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome)
     throw Error("Foundation child has a genuine pending author interrupt; return to parent control.");
   if (finished.outcome.assignmentKey !== key)
@@ -1111,6 +1135,11 @@ async function runFoundationAssignmentChild(
   if (finished.outcome.status === "verified")
     return { ...reviewedState,
       result: { status: correction ? s.result!.status : finished.submission!.status, headSha: finished.outcome.headSha } };
+  if (diagnostic) {
+    if (finished.outcome.status === "paused")
+      return { status: "paused", reason: "Original diagnostic successor is suspended at its writer or Review boundary." };
+    throw new ProtocolIntegrityBlockedError("Diagnostic successor remains unresolved; inspect original native and independent Review receipts.");
+  }
   if (correction) {
     if (finished.outcome.status === "paused") {
       if (finished.outcome.controlRef === "author-updates")
@@ -1178,6 +1207,67 @@ async function runFoundationAssignmentChild(
     "Original Foundation child returned a nonverified result; inspect the exact native/review receipt.",
     { reference: "specialist-receipt", assignmentId: s.active.id,
       resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
+}
+
+/** The selected diagnostic continuation uses the original Foundation child,
+ * not generic specialist dispatch. Its verified native/Git/Review result is
+ * the only discharge authority. */
+async function runFoundationDiagnosticRecovery(s: State, config: RunnableConfig,
+  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>): Promise<Partial<State>> {
+  const lifecycle = s.recoveryLifecycle;
+  const c = lifecycle.active;
+  const d = lifecycle.decision;
+  const source = c && s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+  const fence = (reason: string): Partial<State> => ({
+    status: "blocked", reason, recoveryLifecycle: { ...admitRecovery(lifecycle, { outcome: "fenced",
+      fence: inspectionFence("untrusted-receipt", c?.origin ?? {}, c?.evidence ?? [],
+        c?.evidence[0] ?? null, reason) }), assessorPending: false },
+  });
+  const pause = (reason: "cancelled" | "author-pause" | "budget" | "provider-unavailable", message: string): Partial<State> => {
+    if (d?.action !== "known-correction") return fence("Diagnostic control lacks its selected decision.");
+    return { status: reason === "cancelled" ? "cancelled" : "paused", reason: message,
+      recoveryLifecycle: { ...decideRecovery(lifecycle, {
+        schema: d.schema, caseId: d.caseId, checkedSourceHeadSha: d.checkedSourceHeadSha,
+        evidence: d.evidence, action: "pause", reason, resumeRef: d.receipt,
+      }), assessorPending: false } };
+  };
+  try {
+    if (!c || !d || d.action !== "known-correction" || d.adapter !== "assignment-diagnostic" ||
+        !lifecycle.assessorPending || lifecycle.phase !== "correcting" || !source ||
+        s.active?.id !== "foundation" || s.result || !s.inventory ||
+        s.inventory.headSha !== c.origin.sourceHeadSha || s.planVersion !== c.origin.planVersion ||
+        config.configurable?.thread_id !== c.origin.graphThreadId)
+      return fence("Diagnostic successor has no exact original parent admission.");
+    const job = await openJob(s);
+    const operation = source.input as unknown as GenerationOperationRecovery;
+    const original = await authenticateFoundationDiagnosticDecision(job, c, operation, d, lifecycle.attempt);
+    if (!original || !await authenticateOriginalFailure(job, s.request, c.origin.graphThreadId, c.origin, c.evidence, true))
+      return fence("Diagnostic successor lost its original failure, scope or Pi evidence.");
+    const control = await readJobControl(job);
+    if (control !== "running")
+      return pause(control === "cancelled" ? "cancelled" : "author-pause", "Author control precedes diagnostic correction.");
+    const updated = await runFoundationAssignmentChild(s, config, reviewBoundary, false, original);
+    if (updated.status === "paused" || updated.status === "cancelled")
+      return pause(updated.status === "cancelled" ? "cancelled" : "author-pause",
+        updated.reason ?? "Original diagnostic correction is suspended.");
+    const head = await trustedHead(job);
+    const receipt: RecoveryEvidence = { store: "specialist-receipt", ref: original.terminal.ref,
+      digest: original.authorization.decisionDigest };
+    if (updated.result?.headSha !== head ||
+        !await authenticateFoundationDiagnosticDischarge(job, c, operation, receipt, head))
+      return fence("Diagnostic successor lacks passing native Git and independent Review evidence.");
+    return { ...updated, operationRecovery: null, status: "running", reason: null,
+      recoveryLifecycle: finishVerifiedRecovery(lifecycle, { status: "verified", caseId: c.id,
+        sourceHeadSha: head, assurance: receipt }, true) };
+  } catch (error) {
+    if ((error != null && isGraphBubbleUp(error)) || config.signal?.aborted) throw error;
+    if (error instanceof Error && ["PiBudgetPause", "PiModelUnavailableError", "AssignmentAuthorPauseError"].includes(error.name))
+      return pause(error.name === "PiBudgetPause" ? "budget" :
+        error.name === "PiModelUnavailableError" ? "provider-unavailable" : "author-pause", error.message);
+    if (error instanceof Error && error.name === "StoryCancelledError")
+      return pause("cancelled", error.message);
+    return fence("Diagnostic successor is unresolved: " + (error instanceof Error ? error.message : String(error)));
+  }
 }
 
 /** Canonical Architecture enters the shared assignment lifecycle; the private
@@ -3131,6 +3221,31 @@ export function recoveryNode(
         prior.recoveryLifecycle.decision?.action === "pause" &&
         prior.recoveryLifecycle.decision.reason === "cancelled")
       return { status: "cancelled", recoveryLifecycle: prior.recoveryLifecycle };
+    if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
+        prior.recoveryLifecycle.decision?.action === "pause" &&
+        foundationDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)) {
+      const c = prior.recoveryLifecycle.active!;
+      const d = foundationDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)!;
+      try {
+        const job = await openJob(state);
+        const source = prior.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+        const control = await readJobControl(job);
+        if (control !== "running")
+          return { status: control, reason: "Author control precedes original diagnostic resumption.", recoveryLifecycle: prior.recoveryLifecycle };
+        if (!source || config.configurable?.thread_id !== c.origin.graphThreadId ||
+            !await authenticateFoundationDiagnosticDecision(job, c, source.input as unknown as GenerationOperationRecovery,
+              d, prior.recoveryLifecycle.attempt) ||
+            !await authenticateOriginalFailure(job, state.request, c.origin.graphThreadId, c.origin, c.evidence, true))
+          throw Error("Paused diagnostic successor lost its exact original authorization");
+        return { status: "running", reason: null, recoveryLifecycle: {
+          ...decideRecovery(resumePausedRecovery(prior.recoveryLifecycle, true), d), assessorPending: true } };
+      } catch {
+        return { status: "blocked", reason: "Paused diagnostic successor requires original receipt inspection.",
+          recoveryLifecycle: { ...admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+            fence: inspectionFence("untrusted-receipt", c.origin, c.evidence, c.evidence[0]!,
+              "Reconcile the original diagnostic and writer receipts before resumption.") }), assessorPending: false } };
+      }
+    }
     // A genuine author pause is not an integrity failure and cannot be
     // silently cleared. Resuming the same case requires current author control
     // and the same original authenticated source/Thread; cancellation is final.
@@ -3246,6 +3361,10 @@ export function recoveryNode(
       const action = await executeOperationStrategy(job, state, prior.recoveryLifecycle);
       if (action) return action;
     }
+    if (node === "assess_recovery" && prior.recoveryLifecycle.assessorPending &&
+        prior.recoveryLifecycle.decision?.action === "known-correction" &&
+        prior.recoveryLifecycle.decision.adapter === "assignment-diagnostic")
+      return execute({ ...state, ...prior, ...projectRecovery(prior) } as State, config) as Promise<Partial<CoreState>>;
     const local = { ...state, ...prior, ...projectRecovery(prior) } as State;
     const outcome = await observeNodeOutcome(node, local, config, execute);
     if (node === "independent_assignment_review" &&
@@ -3593,6 +3712,9 @@ export function createGenerationGraph(
       }
     }))
     .addNode("assess_recovery", recoveryNode("assess_recovery", async (s, config) => {
+      if (s.recoveryLifecycle.decision?.action === "known-correction" &&
+          s.recoveryLifecycle.decision.adapter === "assignment-diagnostic")
+        return runFoundationDiagnosticRecovery(s, config, reviewBoundary);
       // Historical v1 unknownRecovery receipts remain inspectable, not executable.
       // Only the shared source-bound C03 operation lane can start a new diagnosis.
       if (s.unknownRecovery?.phase === "assessment")

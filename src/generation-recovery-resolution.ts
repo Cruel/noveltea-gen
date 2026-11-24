@@ -100,6 +100,10 @@ export async function inspectActiveRecoveryResolution(
   git(job, "merge-base", "--is-ancestor", resolution.correctedHeadSha, head);
   const { correction, correctedHeadSha } = resolution;
   const checkpoints = await inspectRecoveryCheckpoints(job);
+  if (correction.store === "specialist-receipt" && source.channel === "operationRecovery" &&
+      original.origin.operation === "specialist-result" && original.origin.assignmentId === "foundation")
+    return (await import("./generation-operation-strategy.js")).authenticateFoundationDiagnosticDischarge(job, original,
+      source.input as unknown as GenerationOperationRecovery, correction, correctedHeadSha);
   if (correction.store === "review-checkpoint" && correction.ref === correctedHeadSha) {
     if (original.origin.operation === "independent-review" &&
         original.observation === "returned-failure")

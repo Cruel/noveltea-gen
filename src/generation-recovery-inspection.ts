@@ -27,7 +27,7 @@ import { verifyPlanHistory } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import type { GenerationGraphState } from "./generation.js";
-import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy, authorizeOperationDiagnosticStrategy } from "./generation-operation-strategy.js";
+import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy, authorizeOperationDiagnosticStrategy, authenticateFoundationDiagnosticDecision, authenticateFoundationDiagnosticDischarge, foundationDiagnosticDecisionForLifecycle } from "./generation-operation-strategy.js";
 import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
@@ -271,8 +271,15 @@ export async function inspectModernGenerationRecovery(
     const operation = source.channel === "operationRecovery" ? source.input as unknown as GenerationOperationRecovery : null;
     if (operation?.evidence.assignmentFailure) {
       if (origin.operation !== "specialist-result" || origin.assignmentId !== operation.evidence.assignmentId ||
-          operation.outcome !== "returned-failure" ||
-          !await authenticateAssignmentFailure(job, operation.evidence, origin.sourceHeadSha)) return false;
+          operation.outcome !== "returned-failure") return false;
+      const discharge = original.discharged.find(entry => entry.case.id === caseFile.id);
+      const selected = original.active?.id === caseFile.id ? foundationDiagnosticDecisionForLifecycle(original) : null;
+      const authenticated = selected ? !!await authenticateFoundationDiagnosticDecision(job, caseFile, operation,
+        selected, original.attempt) :
+        discharge?.correction.store === "specialist-receipt" ?
+          await authenticateFoundationDiagnosticDischarge(job, caseFile, operation, discharge.correction, discharge.correctedHeadSha) :
+          !!await authenticateAssignmentFailure(job, operation.evidence, origin.sourceHeadSha);
+      if (!authenticated) return false;
       return authenticateOriginalFailure(job, request, threadId, origin, evidence, true);
     }
     if (await authenticateOriginalFailure(job, request, threadId, origin, evidence))
@@ -340,6 +347,9 @@ export async function inspectModernGenerationRecovery(
         }
         case "known-correction":
           if (source.channel === "recovery") return d.adapter === "response-contract";
+          if (source.channel === "operationRecovery" && d.adapter === "assignment-diagnostic")
+            return !!await authenticateFoundationDiagnosticDecision(job, active,
+              source.input as unknown as GenerationOperationRecovery, d, original.attempt);
           if (source.channel !== "operationRecovery" || d.adapter !== "review-cycle") return false;
           return await (await import("./generation-operation-strategy.js"))
             .authenticateOperationReviewProof(job, values as GenerationGraphState, active, d);
@@ -407,7 +417,8 @@ export async function inspectModernGenerationRecovery(
     // inspectable without calling Pi again.
     authenticateAttempt: async attempt => {
       const { active, decision } = original;
-      if (!active || !decision || !["diagnostic-stop", "reconcile-effects"].includes(decision.action) ||
+      if (!active || !decision || !(["diagnostic-stop", "reconcile-effects"].includes(decision.action) ||
+          !!foundationDiagnosticDecisionForLifecycle(original)) ||
           attempt.caseId !== active.id || attempt.purpose !== "diagnosis") return false;
       const source = sourceFor(active.id);
       const target = source?.channel === "operationRecovery" ? diagnosticCaseForDecision(active, decision) :

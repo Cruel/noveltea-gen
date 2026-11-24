@@ -117,7 +117,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
   Readonly<
     | {
         action: "known-correction";
-        adapter: "response-contract" | "review-cycle" | "known-verifier-fix" | "native-revalidation";
+        adapter: "response-contract" | "review-cycle" | "known-verifier-fix" | "native-revalidation" | "assignment-diagnostic";
         receipt: RecoveryEvidence;
         /** A source-bound Review adapter continuation selected by the shared assessor. */
         reviewAssessment?: Readonly<{ kind: "diagnostic" | "dispute" | "author-revision" | "scope"; sourceSha: string; digest: string }>;

@@ -15,14 +15,14 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { readJobControl } from "./job-control.js";
-import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
+import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork, inspectAuthorUpdates } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { FoundationAuthorRequiredError, authorizedFoundationException, consumeFoundationRetry, foundationExceptionContext, recordFoundationConflict } from "./foundation-conflict.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { preparePiContext, preflightPiAssignment, guardPiBudget, recordPiSession, registerPendingPiSession, inspectPiPolicy } from "./job-pi-policy.js";
-import { ASSIGNMENT_REPORT, nativeMetadataDefects, executeAssignmentRound, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
+import { ASSIGNMENT_REPORT, nativeMetadataDefects, executeAssignmentRound, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentFailureProof, type AssignmentDiagnosticAuthorization, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -277,6 +277,8 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
           const control = await readJobControl(job);
           if (control === "cancelled") throw new StoryCancelledError(WORK_ITEM);
           if (control !== "running") throw new AssignmentAuthorPauseError();
+          if (round.diagnostic && (await inspectAuthorUpdates(job)).records.some(r => r.acknowledgement.phase !== "applied"))
+            throw new AssignmentAuthorPauseError();
         };
         await checkControl();
         await guardPiBudget(job, "foundation:write", sessionFile);
@@ -584,6 +586,50 @@ export async function inspectFoundationFailure(job: JobStartResult, sourceHead: 
     effect: existsSync(join(job.worktreeStoryRoot, target)) ? await foundationDigest(job, target) : null,
   });
   return terminal && { ...terminal, ref: "foundation-invocations/" + state.piSessionId + "/terminal.json" };
+}
+
+/** A selected diagnostic successor may extend precisely the original
+ * nonconverging Foundation receipt. Historical inspection does not grant
+ * another invocation, even after the committed source advances. */
+export async function inspectFoundationDiagnosticFailure(job: JobStartResult, sourceHead: string,
+  failure: AssignmentFailureProof, authorization: AssignmentDiagnosticAuthorization,
+  historicalHead?: string) {
+  const state = await existingState(job);
+  if (!state || state.workerMode !== "pi" || state.invocationVersion !== 1 ||
+      !state.writerStarted || state.chatApprovalDigest || !state.assignmentKey ||
+      !state.target || !state.piSessionId || !state.piSessionFile || workHead(state) !== sourceHead ||
+      failure.kind !== "nonconverging" || failure.receiptDigest !== authorization.terminalDigest)
+    return null;
+  const target = state.target;
+  let effect: string | null;
+  if (historicalHead) {
+    if (state.stage !== "committed" || state.commitSha !== historicalHead ||
+        !state.authoredSha256 || !state.invocationProof ||
+        git(job, "rev-parse", historicalHead + "^") !== sourceHead ||
+        createHash("sha256").update(gitRaw(job, "show", historicalHead + ":" + storyPath(job, target))).digest("hex") !== state.authoredSha256)
+      return null;
+    await verifyFoundationInvocation(job, state);
+    effect = state.authoredSha256;
+  } else {
+    if (await foundationSourceDigest(job, state, target) !== failure.sourceDigest) return null;
+    const head = git(job, "rev-parse", "HEAD");
+    if (head === sourceHead) {
+      if (!await inspectPendingFoundationInvocation(job, sourceHead)) return null;
+    } else {
+      if (recoveryCommit(job, state) !== head || changedPaths(job).length ||
+          !state.authoredSha256 || await foundationDigest(job, target) !== state.authoredSha256) return null;
+      await verifyFoundationInvocation(job, state);
+    }
+    effect = existsSync(join(job.worktreeStoryRoot, target)) ? await foundationDigest(job, target) : null;
+  }
+  const terminal = await inspectAssignmentFailure({
+    directory: foundationInvocationDirectory(job, state.piSessionId), sourceDigest: failure.sourceDigest,
+    sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+    sessionRoots: [join(job.stateDir, "foundation-sessions")], effect, diagnostic: authorization,
+  });
+  if (!terminal || JSON.stringify(terminal.proof) !== JSON.stringify(failure)) return null;
+  return { ...terminal, assignmentKey: state.assignmentKey, invocationProof: state.invocationProof, sessionId: state.piSessionId,
+    ref: "foundation-invocations/" + state.piSessionId + "/terminal.json" };
 }
 
 /** Read-only proof of an original commit published before its receipt. */

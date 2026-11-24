@@ -628,6 +628,25 @@ HTTP boundary, and executes the queued production worker to the next Character
 question. Event and Focused direct transport regressions are not established
 by the World regression.
 
-#### R14H accepted parent planner continuation (partial #268)
+#### R14H (#268) — authenticated postdiagnostic continuation
 
-A source-authenticated `reconcile-original` diagnosis of `adaptive-admission` may select the existing checkpoint reconciliation adapter only for an already controller-admitted amendment from the original completed Pi operation. The accepted receipt binds the original prompt, session, native source, Turn, plan and amendment version; a model recommendation is not an admission. The assessor restores the ordinary native-verified inventory with new amendments disabled, rechecks the settled diagnosis and source, and discharges only the original Case on verified restore. Rejected/ambiguous/unsupported cases remain fenced; existing owner, Review, author and budget gates remain unchanged. See the source-linked exit inventory. Post-nonconvergence writer admission and production fault-injection certification are not completed by this change.
+The parent assessor can select an executable, source-bound continuation rather than unconditionally recording a diagnostic stop. The diagnostic is read-only and its settled response is data, never permission. [Operation strategy](../src/generation-operation-strategy.ts) admits `assignment-diagnostic` only for the original Foundation nonconverging native metadata/provenance failure, with exact owner, source, scope, no unsatisfied prerequisites and a separately authenticated settled diagnosis. The original Case and terminal receipt remain immutable. [Generation](../src/generation.ts) reenters the same logical assignment child through the selected decision; the shared [assignment receipt service](../src/assignment-metadata-recovery.ts) verifies the original terminal and defects and seals one successor grant bound to the diagnosis, exact predecessor, source and original session. Foundation keeps its original writer lock, target-only dirty draft, native validation, provenance, current author control and cumulative Pi budget gates. The already-admitted successor uses the existing invoke/settle/verify phases. Its failure is unresolved, not a reset of the correction allowance.
+
+Discharge requires the exact successor settlement, native-verified Git commit and independent passing Review reconstructed from the original review-cycle transcript and controller result. The parent retains other pending Cases and returns to ordinary verification/scheduling; inspection reauthenticates the historical discharge without replay. Pauses retain the selected admission; ambiguous starts, changed source, foreign grants, transcripts and unrelated edits fence. No new retry engine, writer or scheduler.
+
+For a parent-owned `adaptive-admission` failure, `reconcile-original` may select the existing checkpoint reconciliation adapter only for an already controller-admitted amendment from the original completed Pi operation. The accepted receipt binds the original prompt, session, native source, Turn, plan and amendment version. The assessor restores the ordinary native-verified inventory with new amendments disabled, rechecks the settled diagnosis and source, and discharges only the original Case on verified restore. Rejected/ambiguous proposals remain unresolved. No fake writer child for parent operations.
+
+Strategy dispositions are explicit:
+
+| Proposal | Controller authority / outcome |
+| --- | --- |
+| `local-repair` | Bounded original Foundation successor described above; any other owner, scope, prerequisite or unauthenticated defect remains unresolved. |
+| `reconcile-original` | Original scheduling/intake, independently passed Review or accepted adaptive effect via its own authenticated reconciliation; never re-execute an uncertain write. |
+| `review-adjudication` | The existing source-bound independent Review/repair assessment and authorized reviewer replacement own disputed verdicts. Generic diagnosis cannot approve a result or replace a reviewer without that separate evidence; unsupported requests stop. |
+| `dependency-plan` | Original verified dependency/owner controller and approved scope only; proposal alone cannot create work. |
+| `blueprint-or-work-plan-amend` | Existing parent-owned amendment/Blueprint authority and sealed predecessor only; unsupported proposals stop. |
+| `no-write-omission-review` | Existing source-backed, independently reviewed no-write disposition and fulfillment gates; diagnosis cannot omit a required assignment. |
+| `resource-or-author-pause` | Actual resource/author control determines the typed pause/cancel, not diagnostic prose. Without authenticated control/authority the original Case remains unresolved. |
+| `unsafe` | Sealed unresolved stop with inspection guidance; no writer or discharge. |
+
+Focused production tests exercise the exact nonconverging Foundation repair with two failed rounds, its independent diagnostic, unchanged assignment/session, one commit and actual independent Review; loss of the parent decision, child grant checkpoint, and child settlement checkpoint; budget pause/resumption, author cancellation, source/receipt tampering and ambiguous invocation; unsafe/foreign-owner proposals; the existing disputed-Review route; and positive/negative real adaptive planner reconciliation. The source-linked exit and model-consumer audits pin the changed authority boundaries.
