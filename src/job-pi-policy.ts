@@ -377,7 +377,8 @@ export async function inspectCompletedPiReviewContext(job: JobStartResult, input
   group: string; sessionFile: string; snapshotId: string;
   requested: { provider: string; model: string };
 }): Promise<{ sessionId: string; sessionSha256: string }> {
-  const folder = join(job.stateDir, "review-sessions", "review") + sep;
+  const folder = join(job.stateDir, "review-sessions",
+    input.group.startsWith("assignment-fidelity:") ? "assignment-fidelity" : "review") + sep;
   const file = input.sessionFile;
   if (!file.startsWith(folder) || !file.endsWith(".jsonl") ||
       !existsSync(file) || await realpath(file) !== file ||

@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { withJobModelRuntime } from "../src/model-runtime.js";
+import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
+import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
+import { fixtureSandboxClient, scriptedModel, scriptedReadCalls, scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 import { createGenerationGraph, parseGenerationContract } from "../src/generation.js";
 import { reconcileInventory, nextExecutionItem } from "../src/generation-plan.js";
 import { authorizePendingAmendment } from "../src/pending-work-amendments.js";
@@ -587,6 +591,184 @@ test("discovered prerequisite amends a focused plan and survives process restart
       ["NT_FOCUS_FIXTURE_DEPENDENCY", old.report]]) {
       if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
     }
+  }
+});
+
+for (const scenario of ["review", "writer", "support-no-write"] as const)
+test("R04 cross-owner prerequisite " + scenario + " uses the original logical assignment", {
+  skip: !available, timeout: 300_000,
+}, async () => {
+  const f = fixture("r04-prerequisite-" + scenario);
+  f.cli("seed", ["start"]);
+  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const seed = f.cli("seed", ["generate", "start", "--task", "Seed a mystery",
+    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
+  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
+  const oldState = process.env.NT_STATE_DIR, oldCache = process.env.NT_SKILL_CACHE_DIR;
+  process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
+  process.env.NT_SKILL_CACHE_DIR = f.env.NT_SKILL_CACHE_DIR;
+  try {
+    const job = await startStoryJob({ story: f.story, job: "r04-review" });
+    const native = await validateStoryJob(job, source, { ...job, baseSha: job.baseSha });
+    const catalog = (native.report as { records: CanonicalScopeRecord[] }).records;
+    const event = "event.disclose-ledger", character = "character.ada";
+    const eventPath = "events/disclose-ledger.md", characterPath = "characters/ada.md";
+    const targets = scenario === "writer" ? [event] : [character, event];
+    const contract: CompletionContract = { scope: { kind: "partial", depth: "interactive",
+      targets, branches: [] }, constraints: [],
+      envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+    const task = "Clarify Ada's reason to disclose the ledger in her profile and the Event.";
+    const turn = planObjective({ kind: "revision", request: task, contract, base: job.baseSha,
+      sourceJobId: "seed", catalog, targetIds: targets,
+      allowedPaths: scenario === "writer" ? [eventPath] : [characterPath, eventPath] });
+    await saveJobTurnPlan(job, turn);
+    const correction = "Explain in Ada's Character profile why she discloses the ledger.";
+    const restore = fixtureSandboxClient(job.jobId, job.worktreeStoryRoot);
+    const saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+    let originalNegative = false, repairYield = false, supportWrites = 0, originalReviews = 0;
+    let writerYield = false, originalWrites = 0;
+    let lastPrompt = "", step = 0;
+    try {
+      const { runtime, calls } = await scriptedStoryRuntime((index, context) => {
+        const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> | string }>;
+        const prompt = messages.filter(m => m.role === "user").flatMap(m =>
+          typeof m.content === "string" ? [m.content] : m.content.map(c => c.text ?? "")).at(-1) ?? "";
+        if (prompt !== lastPrompt) { lastPrompt = prompt; step = 0; }
+        const phase = step++;
+        const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
+        const stop = (value: unknown) => ({ content: scriptedText(value), reason: "stop" as const });
+        if (index === 0) return read(requiredOrchestratorSkillReads(turn.creativePolicy?.mode ?? "autonomous").map(p => "skill://" + p));
+        if (index === 1) return stop({ sourceSha: job.baseSha, turnDigest: turn.digest,
+          assignments: turn.assignments.map(a => ({ id: a.id, reason: "Perform the authorized linked revision." })) });
+        if (prompt.includes("READ-ONLY dependency orchestrator")) {
+          if (!phase) return read(["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+            "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"]
+            .map(p => "skill://" + p).concat(characterPath));
+          return stop({ target: character, specialist: "nt-character-development", outcome: correction,
+            reason: "The sealed Event finding identifies Ada's missing motivation in her owned Character record." });
+        }
+        if (prompt.includes("IMMUTABLE REVIEW PACKET")) {
+          if (!phase) return read(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p));
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          const path = item.assurance.changedPaths[0];
+          const fail = scenario !== "writer" && path === eventPath && !originalNegative;
+          if (fail) originalNegative = true;
+          return stop({ sourceDigest: packet.sourceDigest, verdict: fail ? "fail" : "pass",
+            findings: fail ? [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+              path, line: 1, kind: "continuity", message: "Ada's motivation lacks source support.",
+              requiredCorrection: correction, affectedPaths: [eventPath, characterPath] }] : [],
+            evidence: fail ? [] : [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+              path, line: 1, explanation: "The scoped canonical change fulfills the assignment." }] });
+        }
+        if (prompt.includes("You are the independent nt-narrative-review editor")) {
+          const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
+          if (!phase) return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!
+            .split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths));
+          if (prompt.includes("POST-DEPENDENCY REASSESSMENT")) originalReviews++;
+          return stop({ verdict: "pass", findings: [],
+            evidence: assignment.paths.map((p: string) => p + ":1: The current canonical source establishes the required motivation.") });
+        }
+        if (prompt.includes("OUT_OF_AUTHORITY:") && !prompt.includes("revision specialist. FIRST")) {
+          repairYield = true;
+          return stop("OUT_OF_AUTHORITY: " + characterPath);
+        }
+        if (prompt.includes("revision specialist. FIRST")) {
+          const path = prompt.includes("Only edit these PREEXISTING canonical Markdown files:\n" + eventPath) ? eventPath : characterPath;
+          const support = prompt.includes("THIS IS A SEPARATELY AUTHORIZED SUPPORTING ASSIGNMENT");
+          const skill = path === eventPath ? "nt-event-design" : "nt-character-development";
+          if (!phase) return read([skill + "/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
+            ...(path === eventPath ? ["nt-catalog/references/progression.md"] : [])].map(p => "skill://" + p));
+          if (phase === 1) {
+            if (scenario === "support-no-write" && support) return stop("The prerequisite needs no edits.");
+            if (scenario === "writer" && !support && !writerYield) {
+              writerYield = true;
+              return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-prerequisite", name: "report_dependency",
+                arguments: { obligationIndex: 0, missing: correction, affectedIds: [event, character],
+                  sources: [{ path: characterPath, quote: "id: character.ada" }],
+                  likelySpecialist: "nt-character-development", authorDecisionRequired: false } }] };
+            }
+            if (support) supportWrites++; else if (path === eventPath) originalWrites++;
+            const old = readFileSync(join(job.worktreeStoryRoot, path), "utf8");
+            return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-edit-" + index, name: "edit",
+              arguments: { path, edits: [{ oldText: old, newText: old + "\n" +
+                (support ? "Ada discloses the ledger to protect the witness from a false accusation." :
+                  "Ada hesitates before giving the witness her account of the ledger.") + "\n" }] } }] };
+          }
+          return stop("The authorized revision is complete.");
+        }
+        throw Error("Unexpected R04 model prompt: " + prompt.slice(0, 1000));
+      });
+      const config = { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 };
+      const invoke = (input: Parameters<ReturnType<typeof createGenerationGraph>["invoke"]>[0],
+        options: typeof config & { interruptBefore?: string[]; interruptAfter?: string[] }) =>
+        withJobModelRuntime(runtime, () => createGenerationGraph(saver, "cli").invoke(input, options));
+      const suspended = await invoke({ request: { story: f.story, job: job.jobId, task, contract,
+        fixture: false, skillsSource: source, turnPlanDigest: turn.digest, provider: scriptedModel.provider,
+        model: scriptedModel.id }, pauseAfter: null }, { ...config, interruptBefore: ["dependency_amendment"] });
+      const pin = scenario === "writer" ? suspended.focusedPrerequisite : suspended.reviewPrerequisite;
+      assert.ok(pin, JSON.stringify({ reason: suspended.reason, status: suspended.status }));
+      assert.equal(pin.suspension.pendingPhase, scenario === "writer" ? "writer" : "review");
+      assert.equal(pin.suspension.owner, "nt-character-development");
+      assert.equal(originalNegative, scenario !== "writer");
+      assert.equal(repairYield, scenario !== "writer");
+      const originalHead = git(job.worktreeRoot, "rev-parse", "HEAD");
+      const receiptPath = join(job.stateDir, "focused-items", event + ".json");
+      const originalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      const supported = await invoke(null, { ...config, interruptAfter: ["dependency_amendment"] });
+      if (scenario === "support-no-write") {
+        assert.equal(supportWrites, 0);
+        assert.equal(originalReviews, 0);
+        assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), originalHead);
+        assert.ok(supported.reviewPrerequisite);
+        assert.equal(supported.reviewPrerequisite.supportRef, null);
+        assert.notEqual((await inspectDependencyPlan(job))!.entries[0]!.phase, "verified");
+        const before = calls();
+        const stopped = await invoke(null, config);
+        assert.equal(stopped.status, "blocked", stopped.reason ?? "");
+        assert.equal(calls(), before);
+        return;
+      }
+      const supportPin = scenario === "writer" ? supported.focusedPrerequisite : supported.reviewPrerequisite;
+      assert.ok(supportPin?.supportRef, JSON.stringify({ reason: supported.reason, status: supported.status }));
+      assert.deepEqual(supportPin.identity, pin.identity);
+      assert.equal(supportWrites, 1);
+      assert.equal(originalReviews, 0);
+      if (scenario === "writer") {
+        const resumed = await invoke(null, { ...config, interruptBefore: ["completion_decision", "specialist_dispatch"] });
+        // The first dispatch boundary is the exact original continuation.
+        assert.ok(resumed.focusedPrerequisite?.supportRef);
+        const finished = await invoke(null, { ...config, interruptAfter: ["verify_committed_work"] });
+        assert.equal(finished.focusedPrerequisite, null, finished.reason ?? "");
+        assert.equal(originalWrites, 1);
+        const finalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+        assert.ok(originalReceipt.piSessionFile && originalReceipt.piSessionId);
+        assert.equal(finalReceipt.piSessionFile, originalReceipt.piSessionFile);
+        assert.equal(finalReceipt.piSessionId, originalReceipt.piSessionId);
+        assert.equal(git(job.worktreeRoot, "rev-list", "--count", job.baseSha + "..HEAD"), "2");
+        assert.equal((await inspectDependencyPlan(job))!.entries[0]!.phase, "verified");
+        return;
+      }
+      const resumed = await invoke(null, { ...config, interruptAfter: ["independent_assignment_review"] });
+      assert.equal(resumed.reviewPrerequisite, null, JSON.stringify({ status: resumed.status, reason: resumed.reason, lifecycle: resumed.recoveryLifecycle, originalReviews, calls: calls() }));
+      assert.equal(originalReviews, 1);
+      const ledger = await inspectDependencyPlan(job);
+      const entry = ledger!.entries[0]!;
+      assert.equal(entry.phase, "verified");
+      assert.equal(entry.originalReview?.verdict, "pass");
+      assert.ok(entry.originalReviewerSession);
+      assert.notEqual(entry.originalReviewerSession, entry.reviewerSession);
+      assert.equal((await inspectRecoveryCheckpoints(job)).find(p => p.commitSha === entry.reviewSourceSha)?.semanticReview, "failed");
+      const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+      const before = calls();
+      await invoke(null, { ...config, interruptBefore: ["completion_decision", "specialist_dispatch"] });
+      assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
+      assert.equal(calls(), before);
+      assert.equal(supportWrites, 1);
+    } finally { saver.db.close(); restore(); }
+  } finally {
+    if (oldState === undefined) delete process.env.NT_STATE_DIR; else process.env.NT_STATE_DIR = oldState;
+    if (oldCache === undefined) delete process.env.NT_SKILL_CACHE_DIR; else process.env.NT_SKILL_CACHE_DIR = oldCache;
   }
 });
 

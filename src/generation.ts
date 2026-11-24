@@ -2,7 +2,9 @@ import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig,
-  type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension } from "./generation-assignment-lifecycle.js";
+  type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
+  type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
+import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { readRecoveryFork, verifyReadyRecoveryFork, resolvedInheritedRecoveryReviews } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -213,6 +215,10 @@ type FocusedPrerequisitePin = {
   identity: AssignmentIdentity; suspension: AssignmentPrerequisiteSuspension;
   supportRef: string | null;
 };
+type ReviewPrerequisitePin = FocusedPrerequisitePin & {
+  recoveryCaseId: string;
+  submission: AssignmentSubmission;
+};
 const Channels = Annotation.Root({
   /** Sole recovery phase, decision, pending-case and invocation authority. */
   recoveryLifecycle: Annotation<RecoveryLifecycle>({ reducer: (_, next) => next, default: emptyRecoveryLifecycle }),
@@ -252,6 +258,7 @@ const Channels = Annotation.Root({
   adaptiveVersion: Annotation<number | null>(),
   dependencyHistory: Annotation<DependencyHistoryPin[]>({ reducer: (_, next) => next, default: () => [] }),
   focusedPrerequisite: Annotation<FocusedPrerequisitePin | null>({ reducer: (_, next) => next, default: () => null }),
+  reviewPrerequisite: Annotation<ReviewPrerequisitePin | null>({ reducer: (_, next) => next, default: () => null }),
   /** A sealed source-grounded causal replan request, never write authority. */
   causalAmendment: Annotation<CausalAmendment | null>(),
   /** A controller-admitted prerequisite, before the next dependent dispatch. */
@@ -263,6 +270,7 @@ type CoreState = GenerationGraphState;
 // Local node observations only; never LangGraph channels or resume authority.
 type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict";
   reviewAssessmentRequested?: true;
+  reviewDependencyRequest?: ReviewDependencyRequest;
   reviewPauseReason?: "author-pause" | "author-choice" | "budget" | "provider-unavailable" | "cancelled"; };
 const openJob = async (s: Pick<State, "request">) => {
   const job = await startStoryJob({ story: s.request.story, job: s.request.job }, false);
@@ -1121,6 +1129,9 @@ async function runCharacterWorldAssignmentChild(
         return outcome("paused", "review-checkpoints", { controlRef: "review-checkpoints" });
       if (reviewPatch.reviewAssessmentRequested)
         return outcome("unresolved", "review-checkpoints", { dispositionRef: "assess-review" });
+      if (reviewPatch.reviewDependencyRequest)
+        return outcome("unresolved", reviewPatch.reviewDependencyRequest.digest,
+          { dispositionRef: "review-prerequisite" });
       if (reviewPatch.status === "blocked" || reviewPatch.status === "cancelled" ||
           reviewPatch.escalation || reviewPatch.operationRecovery || reviewPatch.recovery ||
           reviewPatch.unknownRecovery)
@@ -1173,7 +1184,7 @@ async function runCharacterWorldAssignmentChild(
     return { reviewAssessmentRequested: true, result, reason: "Assessing the sealed World/Character Review boundary." };
   }
   if (patch && (patch.status || patch.operationRecovery || patch.recovery || patch.unknownRecovery ||
-      patch.escalation || patch.reviewSteeringHandoff))
+      patch.escalation || patch.reviewSteeringHandoff || patch.reviewDependencyRequest))
     return { ...patch, result };
   if (finished.outcome.status === "paused")
     return { status: "paused", result, reason: "Original World/Character child is suspended." };
@@ -1316,6 +1327,167 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
   // its original submitted receipt rather than restarting the writer.
   return { ...patch, result: patch?.result === undefined ? result : patch.result,
     focusedPrerequisite: null };
+}
+
+/** Recover the original submitted work and exact negative Review from the
+ * existing receipt stores. No dependency grant is derived from graph state. */
+async function reviewPrerequisiteIdentity(s: State, config: RunnableConfig,
+  request: ReviewDependencyRequest): Promise<ReviewPrerequisitePin> {
+  const job = await openJob(s);
+  const active = s.recoveryLifecycle.active;
+  const graphThreadId = config.configurable?.thread_id;
+  if (!active || active.origin.operation !== "independent-review" ||
+      s.recoveryLifecycle.phase !== "correcting" || s.recoveryLifecycle.assessorPending ||
+      s.recoveryLifecycle.decision?.action !== "known-correction" ||
+      s.recoveryLifecycle.decision.adapter !== "review-cycle" ||
+      !s.active || !s.result || s.request.fixture ||
+      s.active.id !== active.origin.assignmentId || s.result.headSha !== active.origin.sourceHeadSha ||
+      active.origin.sourceHeadSha !== request.sourceSha ||
+      s.request.turnPlanDigest !== request.turnDigest || s.planVersion !== request.basePlanVersion ||
+      typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId ||
+      request.action !== "controller-amendment-required")
+    throw Error("Review prerequisite lacks the original admitted Review case, Turn or plan.");
+  const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
+  if (!await authenticateOperationReviewProof(job, s, active, s.recoveryLifecycle.decision))
+    throw Error("Review prerequisite lost its original failed reviewer proof.");
+  const plan = await inspectDependencyPlan(job);
+  if (!plan?.reviewRequests?.some(r => isDeepStrictEqual(r, request)))
+    throw Error("Review prerequisite request is not sealed in the controller ledger.");
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+    p.commitSha === request.sourceSha && p.semanticReview === "failed" &&
+    p.assurance?.assignmentDigest === request.originalAssignmentDigest);
+  const turn = await readTurnEvidence(job, s.request.contract, s.request.task, request.turnDigest);
+  if (!point?.assurance || !turn) throw Error("Review prerequisite lost its native checkpoint and Turn.");
+  const owners = request.otherOwnerPath ? turn.assignments.filter(a => a.id !== request.originalAssignmentId &&
+    (a.authority.existingPaths.includes(request.otherOwnerPath!) ||
+      a.authority.newPaths?.includes(request.otherOwnerPath!))) : [];
+  const owner = request.classification === "new-full-story-record" ? "nt-character-development" :
+    request.classification === "other-owner" && owners.length === 1 ? owners[0]!.specialist : null;
+  if (!owner) throw Error("Review prerequisite does not have a unique authorized owner.");
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+    graphThreadId, turnDigest: request.turnDigest, assignmentId: s.active.id,
+    planVersion: request.basePlanVersion, sourceHeadSha: point.parentSha,
+    scopeDigest: request.originalAssignmentDigest,
+  };
+  const suspension: AssignmentPrerequisiteSuspension = {
+    status: "needs-prerequisite", assignmentKey: logicalAssignmentKey(identity),
+    evidenceRef: request.reviewDigest, suspensionRef: request.digest,
+    owner, scopeRef: request.scopeDigest, pendingPhase: "review",
+  };
+  return { identity, suspension, supportRef: null, recoveryCaseId: active.id,
+    submission: { receiptRef: "review-checkpoints:" + request.sourceSha,
+      status: s.result.status, headSha: request.sourceSha } };
+}
+
+async function authenticatedReviewPrerequisite(s: State, config: RunnableConfig) {
+  const pin = s.reviewPrerequisite;
+  if (!pin) throw Error("No suspended original Review assignment.");
+  const job = await openJob(s);
+  const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
+    r.digest === pin.suspension.suspensionRef);
+  if (!request) throw Error("Suspended Review lost its original dependency request.");
+  const original = await reviewPrerequisiteIdentity(s, config, request);
+  if (!isDeepStrictEqual({ ...pin, supportRef: null }, original))
+    throw Error("Suspended Review checkpoint differs from the exact original source and owner.");
+  return { job, request, pin };
+}
+
+/** A returned-END Review continuation is a logical reentry, not a
+ * Command(resume) interrupt. The original writer submission is immutable. */
+async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
+  request: ReviewDependencyRequest, initial: ReviewPrerequisitePin): Promise<Partial<State>> {
+  const job = await openJob(s);
+  const key = logicalAssignmentKey(initial.identity);
+  const { inspectReviewSupport, continueReviewDependency } = await import("./dependency-work.js");
+  let paused: string | null = null;
+  const authenticate = async () => {
+    const verified = await reviewPrerequisiteIdentity(s, config, request);
+    if (!isDeepStrictEqual({ ...initial, supportRef: null }, verified)) return false;
+    if (!initial.supportRef) return true;
+    const support = await inspectReviewSupport(job, request);
+    return support.ref === initial.supportRef && support.entry.amendment?.assignment.specialist === initial.suspension.owner;
+  };
+  const child = createAssignmentLifecycleGraph({
+    preflight: async () => {
+      if (!await authenticate()) throw Error("Original Review prerequisite is not authenticated.");
+      return null;
+    },
+    authenticateContinuation: async state =>
+      state.continuationRef === initial.supportRef && await authenticate(),
+    invoke: async () => { throw Error("Review prerequisite must not replay its original writer."); },
+    verify: async () => {
+      if (!initial.supportRef) return initial.suspension;
+      const support = await inspectReviewSupport(job, request);
+      if (support.ref !== initial.supportRef) throw Error("Supporting assignment proof changed.");
+      const eventSource = request.classification === "new-full-story-record" &&
+        request.originalWorkItem.startsWith("event-");
+      if (eventSource && support.entry.phase !== "verified") {
+        const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
+        const repair = await advanceRejectedRepair(job, request.sourceSha, {
+          skillsSource: s.request.skillsSource, provider: s.request.provider, model: s.request.model,
+        });
+        if (repair.next === "author-choice") {
+          paused = "Original Event correction awaits an authenticated Author Choice.";
+          return { status: "paused", assignmentKey: key, evidenceRef: request.digest,
+            controlRef: "review-repairs:" + request.sourceSha };
+        }
+        if (repair.next !== "completed") throw Error("Original Event correction has not independently passed.");
+        const { finalizeReviewEventDependency } = await import("./dependency-state.js");
+        await withStoryJobLock(job, "event-dependency-review-completion", () =>
+          finalizeReviewEventDependency(job, request.sourceSha));
+      } else if (!eventSource) {
+        await continueReviewDependency(job, request, initial.supportRef);
+      }
+      if (request.classification === "other-owner") {
+        const { revalidateOtherOwnerPrerequisite } = await import("./review-other-owner-revalidation.js");
+        const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
+        await withStoryJobLock(job, "other-owner-dependent-revalidation", () =>
+          revalidateOtherOwnerPrerequisite({
+            job, request, inventory: s.inventory ?? undefined,
+            contract: s.request.contract, task: s.request.task,
+            provider: s.request.provider ?? policy.profile.provider,
+            model: s.request.model ?? policy.profile.model, skillsSource: s.request.skillsSource,
+            validatorSource: s.request.validatorSource,
+          }));
+      }
+      const head = await trustedHead(job);
+      const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+      if (!await verifyReviewCycleSuccessor(job, request.sourceSha, head))
+        throw Error("Supporting work does not independently cover the original failed Review and affected dependents.");
+      return { status: "verified", assignmentKey: key, evidenceRef: request.digest,
+        reviewRef: initial.supportRef, headSha: head };
+    },
+  });
+  const finished = await child.invoke({ identity: initial.identity, submission: initial.submission,
+    submissionKey: key, outcome: null, continuationRef: initial.supportRef,
+    suspension: initial.supportRef ? initial.suspension : null }, config);
+  if (finished.outcome?.status === "needs-prerequisite")
+    return { reviewPrerequisite: initial };
+  if (finished.outcome?.status === "paused")
+    return { status: "paused", reason: paused ?? "Original Review awaits its saved Author Choice." };
+  if (finished.outcome?.status !== "verified" || !initial.supportRef ||
+      finished.outcome.assignmentKey !== key)
+    throw Error("Original Review prerequisite child did not return authenticated coverage.");
+  // Re-attest even when the child END result was restored from SQLite.
+  const head = await trustedHead(job);
+  const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+  if (head !== finished.outcome.headSha || !await verifyReviewCycleSuccessor(job, request.sourceSha, head))
+    throw Error("Returned Review child has no current verified successor.");
+  const entry = (await inspectReviewSupport(job, request)).entry;
+  const dependencyHistory = [...s.dependencyHistory.filter(p => p.reportDigest !== entry.reportDigest),
+    { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }];
+  let result: State["result"] = { ...s.result!, headSha: head };
+  if (s.result?.status === "review-handoff") {
+    const next = s.active?.stage === "foundations" ? "character-foundations" :
+      s.active && ["interactive", "choice", "puzzle"].includes(s.active.stage) && s.active.milestone
+        ? "interactive-" + (s.active.stage === "choice" ? "choice" : "puzzle") +
+          "-" + s.active.milestone.slice(10) : null;
+    if (!next) throw Error("Review continuation has no original pending specialist unit.");
+    await assertNativeReviewDependencies(job, next);
+    result = null;
+  }
+  return { reviewPrerequisite: null, dependencyHistory, result, escalation: null };
 }
 
 const accepted: Record<Stage, readonly string[]> = {
@@ -1497,51 +1669,10 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
                   action: "Obtain explicit author authority for the protected objective or scope change.",
                 } };
             const { recordReviewDependency } = await import("./dependency-state.js");
-            const { advanceReviewDependency } = await import("./dependency-work.js");
-            const { settleOtherOwnerPrerequisite } = await import("./review-other-owner-controller.js");
-            await settleOtherOwnerPrerequisite({
-              admit: async () => {
-                await withStoryJobLock(job, "other-owner-prerequisite-admission", () =>
-                  recordReviewDependency(job, request));
-              },
-              support: () => advanceReviewDependency({
-                story: s.request.story, job: s.request.job, task: s.request.task,
-                contract: s.request.contract, skillsSource: s.request.skillsSource,
-                validatorSource: s.request.validatorSource, provider: s.request.provider,
-                model: s.request.model, turnPlanDigest: request.turnDigest, request,
-              }),
-              independentlyCovered: async () => {
-                const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(point => point.eligible);
-                const reviewed = await resolvedCheckpointReviews(job, checkpoints);
-                return reviewed.get(request.sourceSha) === "not-required";
-              },
-            });
-            // The corrected upstream source may have been consumed by earlier
-            // already-reviewed specialists. The existing selective reviewer
-            // rechecks only impacted/unknown consumers and carries proven
-            // independent checkpoints forward without replaying their writers.
-            const { revalidateOtherOwnerPrerequisite } = await import("./review-other-owner-revalidation.js");
-            const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
-            await withStoryJobLock(job, "other-owner-dependent-revalidation", () =>
-              revalidateOtherOwnerPrerequisite({
-                job, request, inventory: s.inventory ?? undefined,
-                contract: s.request.contract, task: s.request.task,
-                provider: s.request.provider ?? policy.profile.provider,
-                model: s.request.model ?? policy.profile.model,
-                skillsSource: s.request.skillsSource,
-                validatorSource: s.request.validatorSource,
-              }));
-            if (s.result.status === "review-handoff") {
-              const next = s.active.stage === "foundations" ? "character-foundations" :
-                ["interactive", "choice", "puzzle"].includes(s.active.stage) && s.active.milestone
-                  ? "interactive-" + (s.active.stage === "choice" ? "choice" : "puzzle") +
-                    "-" + s.active.milestone.slice(10) : null;
-              if (!next) throw Error("Cross-owner review handoff has no original specialist.");
-              await assertNativeReviewDependencies(job, next);
-              return { result: null, escalation: null };
-            }
-            return { result: { ...s.result, headSha: await trustedHead(job) },
-              escalation: null };
+            await withStoryJobLock(job, "other-owner-prerequisite-evidence", () =>
+              recordReviewDependency(job, request));
+            // No owner approval or support work inside the original Review.
+            return { reviewDependencyRequest: request };
           } catch (error) {
             if (error instanceof Error && error.name === "SpecialistChoiceRequiredError")
               return { status: "paused", escalation: null,
@@ -1611,79 +1742,9 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
       const request = error.request;
       if (request.action === "controller-amendment-required" &&
           request.classification === "new-full-story-record") {
-        // A routine Character omission already falls under the approved
-        // whole-Story objective. This controller-authorized dependency path
-        // must not ask the author to reapprove that creative choice.
-        try {
-          const { advanceReviewCharacterDependency } = await import("./dependency-work.js");
-          const progress = await advanceReviewCharacterDependency({
-            story: s.request.story, job: s.request.job, task: s.request.task,
-            contract: s.request.contract, skillsSource: s.request.skillsSource,
-            validatorSource: s.request.validatorSource,
-            provider: s.request.provider, model: s.request.model,
-            turnPlanDigest: request.turnDigest, request,
-          });
-          if (progress.status === "dependency-support-verified") {
-            // Event-owned participant/prose correction is a SECOND, bounded
-            // original-specialist operation. The Character assignment gives
-            // it no write authority; the sealed failure remains negative
-            // until the Event repair's new independent checkpoint passes.
-            const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
-            const repair = await advanceRejectedRepair(job, request.sourceSha, {
-              skillsSource: s.request.skillsSource, provider: s.request.provider,
-              model: s.request.model,
-            });
-            if (repair.next === "completed") {
-              const { finalizeReviewEventDependency } = await import("./dependency-state.js");
-              await withStoryJobLock(job, "event-dependency-review-completion", () =>
-                finalizeReviewEventDependency(job, request.sourceSha));
-            } else return {
-              status: repair.next === "author-choice" ? "paused" : "blocked",
-              reason: repair.next === "author-choice"
-                ? "The separate Event correction awaits an authenticated saved Author Choice."
-                : "The original Event failure remains sealed; its bounded Event-owner correction " +
-                  "requires manual reconciliation before Story generation can continue.",
-              escalation: repair.next === "author-choice" ? null : {
-                kind: "dependency-replan", requiresTrustedApproval: false,
-                sources: request.findings.map(f => ({
-                  source: f.path + ":" + f.line, message: f.defect, repair: f.requiredCorrection,
-                })),
-                action: "Inspect the separate Event repair receipt and original Pi session. " +
-                  "Do not replay an interrupted writer or expand its single-Event authority.",
-              },
-            };
-          } else if (progress.status !== "dependency-verified")
-            throw Error("New supporting Character has not completed its mandatory independent reviews.");
-          if (s.result?.status === "review-handoff") {
-            await assertNativeReviewDependencies(job, "character-foundations");
-            return { result: null, escalation: null };
-          }
-          return { result: s.result ? { ...s.result, headSha: await trustedHead(job) } : null,
-            escalation: null };
-        } catch (dependencyError) {
-          // A supporting specialist may legitimately ask a protected author
-          // question. Preserve its authenticated, paused choice instead of
-          // misreporting it as a terminal dependency failure.
-          if (dependencyError instanceof Error &&
-              dependencyError.name === "SpecialistChoiceRequiredError")
-            return { status: "paused",
-              reason: "Supporting Character work is awaiting its saved authenticated Author Choice; the original negative review remains sealed.",
-              escalation: null };
-          return { status: "blocked",
-            reason: "The original negative review remains sealed. Supporting Character amendment: " +
-              (dependencyError instanceof Error ? dependencyError.message : String(dependencyError)),
-            escalation: {
-              kind: "dependency-replan",
-              sources: request.findings.map(f => ({
-                source: f.path + ":" + f.line, message: f.defect, repair: f.requiredCorrection,
-              })),
-              requiresTrustedApproval: false,
-              action: "Inspect the exact source-bound dependency plan and specialist/review receipts. " +
-                "A failed or interrupted new Character/Arc-link assignment needs explicit bounded " +
-                "reconciliation; do not replay its author or broaden the original failed repair lease.",
-            },
-          };
-        }
+        // The parent admits the separate Character grant only after the
+        // original Review returns its typed prerequisite at END.
+        return { reviewDependencyRequest: request };
       }
       const requiresTrustedApproval = request.action === "author-approval-required";
       return {
@@ -2853,7 +2914,7 @@ export function createGenerationGraph(
       });
     }))
     .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async (s, config) => {
-      if (s.crossDomainCloseout || s.focusedPrerequisite &&
+      if (s.crossDomainCloseout || s.reviewPrerequisite || s.focusedPrerequisite &&
           (s.active?.stage !== "focus" || s.active.id !== s.focusedPrerequisite.identity.assignmentId))
         throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
       // Every admitted Foundation assignment uses the shared child. A missing
@@ -3025,11 +3086,20 @@ export function createGenerationGraph(
     }))
     .addNode("dependency_amendment", recoveryNode("dependency_amendment", async (s, config) => {
       try {
-        if (s.active?.stage !== "focus" || !s.active.milestone)
-          throw Error("Dependency amendment is not bound to a focused assignment.");
         const job = await openJob(s);
         const stopped = await withStoryJobLock(job, "dependency-author-boundary", () => authorBoundary(job, s));
-        if (stopped) return stopped;
+        if (stopped) return { ...stopped, result: s.result };
+        if (s.reviewPrerequisite) {
+          const { request, pin } = await authenticatedReviewPrerequisite(s, config);
+          const { advanceReviewDependency, inspectReviewSupport } = await import("./dependency-work.js");
+          await advanceReviewDependency({ ...s.request, turnPlanDigest: request.turnDigest, request }, config);
+          const supported = await inspectReviewSupport(job, request);
+          if (supported.entry.amendment?.assignment.specialist !== pin.suspension.owner)
+            throw Error("Supporting Review assignment has the wrong owner.");
+          return { reviewPrerequisite: { ...pin, supportRef: supported.ref } };
+        }
+        if (s.active?.stage !== "focus" || !s.active.milestone)
+          throw Error("Dependency amendment is not bound to a focused assignment.");
         const pin = s.focusedPrerequisite;
         if (!pin || pin.identity.assignmentId !== s.active.id || pin.identity.planVersion !== s.planVersion ||
             pin.identity.turnDigest !== s.request.turnPlanDigest || pin.identity.jobId !== job.jobId ||
@@ -3056,7 +3126,11 @@ export function createGenerationGraph(
           p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
       } catch (error) {
         const stop = blocked(error);
-        if (stop.status !== "blocked") return stop;
+        if (stop.status !== "blocked") return { ...stop, result: s.result };
+        // The original negative Review already owns the active RecoveryCase.
+        // A failed support effect cannot replace it or start an assessor loop.
+        // The shared observation boundary fences the exact failed support task.
+        if (s.reviewPrerequisite) throw error;
         return operationFailure(s, await openJob(s), "dependency-amendment", error,
           { reference: "dependency-plan", assignmentId: s.active?.id });
       }
@@ -3074,11 +3148,29 @@ export function createGenerationGraph(
         if (!await authenticateOperationReviewProof(job, s, selected.active!, selected.decision!))
           throw Error("Saved Review correction lost its original failed verdict");
       }
-      const reviewed = correction && s.active?.stage === "foundation"
-        ? await runFoundationAssignmentChild(s, config, reviewBoundary, true)
-        : correction && s.active?.stage === "foundations"
-          ? await runCharacterWorldAssignmentChild(s, config, reviewBoundary, true)
-          : await reviewBoundary(s, correction);
+      let reviewed: Partial<State>;
+      if (s.reviewPrerequisite) {
+        const { request, pin } = await authenticatedReviewPrerequisite(s, config);
+        reviewed = await runReviewPrerequisiteChild(s, config, request, pin);
+      } else {
+        // A crash after recording the original request but before the parent
+        // checkpoint must recover the returned-END suspension, not the writer.
+        const job = correction ? await openJob(s) : null;
+        const originalRequest = job && (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
+          r.sourceSha === selected.active?.origin.sourceHeadSha &&
+          r.action === "controller-amendment-required");
+        reviewed = originalRequest ? { reviewDependencyRequest: originalRequest } :
+          correction && s.active?.stage === "foundation"
+            ? await runFoundationAssignmentChild(s, config, reviewBoundary, true)
+            : correction && s.active?.stage === "foundations"
+              ? await runCharacterWorldAssignmentChild(s, config, reviewBoundary, true)
+              : await reviewBoundary(s, correction);
+        if (reviewed.reviewDependencyRequest) {
+          const request = reviewed.reviewDependencyRequest;
+          return runReviewPrerequisiteChild(s, config, request,
+            await reviewPrerequisiteIdentity(s, config, request));
+        }
+      }
       if (correction) {
         if (reviewed.reviewAssessmentRequested) return reviewed;
         if (reviewed.reviewSteeringHandoff)
@@ -3332,7 +3424,8 @@ export function createGenerationGraph(
     .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
       s.ideaTask ? "idea_integration" :
-      s.result?.status === "dependency-required" ? "dependency_amendment" :
+      s.reviewPrerequisite && !s.reviewPrerequisite.supportRef ||
+        s.result?.status === "dependency-required" ? "dependency_amendment" :
       s.active && s.result && s.recoveryLifecycle.active?.origin.operation === "commit-verification" &&
         s.recoveryLifecycle.phase === "verifying" ? "verify_committed_work" :
       s.active && s.result ? "independent_assignment_review" :
@@ -3349,8 +3442,9 @@ export function createGenerationGraph(
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("independent_assignment_review", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :
+      s.reviewPrerequisite && !s.reviewPrerequisite.supportRef ? "dependency_amendment" :
       s.reviewSteeringHandoff ? "author_update_intake" :
-      s.result ? "verify_committed_work" : s.active?.stage === "foundations" ? "author_update_intake" : "specialist_dispatch"), [END, "assess_recovery", "author_update_intake", "verify_committed_work", "specialist_dispatch"])
+      s.result ? "verify_committed_work" : s.active?.stage === "foundations" ? "author_update_intake" : "specialist_dispatch"), [END, "assess_recovery", "dependency_amendment", "author_update_intake", "verify_committed_work", "specialist_dispatch"])
     .addConditionalEdges("verify_committed_work", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("completion_decision", s => routeAfterOperationAssessment(s, END),
@@ -3403,7 +3497,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
           ideaTask: null, ideaResult: null, ideaHistory: [], escalation: null,
           orchestratorSnapshotId: null, orchestratorOrder: null, orchestratorPlanningDigest: null,
           pendingOrder: null, pendingVersion: null, graphThreadId: null, adaptiveVersion: null,
-          dependencyHistory: [], focusedPrerequisite: null, crossDomainCloseout: null, causalAmendment: null };
+          dependencyHistory: [], focusedPrerequisite: null, reviewPrerequisite: null,
+          crossDomainCloseout: null, causalAmendment: null };
       } else {
         if (!state.request) throw new Error("No saved generation request.");
         if (state.request.story !== job.storyRoot || state.request.job !== job.jobId)

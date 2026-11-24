@@ -155,7 +155,8 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   reviewKind: "narrative" | "turn-completeness" | "assignment-fidelity" |
     "assignment-diagnostic" = "narrative",
   freshProtocol = false,
-  postcommit?: { id: string; reviewer?: { id: string; file: string }; protocolFresh?: boolean },
+  postcommit?: { id: string; reviewer?: { id: string; file: string; changedPaths?: readonly string[] };
+    protocolFresh?: boolean; dependencyContinuation?: boolean },
   independentReviewKey?: string) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -195,7 +196,7 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
   await mkdir(dir, { recursive: true });
   const sandboxTools = await selectSandboxPiTools(job, snapshot, loader.getSkills().skills, undefined,
     role === "review" ? "read-only" : "writer", role === "review" ? "reviewer" : "specialist",
-    ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
+    ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind) && !postcommit?.dependencyContinuation
       ? "pinned-skills-only" : "story-and-skills");
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model, thinkingLevel: selectedThinking,
@@ -204,10 +205,10 @@ async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, provider
       ? SessionManager.open(originalSessionFile, dirname(originalSessionFile), project.root)
       : context?.manager ?? SessionManager.create(project.root, dir),
     customTools: [...(sandboxTools ?? []),
-      ...(context && !["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
-        ? [context.contextTool] : []), createPiStatusTool()],
-    noTools: "all", tools: ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind)
-      ? ["read", "report_status"] : role === "review"
+      ...(context && (!["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind) ||
+        postcommit?.dependencyContinuation) ? [context.contextTool] : []), createPiStatusTool()],
+    noTools: "all", tools: ["assignment-fidelity", "assignment-diagnostic"].includes(reviewKind) &&
+      !postcommit?.dependencyContinuation ? ["read", "report_status"] : role === "review"
         ? [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"] : ["read", "edit", "write", "grep", "find", "ls", "report_status"],
   });
   if (selectedThinking && session.thinkingLevel !== selectedThinking) {
@@ -242,12 +243,20 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
    * never append to one another, even when reviewing the same Story HEAD.
    * Original same-session protocol corrections do not set this key. */
   independentReviewKey?: string,
+  continuation?: { cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle;
+    changedPaths: readonly string[] },
 ): Promise<EditorialVerdict> {
+  const cycle = continuation?.cycle;
   const { session, project, pinned, context } = await sessionFor(job, snapshot,
     provider, model, thinking, "review", undefined, assignment,
-    "narrative", false, undefined, independentReviewKey);
+    cycle ? "assignment-fidelity" : "narrative", false,
+    cycle ? { id: cycle.id, reviewer: { ...cycle.reviewer, changedPaths: continuation!.changedPaths },
+      protocolFresh: cycle.protocolFresh, dependencyContinuation: true } : undefined, independentReviewKey);
   try {
     const file = session.sessionManager.getSessionFile();
+    if (cycle && (file !== cycle.reviewer.file || session.sessionId !== cycle.reviewer.id))
+      throw Error("Dependency rereview must continue the exact original reviewer session.");
+    const startMessage = cycle ? session.messages.length : 0;
     if (file) await onSession(file);
     await context!.beforeTurn(file ?? undefined);
     await promptStorySpecialist(session, context!.contextNote + "You are the independent nt-narrative-review editor, not the author. " +
@@ -263,8 +272,8 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
         assignment.reassessment.correctedHeadSha + ". Both checkpoints and all prior " +
         "negative findings remain immutable. Independently evaluate whether the " +
         "original assignment is NOW fully satisfied by the actual canonical sources " +
-        "at the corrected HEAD, including the missing Character, its actual Arc " +
-        "link, source-grounded motivation and honest starting knowledge. Do NOT " +
+        "at the corrected HEAD, including the exact prerequisite identified in the saved " +
+        "negative verdict and supplied assignment. Do NOT " +
         "treat the prior failure as success merely because a supporting writer " +
         "committed; judge each source and reject unresolved contradictions, " +
         "duplicate Characters or unauthorized retcons. Future Event/Choice and " +
@@ -353,7 +362,8 @@ export async function reviewNarrative(job: JobStartResult, snapshot: SkillSnapsh
       "PINNED REFERENCES:\n" + pinnedSkillReferences(snapshot, pinned) + "\nSTORY PATHS:\n" +
       assignment.paths.join("\n") + "\nASSIGNMENT:\n" + JSON.stringify(assignment, null, 2));
     const missingReads = () => {
-      const reads = new Set(completedReads(session, project.root, snapshot.path));
+      const reads = new Set(completedReads({ messages: session.messages.slice(startMessage) } as typeof session,
+        project.root, snapshot.path));
       return [...pinned, ...assignment.paths.map(p => resolve(project.root, p))]
         .filter(path => !reads.has(path));
     };

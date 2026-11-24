@@ -30,6 +30,20 @@ import { independentObligation, type GenerationOperationRecovery } from "./gener
  * exact original-session receipt and the entire failed-root chain verify. */
 export async function verifyReviewCycleSuccessor(job: JobStartResult, rootSha: string, head: string) {
   const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  // A separate support commit is not a repair commit of the original owner.
+  // Accept its exact successor only when the immutable negative Review is
+  // covered by BOTH independent verdicts and required dependent revalidation.
+  const { inspectDependencyPlan } = await import("./dependency-state.js");
+  const dependency = (await inspectDependencyPlan(job))?.entries.find(e =>
+    e.reviewSourceSha === rootSha && e.phase === "verified" && e.originalReview?.verdict === "pass");
+  if (dependency?.commitSha) {
+    const original = points.find(p => p.commitSha === rootSha && p.semanticReview === "failed" &&
+      p.assurance?.turnDigest === dependency.report.turnDigest);
+    if (!original || (await resolvedCheckpointReviews(job, points)).get(rootSha) !== "not-required")
+      return false;
+    if (dependency.commitSha !== head) await verifiedNarrativeChain(job, dependency.commitSha, head);
+    return true;
+  }
   const successor = points.find(p => p.commitSha === head && p.assurance &&
     p.validation.status === "passed" && p.semanticReview === "passed" &&
     p.workItem.startsWith("repair-"));
@@ -86,6 +100,9 @@ export async function inspectActiveRecoveryResolution(
   const { correction, correctedHeadSha } = resolution;
   const checkpoints = await inspectRecoveryCheckpoints(job);
   if (correction.store === "review-checkpoint" && correction.ref === correctedHeadSha) {
+    if (original.origin.operation === "independent-review" &&
+        original.observation === "returned-failure")
+      return verifyReviewCycleSuccessor(job, original.origin.sourceHeadSha, correctedHeadSha);
     const point = checkpoints.find(p => p.eligible && p.commitSha === correctedHeadSha &&
       p.validation.status === "passed" &&
       (p.semanticReview === "passed" || p.semanticReview === "not-required"));
@@ -106,10 +123,6 @@ export async function inspectActiveRecoveryResolution(
       return (await verifyCorrectedOriginalResult(job, original.origin.turnDigest,
         assignment, { status: verifier.resultStatus, headSha: verifier.resultHeadSha },
         verifier, original.origin.planVersion)).eligible;
-    }
-    if (original.origin.operation === "independent-review" &&
-        original.observation === "returned-failure") {
-      return verifyReviewCycleSuccessor(job, original.origin.sourceHeadSha, correctedHeadSha);
     }
     return original.origin.operation === "independent-review" &&
       original.observation === "exception" && original.origin.sourceHeadSha === correctedHeadSha;

@@ -44,10 +44,12 @@ export interface DependencyEntry {
   commitSha?: string; review?: EditorialVerdict; reviewerSession?: string;
   /** Independently sealed focused-support verdict transcript. */
   reviewerSessionDigest?: string;
+  reviewSnapshot?: SkillSnapshot; reviewProvider?: string; reviewModel?: string;
   fixture: boolean;
   /** Exact sealed negative review which generated a supporting work report. */
   reviewSourceSha?: string;
   originalReview?: EditorialVerdict; originalReviewerSession?: string;
+  originalReviewerSessionDigest?: string; originalReviewerSessionBytes?: number;
   rejection?: { reason: string; proposal: unknown };
 }
 export interface DependencyPlan {
@@ -139,9 +141,22 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
           entry.fixture)
         throw Error("Supporting review-dependency report is not linked to the sealed source.");
     }
-    if (entry.originalReview && (!entry.reviewSourceSha ||
-        entry.originalReview.verdict !== "pass" || !entry.originalReviewerSession))
-      throw Error("Suspended original goal lacks independent positive rereview.");
+    if (entry.originalReview) {
+      const request = saved.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
+      const { inspectPostcommitReviewCycle } = await import("./postcommit-review-cycle.js");
+      const cycle = request && await inspectPostcommitReviewCycle(job, request.sourceSha, request.originalAssignmentDigest);
+      const round = cycle?.rounds.find(r => r.commitSha === request!.sourceSha);
+      const length = entry.originalReviewerSessionBytes;
+      if (!request || !cycle || !round || cycle.turnDigest !== request.turnDigest ||
+          entry.originalReviewerSession !== cycle.reviewer.file ||
+          !length || !Number.isSafeInteger(length) || length <= round.transcriptBytes ||
+          entry.phase === "verified" && entry.originalReview.verdict !== "pass")
+        throw Error("Original dependency rereview lost its sealed negative reviewer or successor.");
+      const bytes = (await readFile(cycle.reviewer.file)).subarray(0, length);
+      if (bytes.length !== length ||
+          createHash("sha256").update(bytes).digest("hex") !== entry.originalReviewerSessionDigest)
+        throw Error("Original dependency rereview transcript changed.");
+    }
     seen.add(entry.reportDigest);
     if (entry.amendment) {
       const a = entry.amendment;
@@ -194,14 +209,16 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         dependencyGit(job, "show", correction.commitSha + ":" + prefix + eventPath),
         entry.amendment!.assignment.targets[0]!);
     }
-    if (entry.phase === "verified" && !entry.fixture && !entry.reviewSourceSha) {
+    const supportPassed = entry.phase === "verified" ||
+      entry.phase === "reviewing" && entry.review?.verdict === "pass";
+    if (supportPassed && !entry.fixture) {
       const session = entry.reviewerSession!;
       if (!session.startsWith(join(job.stateDir, "review-sessions") + "/") ||
           await realpath(session) !== session || !entry.reviewerSessionDigest ||
           createHash("sha256").update(await readFile(session)).digest("hex") !== entry.reviewerSessionDigest)
-        throw Error("Focused supporting review lost its independently sealed transcript.");
+        throw Error("Supporting review lost its independently sealed transcript.");
     }
-    if (entry.phase === "verified") {
+    if (supportPassed) {
       const a = entry.amendment!;
       const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", a.assignment.id + ".json"), "utf8"));
       const authorizedPaths = [...a.assignment.authority.existingPaths,

@@ -116,10 +116,11 @@ export function planSelectiveRevalidation(input: {
       original.verifiedSha !== correction.predecessorCommitSha)
     throw Error("Upstream correction does not belong to an already-reviewed item.");
   const originalProof = reviews[original.id];
-  if (!originalProof || originalProof.status !== "passed" ||
+  if (!originalProof || !["passed", "not-required"].includes(originalProof.status) ||
+      (originalProof.status === "not-required" && originalProof.sourcePrecedesUpstream !== true) ||
       originalProof.commitSha !== original.verifiedSha ||
       !HASH.test(originalProof.reviewDigest))
-    throw Error("Upstream source has no independently passed historical review.");
+    throw Error("Upstream source has no authenticated historical review disposition.");
 
   const byId = new Map(inventory.items.map(item => [item.id, item]));
   for (const item of inventory.items) {

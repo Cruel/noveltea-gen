@@ -12,6 +12,8 @@ import type { GenerationInventory, ExecutionItem } from "./generation-plan.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
+import { verifyPlanHistory } from "./architecture.js";
+import { isFocusedScope } from "./focused-scope.js";
 import { planSelectiveRevalidation, type ReviewedUpstreamCorrection,
   type ReviewedConsumerEvidence, type SelectiveRevalidationPlan } from "./selective-revalidation.js";
 
@@ -31,6 +33,8 @@ function ancestor(job: JobStartResult, old: string, current: string) {
   } catch { return false; }
 }
 function workItems(item: ExecutionItem): string[] {
+  if (item.stage === "focus" && item.milestone && item.id === "focus:" + item.milestone)
+    return [item.id];
   if (item.stage === "architecture") return ["global-architecture"];
   if (item.stage === "foundation") return ["foundation"];
   if (item.stage === "foundations") return ["character-foundations", "world-foundations"];
@@ -134,6 +138,25 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
         item.verifiedSha === job.baseSha) {
       sources[item.id] = { commitSha: item.verifiedSha,
         reviewDigest: hash({ approvedBaseline: job.baseSha }),
+        status: "not-required", sourcePaths: [], sourcePrecedesUpstream: true };
+      continue;
+    }
+    // A focused revision adopts verified Architecture without writing a new
+    // commit. Its persisted plan receipt, not an invented reviewer, proves
+    // that this baseline predates the corrected owner.
+    if (historical && !points.length && item.stage === "architecture" &&
+        item.verifiedSha === job.baseSha && isFocusedScope(turn.contract)) {
+      const receipt = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8"));
+      verifyPlanHistory(job, receipt);
+      if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId ||
+          receipt.baseSha !== job.baseSha || receipt.phase !== "committed" ||
+          receipt.expectedHead !== job.baseSha || receipt.paths?.length ||
+          receipt.plan?.version !== correction.planVersion ||
+          JSON.stringify(receipt.plan.contract) !== JSON.stringify(turn.contract) ||
+          receipt.plan.items[0]?.verifiedSha !== job.baseSha)
+        throw Error("Focused Architecture baseline lost its verified plan receipt.");
+      sources[item.id] = { commitSha: item.verifiedSha,
+        reviewDigest: hash({ focusedArchitecture: receipt.plan }),
         status: "not-required", sourcePaths: [], sourcePrecedesUpstream: true };
       continue;
     }

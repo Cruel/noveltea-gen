@@ -246,6 +246,53 @@ test("R04 returned review suspension retains its original submission and never i
   } finally { saver.db.close(); }
 });
 
+test("R04 two pending assignment cases cannot exchange verified support or submissions", async () => {
+  const second = { ...identity, assignmentId: "event:second", sourceHeadSha: "e".repeat(40) };
+  const keys = [key, logicalAssignmentKey(second)];
+  const suspensions: AssignmentPrerequisiteSuspension[] = keys.map((assignmentKey, i) => ({
+    status: "needs-prerequisite", assignmentKey, evidenceRef: "negative:" + i,
+    suspensionRef: "suspension:" + i, owner: "nt-event-design",
+    scopeRef: "scope:" + i, pendingPhase: "review",
+  }));
+  const submits = [0, 1].map(i => ({ receiptRef: "native:" + i, status: "committed", headSha: "d".repeat(40) }));
+  let writes = 0, reviews = 0;
+  const { parent, saver } = graph({
+    preflight: async () => null,
+    invoke: async s => { writes++; return submits[keys.indexOf(logicalAssignmentKey(s.identity))]!; },
+    authenticateContinuation: async s => {
+      const i = keys.indexOf(logicalAssignmentKey(s.identity));
+      return s.continuationRef === "support:" + i &&
+        s.suspension?.suspensionRef === suspensions[i]!.suspensionRef &&
+        s.submission?.receiptRef === submits[i]!.receiptRef;
+    },
+    verify: async s => {
+      reviews++;
+      const i = keys.indexOf(logicalAssignmentKey(s.identity));
+      return s.continuationRef ? { ...verified(), assignmentKey: keys[i]! } : suspensions[i]!;
+    },
+  }, "r04-two-pending");
+  try {
+    const configs = [0, 1].map(i => ({ configurable: { thread_id: "r04-pending-" + i } }));
+    const pending = [];
+    for (const [i, source] of [identity, second].entries())
+      pending.push(await parent.invoke({ identity: source, submission: null, submissionKey: null,
+        outcome: null, continuationRef: null, suspension: null }, configs[i]!));
+    assert.equal(writes, 2);
+    assert.deepEqual(pending.map(p => p.outcome), suspensions);
+    await assert.rejects(parent.invoke({ identity: second, submission: pending[0]!.submission,
+      submissionKey: keys[0], outcome: null, continuationRef: "support:0",
+      suspension: suspensions[0]! }, { configurable: { thread_id: "r04-cross-case" } }),
+      /original|identity|support|submission/i);
+    const final = await parent.invoke({ identity: second, submission: pending[1]!.submission,
+      submissionKey: keys[1], outcome: null, continuationRef: "support:1",
+      suspension: suspensions[1]! }, configs[1]!);
+    assert.equal(final.outcome?.status, "verified");
+    assert.deepEqual((await parent.getState(configs[0]!)).values.outcome, suspensions[0]);
+    assert.equal(writes, 2);
+    assert.equal(reviews, 3);
+  } finally { saver.db.close(); }
+});
+
 test("R01 crash windows reuse settled original invocation/Git/reviewer receipts without a second model charge", async () => {
   for (const phase of ["before-invocation", "post-model", "post-commit", "post-child-before-parent"] as const) {
     const saver = SqliteSaver.fromConnString(join(dir, "crash-" + phase + ".sqlite"));

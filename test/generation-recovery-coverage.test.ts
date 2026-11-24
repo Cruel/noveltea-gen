@@ -48,14 +48,14 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
   specialist_dispatch: "returns:17,status:1,blocked:1,operationFailure:5,throws:5",
-  dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:4",
-  independent_assignment_review: "returns:7,status:2,operationFailure:1,throws:1",
+  dependency_amendment: "returns:5,blocked:1,operationFailure:1,authorBoundary:1,throws:6",
+  independent_assignment_review: "returns:8,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
   completion_decision:
     "returns:10,status:2,blocked:1,operationFailure:3,authorBoundary:2,reconcile:1,throws:2",
   reconcile: "returns:13,status:6,operationFailure:2,throws:9",
   authorBoundary: "returns:4,status:1,blocked:1,operationFailure:1",
-  independentAssignmentBoundary: "returns:21,status:9,operationFailure:2,throws:9",
+  independentAssignmentBoundary: "returns:15,status:6,operationFailure:2,throws:7",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:6,reconcile:1,throws:15",
@@ -174,11 +174,11 @@ function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
 /** Baseline from the current C01 source: any changed route must be audited. */
 const approvedEdgeSignatures: Record<string, string> = {
   assess_recovery: "68e31ce4e43b0258f559658405c3e616af916e4aba65c0d4d54aee575e12558c",
-  author_update_intake: "6f21754bef107f0b6f5f71aaee34c1058fd0175446b97d8901b5bd44b6215181",
+  author_update_intake: "2693bb4f1cc711f6fed86c0d588b3170958dab1866e059be768639e6b27dd56c",
   completion_decision: "75726d85064f0f9b1eb31b89fad2856bbcdfc7f02748f590116cb30fd2148df5",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   idea_integration: "2a18b888743ce1be5a7c8e570b8c1e903874e38bec4fd2c9531d7826bb930235",
-  independent_assignment_review: "d298f31f395e3186120d4d586a5c0b0149f65f56d1b64c9139186da892d91db7",
+  independent_assignment_review: "a0ba647f633ccc7dd3de49e347d5e99c88336a0485b1253f024034f084910fa0",
   schedule: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
   specialist_dispatch: "9f5ffa93f6202d91b0b9eafcf75e35521264ad50c20658d819051cd382488e01",
   verify_committed_work: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
@@ -565,9 +565,9 @@ const reviewedDirectStopFamilies = {
     proof: "Independent Review/prerequisite refused cross-owner action without approved owner or author source",
     regression: ["test/generation.test.ts", "C04 Review strategy demands the original sealed failed Pi cycle before any correction attempt"],
     sites: [
-      "independentAssignmentBoundary/return#10", "independentAssignmentBoundary/return#19",
+      "independentAssignmentBoundary/return#8",
       "independentAssignmentBoundary/status#1", "independentAssignmentBoundary/status#3",
-      "independentAssignmentBoundary/status#8", "independentAssignmentBoundary/status#9",
+      "independentAssignmentBoundary/status#6",
     ],
   },
   "foundation-review-handoff": {

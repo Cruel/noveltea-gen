@@ -116,7 +116,7 @@ export async function revalidateOtherOwnerPrerequisite(input: {
     throw Error("Other-owner revalidation lacks a verified supporting work and both independent reviews.");
   dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha, dependencyGit(job, "rev-parse", "HEAD"));
   await revalidateAfterReviewedCorrection({
-    job,
+    job, otherOwnerPath: path,
     // This graph snapshot precedes the failed original review's checkpoint.
     // Its still-pending original item must not be reclassified as verified.
     inventory: { ...inventory, headSha: request.sourceSha },

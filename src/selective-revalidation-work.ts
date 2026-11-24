@@ -267,6 +267,8 @@ export interface RevalidateAfterCorrectionOptions {
   model: string;
   skillsSource?: string;
   validatorSource?: string;
+  /** An independently authorized other-owner grant uses its own receipt gate. */
+  otherOwnerPath?: string;
 }
 /** Caller holds the existing single Story writer lock. The upstream commit
  * has ALREADY passed independent review and been published by its own owner.
@@ -357,7 +359,13 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
   if (state.state === "blocked" && !state.correctiveAssignment)
     throw Error(state.failure ?? "A downstream reviewed obligation still requires a controller amendment.");
   if (state.state === "completed") {
-    await assertCompletedSelectiveRevalidation(job, correction.successorSha, correction.turnDigest,
+    if (opts.otherOwnerPath) {
+      if (correction.changedPaths.length !== 1 || correction.changedPaths[0] !== opts.otherOwnerPath)
+        throw Error("Other-owner revalidation must retain its one authorized path.");
+      await assertCompletedOtherOwnerRevalidation(job, { baseSha: correction.baseSha,
+        successorSha: correction.successorSha, turnDigest: correction.turnDigest,
+        path: opts.otherOwnerPath });
+    } else await assertCompletedSelectiveRevalidation(job, correction.successorSha, correction.turnDigest,
       correction.reviewDigest);
     if (state.results.length !== wanted.length ||
         state.results.some(r => r.status !== "passed"))

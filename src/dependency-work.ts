@@ -52,6 +52,8 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
       if (entry.commitSha !== head) throw Error("Completed dependency source is stale.");
       return entry.amendment!.assignment;
     }
+    if (entry.phase === "reviewing" && entry.commitSha === head && entry.amendment)
+      return entry.amendment.assignment;
     if (entry.phase === "reviewing" || entry.phase === "rejected" || entry.phase === "planning" && input.fixture)
       throw Error("Interrupted or rejected dependency work requires original receipt reconciliation; no replay.");
     if (!entry.amendment) {
@@ -97,11 +99,14 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
       const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
       if (!current?.amendment || dependencyDigest(current.amendment.assignment) !== identity.scopeDigest ||
           current.amendment.afterVersion !== identity.planVersion ||
-          !["authorized", "verified"].includes(current.phase))
+          !["authorized", "reviewing", "verified"].includes(current.phase))
         throw Error("Supporting child lost its exact controller authorization.");
       return null;
     },
     invoke: async () => {
+      const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
+      if (current?.phase === "reviewing")
+        return { receiptRef: assignment.id, status: "focused-committed", headSha: current.commitSha };
       const result = await runFocusedWorkItem({ ...input, target: assignment.targets[0]!,
         dependencyAssignmentId: assignment.id });
       if (result.status !== "focused-committed" || !result.headSha)
@@ -116,7 +121,8 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     const entry = saved?.entries.find(e => e.reportDigest === reportDigest);
     if (entry?.phase === "verified" && entry.commitSha === head && head === result.headSha)
       return entry;
-    if (!saved || !entry || entry.phase !== "authorized" || head !== result.headSha)
+    if (!saved || !entry || !["authorized", "reviewing"].includes(entry.phase) || head !== result.headSha ||
+        (entry.phase === "reviewing" && entry.commitSha !== head))
       throw Error("Dependency review source or receipt changed.");
     const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", assignment.id + ".json"), "utf8"));
     if (proof.phase !== "committed" || proof.commitSha !== head || proof.expectedHead !== report.sourceSha ||
@@ -152,11 +158,22 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     } else {
       if (!proof.snapshot || await openSkillSnapshot(proof.snapshot.id) !== proof.snapshot.path)
         throw Error("Dependency reviewer lacks the original pinned skill snapshot.");
-      entry.review = await reviewNarrative(job, proof.snapshot, review, proof.provider, proof.model,
+      const reviewKey = "focused-support:" + reportDigest;
+      if (entry.reviewerSession) {
+        const { inspectCompletedPiReviewContext } = await import("./job-pi-policy.js");
+        const completion = await inspectCompletedPiReviewContext(job, {
+          group: "narrative:" + review.planVersion + ":independent:" + reviewKey,
+          sessionFile: entry.reviewerSession, snapshotId: proof.snapshot.id,
+          requested: { provider: proof.provider, model: proof.model },
+        });
+        const { recoveredCloseoutReview } = await import("./cross-domain-closeout-work.js");
+        entry.review = { ...await recoveredCloseoutReview(job, entry.reviewerSession,
+          completion.sessionSha256, review), sessionFile: entry.reviewerSession };
+      } else entry.review = await reviewNarrative({ ...job, headSha: head }, proof.snapshot, review, proof.provider, proof.model,
         undefined, async sessionFile => {
           entry.reviewerSession = sessionFile;
           await saveDependencyPlan(job, saved!);
-        }, "focused-support:" + reportDigest);
+        }, reviewKey);
       if (!entry.reviewerSession) throw Error("Supporting review lacks a persistent Pi transcript.");
       entry.reviewerSessionDigest = createHash("sha256").update(await readFile(entry.reviewerSession)).digest("hex");
     }
@@ -188,7 +205,7 @@ export async function advanceReviewDependency(input: {
   story: string; job: string; task: string; contract: FocusedWorkOptions["contract"];
   skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
   turnPlanDigest: string; request: ReviewDependencyRequest;
-}) {
+}, graphConfig?: RunnableConfig) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const request = input.request;
   const eventSource = request.classification === "new-full-story-record" &&
@@ -203,8 +220,7 @@ export async function advanceReviewDependency(input: {
     const { plan, entry } = await registerReviewDependency(job, request,
       input.validatorSource ?? input.skillsSource);
     if (entry.phase === "verified") return entry.amendment!.assignment;
-    if (entry.phase === "reviewing" && eventSource &&
-        entry.review?.verdict === "pass" && entry.commitSha === head)
+    if (entry.phase === "reviewing" && entry.commitSha === head)
       return entry.amendment!.assignment;
     if (entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected review-dependency work requires exact manual reconciliation; never replay model sessions.");
@@ -233,11 +249,14 @@ export async function advanceReviewDependency(input: {
     throw Error("New Character supporting assignment lost its approved work-plan version.");
   if (entry.phase === "verified")
     return { status: "dependency-verified" as const, sourceSha: request.sourceSha };
-  if (entry.phase === "reviewing" && eventSource && entry.review?.verdict === "pass")
+  if (entry.phase === "reviewing" && entry.review?.verdict === "pass")
     return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
-  if (entry.phase !== "authorized")
+  if (entry.phase !== "authorized" && entry.phase !== "reviewing")
     throw Error("Review-dependency authoring is not in an approved phase.");
-  const result = await runFocusedWorkItem({
+  const invoke = async () => {
+    if (entry.phase === "reviewing")
+      return { receiptRef: assignment.id, status: "focused-committed", headSha: entry.commitSha };
+    const result = await runFocusedWorkItem({
     story: input.story, job: input.job, target: assignment.targets[0]!,
     task: input.task, contract: input.contract, fixture: false,
     skillsSource: input.skillsSource, validatorSource: input.validatorSource,
@@ -245,17 +264,19 @@ export async function advanceReviewDependency(input: {
     turnPlanDigest: input.turnPlanDigest,
     dependencyAssignmentId: assignment.id,
   });
-  if (result.status !== "focused-committed" || !result.headSha)
-    throw Error("Supporting Character writer did not publish a native-validated, bounded commit.");
-
-  await withStoryJobLock(job, "review-dependency-independent-rereview", async () => {
+    if (result.status !== "focused-committed" || !result.headSha)
+      throw Error("Supporting specialist did not publish a native-validated, bounded commit.");
+    return { receiptRef: assignment.id, status: result.status, headSha: result.headSha };
+  };
+  const verify = async (result: { headSha?: string }) => withStoryJobLock(job, "review-dependency-independent-review", async () => {
     const head = await dependencyBoundary(job);
     const persisted = await inspectDependencyPlan(job);
     const current = persisted?.entries.find(e => e.reportDigest === entry.reportDigest);
-    if (!persisted || !current || current.phase !== "authorized" ||
+    if (!persisted || !current || !["authorized", "reviewing", "verified"].includes(current.phase) ||
         !current.amendment || head !== result.headSha ||
         current.amendment.sourceSha !== request.sourceSha)
       throw Error("Review-dependency reviewer source or original grant was replaced.");
+    if (current.review?.verdict === "pass") return current;
     const paths = [...assignment.authority.existingPaths,
       ...(assignment.authority.newPaths ?? [])].sort();
     const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items",
@@ -289,13 +310,19 @@ export async function advanceReviewDependency(input: {
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource,
         skillDirs: [], requiredSkills: [] }
       : await loadSkillConfig(undefined, false);
-    const snapshot = await createSkillSnapshot({ ...config,
+    const snapshot = current.reviewSnapshot ?? await createSkillSnapshot({ ...config,
       requiredSkills: ["nt-narrative-review", "nt-catalog"] });
     if (!snapshot) throw Error("Supporting dependency lacks a pinned independent reviewer.");
     if (await openSkillSnapshot(snapshot.id) !== snapshot.path)
       throw Error("Independent review snapshot is not immutable.");
+    if (current.phase === "reviewing" && (current.reviewProvider !== provider ||
+        current.reviewModel !== model || !current.reviewSnapshot))
+      throw Error("Supporting Review lost its pinned model and methods.");
     current.commitSha = head;
     current.phase = "reviewing";
+    current.reviewSnapshot = snapshot;
+    current.reviewProvider = provider;
+    current.reviewModel = model;
     await saveDependencyPlan(job, persisted);
     const diff = dependencyGit(job, "diff", request.sourceSha, head, "--",
       ...paths.map(p => prefix + p));
@@ -336,11 +363,24 @@ export async function advanceReviewDependency(input: {
     // committed. Pin both fresh reviewer contexts to the verified successor,
     // not the stale job.headSha cached at admission.
     const reviewJob = { ...job, headSha: head };
-    current.review = await reviewNarrative(reviewJob, snapshot, support, provider, model,
+    const reviewKey = "review-support:" + current.reportDigest;
+    if (current.reviewerSession) {
+      const { inspectCompletedPiReviewContext } = await import("./job-pi-policy.js");
+      const completion = await inspectCompletedPiReviewContext(job, {
+        group: "narrative:" + support.planVersion + ":independent:" + reviewKey,
+        sessionFile: current.reviewerSession, snapshotId: snapshot.id,
+        requested: { provider, model },
+      });
+      const { recoveredCloseoutReview } = await import("./cross-domain-closeout-work.js");
+      current.review = { ...await recoveredCloseoutReview(job, current.reviewerSession,
+        completion.sessionSha256, support), sessionFile: current.reviewerSession };
+    } else current.review = await reviewNarrative(reviewJob, snapshot, support, provider, model,
       undefined, async file => {
         current.reviewerSession = file;
         await saveDependencyPlan(job, persisted);
-      });
+      }, reviewKey);
+    if (!current.reviewerSession) throw Error("Supporting Review has no persistent Pi session.");
+    current.reviewerSessionDigest = createHash("sha256").update(await readFile(current.reviewerSession)).digest("hex");
     if (await dependencyBoundary(job) !== head)
       throw Error("Independent supporting review changed the Story HEAD.");
     if (current.review.verdict !== "pass") {
@@ -348,48 +388,145 @@ export async function advanceReviewDependency(input: {
       await saveDependencyPlan(job, persisted);
       throw Error("Independent review rejected the new Character or Arc link; preserve original failure and model session.");
     }
-    if (eventSource) {
-      // The Character work is independently reviewed, but the Event stays
-      // negative until a distinct Event-owned participant/prose correction
-      // passes its existing source-linked specialist-repair review gate.
-      await saveDependencyPlan(job, persisted);
-      return;
-    }
-    const reassess: ReviewAssignment = {
-      ...base, paths: [...new Set([...originalPoint.assurance.changedPaths, ...paths])].sort(),
-      specialistAssignments: [original, assignment],
-      turnGoal: otherOwner
-        ? "Reassess ONLY the ORIGINAL independently failed specialist assignment at the " +
-          "new Story HEAD. Verify the sealed findings now have authentic source-visible " +
-          "support from the separately authorized other-owner correction, while all " +
-          "original obligations, continuity and protected decisions remain intact. " +
-          "The failed review is historical evidence and is never rewritten. " +
-          "Do not certify completion based on the prerequisite alone."
-        : "Reassess ONLY the ORIGINAL independently failed Character Foundations " +
-          "assignment of the saved whole-Story Turn at the NEW Story HEAD. Verify the " +
-          "central missing inspector now has an appropriate Character profile and an exact " +
-          "Arc Character link, and all original Character/World continuity, motivations " +
-          "and honest knowledge remain intact. The previously negative review stays sealed; " +
-          "this is an independent successor judgment, not a rewrite. Downstream Events, " +
-          "interactive Choices and final prose have not yet been assigned.",
-      reassessment: { assignmentId: original.id, failedSourceSha: request.sourceSha,
-        correctedHeadSha: head },
-    };
-    current.originalReview = await reviewNarrative(reviewJob, snapshot, reassess, provider, model,
-      undefined, async file => {
-        current.originalReviewerSession = file;
-        await saveDependencyPlan(job, persisted);
-      });
-    if (await dependencyBoundary(job) !== head)
-      throw Error("Independent original-goal rereview changed the Story HEAD.");
-    current.phase = current.originalReview.verdict === "pass" ? "verified" : "rejected";
+    // This is only the supporting child's verdict, not the original Review.
     await saveDependencyPlan(job, persisted);
-    if (current.phase !== "verified")
-      throw Error("Suspended Character Foundations obligation still failed independent rereview; preserve original negative checkpoint.");
+    return current;
   });
-  return { status: eventSource ? "dependency-support-verified" as const :
-    "dependency-verified" as const, sourceSha: request.sourceSha };
+  if (graphConfig) {
+    const graphThreadId = graphConfig.configurable?.thread_id;
+    if (typeof graphThreadId !== "string")
+      throw Error("Review support requires the admitting parent graph Thread.");
+    const identity: AssignmentIdentity = {
+      schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+      graphThreadId, turnDigest: request.turnDigest, assignmentId: assignment.id,
+      planVersion: entry.amendment.afterVersion, sourceHeadSha: request.sourceSha,
+      scopeDigest: dependencyDigest(assignment),
+    };
+    const key = logicalAssignmentKey(identity);
+    const child = createAssignmentLifecycleGraph({
+      preflight: async () => {
+        const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === entry.reportDigest);
+        if (!current?.amendment || dependencyDigest(current.amendment.assignment) !== identity.scopeDigest ||
+            !["authorized", "reviewing", "verified"].includes(current.phase))
+          throw Error("Supporting Review child lost its original grant.");
+        return null;
+      },
+      invoke,
+      verify: async state => {
+        const reviewed = await verify(state.submission!);
+        if (reviewed.review?.verdict !== "pass" || !reviewed.commitSha)
+          throw Error("Supporting child lacks independent positive review.");
+        return { status: "verified", assignmentKey: key, evidenceRef: reviewed.reportDigest,
+          reviewRef: reviewed.reviewerSessionDigest!, headSha: reviewed.commitSha };
+      },
+    });
+    const finished = await child.invoke({ identity, submission: null, submissionKey: null,
+      outcome: null, continuationRef: null, suspension: null }, graphConfig);
+    if (finished.outcome?.status !== "verified" || finished.outcome.assignmentKey !== key)
+      throw Error("Supporting Review child did not verify its authorized prerequisite.");
+  } else {
+    // Direct adapter certification uses the same writer and verifier; the
+    // production parent always supplies its inherited LangGraph config.
+    await verify(await invoke());
+  }
+  return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
 }
 
-/** Compatibility for the original Character-only dependency route. */
+/** Exact support proof, independent of the originating Review's disposition.
+ * This digest remains stable when the old Review is subsequently continued. */
+export async function inspectReviewSupport(job: import("./job.js").JobStartResult,
+  request: ReviewDependencyRequest) {
+  const plan = await inspectDependencyPlan(job);
+  const entry = plan?.entries.find(e => e.reviewSourceSha === request.sourceSha);
+  if (!plan?.reviewRequests?.some(r => dependencyDigest(r) === dependencyDigest(request)) ||
+      !entry?.amendment || !entry.commitSha || !entry.reviewerSessionDigest ||
+      !["reviewing", "verified"].includes(entry.phase) || entry.review?.verdict !== "pass")
+    throw Error("Original Review has no independently verified supporting assignment.");
+  const ref = dependencyDigest({ reportDigest: entry.reportDigest, amendment: entry.amendment,
+    commitSha: entry.commitSha, verdict: entry.review, session: entry.reviewerSessionDigest });
+  return { entry, ref };
+}
+
+/** Resume the actual negative Pi Review at its independently verified
+ * successor; no new writer or fresh reviewer is authorized. */
+export async function continueReviewDependency(job: import("./job.js").JobStartResult,
+  request: ReviewDependencyRequest, supportRef: string) {
+  return withStoryJobLock(job, "review-dependency-original-review", async () => {
+    const checked = await inspectReviewSupport(job, request);
+    if (checked.ref !== supportRef) throw Error("Review continuation support changed.");
+    const head = await dependencyBoundary(job);
+    const plan = (await inspectDependencyPlan(job))!;
+    const entry = plan.entries.find(e => e.reportDigest === checked.entry.reportDigest)!;
+    if (entry.phase === "verified") {
+      if (entry.commitSha !== head) {
+        const { verifiedNarrativeChain } = await import("./job-successor.js");
+        await verifiedNarrativeChain(job, entry.commitSha!, head);
+      }
+      return entry;
+    }
+    if (entry.commitSha !== head) throw Error("Original Review continuation is not at the verified supporting commit.");
+    if (request.originalWorkItem.startsWith("event-") && request.classification === "new-full-story-record")
+      throw Error("Event prerequisite requires the original Event writer correction, not a read-only waiver.");
+    const turn = await dependencyTurn(job);
+    const original = turn.assignments.find(a => a.id === request.originalAssignmentId);
+    const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+      p.commitSha === request.sourceSha && p.semanticReview === "failed" &&
+      p.assurance?.assignmentId === request.originalAssignmentId);
+    const { inspectPostcommitReviewCycle } = await import("./postcommit-review-cycle.js");
+    const cycle = await inspectPostcommitReviewCycle(job, request.sourceSha, request.originalAssignmentDigest);
+    const round = cycle?.rounds.find(r => r.commitSha === request.sourceSha);
+    if (!original || !point?.assurance || !cycle || !round || cycle.turnDigest !== request.turnDigest ||
+        await openSkillSnapshot(cycle.snapshot.id) !== cycle.snapshot.path)
+      throw Error("Original negative Review session or pinned assignment is missing.");
+    const assignment = entry.amendment!.assignment;
+    const paths = [...assignment.authority.existingPaths, ...(assignment.authority.newPaths ?? [])].sort();
+    const reassess: ReviewAssignment = {
+      contract: turn.contract, planVersion: entry.amendment!.afterVersion,
+      scopeIds: [...new Set([...original.targets, ...assignment.targets])],
+      paths: [...new Set([...point.assurance.changedPaths, ...paths])].sort(),
+      routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
+      specialistAssignments: [original, assignment],
+      turnGoal: "Reassess ONLY the ORIGINAL independently failed specialist assignment. " +
+        "Verify every sealed negative finding using the current canonical Story and the exact " +
+        "supporting commit. The prior negative verdict remains immutable. Do not certify " +
+        "completion based solely on the supporting writer or its independent review.",
+      reassessment: { assignmentId: original.id, failedSourceSha: request.sourceSha, correctedHeadSha: head },
+    };
+    const reviewJob = { ...job, headSha: head };
+    if (entry.originalReviewerSession) {
+      if (entry.originalReviewerSession !== cycle.reviewer.file)
+        throw Error("Original negative reviewer identity changed.");
+      const { inspectCompletedPiReviewContext } = await import("./job-pi-policy.js");
+      const completion = await inspectCompletedPiReviewContext(job, {
+        group: "assignment-fidelity:" + cycle.id + (cycle.protocolFresh ? ":protocol-fresh" : ""),
+        sessionFile: cycle.reviewer.file, snapshotId: cycle.snapshot.id,
+        requested: { provider: cycle.provider, model: cycle.model },
+      });
+      if ((await readFile(cycle.reviewer.file)).length <= round.transcriptBytes)
+        throw Error("Original Review continuation has no newly completed verdict; never replay a claimed turn.");
+      const { recoveredCloseoutReview } = await import("./cross-domain-closeout-work.js");
+      entry.originalReview = { ...await recoveredCloseoutReview(job, cycle.reviewer.file,
+        completion.sessionSha256, reassess), sessionFile: cycle.reviewer.file };
+    } else {
+      if ((await readFile(cycle.reviewer.file)).length !== round.transcriptBytes)
+        throw Error("Original negative Review has unexpected unclaimed transcript effects.");
+      entry.originalReview = await reviewNarrative(reviewJob, cycle.snapshot, reassess,
+        cycle.provider, cycle.model, cycle.thinking, async file => {
+          if (file !== cycle.reviewer.file) throw Error("Original reviewer session was replaced.");
+          entry.originalReviewerSession = file;
+          await saveDependencyPlan(job, plan);
+        }, undefined, { cycle, changedPaths: paths });
+    }
+    if (await dependencyBoundary(job) !== head)
+      throw Error("Independent original-goal rereview changed the Story HEAD.");
+    const transcript = await readFile(cycle.reviewer.file);
+    entry.originalReviewerSessionDigest = createHash("sha256").update(transcript).digest("hex");
+    entry.originalReviewerSessionBytes = transcript.length;
+    entry.phase = entry.originalReview.verdict === "pass" ? "verified" : "rejected";
+    await saveDependencyPlan(job, plan);
+    if (entry.phase !== "verified")
+      throw Error("Original obligation remains independently failed after support.");
+    return entry;
+  });
+}
 export const advanceReviewCharacterDependency = advanceReviewDependency;
