@@ -1,3 +1,4 @@
+import { withoutJobModelRuntime } from "./model-runtime.js";
 import { parseAuthorAnswer } from "./author-question.js";
 import { answerSpecialistChoice } from "./specialist-choice.js";
 import { createGenerationQuestionGraph, pendingGenerationQuestion, generationQuestionResume, pendingQuestionBudgetPause } from "./generation-author-question.js";
@@ -3199,7 +3200,9 @@ async function observeNodeOutcome(node: GenerationNode, s: State, config: Runnab
   execute: (s: State, config: RunnableConfig) => Promise<Partial<State>>): Promise<Partial<State>> {
   let result: Partial<State>;
   let observation: GenerationOperationRecovery["outcome"] = "returned-failure";
-  try { result = await execute(s, config); }
+  try {
+    result = await (s.request.fixture ? withoutJobModelRuntime(() => execute(s, config)) : execute(s, config));
+  }
   catch (error) {
     if ((error != null && isGraphBubbleUp(error)) || config.signal?.aborted) throw error;
     observation = "exception";

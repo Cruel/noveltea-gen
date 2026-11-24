@@ -141,7 +141,10 @@ function setup(name: string, seed?: (story: string) => void) {
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "config.json"), NT_SKILL_CACHE_DIR: join(root, "skills") };
   function cli(args: string[], success = true) {
-    const result = spawnSync(process.execPath, [...cliEntry(),
+    const entry = args[0] === "generate" && (env as NodeJS.ProcessEnv).NT_TEST_SCRIPTED_FOUNDATION === "1"
+      ? ["--import", "tsx", resolve("test/support/scripted-foundation-cli.ts")]
+      : cliEntry();
+    const result = spawnSync(process.execPath, [...entry,
       "job", ...args, "--story", story, "--job", "single"], {
       encoding: "utf8", env, timeout: process.env.NT_LIVE_GENERATION === "1" ||
         process.env.NT_LIVE_GENERATION_IDEA === "1" ? 1_800_000 : 240_000, maxBuffer: 32 * 1024 * 1024 });
@@ -157,6 +160,18 @@ function setup(name: string, seed?: (story: string) => void) {
   const start = ["generate", "start", "--task", "A missing archive witness; invent unspecified details",
     "--contract", contract, "--fixture", "--skills-source", source];
   return { repo, story, initial, cli, job, start, contract, env };
+}
+
+/** Migrate tests that stop at Foundation to the ordinary authenticated CLI.
+ * A test-owned Turn is pinned once before starting the actual subprocess. */
+async function useScriptedFoundationCli(f: ReturnType<typeof setup>) {
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  await saveJobTurnPlan(f.job, planWholeStory(f.start[3]!, contract, f.job.baseSha));
+  f.start.splice(f.start.indexOf("--fixture"), 1);
+  f.start.push("--provider", scriptedModel.provider, "--model", scriptedModel.id);
+  Object.assign(f.env, { NT_TEST_SCRIPTED_FOUNDATION: "1", NT_TEST_SCRIPTED_MODEL_LOG: f.contract + ".model-calls" });
 }
 
 test("parent integrates eligible deferred ideas through the dedicated placement workflow and preserves source intent", { skip: !available }, () => {
@@ -3092,8 +3107,9 @@ test("a committed Interactive checkpoint ignores later diagnostics but rejects a
   assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
 });
 
-test("generation rejects a lost orchestrator selection after checkpoint without repinning or replay", { skip: !available }, () => {
+test("generation rejects a lost orchestrator selection after checkpoint without repinning or replay", { skip: !available }, async () => {
   const f = setup("missing-orchestrator-selection");
+  await useScriptedFoundationCli(f);
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);
   assert.equal(paused.status, "paused", JSON.stringify(paused));
   const initialPin = paused.orchestrationSelection.skillSnapshot.id;
@@ -3107,10 +3123,12 @@ test("generation rejects a lost orchestrator selection after checkpoint without 
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
     "no specialist can run after missing source-bound selection");
   assert.notEqual(initialPin, "", "checkpoint originally recorded an immutable pin");
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8").trim().split("\n").length, 8);
 });
 
-test("inspection rejects a different valid pinned method and never displays its forged provenance", { skip: !available }, () => {
+test("inspection rejects a different valid pinned method and never displays its forged provenance", { skip: !available }, async () => {
   const f = setup("swapped-orchestrator-snapshot");
+  await useScriptedFoundationCli(f);
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);
   assert.equal(paused.status, "paused", JSON.stringify(paused));
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
@@ -3123,7 +3141,9 @@ test("inspection rejects a different valid pinned method and never displays its 
   git(changedSource, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
     "commit", "-qm", "Revise portable method");
   const next = setup("other-orchestrator-snapshot");
-  const other = next.cli([...next.start.slice(0, -1), changedSource, "--pause-after", "foundation"]);
+  await useScriptedFoundationCli(next);
+  next.start[next.start.indexOf("--skills-source") + 1] = changedSource;
+  const other = next.cli([...next.start, "--pause-after", "foundation"]);
   assert.equal(other.status, "paused", JSON.stringify(other));
   assert.notEqual(other.orchestrationSelection.skillSnapshot.id,
     paused.orchestrationSelection.skillSnapshot.id);
@@ -3141,6 +3161,8 @@ test("inspection rejects a different valid pinned method and never displays its 
   const resumed = f.cli(["generate", "resume"]);
   assert.equal(resumed.status, "blocked");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8").trim().split("\n").length, 8);
+  assert.equal(readFileSync(next.contract + ".model-calls", "utf8").trim().split("\n").length, 8);
 });
 
 test("independent World and Character checkpoints survive restart and reconcile a lost finalization without writer replay", { skip: !available }, () => {
@@ -6912,15 +6934,22 @@ test("generation honors author pause, questions, cancellation and cumulative bud
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
-test("generation preserves unexpected edits and rejects new contracts on resume", { skip: !available }, () => {
+test("generation preserves unexpected edits and rejects new contracts on resume", { skip: !available }, async () => {
   const f = setup("dirty");
-  f.cli([...f.start, "--pause-after", "foundation"]);
+  await useScriptedFoundationCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+  assert.equal(receipt.workerMode, "pi");
+  assert.ok(receipt.piSessionFile);
+  assert.ok(receipt.invocationProof);
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const path = join(f.job.worktreeStoryRoot, "author-notes.txt");
   writeFileSync(path, "Preserve my unfinished work");
   const result = f.cli(["generate", "resume"]);
   assert.equal(result.status, "blocked");
-  assert.match(result.reason, /clean|unexpected|dirty/i);
+  assert.equal(result.recoveryInspection.phase, "fenced");
+  assert.ok(result.recoveryInspection.fences.length, JSON.stringify(result.recoveryInspection));
   assert.equal(readFileSync(path, "utf8"), "Preserve my unfinished work");
   const inspection = f.cli(["generate", "inspect"]);
   assert.equal(inspection.status, "blocked");
@@ -6928,16 +6957,24 @@ test("generation preserves unexpected edits and rejects new contracts on resume"
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.match(f.cli(["generate", "resume", "--contract", f.contract], false), /pinned/);
   assert.match(f.cli(f.start, false), /already exists/);
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8").trim().split("\n").length, 8);
 });
 
-test("inspection detects dirty work after a saved pause without advancing checkpoints", { skip: !available }, () => {
+test("inspection detects dirty work after a saved pause without advancing checkpoints", { skip: !available }, async () => {
   const f = setup("inspect-drift");
-  f.cli([...f.start, "--pause-after", "foundation"]);
+  await useScriptedFoundationCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+  assert.equal(receipt.workerMode, "pi");
+  assert.ok(receipt.piSessionFile);
+  assert.ok(receipt.invocationProof);
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   writeFileSync(join(f.job.worktreeStoryRoot, "new.txt"), "Do not overwrite");
   const inspection = f.cli(["generate", "inspect"]);
   assert.equal(inspection.status, "blocked");
   assert.equal(inspection.checkpointStatus, "paused");
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8").trim().split("\n").length, 8);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
@@ -7038,7 +7075,6 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
   const terminal = scenario === "protocol-exhausted" || scenario.startsWith("nonconverging");
   const realReview = scenario.startsWith("review-");
   const crashRounds = scenario.startsWith("crash-");
-  const actualReviewer = realReview || crashRounds || diagnosticContinue;
   const stalled = scenario === "review-stalled" || scenario === "review-stalled-continue";
   const dispute = scenario === "review-dispute";
   const scopeRevision = scenario === "review-scope";
@@ -7145,7 +7181,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }, ...(i === 5 ? [{ type: "toolCall" as const, name: "write", id: "r02-foreign-write",
         arguments: { path: "events/foreign.md", content: "Unauthorized" } }] : [])], reason: "toolUse" };
       if (i === 6 || i === 8) return { content: scriptedText(report), reason: "stop" };
-      if (actualReviewer && i === 9)
+      if (i === 9)
         return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
           .map(path => "skill://" + path), i), reason: "toolUse" };
       if (scopeRevision && i === 11)
@@ -7217,14 +7253,14 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           arguments: { path: target, content: authored + "\n" + revisions.slice(0, correction).join("\n") + "\n" } }], reason: "toolUse" };
       if (revising && correction && correctionStep === 1)
         return { content: scriptedText("Corrected the source-linked witness obligation."), reason: "stop" };
-      if (actualReviewer && (i === 10 || diagnosticContinue && i === 12 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15)) {
+      if (i === 10 || diagnosticContinue && i === 12 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15) {
         const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
         const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
           .map(c => c.text ?? "").findLast(text => text.includes("\nIMMUTABLE REVIEW PACKET\n"));
         assert.ok(prompt, "Original reviewer receives the source-bound packet");
         const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
         const item = packet.items[0];
-        const pass = diagnosticContinue || crashRounds || reviewCrash && correction === 1 || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
+        const pass = !realReview || diagnosticContinue || crashRounds || reviewCrash && correction === 1 || correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
         const finding = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: target, line: 1, kind: "missing-requirement",
           message: "The witness causal connection still needs the next specific link.",
@@ -7247,28 +7283,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       (owner === "server" ? ":generation:web" : ":generation") },
       recursionLimit: 10000 };
     try {
-      let reviewCalls = 0;
-      let reviewerError: string | null = null;
-      const makeGraph = () => createGenerationGraph(saver, owner, actualReviewer ? undefined : async s => {
-        const job = await startStoryJob({ story: f.story, job: "single" }, false);
-        const point = (await inspectRecoveryCheckpoints(job)).find(p =>
-          p.eligible && p.workItem === "foundation");
-        assert.ok(point?.assurance, "The child cannot verify without its native/Git Foundation receipt");
-        if (point.semanticReview === "required-pending") {
-          reviewCalls++;
-          await reviewBoundedAssignments(job, [point], async packet => ({
-            sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
-            evidence: packet.items.map(item => ({
-              commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
-              path: item.assurance.changedPaths[0]!, line: 1,
-              explanation: "Independent deterministic reviewer checked the original source-bound Foundation.",
-            })),
-          }), "deterministic-r01-independent-review", true).catch(error => {
-            reviewerError = String(error); throw error;
-          });
-        }
-        return { result: s.result };
-      });
+      const makeGraph = () => createGenerationGraph(saver, owner);
       let graph = makeGraph();
       const input = { request: {
         story: f.story, job: "single", task: f.start[3]!,
@@ -7857,7 +7872,6 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           assert.deepEqual(observed.at(-1)!.tools, []);
           assert.equal(stopped.recoveryLifecycle.attempt?.phase, "settled");
         }
-        assert.equal(reviewCalls, 0);
         assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
         assert.equal(stopped.completedStages.length, 0);
         assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
@@ -7897,7 +7911,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         active: first.active, result: first.result }));
       assert.equal(first.result?.status, "committed", JSON.stringify({ reason: first.reason,
         recovery: currentOperationRecovery(first), active: first.active, status: first.status,
-        result: first.result, calls: observed.length, reviewCalls, reviewerError,
+        result: first.result, calls: observed.length,
         points: (await inspectRecoveryCheckpoints(f.job)).map(p => ({
           workItem: p.workItem, eligible: p.eligible, reason: p.reason,
           semanticReview: p.semanticReview, planVersion: p.planVersion,
@@ -7908,9 +7922,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
       assert.notEqual(head, f.initial, "The child must commit real Story bytes to Git");
       assert.equal(first.result.headSha, head);
-      const expectedReviews = actualReviewer ? 0 : 1;
-      const expectedCalls = actualReviewer ? 13 : 11;
-      assert.equal(reviewCalls, expectedReviews);
+      const expectedCalls = 13;
       assert.equal(observed.length, expectedCalls, "One pinned planning session and one original writer session with distinct corrections settled");
       assert.deepEqual(observed[6]!.tools, [], "Format-only correction must not have tools");
       assert.ok(observed[7]!.tools.includes("write"));
@@ -7954,12 +7966,10 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }
       assert.deepEqual([...settledRounds].sort(), [0, 1, 2]);
       assert.deepEqual([...correctiveGrants].sort(), [0, 1]);
-      if (actualReviewer) {
-        assert.ok(observed.slice(-2).every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
-        const { inspectPiPolicy } = await import("../src/job-pi-policy.js");
-        const policy = await inspectPiPolicy(f.job);
-        assert.equal(policy.budget.modelCalls, expectedCalls);
-      }
+      assert.ok(observed.slice(-2).every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
+      const { inspectPiPolicy } = await import("../src/job-pi-policy.js");
+      const policy = await inspectPiPolicy(f.job);
+      assert.equal(policy.budget.modelCalls, expectedCalls);
       assert.ok(namespaces.size >= 2, "Parent and production Foundation child need distinct SQLite namespaces");
       // Reopen the parent checkpoint immediately before child dispatch after
       // the physical child already reached END. The original Pi/Git/Review
@@ -7974,13 +7984,11 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }));
       assert.equal(replay.result?.headSha, head);
       assert.equal(observed.length, expectedCalls, "Child END before parent publication cannot replay Pi");
-      assert.equal(reviewCalls, expectedReviews);
       assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
       // Only the controller's original next edges may accept the child result.
       const next = await withJobModelRuntime(runtime, () =>
         graph.invoke(null, { ...config, interruptAfter: ["verify_committed_work"] }));
       assert.equal(observed.length, expectedCalls, "Parent verification cannot repeat the Foundation writer");
-      assert.equal(reviewCalls, expectedReviews, "Already-sealed review must not require another reviewer");
       assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
       assert.ok(next.completedStages.some((item: { stage: string }) => item.stage === "foundation"),
         "Only the production parent's verified-work node advances completedStages");

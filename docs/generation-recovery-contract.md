@@ -741,3 +741,12 @@ project setup for either live or fixture requests. Its model session and write
 tool are deleted; production Foundation uses the shared pure canonical
 serializer. Paid Foundation certification now enters via the current whole-Story
 Turn and parent pause boundary; the read-only `run` demonstration is unaffected.
+
+**Transport isolation during cutover.** A fixture flag cannot alter selection
+of a source-authenticated recovery strategy. Structural fixture node execution
+cannot acquire a model runtime, even when one is bound in an outer context.
+Production-shaped deterministic tests instead use the normal Turn, planner,
+writer and Review path with an injected scripted Pi transport; tests assert
+source receipts, native Git effects, and no additional model calls on fenced
+resumption. This does not confer current authority on historical fixture-only
+checkpoints.

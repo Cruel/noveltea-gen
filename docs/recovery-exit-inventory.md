@@ -287,3 +287,16 @@ whole-assignment adapter. The no-Turn fixture admission and standalone repair pa
 
 The deleted `runFoundationDemo` model consumer is removed from the reviewed
 inventory; no other model consumer changes for this retirement.
+
+#### R14K transport-independent assessment and scripted subprocess migration
+
+| Source / entrypoint | Disposition and evidence |
+| --- | --- |
+| [Strategy selection](../src/generation-operation-strategy.ts) | Remove fixture-based selection skips from assignment, Review, blueprint and diagnostic proof selection. An authentic case requires the same current Turn pin and source receipts regardless of transport; an Interactive no-write report must be Pi-owned. [Event diagnostic regression](../test/generation-operation-event-diagnostic.test.ts) proves that fixture flags cannot alter a selected source-bound diagnostic or manufacture a missing Turn. |
+| [Model runtime](../src/model-runtime.ts), [node execution](../src/generation.ts) | While structural fixtures remain, their execution is explicitly denied a model runtime, including an ambient bound runtime and nested rebinding. This is transport isolation, not a recovery policy. Production-shaped tests use the ordinary execution path with a deterministic Pi transport. [Cutover regression](../test/recovery-cutover.test.ts) verifies denial and restoration of the outer runtime. |
+| [Scripted CLI subprocess](../test/support/scripted-foundation-cli.ts), [Generation tests](../test/generation.test.ts) | Four former structural CLI tests now use a real whole-Story Turn, original planner, Foundation writer, native Git verification, independent Review and actual subprocess checkpoints; missing or swapped method receipts and dirty Git inspection/resume must not invoke another model. R01 Foundation scenarios no longer substitute a synthetic review callback: the normal independent Review consumes the scripted model transport. |
+
+The reviewed strategy helper fingerprints are individually updated, and the
+owner no-write and blueprint assessment proof functions are explicitly included.
+Structural fixture admission and remaining standalone recovery routes are not
+certified by these changes.

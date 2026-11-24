@@ -111,6 +111,13 @@ test("C03 authenticates an original Event Pi no-write once and selects advisory 
   assert.equal(diagnosticCaseForDecision(f.c, selected!).operation, "specialist-result");
   assert.deepEqual(await selectOperationStrategy(f.job, f.s, f.c), selected,
     "Repeated assessor selection cannot mint a new case or model entitlement");
+  // The fixture bit cannot waive a source-authenticated original disposition.
+  const fixtureRequest = { ...f.s, request: { ...f.s.request, fixture: true } };
+  assert.deepEqual(await selectOperationStrategy(f.job, fixtureRequest, f.c), selected);
+  assert.equal(await authenticateOperationDiagnosticProof(f.job, fixtureRequest, f.c, selected!), true);
+  assert.equal(await selectOperationStrategy(f.job, { ...fixtureRequest,
+    request: { ...fixtureRequest.request, turnPlanDigest: undefined } }, f.c), null,
+    "A fixture bit cannot replace the original Turn identity.");
   assert.equal(git(f.repo, "status", "--porcelain", "--untracked-files=all"), "");
 });
 test("C03 source-bound unknown scheduling exception selects exactly one read-only diagnosis", async t => {

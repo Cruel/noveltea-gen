@@ -56,7 +56,7 @@ async function originalAssignmentFailure(job: JobStartResult, s: State, c: Recov
   }
   if (c.origin.operation !== "specialist-result" || c.origin.assignmentId !== op.evidence.assignmentId ||
       c.observation !== "returned-failure" || s.active?.id !== c.origin.assignmentId || s.result ||
-      !s.inventory || s.request.fixture ||
+      !s.inventory ||
       s.request.turnPlanDigest !== c.origin.turnDigest || s.planVersion !== c.origin.planVersion ||
       s.request.job !== job.jobId || c.origin.jobThreadId !== job.threadId)
     throw Error("Original settled assignment failure is not the admitted active child.");
@@ -84,7 +84,7 @@ async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
  * operation's verified effect, not a reason string or a model's diagnosis. */
 async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryEvidence | null> {
   const { operation, sourceHeadSha: head, turnDigest, planVersion } = c.origin;
-  if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  if (!s.request.turnPlanDigest) return null;
   // A negative final objective is an authenticated semantic obligation, not
   // an ambiguous writer effect. Even when new author authority is required,
   // a read-only diagnosis may establish that no authorized remedy exists.
@@ -209,7 +209,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
           (s.inventory.headSha === head ||
             original.domain === "puzzle" && c.origin.assignmentId === "interactive:" + reported.milestoneId &&
             s.inventory.headSha === original.precedingChoiceSource) &&
-          original.worker === (s.request.fixture ? "fixture" : "pi"))
+          original.worker === "pi")
         return { store: "specialist-receipt", ref: original.relative, digest: original.reportDigest };
     }
   }
@@ -351,7 +351,7 @@ async function authenticateSettledReviewVerdict(job: JobStartResult,
 export async function originalFailedReviewProof(job: JobStartResult, s: State,
   c: RecoveryCase): Promise<RecoveryEvidence | null> {
   if (c.origin.operation !== "independent-review" ||
-      c.observation !== "returned-failure" || s.request.fixture ||
+      c.observation !== "returned-failure" ||
       !s.request.turnPlanDigest || s.escalation?.requiresTrustedApproval ||
       !s.active || !s.result || s.active.id !== c.origin.assignmentId ||
       s.result.headSha !== c.origin.sourceHeadSha ||
@@ -386,7 +386,7 @@ export async function originalFailedReviewProof(job: JobStartResult, s: State,
  * the C06 controller consumes this source-bound input for supersession. */
 export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
   c: RecoveryCase): Promise<{ owner: string; proof: RecoveryEvidence } | null> {
-  if (s.request.fixture || !s.request.turnPlanDigest ||
+  if (!s.request.turnPlanDigest ||
       c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
       s.active || s.result || s.causalAmendment || s.crossDomainCloseout ||
       s.escalation?.kind !== "dependency-replan" ||
@@ -455,7 +455,7 @@ async function originalBlueprintAssessment(job: JobStartResult, s: State, c: Rec
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
   const ref = op?.evidence.blueprintAssessment;
   if (!ref) return null;
-  if (s.request.fixture || c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
+  if (c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
       op?.evidence.resultStatus !== "blueprint-assessment" || op.evidence.reference !== "specialist-receipt" ||
       s.active?.id !== c.origin.assignmentId || s.result || s.inventory?.headSha !== c.origin.sourceHeadSha)
     throw Error("Original Blueprint assessment lost its active parent assignment.");
@@ -476,7 +476,7 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   if (!s.request.turnPlanDigest || s.request.turnPlanDigest !== c.origin.turnDigest) return null;
   const originalOperation = s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
-  const blueprint = s.request.fixture ? null : await originalBlueprintAssessment(job, s, c);
+  const blueprint = await originalBlueprintAssessment(job, s, c);
   if (blueprint)
     return { ...base(c, blueprint.evidence), action: "known-correction",
       adapter: "review-cycle", receipt: blueprint.evidence };
@@ -488,9 +488,6 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   if (originalOperation?.evidence.failureKind === "integrity")
     return { ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
       requiredInspection: "Authenticate the original source and invocation; no replacement model call is authorized." };
-  // A fixture transport cannot waive a terminal integrity/protocol decision.
-  // The remaining effectful adapters still require their original Pi receipts.
-  if (s.request.fixture) return null;
   const assignmentFailure = await originalAssignmentFailure(job, s, c);
   if (assignmentFailure && assessBoundedAssignmentFailure(assignmentFailure.proof.kind) === "exhausted") {
     const proof = { store: "response-contract" as const, ref: assignmentFailure.ref,

@@ -247,3 +247,22 @@ test("integrity assessment cannot be skipped by changing current Turn transport"
     assert.equal(decision?.action, "integrity-fence");
   }
 });
+
+
+test("legacy structural fixture cannot acquire an ambient or already bound model runtime", async () => {
+  const { createJobModelRuntime, withJobModelRuntime, withoutJobModelRuntime } = await import("../src/model-runtime.js");
+  const { runtime, observed } = await (await import("./c03-scripted-story-helpers.js")).scriptedStoryRuntime(() => {
+    throw Error("Fixture may not call Pi");
+  });
+  await withoutJobModelRuntime(async () => {
+    await assert.rejects(createJobModelRuntime(), /forbidden in a structural fixture/);
+    assert.throws(() => withJobModelRuntime(runtime, async () => {}), /forbidden in a structural fixture/);
+  });
+  await withJobModelRuntime(runtime, async () => {
+    await withoutJobModelRuntime(async () => {
+      await assert.rejects(createJobModelRuntime(), /forbidden in a structural fixture/);
+    });
+    assert.equal(await createJobModelRuntime(), runtime, "The outer authenticated transport is retained");
+  });
+  assert.equal(observed.length, 0);
+});
