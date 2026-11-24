@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 /** Discovery happens before a Story job exists. Store its immutable response
  * evidence in private controller state, not the Git worktree or public logs.
@@ -12,7 +13,7 @@ export async function createDiscoveryEvidence(options: {
   repositoryId: string
   workspace: string
   revision: number
-  stage: 'initial' | 'corrective' | 'opening-questions' | 'semantic-review'
+  stage: 'initial' | 'corrective' | 'opening-questions' | 'semantic-review' | 'semantic-diagnostic'
   model: { provider: string; id: string }
   skillId: string
   instructions: string
@@ -40,10 +41,11 @@ export async function createDiscoveryEvidence(options: {
   return {
     dir,
     piDirectory,
-    async response(raw: string, piSessionFile?: string) {
+    async response(raw: string, piSessionFile?: string, reference?: DiscoveryPiReference) {
       await write('response.json', {
         version: 1, raw, sha256: createHash('sha256').update(raw).digest('hex'),
         ...(piSessionFile ? { piSessionFile } : {}),
+        ...(reference ? { reference } : {}),
         savedAt: new Date().toISOString(),
       })
     },
@@ -67,3 +69,55 @@ export async function createDiscoveryEvidence(options: {
 }
 
 export type DiscoveryEvidence = Awaited<ReturnType<typeof createDiscoveryEvidence>>
+
+/** Source-bound, private reference to the exact settled Pi conversation.
+ * Discovery has no Generation Job or writable Story worktree. */
+export type DiscoveryPiReference = Readonly<{
+  sourceDigest: string
+  role: 'writer' | 'reviewer' | 'diagnostic'
+  id: string
+  file: string
+  bytes: number
+  digest: string
+}>
+
+const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+
+async function exactTranscript(file: string) {
+  if (!isAbsolute(file) || !file.endsWith('.jsonl') || await realpath(file) !== file)
+    throw Error('Discovery Pi transcript path changed.')
+  const stat = await lstat(file)
+  if (!stat.isFile() || stat.size > 64 * 1024 * 1024)
+    throw Error('Discovery Pi transcript is not a bounded regular file.')
+  const bytes = await readFile(file)
+  if (!bytes.length || bytes.at(-1) !== 10) throw Error('Incomplete Discovery Pi transcript.')
+  const records = bytes.toString('utf8').trimEnd().split('\n').map(line => JSON.parse(line))
+  return { bytes, header: records[0] }
+}
+
+export async function sealDiscoveryPiReference(manager: SessionManager, sourceDigest: string,
+  role: DiscoveryPiReference['role']): Promise<DiscoveryPiReference> {
+  const file = manager.getSessionFile()
+  if (!file || !/^[a-f0-9]{64}$/.test(sourceDigest))
+    throw Error('Discovery invocation has no durable source-bound Pi session.')
+  const { bytes, header } = await exactTranscript(file)
+  if (header.type !== 'session' || header.id !== manager.getSessionId() || header.cwd !== '/')
+    throw Error('Discovery Pi transcript header changed.')
+  return { sourceDigest, role, id: header.id, file, bytes: bytes.length, digest: hash(bytes) }
+}
+
+/** Pi's ordinary open() can allocate a new session for a missing input.
+ * Require exact source, role and settled transcript bytes BEFORE opening. */
+export async function reopenDiscoveryPiReference(ref: DiscoveryPiReference,
+  sourceDigest: string, role: DiscoveryPiReference['role']): Promise<SessionManager> {
+  if (ref.sourceDigest !== sourceDigest || ref.role !== role)
+    throw Error('Discovery Pi reference belongs to another assignment or role.')
+  const { bytes, header } = await exactTranscript(ref.file)
+  if (header.type !== 'session' || header.id !== ref.id || header.cwd !== '/' ||
+      bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
+    throw Error('Discovery Pi transcript changed after settlement.')
+  const manager = SessionManager.open(ref.file, dirname(ref.file), '/')
+  if (manager.getSessionId() !== ref.id || manager.getSessionFile() !== ref.file)
+    throw Error('Discovery Pi session identity changed.')
+  return manager
+}

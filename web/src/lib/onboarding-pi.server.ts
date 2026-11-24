@@ -15,13 +15,18 @@ import { validStoryTitle } from './story-initialization-contract'
 import { parseGenerationContract } from '../../../src/generation'
 import { parseStoryPlanning, type StoryPlanning } from '../../../src/story-planning'
 import { parsePlanningInterpretations, renderPlanningInterpretations, planningDimensionPaths,
-  PlanningClarificationRequired, PlanningInterpretationContractError, resolveDelegatedDecision,
+  PlanningClarificationRequired, PlanningInterpretationContractError, PlanningProvenanceError, resolveDelegatedDecision,
   type PlanningEvidence, type PlanningInterpretation } from '../../../src/planning-interpretation'
 import { authorQuestionDirection, authorQuestionOptions } from '../../../src/author-question'
 import { parseProposedQuestionSet, parseQuestionDrafts, parseQuestionResponses,
   type QuestionSet, type QuestionResponse, type QuestionDraft } from '../../../src/author-question-set'
 import { continueApprovedStoryChat, type ContinuationStatus, type ProviderJobGateways } from './story-approved-continuation.server'
-import { createDiscoveryEvidence, type DiscoveryEvidence } from './discovery-evidence.server'
+import { createDiscoveryEvidence, reopenDiscoveryPiReference, sealDiscoveryPiReference,
+  type DiscoveryEvidence, type DiscoveryPiReference } from './discovery-evidence.server'
+import type { RunnableConfig } from '@langchain/core/runnables'
+import { createAssignmentLifecycleGraph, logicalAssignmentKey, type DiscoveryAssignmentIdentity } from '../../../src/generation-assignment-lifecycle'
+import { beginProtocolInvocation, recoverResponseContract, ProtocolExhaustedError } from '../../../src/response-contract-recovery'
+import { sourceReviewConvergence, sourceReviewDiagnosticTrigger, assertReviewCycleSession } from '../../../src/review-cycle'
 import { discoverySemanticPacket, discoverySemanticReviewInstructions,
   parseDiscoverySemanticVerdict, discoverySemanticFailures, discoverySemanticDigest,
   discoverySemanticCorrection } from '../../../src/discovery-semantic-review'
@@ -58,6 +63,7 @@ function needsOpeningQuestions(brief: string): boolean {
 }
 type Phase = 'running' | 'questions' | 'proposed' | 'approved' | 'blocked'
 type DiscoveryReviewRecord = { packetDigest: string; verdictDigest: string;
+  sources: Record<string, string>;
   failures: Array<{ claimId: string; verdict: 'supported' | 'unsupported' | 'uncertain'; reason: string }> }
 /** Trusted Story Chat identity. The reserved persistence namespace is inaccessible
  * to the legacy repository onboarding endpoint. No client may supply this binding. */
@@ -82,8 +88,11 @@ type Session = { phase: Phase; revision: number; model: PiSelection; skillId: st
   semanticReview?: { proposalDigest: string; packetDigest: string; verdictDigest: string };
   /** Private resumable draft. A user-initiated retry never needs to regenerate a
    * completed writer response merely because independent review was interrupted. */
-  pendingDiscovery?: { kind: 'review' | 'correction'; raw: string; feedback?: string;
-    reviewHistory: DiscoveryReviewRecord[]; nonprogress: number } }
+  recovery?: { status: 'paused' | 'fenced' | 'unresolved';
+    reason: 'not-started' | 'budget' | 'uncertain-effect' | 'protocol-exhausted' | 'nonconverging' | 'reviewer-drift';
+    operationId: number; writer?: DiscoveryPiReference; reviewer?: DiscoveryPiReference };
+  pendingDiscovery?: { kind: 'review' | 'correction'; raw: string; feedback?: string; prompt?: string;
+    reviewHistory: DiscoveryReviewRecord[]; nonprogress: number; diagnoses?: number; mandatoryQuestion?: boolean } }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const reply = (value: unknown, status = 200) => Response.json(value, {
@@ -93,9 +102,17 @@ class DiscoveryError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 class DiscoverySemanticRejection extends Error {
-  constructor(readonly correction: string, readonly unsupportedCount: number) {
+  constructor(readonly correction: string) {
     super('Independent discovery review found unsupported or uncertain source scope.')
   }
+}
+/** Trusted transport admission rejected BEFORE the original Pi turn started.
+ * A provider response or an interrupted prompt must never become this error. */
+export class DiscoveryInvocationNotStarted extends Error {}
+class DiscoveryNonconverging extends Error {}
+class DiscoveryReviewerDrift extends Error {}
+class DiscoveryBudgetPaused extends Error {
+  constructor() { super('Discovery exhausted its original turn resource budget.') }
 }
 class DiscoveryReviewerFailure extends Error {
   constructor() { super('Independent discovery reviewer could not complete a valid assessment.') }
@@ -131,7 +148,7 @@ function expectedProposal(value: unknown, evidence: PlanningEvidence[], newStory
   }
   if (!delegationAuthorized &&
       input.decisions.some(d => d.authority === 'delegated'))
-    throw new Error('Proposed Studio decisions lack an author delegation')
+    throw new PlanningProvenanceError('missing-delegation', 'Proposed Studio decisions lack an author delegation')
   // Never rely on the model to label the author's words correctly. Preserve
   // the exact supplied brief/answers as protected canon, separately from the
   // model's own recommendations and delegated creative selections.
@@ -141,7 +158,7 @@ function expectedProposal(value: unknown, evidence: PlanningEvidence[], newStory
   }))
   const selections: Foundation['decisions'] = input.decisions.map((d, i) => {
     if (d.authority !== 'delegated' && d.source !== undefined)
-      throw Error('An un-delegated Studio suggestion cannot claim author-source authority.')
+      throw new PlanningProvenanceError('undelegated-source', 'An un-delegated Studio suggestion cannot claim author-source authority.')
     const source = d.authority === 'delegated'
       ? resolveDelegatedDecision(d.source, evidence, d.statement) : null
     return { id: 'discovery-' + (i + 1),
@@ -207,53 +224,78 @@ function discoveryCorrectionFeedback(error: unknown): string {
   return 'The structured response did not satisfy the required Question Set, Creative Direction JSON or source-grounded planning contract.'
 }
 export type DiscoveryInference = (session: Session, instructions: string,
-  kind?: 'discovery' | 'semantic-review') => Promise<string>
+  kind?: 'discovery' | 'semantic-review' | 'semantic-diagnostic') => Promise<string>
 async function realInference(store: StudioDatabase, owner: string, session: Session,
   instructions: string, evidence: DiscoveryEvidence,
-  payload?: object, validateReviewFormat?: (raw: string) => void):
-  Promise<{ text: string; piSessionFile?: string }> {
-  await assertUserPiSelection(store, owner, session.model)
-  const runtime = await createUserPiRuntime(store, owner)
-  const model = runtime.getModel(session.model.provider, session.model.id)
-  if (!model) throw new Error('Selected model is unavailable')
-  // The durable transcript is the conversation authority. A fresh, tool-less
-  // Pi AgentSession receives that exact role-labelled transcript without a
-  // host session directory, host settings, or a second mutable transcript.
+  sourceDigest: string, role: DiscoveryPiReference['role'], previous?: DiscoveryPiReference,
+  payload?: object, validateFormat?: (raw: string) => void,
+  beforePrompt?: () => Promise<void>):
+  Promise<{ text: string; piSessionFile: string; reference: DiscoveryPiReference }> {
+  const { runtime, model } = await (async () => {
+    await assertUserPiSelection(store, owner, session.model)
+    const runtime = await createUserPiRuntime(store, owner)
+    const model = runtime.getModel(session.model.provider, session.model.id)
+    if (!model) throw new Error('Selected model is unavailable')
+    return { runtime, model }
+  })().catch(error => {
+    throw new DiscoveryInvocationNotStarted('Selected model admission failed before dispatch.', { cause: error })
+  })
+  // Each role has its own tool-less Pi conversation. A correction must append
+  // to the verified original transcript, not reconstruct it from Chat prose.
   const settingsManager = SettingsManager.inMemory()
   const loader = new DefaultResourceLoader({ cwd: '/', agentDir: '/', settingsManager,
     systemPrompt: instructions, noExtensions: true, noSkills: true, noContextFiles: true,
     noPromptTemplates: true, noThemes: true })
   await loader.reload()
+  const manager = previous ? await reopenDiscoveryPiReference(previous, sourceDigest, role)
+    : SessionManager.create('/', evidence.piDirectory)
   const { session: agent } = await createAgentSession({ cwd: '/', agentDir: '/',
     modelRuntime: runtime, model, thinkingLevel: session.model.thinking,
-    resourceLoader: loader, settingsManager, sessionManager: SessionManager.create('/', evidence.piDirectory),
+    resourceLoader: loader, settingsManager, sessionManager: manager,
     noTools: 'all', tools: [] })
   const timer = setTimeout(() => { void agent.abort().catch(() => {}) }, 4 * 60_000)
   try {
-    await agent.prompt(JSON.stringify(payload ?? { conversation: session.turns,
+    const contract = role === 'writer' ? 'discovery.writer-response.v1' : 'discovery.review-response.v1'
+    const data = payload ?? { conversation: session.turns,
       planningSources: authorEvidence(session).map(({ source, decisionId, statement, authorText, selectedOption, delegated }) =>
-        ({ source, decisionId, statement, authorText, selectedOption, delegated })) }), { expandPromptTemplates: false })
-    for (let attempt = 0; attempt < (validateReviewFormat ? 3 : 1); attempt++) {
+        ({ source, decisionId, statement, authorText, selectedOption, delegated })) }
+    const receiptFile = join(evidence.dir, 'protocol')
+    const invocationSource = sha({ sourceDigest, role, previous, instructions, data })
+    await beforePrompt?.()
+    await beginProtocolInvocation({ receiptFile, sourceDigest: invocationSource, contract, session: agent })
+    const prompt = async (text: string) => {
+      await agent.prompt(text, { expandPromptTemplates: false })
       const last = [...agent.messages].reverse().find(item => item.role === 'assistant')
       if (!last || last.role !== 'assistant' || last.stopReason !== 'stop')
         throw new Error('Pi specialist did not finish')
-      const text = agent.getLastAssistantText() ?? ''
+    }
+    await prompt(JSON.stringify({ ...(previous ? { controllerInstructions: instructions } : {}), ...data }))
+    const validate = (raw: string) => {
       try {
-        validateReviewFormat?.(text)
-        return { text, piSessionFile: agent.sessionManager.getSessionFile() ?? undefined }
+        if (validateFormat) validateFormat(raw)
+        else {
+          const value = JSON.parse(raw.trim().replace(/^\x60\x60\x60(?:json)?\s*/i, '').replace(/\s*\x60\x60\x60$/, ''))
+          if (!value || typeof value !== 'object' || Array.isArray(value) ||
+              !['questions', 'proposal'].includes(value.phase))
+            throw Error('Invalid Discovery response envelope')
+        }
+        return []
       } catch (error) {
-        if (attempt === 2) throw error
-        // Protocol-format repair stays in the same independent, read-only Pi
-        // conversation. Never retry the original creative assignment here.
-        await agent.prompt('Independent read-only review FORMAT correction: your previous ' +
-          'JSON assessments were invalid. Keep the exact review packet and unchanged ' +
-          'review criteria. Return only one complete JSON object with assessments ' +
-          'for EVERY claim ID and exact keys claimId, verdict, reason. Verdict is ' +
-          'supported, unsupported or uncertain; no omitted or invented IDs.',
-        { expandPromptTemplates: false })
+        return [{ path: '$', expected: role === 'writer'
+          ? discoveryCorrectionFeedback(error)
+          : 'One complete JSON object with an assessment for each current claim' }]
       }
     }
-    throw Error('Independent discovery review format exhausted')
+    const text = await recoverResponseContract({ session: agent, contract,
+      sourceDigest: invocationSource, receiptFile: receiptFile + '.initial.json',
+      validate, parse: raw => raw, prompt, beforeCorrection: beforePrompt,
+      feedback: failures => 'RESPONSE-CONTRACT CORRECTION ONLY. ' + failures.map(failure => failure.expected).join('; ') +
+        '. Return the complete previous response as valid JSON ' +
+        'in this same tool-less conversation. Preserve the proposed decisions, exact author sources and ' +
+        'review verdicts; do not claim approval or change the assignment.',
+    })
+    const reference = await sealDiscoveryPiReference(agent.sessionManager, sourceDigest, role)
+    return { text, piSessionFile: reference.file, reference }
   } finally {
     clearTimeout(timer)
     try {
@@ -421,7 +463,7 @@ function sameOperation(saved: Session, operation: DiscoveryOperation) {
  * conversation. Every execution is claimed durably before calling Pi. */
 async function openDiscoveryGraph(store: StudioDatabase, owner: string, repo: string,
   workspace: string, original: Session, verifyAuthority: () => Promise<void>,
-  run?: (claimed: Session) => Promise<Session>) {
+  run?: (claimed: Session, config: RunnableConfig, assertClaim: () => Promise<void>) => Promise<Session>) {
   assertGraphIdentity(owner, repo, workspace, original)
   const identity = original.graphEpoch!
   const read = async (operation: DiscoveryOperation) => {
@@ -445,7 +487,7 @@ async function openDiscoveryGraph(store: StudioDatabase, owner: string, repo: st
       if (saved.graphOperation!.status === 'claimed')
         throw new DiscoveryError(409, 'Discovery invocation may have run; reconcile before retrying')
     },
-    async execute(operation) {
+    async execute(operation, config) {
       const saved = await read(operation)
       if (saved.graphOperation!.status === 'settled') return gateFor(saved)
       if (saved.graphOperation!.status !== 'reserved' || !run ||
@@ -454,7 +496,12 @@ async function openDiscoveryGraph(store: StudioDatabase, owner: string, repo: st
       const claimed: Session = { ...saved, revision: saved.revision + 1,
         graphOperation: { ...operation, status: 'claimed' } }
       await save(store, owner, repo, workspace, claimed, saved.revision)
-      const result = await run(claimed)
+      const assertClaim = async () => {
+        const current = await read(operation)
+        if (current.graphOperation?.status !== 'claimed' || current.revision !== claimed.revision)
+          throw new DiscoveryError(409, 'Discovery invocation lost its original claim')
+      }
+      const result = await run(claimed, config, assertClaim)
       await read(operation)
       const settled: Session = { ...result, revision: claimed.revision + 1,
         graphOperation: { ...operation, status: 'settled' } }
@@ -669,6 +716,11 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       // may have died. It does not run any model or mutate a Story file. A
       // late former worker response cannot overwrite this CAS revision.
       const blocked: Session = { ...saved, phase: 'blocked', revision: saved.revision + 1,
+        ...(currentGraph(saved) ? { recovery: {
+          status: saved.graphOperation!.status === 'reserved' ? 'paused' as const : 'fenced' as const,
+          reason: saved.graphOperation!.status === 'reserved' ? 'not-started' as const : 'uncertain-effect' as const,
+          operationId: saved.graphOperation!.id,
+        } } : {}),
         ...(currentGraph(saved) ? { graphOperation: { ...saved.graphOperation!, status: 'settled' as const,
           reconciledFrom: saved.graphOperation!.status === 'reserved' ? 'reserved' as const : 'claimed' as const } } : {}) }
       await save(store, actor.id, repo, workspace, blocked, saved.revision)
@@ -732,6 +784,9 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     if (action === 'retry' && (!saved || saved.questionContract !== 'structured-v1' ||
         saved.phase !== 'blocked' || data.revision !== saved.revision))
       throw new DiscoveryError(409, 'Blocked discovery revision changed or requires explicit restart')
+    if (action === 'retry' && (saved!.recovery?.status !== 'paused' ||
+        saved!.recovery.reason !== 'not-started'))
+      throw new DiscoveryError(409, 'Discovery has no proven unstarted invocation; inspect the original receipts instead of replaying it')
     if (action === 'answer' && saved?.questionContract !== 'structured-v1')
       throw new DiscoveryError(409, 'Unsupported old question format. Restart discovery explicitly.')
     if (action !== 'retry' && action !== 'restart' && action !== 'answer' &&
@@ -796,9 +851,11 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
               answer: response.answer,
           })) }) }
       } else if (action !== 'retry') userTurn = { role: 'user', text: (data.text as string).trim() }
-      session = { ...saved!, phase: 'running', startedAt: Date.now(), revision: saved!.revision + 1,
+      session = { ...saved!, phase: 'running', startedAt: action === 'retry' ? saved!.startedAt : Date.now(),
+        revision: saved!.revision + 1,
         questions: undefined, drafts: undefined, proposal: undefined, digest: undefined,
         pendingDiscovery: action === 'retry' ? saved!.pendingDiscovery : undefined,
+        recovery: action === 'retry' ? saved!.recovery : undefined,
         ...(accepted ? { accepted } : {}),
         turns: userTurn ? [...saved!.turns, userTurn] : saved!.turns }
     }
@@ -815,14 +872,24 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     // invoked only inside the checkpointed execute_round node.
     await save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
     const graph = await openDiscoveryGraph(store, actor.id, repo, workspace, session,
-      verifyAuthority, async (session): Promise<Session> => {
+      verifyAuthority, async (session, config, assertClaim): Promise<Session> => {
     let diagnosticStage = 'load-skills'
     let evidence: DiscoveryEvidence | null = null
     let pendingDiscovery: Session['pendingDiscovery'] = session.pendingDiscovery
     const evidencePaths: string[] = []
+    const assignmentSource = sha({ graph: session.graphEpoch, turns: session.turns,
+      accepted: session.accepted, model: session.model, skillId: session.skillId })
+    let writerReference = session.recovery?.writer
+    let reviewerReference = session.recovery?.reviewer
     try {
       const instructions = await skillInstructions(session.skillId)
+      const admitPrompt = async () => {
+        await assertClaim()
+        if (Date.now() - (session.startedAt ?? 0) > 15 * 60_000)
+          throw new DiscoveryBudgetPaused()
+      }
       const invoke = async (prompt: string, stage: 'initial' | 'corrective' | 'opening-questions') => {
+        await admitPrompt()
         // Production always records private evidence. Injected fixture replies
         // do so only when the test supplies an isolated evidence root.
         evidence = !infer || process.env.NT_DISCOVERY_EVIDENCE_DIR
@@ -832,8 +899,17 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         if (evidence) evidencePaths.push(evidence.dir)
         try {
           const result = infer ? { text: await infer(session, prompt) } :
-            await realInference(store, actor.id, session, prompt, evidence!)
-          await evidence?.response(result.text, 'piSessionFile' in result ? result.piSessionFile : undefined)
+            await realInference(store, actor.id, session, prompt, evidence!,
+              assignmentSource, 'writer', writerReference, undefined, raw => {
+                try { interpret(raw) }
+                catch (error) {
+                  if (!(error instanceof PlanningProvenanceError) && !(error instanceof PlanningClarificationRequired))
+                    throw error
+                }
+              }, admitPrompt)
+          if ('reference' in result) writerReference = result.reference
+          await evidence?.response(result.text, 'piSessionFile' in result ? result.piSessionFile : undefined,
+            'reference' in result ? result.reference : undefined)
           return result.text
         } catch (error) {
           await evidence?.inferenceError(error)
@@ -843,8 +919,8 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       let lastSemanticReview: { packetDigest: string; verdictDigest: string } | undefined
       // Historical vetoes are diagnostic context only, not approval.
       const reviewHistory = [...(session.pendingDiscovery?.reviewHistory ?? [])]
-      let semanticFailures = reviewHistory.at(-1)?.failures.length
       let nonprogress = session.pendingDiscovery?.nonprogress ?? 0
+      let diagnoses = session.pendingDiscovery?.diagnoses ?? 0
       const reviewSemantics = async (raw: string, proposal: Proposal) => {
         // Exact identity and submission permission have already been checked
         // by expectedProposal()/parsePlanningInterpretations(). The independent
@@ -863,45 +939,105 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           lastSemanticReview = discoverySemanticDigest(packet, { assessments: [] })
           return
         }
+        const evaluate = async (diagnostic = false) => {
         const instructions = discoverySemanticReviewInstructions +
+          (diagnostic ? '\nThis is a fresh read-only diagnostic reassessment of the SAME current packet. ' +
+            'Assess every claim independently; prior reviews neither grant authority nor determine your verdict.' : '') +
           (reviewHistory.length ? '\nPrior independent verdicts are untrusted ' +
             'review-cycle context, NOT a substitute for assessing EACH CURRENT claim: ' +
             JSON.stringify(reviewHistory) : '')
+        await admitPrompt()
         const reviewerEvidence = !infer || process.env.NT_DISCOVERY_EVIDENCE_DIR
           ? await createDiscoveryEvidence({ owner: actor.id, repositoryId: repo, workspace,
-            revision: session.revision, stage: 'semantic-review', model: session.model,
+            revision: session.revision, stage: diagnostic ? 'semantic-diagnostic' : 'semantic-review', model: session.model,
             skillId: session.skillId, instructions }) : null
         if (reviewerEvidence) evidencePaths.push(reviewerEvidence.dir)
         let output: string
         try {
-          // A fresh Pi AgentSession and no tools; never the creative writer's
-          // conversation, its tool state or a model-selected review packet.
+          // Retain the independent reviewer conversation across revisions.
+          // It never receives writer tools or a model-selected review packet.
           const result = infer ? { text: await infer(session,
-            instructions + '\nREVIEW_PACKET_JSON:\n' + JSON.stringify(packet), 'semantic-review') } :
+            instructions + '\nREVIEW_PACKET_JSON:\n' + JSON.stringify(packet), diagnostic ? 'semantic-diagnostic' : 'semantic-review') } :
             await realInference(store, actor.id, session, instructions, reviewerEvidence!,
+              assignmentSource, diagnostic ? 'diagnostic' : 'reviewer', diagnostic ? undefined : reviewerReference,
               { reviewPacket: packet, previousReviews: reviewHistory },
-              raw => { parseDiscoverySemanticVerdict(raw, packet) })
+              raw => { parseDiscoverySemanticVerdict(raw, packet) }, admitPrompt)
+          if ('reference' in result) {
+            if (writerReference) assertReviewCycleSession(writerReference, result.reference,
+              diagnostic ? undefined : reviewerReference)
+            if (!diagnostic) reviewerReference = result.reference
+          }
           output = result.text
           await reviewerEvidence?.response(output,
-            'piSessionFile' in result ? result.piSessionFile : undefined)
+            'piSessionFile' in result ? result.piSessionFile : undefined,
+            'reference' in result ? result.reference : undefined)
         } catch (error) {
           await reviewerEvidence?.inferenceError(error)
+          if (error instanceof DiscoveryInvocationNotStarted || error instanceof DiscoveryBudgetPaused ||
+              error instanceof ProtocolExhaustedError) throw error
           throw new DiscoveryReviewerFailure()
         }
         try {
           const verdict = parseDiscoverySemanticVerdict(output, packet)
           const failures = discoverySemanticFailures(verdict)
-          if (failures.length) {
-            reviewHistory.push({ ...discoverySemanticDigest(packet, verdict), failures })
-            throw new DiscoverySemanticRejection(discoverySemanticCorrection(verdict), failures.length)
-          }
-          await reviewerEvidence?.validation('accepted')
-          lastSemanticReview = discoverySemanticDigest(packet, verdict)
+          await reviewerEvidence?.validation(failures.length ? 'rejected' : 'accepted',
+            failures.length ? new DiscoverySemanticRejection(discoverySemanticCorrection(verdict)) : undefined)
+          return verdict
         } catch (error) {
           await reviewerEvidence?.validation('rejected', error)
-          if (error instanceof DiscoverySemanticRejection) throw error
           throw new DiscoveryReviewerFailure()
         }
+        }
+        const verdict = await evaluate()
+        const failures = discoverySemanticFailures(verdict)
+        // Exact claim snapshots, not invented author text. Removed assertions
+        // are demonstrably absent from the validated packet.
+        const sources = Object.fromEntries(packet.claims.map(claim => [claim.id, JSON.stringify(claim)]))
+        const last = reviewHistory.at(-1)
+        for (const previous of reviewHistory) {
+          for (const id of Object.keys(previous.sources))
+            if (!(id in sources)) sources[id] = JSON.stringify({ absentFromCurrentPacket: true })
+        }
+        const previous = reviewHistory.map(round => ({ sources: round.sources,
+          verdict: { findings: round.failures.map(failure => ({ path: failure.claimId })) } }))
+        const prior = last?.failures.map((failure, findingIndex) => {
+          const current = verdict.assessments.find(item => item.claimId === failure.claimId)
+          return { round: reviewHistory.length - 1, findingIndex,
+            status: (!current || current.verdict === 'supported') ? 'resolved' as const : 'persisting' as const,
+            evidence: { path: failure.claimId, quote: sources[failure.claimId]! } }
+        }) ?? []
+        let drift = false
+        try {
+          const progress = sourceReviewConvergence({ status: failures.length ? 'revise' : 'pass', prior },
+            sources, previous, nonprogress)
+          nonprogress = progress.stalled
+        } catch {
+          drift = true
+        }
+        if (failures.length) reviewHistory.push({ ...discoverySemanticDigest(packet, verdict), failures, sources })
+        const trigger = sourceReviewDiagnosticTrigger(reviewHistory.map((round, index) => ({
+          verdict: { status: 'revise' as const, findings: round.failures.map(failure => ({
+            origin: reviewHistory[index - 1]?.failures.some(prior => prior.claimId === failure.claimId) ? 'prior' : 'introduced',
+          })) },
+        })), nonprogress, diagnoses)
+        if (drift || trigger) {
+          diagnoses++
+          pendingDiscovery = { kind: 'correction', raw, feedback: discoverySemanticCorrection(verdict),
+            reviewHistory: [...reviewHistory], nonprogress, diagnoses }
+          const diagnostic = await evaluate(true)
+          const diagnosticFailures = discoverySemanticFailures(diagnostic)
+          const negativeIds = (items: typeof failures) => items.map(item => item.claimId).sort().join(',')
+          if (drift || negativeIds(diagnosticFailures) !== negativeIds(failures))
+            throw new DiscoveryReviewerDrift('Independent diagnostic disagrees with the original review or its source progression.')
+          if (nonprogress >= 2)
+            throw new DiscoveryNonconverging('Independent diagnostic corroborates nonproductive correction.')
+        }
+        if (failures.length) {
+          if (nonprogress >= 2)
+            throw new DiscoveryNonconverging('Discovery semantic review remains nonproductive after diagnosis.')
+          throw new DiscoverySemanticRejection(discoverySemanticCorrection(verdict))
+        }
+        lastSemanticReview = discoverySemanticDigest(packet, verdict)
       }
       const interpret = (raw: string, mandatoryClarification = false) => {
         const delegationAuthorized = explicitFullDelegation(session.brief) ||
@@ -930,7 +1066,8 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           pendingDiscovery = undefined
           const checked = interpret(raw, mandatoryClarification)
           if (checked.proposal) {
-            pendingDiscovery = { kind: 'review', raw, reviewHistory: [...reviewHistory], nonprogress }
+            if (mandatoryClarification) throw new PlanningClarificationRequired('The author must resolve the protected decision.')
+            pendingDiscovery = { kind: 'review', raw, reviewHistory: [...reviewHistory], nonprogress, diagnoses, mandatoryQuestion: mandatoryClarification }
             diagnosticStage = 'semantic-review'
             await reviewSemantics(raw, checked.proposal)
           }
@@ -952,84 +1089,94 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         'Return one complete valid structured Question Set or Creative Direction proposal; ' +
         'never invent approval or substitute prose questions.\nREJECTED_DRAFT_JSON:\n' +
         rejected.slice(0, 24_000)
-      diagnosticStage = 'initial-inference'
-      let raw = session.pendingDiscovery?.kind === 'review'
-        ? session.pendingDiscovery.raw
-        : session.pendingDiscovery?.kind === 'correction'
-          ? await invoke(correctionPrompt(session.pendingDiscovery.feedback ?? '',
-            session.pendingDiscovery.raw), 'corrective')
-          : await invoke(instructions, 'initial')
-      diagnosticStage = 'initial-response-validation'
-      let structuralCorrectionUsed = false
-      let outcome: ReturnType<typeof interpret>
-      while (true) {
-        if (Date.now() - (session.startedAt ?? Date.now()) > 15 * 60_000)
-          throw Error('Discovery exceeded the current turn resource budget.')
-        try {
-          outcome = await validateWithEvidence(raw)
-          pendingDiscovery = undefined
-          break
-        } catch (error) {
-          if (error instanceof DiscoveryReviewerFailure) throw error
-          if (error instanceof DiscoverySemanticRejection) {
-            // Semantic corrections are not protocol/source-format retries. Use
-            // independently assessed improvement rather than a fixed number of
-            // creative drafts. Unchanged or worsening rejection counts are not
-            // evidence of progress, even if the prose or claim IDs change.
-            if (semanticFailures !== undefined) {
-              nonprogress = error.unsupportedCount < semanticFailures ? 0 : nonprogress + 1
+      const identity: DiscoveryAssignmentIdentity = {
+        schema: 'noveltea-discovery-assignment/v1', graphThreadId: session.graphEpoch!,
+        operationId: session.recovery?.operationId ?? session.graphOperation!.id, scopeDigest: assignmentSource,
+      }
+      const assignmentKey = logicalAssignmentKey(identity)
+      let submittedRaw: string | undefined
+      let verifiedSession: Session | undefined
+      let mandatoryQuestion = false
+      let formatCorrections = 0
+      let provenanceNonprogress = 0
+      let previousProvenance: string | undefined
+      let correction: { prompt: string; stage: 'corrective' | 'opening-questions';
+        mandatoryQuestion: boolean; raw: string } | undefined
+      const scheduleCorrection = (raw: string, prompt: string,
+        stage: 'corrective' | 'opening-questions' = 'corrective', question = false) => {
+        correction = { raw, prompt, stage, mandatoryQuestion: question }
+        pendingDiscovery = { kind: 'correction', raw, prompt, reviewHistory: [...reviewHistory],
+          nonprogress, diagnoses, mandatoryQuestion: question }
+        return { correctionRef: sha(correction), rejectedReceiptRef: sha(raw) }
+      }
+      const settleSubmission = (raw: string) => {
+        submittedRaw = raw
+        pendingDiscovery = { kind: 'review', raw, reviewHistory: [...reviewHistory],
+          nonprogress, diagnoses, mandatoryQuestion }
+        return { status: 'submitted', receiptRef: sha(raw) }
+      }
+      const child = createAssignmentLifecycleGraph<DiscoveryAssignmentIdentity>({
+        preflight: async () => { await assertClaim(); return null },
+        invoke: async () => {
+          diagnosticStage = 'initial-inference'
+          mandatoryQuestion = session.pendingDiscovery?.mandatoryQuestion ?? false
+          const raw = session.pendingDiscovery?.kind === 'review'
+            ? session.pendingDiscovery.raw
+            : session.pendingDiscovery?.kind === 'correction'
+              ? await invoke(session.pendingDiscovery.prompt ?? correctionPrompt(session.pendingDiscovery.feedback ?? '',
+                session.pendingDiscovery.raw), 'corrective')
+              : await invoke(instructions, 'initial')
+          return settleSubmission(raw)
+        },
+        correct: async state => {
+          await assertClaim()
+          if (!correction || state.correction?.correctionRef !== sha(correction) ||
+              state.submission?.receiptRef !== sha(correction.raw))
+            throw Error('Discovery correction lacks its original authorization')
+          mandatoryQuestion = correction.mandatoryQuestion
+          const raw = await invoke(correction.prompt, correction.stage)
+          correction = undefined
+          return settleSubmission(raw)
+        },
+        verify: async state => {
+          await assertClaim()
+          if (submittedRaw === undefined || state.submission?.receiptRef !== sha(submittedRaw))
+            throw Error('Discovery submission lacks its original response receipt')
+          const raw = submittedRaw
+          diagnosticStage = 'response-validation'
+          let outcome: ReturnType<typeof interpret>
+          try {
+            outcome = await validateWithEvidence(raw, mandatoryQuestion)
+          } catch (error) {
+            if (error instanceof DiscoveryReviewerFailure || error instanceof DiscoveryInvocationNotStarted ||
+                error instanceof DiscoveryBudgetPaused || error instanceof ProtocolExhaustedError ||
+                error instanceof DiscoveryNonconverging || error instanceof DiscoveryReviewerDrift) throw error
+            if (error instanceof DiscoverySemanticRejection)
+              return scheduleCorrection(raw, correctionPrompt(error.correction, raw))
+            if (error instanceof PlanningProvenanceError) {
+              if (previousProvenance !== undefined) provenanceNonprogress++
+              previousProvenance = error.code
+              if (provenanceNonprogress >= 2)
+                throw new DiscoveryNonconverging(error.message)
+              return scheduleCorrection(raw, correctionPrompt(error.message, raw))
             }
-            semanticFailures = error.unsupportedCount
-            pendingDiscovery = { kind: 'correction', raw, feedback: error.correction,
-              reviewHistory: [...reviewHistory], nonprogress }
-            if (nonprogress >= 2)
-              throw Error('Discovery semantic review did not converge after independent reassessment.')
-            diagnosticStage = 'semantic-corrective-inference'
-            raw = await invoke(correctionPrompt(error.correction, raw), 'corrective')
-            diagnosticStage = 'semantic-corrective-validation'
-            continue
+            if (error instanceof PlanningClarificationRequired) {
+              if (mandatoryQuestion) throw new DiscoveryNonconverging('The required author clarification was not produced.')
+              return scheduleCorrection(raw, instructions + '\nController clarification required: ' + error.message +
+                ' Return ONLY a focused structured Question Set requesting author direction. Do not choose for the author.',
+                'corrective', true)
+            }
+            if (++formatCorrections > 2) throw error
+            return scheduleCorrection(raw, instructions + '\nController correction: ' + discoveryCorrectionFeedback(error) +
+              ' Return one complete valid structured Question Set or Creative Direction proposal with source-backed ' +
+              'interpretations. Do not invent approvals or substitute prose questions.', 'corrective', mandatoryQuestion)
           }
-          const clarification = error instanceof PlanningClarificationRequired
-          if (structuralCorrectionUsed) throw error
-          structuralCorrectionUsed = true
-          // Contradictory author instructions must generate a real new question,
-          // not a model-invented compromise. Structural response correction is
-          // independent from subsequent semantic review.
-          diagnosticStage = 'corrective-inference'
-          raw = await invoke(instructions + (clarification
-            ? '\nController clarification required: ' + error.message +
-              ' Return ONLY a focused structured Question Set requesting author direction. ' +
-              'Do not choose for the author.'
-            : '\nController correction: ' + discoveryCorrectionFeedback(error) +
-              ' Return one complete valid structured Question Set or Creative Direction ' +
-              'proposal with source-backed interpretations. Do not invent approvals ' +
-              'or substitute prose questions.'), 'corrective')
-          diagnosticStage = 'corrective-response-validation'
-          if (clarification) {
-            outcome = await validateWithEvidence(raw, true)
-            if (outcome.proposal)
-              throw Error('A material planning contradiction requires a new author question.')
-            pendingDiscovery = undefined
-            break
-          }
-        }
-      }
-      // A sparse initial author objective must solicit baseline questions even
-      // in Autonomous mode. Give one bounded corrective model pass if it skipped
-      // discovery; never fabricate questions or accept an unreviewed proposal.
-      diagnosticStage = 'opening-question-requirement'
-      if (chat && session.turns.length === 1 && needsOpeningQuestions(session.brief) &&
-          outcome.proposal) {
-        if (structuralCorrectionUsed) throw new Error('Discovery already exhausted its corrective model attempt')
-        diagnosticStage = 'opening-question-inference'
-        raw = await invoke(instructions + '\nController requirement: the author has only ' +
-          'supplied a sparse objective without comprehensive delegation. Your previous proposal ' +
-          'skipped the required first baseline discovery questions. Return ONLY a questions ' +
-          'response with the minimum necessary recommended questions, not a proposal.', 'opening-questions')
-        diagnosticStage = 'opening-question-validation'
-        outcome = await validateWithEvidence(raw)
-        if (outcome.proposal) throw new Error('Required opening discovery questions were not supplied')
-      }
+          if (chat && session.turns.length === 1 && needsOpeningQuestions(session.brief) && outcome.proposal)
+            return scheduleCorrection(raw, instructions + '\nController requirement: the author has only ' +
+              'supplied a sparse objective without comprehensive delegation. Your previous proposal ' +
+              'skipped the required first baseline discovery questions. Return ONLY a questions ' +
+              'response with the minimum necessary recommended questions, not a proposal.', 'opening-questions', true)
+          pendingDiscovery = undefined
       // The model proposes creative details, never replaces the original Turn's
       // objective or silently changes its requested scope.
       if (chat && outcome.proposal) outcome.proposal.task = chat.originalObjective
@@ -1040,10 +1187,21 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           ...(lastSemanticReview ? { semanticReview: {
             proposalDigest: sha(outcome.proposal), ...lastSemanticReview } } : {}) } : {}),
         discoveryEvidencePaths: [...(session.discoveryEvidencePaths ?? []), ...evidencePaths],
-        pendingDiscovery: undefined,
+        pendingDiscovery: undefined, recovery: undefined,
       }
       diagnosticStage = 'persist-valid-response'
-      return next
+          verifiedSession = next
+          return { status: 'verified', assignmentKey, evidenceRef: sha(next),
+            reviewRef: lastSemanticReview?.verdictDigest ?? sha(outcome.questions),
+            sourceDigest: assignmentSource }
+        },
+      })
+      const completed = await child.invoke({ identity, submission: null, submissionKey: null,
+        outcome: null, continuationRef: null, correction: null }, { ...config, recursionLimit: 256 })
+      if (!verifiedSession || completed.outcome?.status !== 'verified' ||
+          completed.outcome.evidenceRef !== sha(verifiedSession))
+        throw Error('Discovery assignment did not return a verified original result')
+      return verifiedSession
     } catch (error) {
       // Explicit trusted local certification may classify a failing provider
       // turn without revealing error messages, transcript text or credentials.
@@ -1088,7 +1246,17 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       }
       // Never repeat an uncertain provider turn automatically or expose raw
       // model errors/credentials. Saved author input survives for inspection.
+      const reason = error instanceof DiscoveryInvocationNotStarted ? 'not-started' as const
+        : error instanceof DiscoveryBudgetPaused ? 'budget' as const
+        : error instanceof ProtocolExhaustedError ? 'protocol-exhausted' as const
+        : error instanceof DiscoveryNonconverging ? 'nonconverging' as const
+        : error instanceof DiscoveryReviewerDrift ? 'reviewer-drift' as const
+        : 'uncertain-effect' as const
+      const status = reason === 'not-started' || reason === 'budget' ? 'paused' as const
+        : reason === 'protocol-exhausted' || reason === 'nonconverging' ? 'unresolved' as const : 'fenced' as const
       const blocked: Session = { ...session, phase: 'blocked', revision: session.revision + 1,
+        recovery: { status, reason, operationId: session.recovery?.operationId ?? session.graphOperation!.id,
+          writer: writerReference, reviewer: reviewerReference },
         discoveryEvidencePaths: [...(session.discoveryEvidencePaths ?? []), ...evidencePaths],
         pendingDiscovery }
       return blocked

@@ -14,7 +14,7 @@ import { openStudioBusinessFixture } from './support/studio-database'
 import { openSharedStudioStore } from '../src/db/shared-studio-store'
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { listStoryThreads } from '../src/lib/story-threads.server'
-import type { DiscoveryInference } from '../src/lib/onboarding-pi.server'
+import { DiscoveryInvocationNotStarted, type DiscoveryInference } from '../src/lib/onboarding-pi.server'
 import { planningDimensions, planningDimensionPaths } from '../../src/planning-interpretation'
 import { withFixtureSemanticReview } from './support/discovery-semantic-fixture'
 
@@ -245,7 +245,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
         headers: { cookie: aliceCookie, origin: url },
         body: JSON.stringify({ action: 'answer', revision: savedDraft.body.session.revision,
           setId: set.id, setRevision: set.revision, responses: answers }),
-      }), url, storyIds[0]!, firstId, async () => { throw new Error('synthetic provider interruption') })
+      }), url, storyIds[0]!, firstId, async () => { throw new DiscoveryInvocationNotStarted('synthetic model admission failure') })
     const partial = { status: interrupted.status, body: await interrupted.json() as any }
     assert.equal(partial.status, 503)
     const afterFailure = (await req(storyIds[0]!, firstId, 'GET')).body.session
@@ -622,6 +622,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       responses: [{ questionId: 'puzzle-clarification', answer: { kind: 'delegate', note: '' } }],
     })
     assert.equal(rejectedDelegation.status, 422)
+    let provenanceAttempts = 0
     const resolvedConflict = await storyChatDiscoveryRequest(auth, store,
       new Request(url + '/api/story-chat-discovery', { method: 'POST',
         headers: { cookie: aliceCookie, origin: url },
@@ -630,8 +631,25 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
           responses: [{ questionId: 'puzzle-clarification', answer: {
             kind: 'option', optionId: 'no-puzzles', note: '' } }],
         }),
-      }), url, storyIds[4]!, conflictId, withFixtureSemanticReview(async state => proposalFor(state)))
+      }), url, storyIds[4]!, conflictId, withFixtureSemanticReview(async (state, instructions) => {
+        provenanceAttempts++
+        const value = JSON.parse(proposalFor(state))
+        if (provenanceAttempts === 1) {
+          value.interpretations.find((i: any) => i.path === 'planning.puzzle_emphasis').source = {
+            kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'puzzle-guidance',
+          }
+        } else if (provenanceAttempts === 2) {
+          assert.match(instructions, /later author clarification/i)
+          value.foundation.decisions.push({ statement: 'The bell is made of silver',
+            authority: 'user-protected', source: { kind: 'turn', index: 0 } })
+        } else {
+          assert.equal(provenanceAttempts, 3)
+          assert.match(instructions, /un-delegated Studio suggestion/i)
+        }
+        return JSON.stringify(value)
+      }))
     assert.equal(resolvedConflict.status, 200)
+    assert.equal(provenanceAttempts, 3, 'both distinct source defects must be corrected before Review')
     const resolvedProposal = (await resolvedConflict.json() as any).session
     assert.equal(resolvedProposal.phase, 'proposed')
     assert.equal(resolvedProposal.proposal.foundation.planning.puzzle_emphasis, 'none')

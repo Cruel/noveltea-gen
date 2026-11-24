@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
-import { onboardingPiRequest, assertApprovedPiFoundation, type DiscoveryInference } from '../src/lib/onboarding-pi.server'
+import { onboardingPiRequest, assertApprovedPiFoundation, DiscoveryInvocationNotStarted, type DiscoveryInference } from '../src/lib/onboarding-pi.server'
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { candidate } from '../src/lib/story-foundation.server'
 import { hasUserProtectedDecision } from '../../src/foundation-record'
@@ -258,7 +258,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       }, own, url, writer, workspace, reject)
       assert.equal(rejected.status, 503)
       assert.equal(writerCalls, 4)
-      assert.equal(reviewCalls, 3, 'Two nonproductive semantic corrections stop safely')
+      assert.equal(reviewCalls, 4, 'Two nonproductive semantic corrections trigger independent diagnosis')
       const saved = JSON.parse((await store.persistence.onboarding.conversation(
         alice.id, repo, workspace))!.state)
       assert.equal(saved.phase, 'blocked')
@@ -275,16 +275,11 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         JSON.parse(readFileSync(join(path, 'validation.json'), 'utf8')).status === 'rejected'))
       const resumed = await request('POST', { action: 'retry', revision: saved.revision },
         own, url, writer, workspace, reject)
-      assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
-      assert.equal(resumed.body.session.phase, 'proposed')
-      assert.equal(writerCalls, 5)
+      assert.equal(resumed.status, 409, 'An exhausted correction cannot mint a new allowance')
+      assert.equal(writerCalls, 4)
       assert.equal(reviewCalls, 4)
-      const final = JSON.parse((await store.persistence.onboarding.conversation(
-        alice.id, repo, workspace))!.state)
-      const latestReview = final.discoveryEvidencePaths.at(-1)
-      assert.match(readFileSync(join(latestReview, 'request.json'), 'utf8'),
-        /Prior independent verdicts/, 'Review history survives user-initiated retry')
-      assert.equal(final.semanticReview.proposalDigest, final.digest)
+      assert.equal(saved.recovery.status, 'unresolved')
+      assert.equal(saved.recovery.reason, 'nonconverging')
     } finally {
       if (previousEvidenceRoot === undefined) delete process.env.NT_DISCOVERY_EVIDENCE_DIR
       else process.env.NT_DISCOVERY_EVIDENCE_DIR = previousEvidenceRoot
@@ -342,7 +337,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       assert.equal(calls, 4, 'Reload must never replay an accepted writer')
     }
 
-    // A completed writer response survives a malformed or interrupted independent
+    // A completed writer response survives a proven unstarted independent
     // reviewer; explicit retry re-reviews exact evidence without calling the writer.
     {
       const workspace = 'projects/reviewer-retry'
@@ -361,9 +356,10 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       }
       const review: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
         reviews++
-        return reviewerAvailable ? packet.claims.map(c => ({
+        if (!reviewerAvailable) throw new DiscoveryInvocationNotStarted('Reviewer admission unavailable')
+        return packet.claims.map(c => ({
           claimId: c.id, verdict: 'supported' as const, reason: 'Exact author delegation.',
-        })) : []
+        }))
       }
       const started = await request('POST', { action: 'start', model,
         text: 'A short mystery' }, own, url, writer, workspace, review)
@@ -465,7 +461,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
   }
 })
 
-test('failed Pi turns are preserved and only user-initiated retry can reissue them', {
+test('unstarted Pi turns may retry; uncertain started turns remain fenced', {
   timeout: 120_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-web-pi-retry-'))
@@ -496,7 +492,7 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
       return {status: response.status, body: await response.json() as any}
     }
     const fail = await req({action:'start', model:{provider:model.provider, id:model.id},
-      text:'A small-town mystery'}, async () => { throw new Error('provider secret: NOT-FOR-UI') })
+      text:'A small-town mystery'}, async () => { throw new DiscoveryInvocationNotStarted('provider secret: NOT-FOR-UI') })
     assert.equal(fail.status, 503)
     assert.doesNotMatch(JSON.stringify(fail.body), /NOT-FOR-UI/)
     const resubmit = await req({action:'start', model:{provider:model.provider, id:model.id},
@@ -581,6 +577,12 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
       assert.equal(recovered.status, 200, JSON.stringify(recovered.body))
       assert.equal(recovered.body.session.phase, 'blocked')
       assert.equal(calls, 2)
+      const blockedRevision = recovered.body.session.revision
+      for (let attempt = 0; attempt < 2; attempt++) {
+        assert.equal((await req({action:'retry', revision: blockedRevision}, async () => {
+          assert.fail('An uncertain started writer must not be replayed')
+        })).status, 409)
+      }
       assert.equal((await req({action:'reconcile',revision:hanging.revision}, async () => {
         throw new Error('duplicate reconcile must not call Pi')
       })).status, 409)

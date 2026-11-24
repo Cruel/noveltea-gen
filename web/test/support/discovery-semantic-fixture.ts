@@ -8,7 +8,7 @@ export function withFixtureSemanticReview(infer: DiscoveryInference,
     claimId: string; verdict: 'supported' | 'unsupported' | 'uncertain'; reason: string
   }>): DiscoveryInference {
   return (session, instructions, role) => {
-    if (role !== 'semantic-review') return infer(session, instructions, role)
+    if (role !== 'semantic-review' && role !== 'semantic-diagnostic') return infer(session, instructions, role)
     const marker = 'REVIEW_PACKET_JSON:\n'
     const pos = instructions.indexOf(marker)
     if (pos < 0) throw Error('Fixture reviewer did not receive an exact review packet.')

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
-import { createDiscoveryEvidence } from '../src/lib/discovery-evidence.server'
+import { createDiscoveryEvidence, reopenDiscoveryPiReference, sealDiscoveryPiReference } from '../src/lib/discovery-evidence.server'
 
 test('failed discovery retains private Pi JSONL, raw reply and exact validation error', async () => {
   const state = mkdtempSync(join(tmpdir(), 'noveltea-discovery-evidence-'))
@@ -19,6 +19,20 @@ test('failed discovery retains private Pi JSONL, raw reply and exact validation 
     const transcript = manager.getSessionFile()!
     assert.ok(transcript.startsWith(attempt.piDirectory + '/'))
     assert.match(readFileSync(transcript, 'utf8'), /Private discovery input/)
+    const source = 'a'.repeat(64)
+    const original = await sealDiscoveryPiReference(manager, source, 'writer')
+    await assert.rejects(reopenDiscoveryPiReference(original, 'b'.repeat(64), 'writer'), /another assignment/)
+    await assert.rejects(reopenDiscoveryPiReference(original, source, 'reviewer'), /another assignment/)
+    const reopened = await reopenDiscoveryPiReference(original, source, 'writer')
+    reopened.appendMessage({ role: 'user', content: 'Correct the original draft', timestamp: Date.now() })
+    const corrected = await sealDiscoveryPiReference(reopened, source, 'writer')
+    assert.equal(corrected.id, original.id)
+    assert.equal(corrected.file, original.file)
+    assert.ok(corrected.bytes > original.bytes)
+    assert.match(readFileSync(transcript, 'utf8'), /Correct the original draft/)
+    await assert.rejects(reopenDiscoveryPiReference(original, source, 'writer'), /changed after settlement/)
+    appendFileSync(transcript, '{}\n')
+    await assert.rejects(reopenDiscoveryPiReference(corrected, source, 'writer'), /changed after settlement/)
     const raw = '{"phase":"proposal","foundation":{"invalid":"not authorized"}}'
     await attempt.response(raw, transcript)
     await attempt.validation('rejected', new Error('Invalid source-bound interpretation'))

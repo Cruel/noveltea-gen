@@ -23,8 +23,20 @@ export type AssignmentIdentity = Readonly<{
   scopeDigest: string;
 }>;
 
-export function logicalAssignmentKey(identity: AssignmentIdentity): string {
-  const fields = [identity.schema, identity.jobId, identity.jobThreadId,
+/** Studio Discovery precedes any Generation job or Git write grant. */
+export type DiscoveryAssignmentIdentity = Readonly<{
+  schema: "noveltea-discovery-assignment/v1";
+  graphThreadId: string;
+  operationId: number;
+  scopeDigest: string;
+}>;
+
+type LifecycleIdentity = AssignmentIdentity | DiscoveryAssignmentIdentity;
+
+export function logicalAssignmentKey(identity: LifecycleIdentity): string {
+  const fields = identity.schema === "noveltea-discovery-assignment/v1"
+    ? [identity.schema, identity.graphThreadId, identity.operationId, identity.scopeDigest]
+    : [identity.schema, identity.jobId, identity.jobThreadId,
     identity.graphThreadId, identity.turnDigest, identity.assignmentId,
     identity.planVersion, identity.sourceHeadSha, identity.scopeDigest];
   return createHash("sha256").update(JSON.stringify(fields)).digest("hex");
@@ -52,13 +64,20 @@ type OutcomeBase = Readonly<{
   evidenceRef: string;
 }>;
 
-export type AssignmentOutcome =
-  | (OutcomeBase & Readonly<{ status: "verified"; reviewRef: string; headSha: string }>)
+export type AssignmentOutcome<I extends LifecycleIdentity = AssignmentIdentity> =
+  | (OutcomeBase & Readonly<{ status: "verified"; reviewRef: string }> &
+      (I extends DiscoveryAssignmentIdentity ? Readonly<{ sourceDigest: string }> : Readonly<{ headSha: string }>))
   | (OutcomeBase & Readonly<{ status: "needs-prerequisite"; suspensionRef: string }>)
   | (OutcomeBase & Readonly<{ status: "awaiting-author"; questionRef: string }>)
   | (OutcomeBase & Readonly<{ status: "paused"; controlRef: string }>)
   | (OutcomeBase & Readonly<{ status: "fenced"; inspectionRef: string }>)
   | (OutcomeBase & Readonly<{ status: "unresolved"; dispositionRef: string }>);
+
+/** Internal authorized correction, not a terminal parent outcome. */
+export type AssignmentCorrection = Readonly<{
+  correctionRef: string;
+  rejectedReceiptRef: string;
+}>;
 
 export type AssignmentSubmission = Readonly<{
   /** The original specialist's native/Git receipt; never a graph-only claim. */
@@ -67,39 +86,45 @@ export type AssignmentSubmission = Readonly<{
   headSha?: string;
 }>;
 
-type LifecycleState = typeof LifecycleChannels.State;
-
-const LifecycleChannels = Annotation.Root({
-  identity: Annotation<AssignmentIdentity>(),
+function lifecycleChannels<I extends LifecycleIdentity>() {
+  return Annotation.Root({
+  identity: Annotation<I>(),
   /** The source-backed settled invocation, NOT an in-flight writer token. */
   submission: Annotation<AssignmentSubmission | null>({ reducer: (_, next) => next, default: () => null }),
   /** Binds a saved submission to the exact original assignment tuple. */
   submissionKey: Annotation<string | null>({ reducer: (_, next) => next, default: () => null }),
-  outcome: Annotation<AssignmentOutcome | null>({ reducer: (_, next) => next, default: () => null }),
+  outcome: Annotation<AssignmentOutcome<I> | null>({ reducer: (_, next) => next, default: () => null }),
   /** Only a reference into the existing controller-owned history. */
   continuationRef: Annotation<string | null>({ reducer: (_, next) => next, default: () => null }),
-});
+  correction: Annotation<AssignmentCorrection | null>({ reducer: (_, next) => next, default: () => null }),
+  });
+}
+type LifecycleState<I extends LifecycleIdentity> = ReturnType<typeof lifecycleChannels<I>>["State"];
 
-export type AssignmentAdapter = Readonly<{
+export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> = Readonly<{
   /** Reauthenticate the parent authorization, source and uncertain effects. */
-  preflight: (state: LifecycleState, config: RunnableConfig) =>
-    Promise<AssignmentOutcome | null>;
+  preflight: (state: LifecycleState<I>, config: RunnableConfig) =>
+    Promise<AssignmentOutcome<I> | null>;
   /** Before any model/Git effect, reconcile the original intent and receipts.
    * Repeating this call after a crash MUST NOT repeat an uncertain Pi write. */
-  invoke: (state: LifecycleState, config: RunnableConfig) =>
-    Promise<AssignmentSubmission | AssignmentOutcome>;
+  invoke: (state: LifecycleState<I>, config: RunnableConfig) =>
+    Promise<AssignmentSubmission | AssignmentOutcome<I>>;
   /** Run native validation and independent read-only Review; return references
    * only to real trusted receipts. Never certify solely from the child state. */
-  verify: (state: LifecycleState, config: RunnableConfig) =>
-    Promise<AssignmentOutcome>;
+  verify: (state: LifecycleState<I>, config: RunnableConfig) =>
+    Promise<AssignmentOutcome<I> | AssignmentCorrection>;
+  /** Reconcile the exact rejected submission and authorized correction before
+   * a new model attempt. The adapter retains original external receipts. */
+  correct?: (state: LifecycleState<I>, config: RunnableConfig) =>
+    Promise<AssignmentSubmission | AssignmentOutcome<I>>;
   /** Used only for a true pending LangGraph author interrupt. */
-  authenticateAnswer?: (state: LifecycleState, answer: unknown) => Promise<boolean>;
+  authenticateAnswer?: (state: LifecycleState<I>, answer: unknown) => Promise<boolean>;
   /** Required for any returned-END logical phase reentry. Must check the
    * original suspension, matching Turn/scope/source and supporting receipt. */
-  authenticateContinuation?: (state: LifecycleState, config: RunnableConfig) => Promise<boolean>;
+  authenticateContinuation?: (state: LifecycleState<I>, config: RunnableConfig) => Promise<boolean>;
 }>;
 
-function assertAssignmentOutcome(identity: AssignmentIdentity, outcome: AssignmentOutcome): void {
+function assertAssignmentOutcome(identity: LifecycleIdentity, outcome: AssignmentOutcome<LifecycleIdentity>): void {
   if (outcome.assignmentKey !== logicalAssignmentKey(identity) || !outcome.evidenceRef)
     throw Error("Assignment outcome lacks an authenticated original source reference.");
   const ref = outcome.status === "verified" ? outcome.reviewRef :
@@ -108,12 +133,14 @@ function assertAssignmentOutcome(identity: AssignmentIdentity, outcome: Assignme
     outcome.status === "paused" ? outcome.controlRef :
     outcome.status === "fenced" ? outcome.inspectionRef : outcome.dispositionRef;
   if (typeof ref !== "string" || !ref.trim() ||
-      outcome.status === "verified" && !/^[a-f0-9]{40}$/.test(outcome.headSha))
+      outcome.status === "verified" && (identity.schema === "noveltea-discovery-assignment/v1"
+        ? !("sourceDigest" in outcome) || outcome.sourceDigest !== identity.scopeDigest
+        : !("headSha" in outcome) || !/^[a-f0-9]{40}$/.test(outcome.headSha)))
     throw Error("Assignment outcome has no valid typed evidence/commit reference.");
 }
 
-export function createAssignmentLifecycleGraph(adapter: AssignmentAdapter) {
-  return new StateGraph(LifecycleChannels)
+export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = AssignmentIdentity>(adapter: AssignmentAdapter<I>) {
+  return new StateGraph(lifecycleChannels<I>())
     .addNode("preflight", async (state, config) => {
       const key = logicalAssignmentKey(state.identity);
       if (state.outcome) assertAssignmentOutcome(state.identity, state.outcome);
@@ -151,8 +178,28 @@ export function createAssignmentLifecycleGraph(adapter: AssignmentAdapter) {
     .addNode("verify_original", async (state, config) => {
       if (state.outcome || !state.submission) return {};
       const outcome = await adapter.verify(state, config);
+      if ("correctionRef" in outcome) {
+        if (!adapter.correct || !outcome.correctionRef ||
+            outcome.rejectedReceiptRef !== state.submission.receiptRef)
+          throw Error("Correction lacks its original rejected submission.");
+        return { correction: outcome };
+      }
       assertAssignmentOutcome(state.identity, outcome);
-      return { outcome };
+      return { outcome, correction: null };
+    })
+    .addNode("correct_original", async (state, config) => {
+      if (!adapter.correct || !state.correction || !state.submission ||
+          state.correction.rejectedReceiptRef !== state.submission.receiptRef ||
+          state.submissionKey !== logicalAssignmentKey(state.identity))
+        throw Error("Correction cannot replay without its source-bound original submission.");
+      const settled = await adapter.correct(state, config);
+      if ("assignmentKey" in settled) {
+        assertAssignmentOutcome(state.identity, settled);
+        return { outcome: settled, correction: null };
+      }
+      if (!settled.receiptRef || !settled.status)
+        throw Error("An assignment cannot checkpoint an unreceipted correction.");
+      return { submission: settled, submissionKey: logicalAssignmentKey(state.identity), correction: null };
     })
     .addNode("author_gate", async state => {
       if (state.outcome?.status !== "awaiting-author") return {};
@@ -176,8 +223,11 @@ export function createAssignmentLifecycleGraph(adapter: AssignmentAdapter) {
       state => state.outcome ? state.outcome.status === "awaiting-author" ? "author_gate" : END : "verify_original",
       ["author_gate", "verify_original", END])
     .addConditionalEdges("verify_original",
-      state => state.outcome?.status === "awaiting-author" ? "author_gate" : END,
-      ["author_gate", END])
+      state => state.correction ? "correct_original" : state.outcome?.status === "awaiting-author" ? "author_gate" : END,
+      ["correct_original", "author_gate", END])
+    .addConditionalEdges("correct_original",
+      state => state.outcome ? state.outcome.status === "awaiting-author" ? "author_gate" : END : "verify_original",
+      ["author_gate", "verify_original", END])
     .addEdge("author_gate", END)
     .compile({ checkpointer: true });
 }

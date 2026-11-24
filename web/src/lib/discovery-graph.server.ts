@@ -1,4 +1,5 @@
 import { Annotation, Command, END, interrupt, START, StateGraph, type StateSnapshot } from '@langchain/langgraph'
+import type { RunnableConfig } from '@langchain/core/runnables'
 import type { StudioDiscoveryCheckpoints } from '../persistence/discovery-checkpoints'
 
 export type DiscoveryOperation = Readonly<{
@@ -14,7 +15,7 @@ export type DiscoveryGate = Readonly<{
 }>
 type DiscoveryAdapter = {
   authenticate(operation: DiscoveryOperation, gate: DiscoveryGate | null): Promise<void>
-  execute(operation: DiscoveryOperation): Promise<DiscoveryGate>
+  execute(operation: DiscoveryOperation, config: RunnableConfig): Promise<DiscoveryGate>
 }
 const Channels = Annotation.Root({
   identity: Annotation<string>(),
@@ -28,10 +29,10 @@ const Channels = Annotation.Root({
 export function discoveryGraph(identity: string, saver: StudioDiscoveryCheckpoints,
   adapter: DiscoveryAdapter) {
   const graph = new StateGraph(Channels)
-    .addNode('execute_round', async state => {
+    .addNode('execute_round', async (state, config) => {
       if (state.identity !== identity) throw Error('Discovery execution identity changed')
       await adapter.authenticate(state.operation, null)
-      const gate = await adapter.execute(state.operation)
+      const gate = await adapter.execute(state.operation, config)
       if (gate.operationId !== state.operation.id) throw Error('Discovery result belongs to another operation')
       return { gate }
     })

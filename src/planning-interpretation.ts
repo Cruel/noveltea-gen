@@ -26,6 +26,15 @@ export class PlanningClarificationRequired extends Error {
   constructor(reason: string) { super(reason); this.name = 'PlanningClarificationRequired' }
 }
 
+/** A syntactically valid proposal misattributes author authority. This is
+ * substantive provenance failure, not a response-format error. */
+export class PlanningProvenanceError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'PlanningProvenanceError'
+  }
+}
+
 export const planningSourceKey = (source: PlanningSource): string =>
   source.kind === 'turn' ? 'turn:' + source.index : 'answer:' + source.setId + ':' + source.questionId
 const own = (v: unknown): v is Record<string, unknown> =>
@@ -43,7 +52,7 @@ export function resolvePlanningEvidence(raw: unknown, evidence: PlanningEvidence
     key = 'answer:' + raw.setId + ':' + raw.questionId
   else throw Error('Invalid planning source identity.')
   const bound = evidence.find(item => planningSourceKey(item.source) === key)
-  if (!bound) throw Error('Planning source is not a submitted author response.')
+  if (!bound) throw new PlanningProvenanceError('unsubmitted-source', 'Planning source is not a submitted author response.')
   return bound
 }
 
@@ -51,7 +60,7 @@ export function resolvePlanningEvidence(raw: unknown, evidence: PlanningEvidence
  * direction. Broad baseline grants are themselves explicit author answers. */
 export function resolveDelegatedDecision(raw: unknown, evidence: PlanningEvidence[], _statement: string) {
   const bound = resolvePlanningEvidence(raw, evidence)
-  if (!bound.delegated) throw Error('Studio decision lacks an author delegation.')
+  if (!bound.delegated) throw new PlanningProvenanceError('missing-delegation', 'Studio decision lacks an author delegation.')
   // Only the exact submitted, controller-authorized delegation grants source
   // permission. Relevance is assessed separately by an independent, read-only
   // semantic reviewer; no keywords can grant or deny authorization here.
@@ -182,12 +191,12 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
     seen.add(item.path)
     const bound = resolvePlanningEvidence(item.source, evidence)
     if ((item.basis === 'delegated') !== bound.delegated)
-      throw Error('Planning interpretation has no matching submitted author evidence or delegation.')
+      throw new PlanningProvenanceError('unmatched-authority', 'Planning interpretation has no matching submitted author evidence or delegation.')
     const relevantClarification = item.path.startsWith('planning.branching.')
       ? clarification(evidence, 'branch') : item.path.startsWith('planning.puzzle_')
         ? clarification(evidence, 'puzzle') : undefined
     if (relevantClarification && planningSourceKey(bound.source) !== planningSourceKey(relevantClarification.source))
-      throw Error('A resolved planning conflict must cite its later author clarification.')
+      throw new PlanningProvenanceError('superseded-source', 'A resolved planning conflict must cite its later author clarification.')
     // Exact provenance and basis remain deterministic. Whether this source's
     // meaning supports this dimension is assessed by the independent reviewer
     // before discovery can enter the approval boundary.
@@ -199,17 +208,17 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
         (!bound.selectedOption || typeof value !== 'string' ||
           bound.authorText.trim().toLowerCase().replace(/-/g, ' ') !==
           value.toLowerCase().replace(/-/g, ' ')))
-      throw Error('Model-derived planning cannot impersonate an explicit author choice.')
+      throw new PlanningProvenanceError('invented-explicit-choice', 'Model-derived planning cannot impersonate an explicit author choice.')
     if (item.basis === 'inferred' && bound.delegated)
-      throw Error('Delegation cannot masquerade as an author inference.')
+      throw new PlanningProvenanceError('delegation-as-inference', 'Delegation cannot masquerade as an author inference.')
     if (typeof value === 'object' && value !== null && !bound.delegated) {
       const numerals = bound.authorText.match(/\b\d+(?:\.\d+)?\b/g) ?? []
       const numeric = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|dozen|couple|few|several|hour|minute)\b/i.test(bound.authorText)
       if (!numerals.length && !numeric)
-        throw Error('Numeric planning estimates need an explicit quantitative source or delegation.')
+        throw new PlanningProvenanceError('missing-quantitative-source', 'Numeric planning estimates need an explicit quantitative source or delegation.')
       if (item.path.startsWith('planning.production.') && (value as { firmness?: string }).firmness === 'hard') {
         if (!/\b(?:hard|strict|maximum|max|at most|no more than|limit|cap|cannot exceed|must not exceed)\b/i.test(bound.authorText))
-          throw Error('A model cannot fabricate a hard author production limit.')
+          throw new PlanningProvenanceError('invented-hard-limit', 'A model cannot fabricate a hard author production limit.')
         const exactCap = /(?:at most|max(?:imum)?|limit(?:ed)? to|no more than|cap(?:ped)? at)\s+(\d+)\b/i.exec(bound.authorText)
         const statedCap = exactCap ? Number(exactCap[1]) : numerals.length === 1 ? Number(numerals[0]) : undefined
         if (statedCap !== undefined &&
