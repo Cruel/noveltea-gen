@@ -4392,9 +4392,11 @@ test("C04 Review strategy demands the original sealed failed Pi cycle before any
         ...cfg, interruptAfter: ["independent_assignment_review"],
       });
       assert.equal(stopped.status, "blocked");
-      assert.match(stopped.reason ?? "", /no independently passing corrective successor/i,
-        "A forged adapter-success return cannot discharge an uncorrected original Review");
-      assert.equal(correctionCalls, 1, "Only the selected original Review adapter is entered");
+      assert.match(stopped.reason ?? "", /original committed Pi writer identity/i,
+        "The checkpointed Review child must reject a fixture writer before dispatching a correction");
+      assert.equal(correctionCalls, 0, "A forged fixture writer cannot enter the old correction callback");
+      assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), point.commitSha);
+      assert.equal(stopped.recoveryLifecycle.discharged.length, 0);
       assert.equal(stopped.recoveryLifecycle.active?.id, admitted.recoveryLifecycle.active?.id);
     } finally {
       saver.db.close();

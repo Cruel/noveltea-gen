@@ -221,7 +221,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [writer, "subunitWriterResult", "f37d39dce1f50b1cb032b235712bd6e37ef55f1de8b7b3dc36b0b1ea0ab05e56"],
     [file, "subunitReviewTransitions", "34552a8f637d15a358c73c4b627cadea6460aa1a927d5ecb58c2c3514526b2c4"],
     [file, "subunitReviewStop", "715a0422597a2bd2b70c26baf5db85300ac0e66c7ff422e60da7c7e8b4c5cc1d"],
-    [file, "runInteractiveAssignmentChildren", "57ad4e10462ee0c13a3e8ade3d0526a778355c62f98850306fe90c38d969c785"],
+    [file, "runInteractiveAssignmentChildren", "fde7f450c5ffd43c862cf6d1f409dfe414b97c519af71f600519ce89e66f6900"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
     const body = helpers(source).get(name);

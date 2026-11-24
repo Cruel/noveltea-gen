@@ -232,7 +232,7 @@ test("authored validation failure remains restartable without rerunning the spec
   assert.equal(count(x.job.worktreeRoot, x.base), 0);
 });
 
-test("missing/corrupt original Pi transcript blocks rather than opening a new session", { skip: !available }, () => {
+test("An interrupted Architecture receipt without a checkpointed assignment blocks standalone replay", { skip: !available }, () => {
   const x = setup("pi-session");
   const completed = x.authored();
   const state = x.readReceipt();
@@ -241,15 +241,20 @@ test("missing/corrupt original Pi transcript blocks rather than opening a new se
   state.piSessionId = randomUUID();
   state.piSessionFile = join(dirname(x.job.worktreeRoot), "architecture-sessions", "missing.jsonl");
   x.saveReceipt(state);
-  assert.match(expectOk(x.cli("architecture", "inspect")).recovery.reason, /Cannot recover Pi session/);
+  assert.match(expectOk(x.cli("architecture", "inspect")).recovery.reason, /only the original checkpointed assignment/);
   const failed = x.cli("architecture", "run");
   assert.notEqual(failed.status, 0);
-  assert.match(failed.stderr, /Cannot recover Pi session/);
+  assert.match(failed.stderr, /only the original checkpointed assignment/);
   assert.equal(count(x.job.worktreeRoot, x.base), 1);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), completed.headSha);
+  assert.deepEqual(x.readReceipt(), state);
+  assert.equal(existsSync(state.piSessionFile), false);
   mkdirSync(dirname(state.piSessionFile), { recursive: true });
   writeFileSync(state.piSessionFile, "{not json}\n");
-  assert.match(expectOk(x.cli("architecture", "inspect")).recovery.reason, /Cannot recover Pi session/);
+  assert.match(expectOk(x.cli("architecture", "inspect")).recovery.reason, /only the original checkpointed assignment/);
+  assert.notEqual(x.cli("architecture", "run").status, 0);
+  assert.equal(readFileSync(state.piSessionFile, "utf8"), "{not json}\n");
+  assert.deepEqual(x.readReceipt(), state);
   assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), completed.headSha);
 });
 

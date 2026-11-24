@@ -31,6 +31,11 @@ const stageAdapters = {
   review: "runNarrativeReview",
 } as const satisfies Record<GenerationStage, string>;
 
+const dedicatedChildren = {
+  foundation: "runFoundationAssignmentChild",
+  architecture: "runArchitectureAssignmentChild",
+} as const;
+
 /** Original-operation assessment and authentic regression anchor for each
  * current graph node. C01 additionally fingerprints every return and throw. */
 const nodeChecks = {
@@ -76,6 +81,19 @@ function dispatchCases(): Record<string, string> {
   const file = ts.createSourceFile("generation.ts", source("src/generation.ts"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const found: Record<string, string> = {};
+  const functions = new Map<string, ts.FunctionDeclaration>();
+  let dispatchNode: ts.Node | undefined;
+  function collect(node: ts.Node): void {
+    if (ts.isFunctionDeclaration(node) && node.name) functions.set(node.name.text, node);
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "addNode" &&
+        ts.isStringLiteral(node.arguments[0]!) && node.arguments[0].text === "specialist_dispatch")
+      dispatchNode = node.arguments[1];
+    ts.forEachChild(node, collect);
+  }
+  collect(file);
+  assert.ok(dispatchNode, "Missing parent specialist dispatch node");
+  const parentDispatch = dispatchNode.getText(file);
   function visit(node: ts.Node): void {
     if (ts.isFunctionDeclaration(node) && node.name?.text === "dispatch") {
       const findSwitch = (child: ts.Node): void => {
@@ -92,7 +110,25 @@ function dispatchCases(): Record<string, string> {
             pending.push(clause.expression.text);
             if (!clause.statements.length) continue;
             const body = clause.statements.map(statement => statement.getText(file)).join(" ");
-            const handler = /\breturn\s+(run[A-Za-z]+Job|run[A-Za-z]+WorkItem|runNarrativeReview)\s*\(/.exec(body)?.[1];
+            let handler = /\breturn\s+(run[A-Za-z]+Job|run[A-Za-z]+WorkItem|runNarrativeReview)\s*\(/.exec(body)?.[1];
+            if (pending.length === 1 && Object.hasOwn(dedicatedChildren, pending[0]!)) {
+              const stage = pending[0] as keyof typeof dedicatedChildren;
+              const child = dedicatedChildren[stage];
+              assert.match(body, /throw Error\(.*checkpointed assignment child.*\)/,
+                stage + " must refuse the retired direct dispatcher");
+              assert.match(parentDispatch, new RegExp('if \\(s\\.active\\?\\.stage === "' +
+                stage + '".*\\)[\\s\\S]*?return await ' + child + '\\(s, config, reviewBoundary\\)'),
+                stage + " must enter its checkpointed child from the parent");
+              const declaration = functions.get(child);
+              assert.ok(declaration, "Missing original child " + child);
+              const childSource = declaration.getText(file);
+              const original = stageAdapters[stage];
+              assert.match(childSource, new RegExp('\\bawait ' + original + '\\('),
+                child + " must invoke the original specialist");
+              assert.match(childSource, /createAssignmentLifecycleGraph\(/);
+              assert.match(childSource, /round: \{ assignmentKey:/);
+              handler = original;
+            }
             assert.ok(handler, `Stage group ${pending.join(",")} no longer invokes its certified adapter`);
             for (const stage of pending) {
               assert.equal(found[stage], undefined, "Duplicate dispatch stage");

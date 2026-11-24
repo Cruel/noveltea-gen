@@ -15,8 +15,31 @@ import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
 import { readIndependentReview } from "../src/checkpoint-assurance.js";
 import { removeTestTree } from "./helpers.js";
 import { buildEventConsequenceProof, eventConsequenceProofDigest } from "../src/event-consequence-proof.js";
+import { createReviewRoundTransitions } from "../src/generation-review-round.js";
 
 const sha = "a".repeat(40);
+test("A claimed passing repair cannot discharge the original Review without an independently verified successor", async () => {
+  const successor = "b".repeat(40);
+  let verifications = 0;
+  const rounds = createReviewRoundTransitions({
+    originalHead: sha, originalReceipt: "foundation.json",
+    run: async command => {
+      assert.deepEqual(command, { phase: "verify", sourceSha: sha, successorSha: successor });
+      return { status: "passed", sourceSha: sha, successorSha: successor };
+    },
+    outcome: () => { throw Error("Unverified successor must not produce a terminal outcome"); },
+    verifySuccessor: async head => {
+      assert.equal(head, successor);
+      verifications++;
+      return false;
+    },
+  });
+  await assert.rejects(rounds.verify({
+    status: "repair-round", receiptRef: "repair:" + sha + ":" + successor, headSha: successor,
+  }), /independently passing successor/);
+  assert.equal(verifications, 1);
+});
+
 function git(cwd: string, ...args: string[]) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);

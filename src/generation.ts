@@ -2679,7 +2679,10 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     }
     if (settled.status !== "verified") throw Error("Interactive child cannot advance without verified disposition");
 
-    if (domain === "choice" && domains.length === 2 && (await inspectInteractiveUnit(job, milestone, domain))?.unit.phase === "committed")
+    // Inherited Choice has already crossed its original Review boundary.
+    // There is no local checkpoint for the parent to wait on in this fork.
+    if (domain === "choice" && domains.length === 2 && !settled.reviewRef?.startsWith("recovery-fork:") &&
+        (await inspectInteractiveUnit(job, milestone, domain))?.unit.phase === "committed")
       return { result: { status: "review-handoff", headSha: settled.headSha } };
     if (domain === domains.at(-1)) {
       const inspected = await runInteractiveWorkItem({ ...s.request, milestone,
