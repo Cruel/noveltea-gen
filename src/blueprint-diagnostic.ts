@@ -29,12 +29,12 @@ export interface BlueprintDiagnosis {
 }
 
 export function diagnosticTrigger(rounds: readonly ReviewRound[], stalled: number,
-  diagnosedCount = 0, lastDiagnosedRound = 0): DiagnosticTrigger | null {
+  lastDiagnosedRound = 0): DiagnosticTrigger | null {
   return sourceReviewDiagnosticTrigger(rounds.map(({ verdict }) => ({
     verdict: { status: verdict.status, findings: verdict.findings.map(finding => ({
       origin: "origin" in finding ? String(finding.origin) : undefined,
     })) },
-  })), stalled, diagnosedCount, lastDiagnosedRound);
+  })), stalled, lastDiagnosedRound);
 }
 
 export function diagnosticEvidence(cycleId: string, rounds: readonly ReviewRound[],

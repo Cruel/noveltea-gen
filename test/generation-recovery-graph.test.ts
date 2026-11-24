@@ -329,6 +329,20 @@ test("C02 production recovery wrapper prevents completion with an active or defe
     "a missing status patch must not preserve an earlier completed flag with pending recovery");
 });
 
+test("R14 obsolete inventory cannot execute a resumed node", async () => {
+  let effects = 0;
+  const dispatch = recoveryNode("specialist_dispatch", async () => {
+    effects++;
+    return { status: "running" };
+  });
+  const outcome = await dispatch({ ...empty(), request: { fixture: true },
+    inventory: { headSha: head, planVersion: 2, items: [] } } as never, {} as never);
+  assert.equal(outcome.status, "blocked");
+  assert.match(outcome.reason ?? "", /inventory/i);
+  assert.equal(outcome.recoveryLifecycle?.inspectionFences.length, 1);
+  assert.equal(effects, 0);
+});
+
 test("assessor without the original job cannot checkpoint a checked-HEAD decision", async () => {
   const admitted = await admit();
   let calls = 0;

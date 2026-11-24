@@ -59,6 +59,7 @@ test("#220 detection is based on actual nonproductive rounds, not fixed semantic
   assert.equal(milestoneDiagnosticTrigger([...rounds, round("four")], [3], 2), null);
   assert.equal(milestoneDiagnosticTrigger([...rounds, round("four"), round("five"), round("six")], [3], 2), "stagnation");
   assert.equal(milestoneDiagnosticTrigger(rounds, [1, 2], 3), null);
+  assert.equal(milestoneDiagnosticTrigger([...rounds, round("four")], [1, 2], 2), "stagnation");
   assert.equal(milestoneDiagnosticTrigger([round("one")], [], 2), null);
 });
 

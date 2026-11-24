@@ -60,7 +60,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:6,reconcile:1,throws:15",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
-  recoveryNode: "returns:24,status:18,throws:13",
+  recoveryNode: "returns:24,status:18,throws:14",
 };
 const operations = [
   "adaptive-admission",
@@ -258,6 +258,44 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     const actual = createHash("sha256")
       .update(printer.printNode(ts.EmitHint.Unspecified, body, source)).digest("hex");
     assert.equal(actual, expected, name + " changed: review R02 proof gates and contract");
+  }
+});
+
+// R14 extends the existing source gate to the Studio parent, its original
+// invocation/receipt adapter, and the external handoff. See the R14 inventory
+// in docs/recovery-exit-inventory.md for the disposition of each boundary.
+// Hash the bodies, not line numbers, to detect a new return, changed proof
+// predicate, alternate route, or new invocation inside the reviewed boundary.
+test("R14 Discovery and handoff retain reviewed source/effect gates", () => {
+  const reviewed = [
+    ["discovery-graph.server.ts", "discoveryGraph", "29b99596bb982d57721d7197b3975f9f0eb437428a6febf075a499107d4eca3a"],
+    ["onboarding-pi.server.ts", "realInference", "f96db670a6bb0e51ba7b6417d829175652af5bee2fe372a999e20fd076322e8e"],
+    ["onboarding-pi.server.ts", "openDiscoveryGraph", "af14f5a9776487a27f52a6fa457d700d4c51aa8bfdf582a4c2acc496e2100a26"],
+    ["onboarding-pi.server.ts", "settleInterruptedApproval", "6332d0af287a08423108d122c20d5da9503136454566a2a4a2a703aaa1f38412"],
+    ["onboarding-pi.server.ts", "reconcileDiscoveryGraph", "df459778be6135cdf996624df0019a2901d0230acdab3c051362f612f3d9dd54"],
+    ["onboarding-pi.server.ts", "onboardingPiRequest", "aef114c41b13b1cd51fc213b1036e10a2b2937d176b4d46f92319cd59f9d4cbb"],
+    ["onboarding-pi.server.ts", "assertApprovedPiFoundation", "a77d7692a88f4354a2f4e607bcf72fe5cd0e02b8d2fa7641082705919613cc2b"],
+    ["discovery-evidence.server.ts", "createDiscoveryEvidence", "d65530210581f739b02c85fa4d1363b0b0fc199d24073f79df84b3e9b6d3a91f"],
+    ["discovery-evidence.server.ts", "discoveryEvidence", "d957a619d6e7cec6bc5f0717fd7d1fc557e978f6e8339dae1d94f269a0452e7c"],
+    ["discovery-evidence.server.ts", "readDiscoveryResponse", "fc3f1111c465c11c35ff4efd664b831a3fa77c868364f2a2abd87298f7dc59ba"],
+    ["discovery-evidence.server.ts", "meterDiscoveryAttempts", "e9241e86534b4c7ba043c91d9dab9c5d019fb636f1077619a67d6651adf6dd9b"],
+    ["discovery-evidence.server.ts", "reopenDiscoveryPiReference", "34427e1be321ede94d803e8428a3958010e7d12faee592f9ef0717d58301e8dd"],
+    ["discovery-handoff-effects.server.ts", "readHandoffEffect", "16d73d0fd5e840f7d86598f21e890038ddf9266089106e9fb3ee14cbe6790dd7"],
+    ["discovery-handoff-effects.server.ts", "handoffEffects", "39b839219a60fdb75e1d81acdd574240229a34d50c7c00c885ca5dd595e03c08"],
+    ["story-approved-continuation.server.ts", "admitWholeApprovedStory", "0ed28dd4aa02a70f940436159292c0e6c09c7abe739ded84be0de16258beecee"],
+    ["story-approved-continuation.server.ts", "continueApprovedStoryChat", "096597e97a72aa19a8c5a9a2c77530f112232e282c0d2900abccb72f4b09851d"],
+    ["story-chat-discovery.server.ts", "storyChatDiscoveryRequest", "ba6213d9bb15cff30ead8d79d82321daa92088c83b26ff3abea82d0aa1ffcd3f"],
+    ["story-chat-discovery.server.ts", "beginStoryChatDiscovery", "fb515c5e6d2ef1631df02b785f8cd96a2cc7b7d1d20ae83f1be070e7417aacd7"],
+  ] as const;
+  const printer = ts.createPrinter({ removeComments: true });
+  for (const [path, name, expected] of reviewed) {
+    const source = ts.createSourceFile(path, readFileSync(resolve(root, "web/src/lib", path), "utf8"),
+      ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const body = helpers(source).get(name);
+    assert.ok(body, name + " must remain source-linked");
+    const actual = createHash("sha256")
+      .update(printer.printNode(ts.EmitHint.Unspecified, body, source)).digest("hex");
+    assert.equal(actual, expected, name + " changed: review R14 Discovery/handoff proof gates");
   }
 });
 

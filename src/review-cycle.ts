@@ -115,10 +115,12 @@ export function sourceReviewConvergence(
 export function sourceReviewDiagnosticTrigger(
   rounds: readonly { verdict: { status: "pass" | "revise"; findings: readonly { origin?: string }[] } }[],
   stalled: number,
-  diagnosed = 0,
   lastDiagnosedRound = 0,
 ): "stagnation" | "late-blockers" | "review-depth" | null {
-  if (rounds.at(-1)?.verdict.status !== "revise" || diagnosed >= 2) return null;
+  // A settled independent diagnosis starts a new assessment window, never
+  // a new assignment or semantic allowance. The same boundary cannot recur.
+  // The adapter authenticates any repeated-source stop and resource budget.
+  if (rounds.at(-1)?.verdict.status !== "revise") return null;
   const since = rounds.length - lastDiagnosedRound;
   if (since <= 0) return null;
   if (stalled >= 2 && (!lastDiagnosedRound || since >= 2))

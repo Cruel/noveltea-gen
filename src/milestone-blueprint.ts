@@ -1323,12 +1323,6 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       // that turn before the unchanged rounds can trigger another stop.
       const continuationDue = receipt.diagnostics?.at(-1)?.diagnosis.action === "continue" &&
         receipt.diagnostics.at(-1)!.round === receipt.rounds.length - 1;
-      if (!continuationDue && (trigger || stalled >= 2) && (receipt.diagnostics?.length ?? 0) >= 2) {
-        receipt.phase = "stopped";
-        receipt.stopReason = "Independent Milestone diagnostic allowance exhausted; unresolved negative review requires author-guided escalation.";
-        await persist(file, receipt);
-        throw Error(receipt.stopReason);
-      }
       if (trigger && !continuationDue) {
         const last = receipt.rounds.at(-1)!;
         const fingerprint = milestoneDiagnosticFingerprint(binding.reviewCycleId,

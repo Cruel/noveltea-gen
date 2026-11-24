@@ -619,6 +619,17 @@ export async function verifyCompositionReviewPin(
   return sealedReview;
 }
 
+function compositionDiagnosticEvidence(cycleId: string, trigger: string,
+  sources: Record<string, string>, history: CompositionReviewRound[]) {
+  return hash(JSON.stringify({
+    cycleId, trigger,
+    sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)])),
+    history: history.map(r => ({ verdict: r.verdict,
+      sources: Object.fromEntries(Object.entries(r.sources).map(([p, v]) => [p, hash(v)])),
+    })),
+  }));
+}
+
 /** Fresh independent Diagnosis is deliberately unable to approve prose. */
 async function diagnoseComposition(
   job: JobStartResult,
@@ -635,17 +646,7 @@ async function diagnoseComposition(
   history: CompositionReviewRound[],
   trigger: string,
 ) {
-  const evidenceDigest = hash(
-    JSON.stringify({
-      cycleId,
-      trigger,
-      sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)])),
-      history: history.map((r) => ({
-        verdict: r.verdict,
-        sources: Object.fromEntries(Object.entries(r.sources).map(([p, v]) => [p, hash(v)])),
-      })),
-    }),
-  );
+  const evidenceDigest = compositionDiagnosticEvidence(cycleId, trigger, sources, history);
   const file = join(reviewDirectory(job, cycleId), "diagnostic-" + history.length + ".json");
   const { session, project, pinned, context } = await createSession(
     job,
@@ -821,7 +822,8 @@ export async function createCompositionReviewCycle(
     const history: CompositionReviewRound[] = [];
     let stalled = 0;
     let previousDigest: string | null = null;
-    let diagnosisCount = 0;
+    let lastDiagnosedRound = 0;
+    const diagnosedSources = new Set<string>();
     let lastReceipt: CompositionReviewReceipt | undefined;
     let lastProductive = false;
     const projection = (receipt: CompositionReviewReceipt) => ({
@@ -854,19 +856,23 @@ export async function createCompositionReviewCycle(
         history.push({ sources: receipt.sourceText, verdict: verified });
         previousDigest = hash(JSON.stringify(receipt));
         lastReceipt = receipt;
-        const trigger = sourceReviewDiagnosticTrigger(history, stalled, diagnosisCount);
-        if (trigger && !(trigger === "review-depth" && history.length < 5 + diagnosisCount * 4)) {
+        const trigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
+        if (trigger) {
           const diagnosticPath = join(reviewDirectory(job, cycleId), "diagnostic-" + history.length + ".json");
           if (!existsSync(diagnosticPath)) throw Error("Original Composition diagnostic requires reconciliation");
           const saved = JSON.parse(await readFile(diagnosticPath, "utf8"));
           const bytes = await reviewerTranscript(job, saved.diagnostic);
           if (saved.schema !== "noveltea-composition-diagnostic-receipt/v1" || saved.cycleId !== cycleId ||
-              saved.trigger !== trigger || saved.writer.id !== writer.id || saved.reviewer.id !== reviewer.id ||
+              saved.trigger !== trigger || saved.evidenceDigest !== compositionDiagnosticEvidence(cycleId, trigger, receipt.sourceText, history) ||
+              saved.writer.id !== writer.id || saved.reviewer.id !== reviewer.id ||
               hash(bytes.subarray(0, saved.transcriptBytes)) !== saved.transcriptDigest ||
               JSON.stringify(transcriptReviewVerdict(bytes.subarray(0, saved.transcriptBytes))) !== JSON.stringify(saved.diagnosis) ||
               saved.diagnosis.action !== "continue")
             throw Error("Original Composition diagnostic is not a settled continuation");
-          diagnosisCount++; stalled = 0;
+          const sourceDigest = hash(JSON.stringify(receipt.sourceText));
+          if (diagnosedSources.has(sourceDigest)) throw Error("Repeated Composition diagnostic source.");
+          diagnosedSources.add(sourceDigest);
+          lastDiagnosedRound = history.length; stalled = 0;
         }
       }
       if (lastReceipt && transcript.length !== lastReceipt.transcriptBytes ||
@@ -1036,10 +1042,11 @@ export async function createCompositionReviewCycle(
         previousDigest = hash(JSON.stringify(receipt));
         history.push({ sources, verdict });
         lastReceipt = receipt;
-        const candidate = sourceReviewDiagnosticTrigger(history, stalled, diagnosisCount);
-        const trigger =
-          candidate === "review-depth" && history.length < 5 + diagnosisCount * 4 ? null : candidate;
+        const trigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
         if (trigger) {
+          const sourceDigest = hash(JSON.stringify(sources));
+          if (diagnosedSources.has(sourceDigest))
+            throw Error("Composition diagnosis already assessed this nonconverging source.");
           const { diagnosis } = await diagnoseComposition(
             job,
             snapshot,
@@ -1055,7 +1062,8 @@ export async function createCompositionReviewCycle(
             history,
             trigger,
           );
-          diagnosisCount++;
+          diagnosedSources.add(sourceDigest);
+          lastDiagnosedRound = history.length;
           if (diagnosis.action !== "continue")
             throw Error(
               "Composition Diagnostic review requires author-guided " +
@@ -1067,10 +1075,6 @@ export async function createCompositionReviewCycle(
                 "; a diagnosis cannot approve or expand a prose assignment.",
             );
           stalled = 0;
-        } else if (stalled >= 2 && diagnosisCount >= 2) {
-          throw Error(
-            "Composition Review cycle remains unproductive after bounded diagnostics; author reconciliation required.",
-          );
         }
         return {
           review: {

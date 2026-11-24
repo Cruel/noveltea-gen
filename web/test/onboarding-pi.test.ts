@@ -286,10 +286,10 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       else process.env.NT_DISCOVERY_EVIDENCE_DIR = previousEvidenceRoot
     }
 
-    // Three independently rejected provenance drafts require a fresh
-    // diagnosis; its advice cannot waive the original validator.
-    {
-      const workspace = 'projects/provenance-assessment'
+    // Distinct rejected sources may need multiple diagnoses, but the same
+    // diagnosed source must not be probed forever or become an approval.
+    for (const repeated of [false, true]) {
+      const workspace = repeated ? 'projects/provenance-repeated-source' : 'projects/provenance-assessment'
       let writers = 0, diagnoses = 0, reviews = 0
       const writer: DiscoveryInference = async (state, prompt, role) => {
         if (role === 'provenance-diagnostic') {
@@ -301,10 +301,12 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         if (state.turns.length === 1) return structuredQuestions([
           { id: 'ending', kind: 'yes-no', question: 'Should the ending be hopeful?', allowStudioDecision: true },
         ])
-        if (writers === 5) assert.match(prompt, /Remove the fabricated author citation/)
+        if ([5, 7, 9].includes(writers)) assert.match(prompt, /Remove the fabricated author citation/)
         return JSON.stringify({ ...JSON.parse(proposed), foundation: {
           ...JSON.parse(proposed).foundation, decisions: [{
-            statement: 'A hopeful ending', authority: writers < 5 ? 'user-protected' : 'delegated',
+            statement: repeated ? 'A hopeful ending, unchanged invalid draft' :
+              writers < 9 ? 'A hopeful ending, draft ' + writers : 'A hopeful ending',
+            authority: writers < 9 ? 'user-protected' : 'delegated',
             source: { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'ending' },
           }] } })
       }
@@ -321,11 +323,21 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         setId: qs.id, setRevision: qs.revision,
         responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
       }, own, url, writer, workspace, review)
-      assert.equal(result.status, 200, JSON.stringify(result.body))
-      assert.equal(result.body.session.phase, 'proposed')
-      assert.equal(writers, 5)
-      assert.equal(diagnoses, 1)
-      assert.equal(reviews, 1)
+      if (repeated) {
+        assert.equal(result.status, 503, JSON.stringify(result.body))
+        assert.equal(writers, 6)
+        assert.equal(diagnoses, 1, 'an unchanged diagnosed source cannot mint a new diagnostic')
+        assert.equal(reviews, 0)
+        const saved = JSON.parse((await store.persistence.onboarding.conversation(
+          alice.id, repo, workspace))!.state)
+        assert.equal(saved.recovery.reason, 'nonconverging')
+      } else {
+        assert.equal(result.status, 200, JSON.stringify(result.body))
+        assert.equal(result.body.session.phase, 'proposed')
+        assert.equal(writers, 9)
+        assert.equal(diagnoses, 3, 'new nonproductive source boundaries must be assessed rather than stopped by a local count')
+        assert.equal(reviews, 1)
+      }
     }
     // A reviewer flipping its verdict for unchanged source evidence cannot
     // manufacture a passing proposal, even if a diagnostic agrees with it.

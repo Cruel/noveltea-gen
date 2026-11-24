@@ -820,14 +820,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.equal(pathStarted.state, 'discovery')
     const pathQuestions = (await req(storyIds[5]!, pathTurnId, 'GET')).body.session
     let pathResponses = 0
-    const repaired = await storyChatDiscoveryRequest(auth, store,
-      new Request(url + '/api/story-chat-discovery', { method: 'POST',
-        headers: { cookie: aliceCookie, origin: url },
-        body: JSON.stringify({ action: 'answer', revision: pathQuestions.revision,
-          setId: pathQuestions.questions.id, setRevision: pathQuestions.questions.revision,
-          responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
-        }),
-      }), url, storyIds[5]!, pathTurnId, withFixtureSemanticReview(async (state, instructions) => {
+    const pathTransport = withFixtureSemanticReview(async (state, instructions) => {
         pathResponses++
         const next = JSON.parse(proposalFor(state))
         if (pathResponses === 1) {
@@ -839,9 +832,45 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
           assert.match(instructions, /planning.production.illustrated_backgrounds/)
         }
         return JSON.stringify(next)
-      }))
-    assert.equal(repaired.status, 200)
-    assert.equal(pathResponses, 2, 'Discovery repairs an exact schema error within its bounded correction')
+      })
+    const pathRequest = (body: unknown) => storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(body),
+      }), url, storyIds[5]!, pathTurnId, pathTransport)
+    const pathWorkspace = 'story-chat,' + storyIds[5] + ',' + pathTurnId
+    let childEnded = false
+    // Lose the parent CAS after the corrected child and independent Review
+    // have completed. Recovery must use the sealed responses, not call Pi.
+    persistence.saveConversation = async (...args: Parameters<typeof originalSave>) => {
+      const state = args[2] === pathWorkspace ? JSON.parse(args[4]) : null
+      if (state?.graphOperation?.status === 'settled' && state.phase === 'proposed')
+        childEnded = true
+      if (childEnded && state) throw Error('synthetic worker exit after Discovery child END')
+      return originalSave(...args)
+    }
+    try {
+      const interrupted = await pathRequest({ action: 'answer', revision: pathQuestions.revision,
+        setId: pathQuestions.questions.id, setRevision: pathQuestions.questions.revision,
+        responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
+      })
+      assert.equal(interrupted.status, 503)
+      assert.ok(childEnded)
+      assert.equal(pathResponses, 2)
+    } finally { persistence.saveConversation = originalSave }
+    const pathRow = (await persistence.conversation(alice, repositoryId, pathWorkspace))!
+    const pathState = JSON.parse(pathRow.state)
+    assert.equal(pathState.graphOperation.status, 'claimed')
+    assert.ok(pathState.activeAttempts.length >= 2)
+    assert.ok(pathState.activeAttempts.every((attempt: any) => attempt.responseDigest))
+    assert.equal(await originalSave(alice, repositoryId, pathWorkspace, pathRow.revision + 1,
+      JSON.stringify({ ...pathState, revision: pathRow.revision + 1, startedAt: Date.now() - 11 * 60_000 }),
+      pathRow.revision, 'now'), true)
+    const pathReconciled = await pathRequest({ action: 'reconcile', revision: pathRow.revision + 1 })
+    assert.equal(pathReconciled.status, 200, await pathReconciled.clone().text())
+    const pathBlocked = (await pathReconciled.json() as any).session
+    const repaired = await pathRequest({ action: 'retry', revision: pathBlocked.revision })
+    assert.equal(repaired.status, 200, await repaired.clone().text())
+    assert.equal(pathResponses, 2, 'post-END recovery must not repeat either writer response')
     const repairedSession = (await repaired.json() as any).session
     assert.equal(repairedSession.phase, 'proposed')
     assert.ok(repairedSession.proposal.interpretations.every((item: { path: string }) =>

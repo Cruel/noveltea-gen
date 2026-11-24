@@ -63,10 +63,10 @@ test("diagnostic triggers detect stagnation, late goalposts and soft depth witho
   assert.equal(diagnosticTrigger([round, round, round], 2), "stagnation");
   assert.equal(diagnosticTrigger([round, round, current, introduced], 0), "late-blockers");
   assert.equal(diagnosticTrigger([round, round, round, round, round], 0), "review-depth");
-  assert.equal(diagnosticTrigger([round, round, round, round, round], 0, 2), null);
-  assert.equal(diagnosticTrigger([round, round, round, round, round, round], 0, 1, 5), null);
-  assert.equal(diagnosticTrigger(Array(10).fill(round), 0, 1, 5), "review-depth");
-  assert.equal(diagnosticTrigger([round, round, round], 2, 2), null);
+  assert.equal(diagnosticTrigger(Array(15).fill(round), 0, 10), "review-depth");
+  assert.equal(diagnosticTrigger([round, round, round, round, round, round], 0, 5), null);
+  assert.equal(diagnosticTrigger(Array(10).fill(round), 0, 5), "review-depth");
+  assert.equal(diagnosticTrigger(Array(7).fill(round), 2, 5), "stagnation");
   assert.equal(diagnosticTrigger([{ ...round, verdict: {
     ...rejected, status: "pass", findings: [],
   } }], 2), null);

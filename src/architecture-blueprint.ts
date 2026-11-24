@@ -602,7 +602,6 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
   let previousTranscriptBytes = 0;
   const priorRounds: ReviewRound[] = [];
   let stalled = 0;
-  let diagnosisCount = 0;
   let lastDiagnosedRound = 0;
   const seenCases = new Set<string>();
   let activeReviewer: { id: string; file: string } | undefined;
@@ -671,13 +670,12 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
     if (persistent) {
       const diagnosis = await readDiagnosis(job, plan, i, cycleId, rounds, sources,
         reviewSession.sessionId, record.plannerSessionId);
-      const expectedTrigger = diagnosticTrigger(rounds, stalled, diagnosisCount, lastDiagnosedRound);
+      const expectedTrigger = diagnosticTrigger(rounds, stalled, lastDiagnosedRound);
       if (diagnosis) {
         if (!expectedTrigger || diagnosis.trigger !== expectedTrigger ||
             seenCases.has(diagnosis.caseFingerprint))
           throw Error("Blueprint diagnosis was repeated or not requested by the verified Review cycle.");
         seenCases.add(diagnosis.caseFingerprint);
-        diagnosisCount++;
         lastDiagnosedRound = rounds.length;
         if (["split", "escalate"].includes(diagnosis.diagnosis.action))
           throw Error("Historical Blueprint diagnostic escalated; no automatic review continuation is authorized.");
@@ -1928,16 +1926,13 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
               ...(version ? { patch: sourceChanges } : {}) }];
         const diagnosedRounds = rounds.slice(0, -1).flatMap((_, i) =>
           existsSync(diagnosticPath(job, plan.version, i)) ? [i + 1] : []);
-        const previouslyDiagnosed = diagnosedRounds.length;
         const sealedDiagnosis = resumingDiagnosis &&
           existsSync(diagnosticPath(job, plan.version, version))
           ? await readDiagnosis(job, plan, version, cycleId, rounds, sources,
               reviewer.session.sessionId, planner.session.sessionId)
           : null;
         const trigger = sealedDiagnosis?.trigger ??
-          diagnosticTrigger(rounds, convergence.stalled, previouslyDiagnosed, diagnosedRounds.at(-1) ?? 0);
-        if (convergence.stalled >= 2 && previouslyDiagnosed >= 2)
-          throw Error("Diagnostic review requires author-guided escalation after repeated stagnation.");
+          diagnosticTrigger(rounds, convergence.stalled, diagnosedRounds.at(-1) ?? 0);
         if (trigger) {
           let diagnosis: BlueprintDiagnosticReceipt;
           try {

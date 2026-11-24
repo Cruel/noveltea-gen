@@ -57,10 +57,9 @@ export async function preflightCompositionBoundary(
   milestoneId: string, planVersion: number,
 ): Promise<CompositionBoundaryDecision> {
   const refuse = (reason: string): CompositionBoundaryDecision => ({ kind: "refuse", reason });
-  // Existing pre-cutover Turns did not persist the modern objective pin.
-  // No additional write authority is granted for those runs: the original
-  // Composition, Event, and Interactive validators remain authoritative.
-  if (!request.turnPlanDigest) return { kind: "ready" };
+  // Missing pre-cutover authority is not proof of readiness, even if a
+  // caller reaches this boundary outside the Generation parent.
+  if (!request.turnPlanDigest) return refuse("Composition prerequisite requires an authenticated current-format Turn.");
   const turn = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
   if (!turn || turn.kind !== "full-story" || turn.objective?.breadth !== "whole-story" ||
       turn.objective.deliveryDepth !== "composition" ||

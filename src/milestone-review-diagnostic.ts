@@ -40,7 +40,7 @@ export function milestoneDiagnosticTrigger(
   // fabricate it. The common policy still owns stagnation and depth.
   const trigger = sourceReviewDiagnosticTrigger(rounds.map(({ review }) => ({
     verdict: { status: review.status, findings: [] },
-  })), rounds.length >= 3 ? stalled : 0, diagnosedAt.length, diagnosedAt.at(-1) ?? 0);
+  })), rounds.length >= 3 ? stalled : 0, diagnosedAt.at(-1) ?? 0);
   return trigger === "late-blockers" ? null : trigger;
 }
 

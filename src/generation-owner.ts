@@ -25,21 +25,9 @@ function canonicalRequestJson(request: GenerationRequest): string {
 }
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const sha = (request: GenerationRequest) => digest(canonicalRequestJson(request));
-// Existing receipts used the original insertion order. Accept those only for
-// the exact byte-identical legacy request; never reinterpret a preexisting
-// receipt as permission to replay an interrupted writer.
-const legacySha = (request: GenerationRequest) => digest(JSON.stringify(request));
-// Pre-cutover owner receipts could have been created just before a Studio
-// admission crashed, when orchestrationPolicy was not part of the request.
-// Accept that *one field addition* only; every original author/model/scope
-// field and the Thread owner must still match exactly. Never treat two
-// different recorded policies as equivalent or rewrite the original receipt.
-const matches = (saved: string, request: GenerationRequest) => {
-  if (saved === sha(request) || saved === legacySha(request)) return true;
-  if (request.orchestrationPolicy === undefined) return false;
-  const { orchestrationPolicy: _policy, ...previous } = request;
-  return saved === sha(previous) || saved === legacySha(previous);
-};
+// Historical receipts remain forensic evidence, not executable ownership.
+// Only an exact canonical current request can reclaim its original writer.
+const matches = (saved: string, request: GenerationRequest) => saved === sha(request);
 
 export const sameGenerationRequest = (left: GenerationRequest, right: GenerationRequest): boolean =>
   canonicalRequestJson(left) === canonicalRequestJson(right);

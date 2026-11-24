@@ -23,7 +23,7 @@ const plan = (): Plan => ({ version: 1, contract: { scope: { kind: "full-story",
     targetIds: ["milestone.discovery", "milestone.choice"],
   }] });
 function inventory(): GenerationInventory {
-  return { version: 1, planVersion: 1, headSha: head, rationale: "Native Story",
+  return { version: 1, planVersion: 1, headSha: head, invalidationVersion: 1, rationale: "Native Story",
     items: [work("foundation", "foundation", [], "verified"),
       work("architecture", "architecture", ["foundation"], "verified"),
       work("foundations", "foundations", ["architecture"], "verified"),

@@ -28,7 +28,7 @@ const item = (id: string, dependencies: string[], status: ExecutionItem["status"
     planVersion: 1, status, ...(sha ? { verifiedSha: sha } : {}),
   });
 const inventory = (): GenerationInventory => ({
-  version: 1, planVersion: 1, headSha: head, rationale: "Native verified input",
+  version: 1, planVersion: 1, headSha: head, invalidationVersion: 1, rationale: "Native verified input",
   items: [
     item("foundation", [], "verified", head),
     item("architecture", ["foundation"], "verified", head),
@@ -191,18 +191,17 @@ test("C08 persisted causal invalidation is typed; changed display wording cannot
     "unauthenticated prose must never create a causal invalidation");
 
   const oldCheckpoint = structuredClone(prior);
+  delete oldCheckpoint.invalidationVersion;
   const oldItem = oldCheckpoint.items.find(i => i.id === nia.id)!;
   oldItem.status = "blocked";
   oldItem.blockingReason = "Legacy checkpoint with unknown blocked reason";
   delete oldItem.invalidation;
   delete oldItem.verifiedSha;
   const sameHead = structuredClone(prior);
-  invalidateChangedVerifiedPrerequisites(sameHead.items, oldCheckpoint);
-  assert.equal(sameHead.items.find(i => i.id === nia.id)?.invalidation, "legacy-unclassified");
-  assert.equal(sameHead.items.find(i => i.id === nia.id)?.status, "blocked",
-    "a previously blocked source without typed proof cannot regain assurance at unchanged HEAD");
-  assert.equal(sameHead.items.find(i => i.id === "review")?.status, "blocked",
-    "legacy unresolved source cannot confer dependent Review completion");
+  const preserved = structuredClone(oldCheckpoint);
+  assert.throws(() => invalidateChangedVerifiedPrerequisites(sameHead.items, oldCheckpoint),
+    /obsolete.*inventory/i);
+  assert.deepEqual(oldCheckpoint, preserved, "obsolete inventory remains available for inspection");
 
   const modern = structuredClone(prior);
   modern.invalidationVersion = 1;

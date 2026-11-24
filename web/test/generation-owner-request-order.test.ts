@@ -70,7 +70,7 @@ test('one graph request may reorder JSON keys but never acquire a second writer'
   }
 })
 
-test('pre-cutover owner receipt can adopt only its exact request with the new explicit method policy', async () => {
+test('pre-cutover owner receipt cannot adopt a new explicit method policy', async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'nt-owner-policy-migration-'))
   const job = { stateDir, jobId: pinned.job } as JobStartResult
   const thread = 'pinned:generation:web'
@@ -78,8 +78,8 @@ test('pre-cutover owner receipt can adopt only its exact request with the new ex
     await claimServerGeneration(job, thread, pinned)
     const original = readFileSync(join(stateDir, 'generation-server-owner.json'), 'utf8')
     const explicit: GenerationRequest = { ...pinned, orchestrationPolicy: 'explicit' }
-    await assertServerClaimPermitted(job, thread, explicit)
-    await claimServerGeneration(job, thread, explicit)
+    await assert.rejects(() => assertServerClaimPermitted(job, thread, explicit), /conflicts/)
+    await assert.rejects(() => claimServerGeneration(job, thread, explicit), /another thread/)
     assert.equal(readFileSync(join(stateDir, 'generation-server-owner.json'), 'utf8'), original)
     await assert.rejects(() => assertServerClaimPermitted(job, thread, {
       ...explicit, task: 'Different objective',
@@ -106,7 +106,7 @@ test('new explicit-policy owner receipt rejects a changed orchestration policy',
   }
 })
 
-test('existing byte-order owner receipts remain inspectable without broadening admission', async () => {
+test('historical byte-order owner receipts are preserved but cannot authorize execution', async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'nt-owner-legacy-'))
   const job = { stateDir, jobId: pinned.job } as JobStartResult
   const thread = 'pinned:generation:web'
@@ -116,11 +116,11 @@ test('existing byte-order owner receipts remain inspectable without broadening a
       schema: 'noveltea-generation-owner/v1', jobId: pinned.job,
       threadId: thread, requestSha256: oldDigest,
     }))
-    await assertServerClaimPermitted(job, thread, pinned)
-    await claimServerGeneration(job, thread, pinned)
-    if (oldDigest !== createHash('sha256').update(JSON.stringify(graphRequest)).digest('hex')) {
-      await assert.rejects(() => claimServerGeneration(job, thread, graphRequest), /another thread/)
-    }
+    const original = readFileSync(join(stateDir, 'generation-server-owner.json'), 'utf8')
+    await assert.rejects(() => assertServerClaimPermitted(job, thread, pinned), /conflicts/)
+    await assert.rejects(() => claimServerGeneration(job, thread, pinned), /another thread/)
+    await assert.rejects(() => claimServerGeneration(job, thread, graphRequest), /another thread/)
+    assert.equal(readFileSync(join(stateDir, 'generation-server-owner.json'), 'utf8'), original)
     await assert.rejects(() => assertServerClaimPermitted(job, thread,
       { ...pinned, task: 'Changed task' }), /conflicts/)
   } finally {

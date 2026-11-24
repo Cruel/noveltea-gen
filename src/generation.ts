@@ -2563,6 +2563,8 @@ export function recoveryNode(
     // child/parent task resumed directly from SQLite rather than via START.
     try {
       if (!state.request) throw Error("Missing Generation request.");
+      if (state.inventory && state.inventory.invalidationVersion !== 1)
+        throw Error("Obsolete Generation inventory cannot authorize execution.");
       if (state.request.fixture !== true || state.request.turnPlanDigest !== undefined ||
           state.request.orchestrationPolicy !== undefined &&
           state.request.orchestrationPolicy !== "explicit" && state.request.orchestrationPolicy !== "fixture-test")

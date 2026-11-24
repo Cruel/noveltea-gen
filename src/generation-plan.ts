@@ -23,14 +23,14 @@ export interface ExecutionItem extends WorkItem {
    * Human-readable blockingReason is never controller authority. A previously
    * blocked checkpoint without this field is conservatively unclassified. */
   invalidation?: "causal-new-edge" | "dependent-revalidation" |
-    "omission-invalidated" | "legacy-unclassified";
+    "omission-invalidated";
   /** Fulfilled by a reviewed, source-bound omission rather than a new writer. */
   omission?: { reason: string; evidence: string; reviewerSession: string };
 }
 export interface GenerationInventory {
   version: number; planVersion: number | null; headSha: string;
-  /** A current-format inventory explicitly emits typed invalidation causes.
-   * Only older checkpoints without this marker require conservative fallback. */
+  /** Current-format inventories carry typed invalidation causes. Historical
+   * checkpoints without this marker may be inspected but never reconciled. */
   invalidationVersion?: 1;
   items: ExecutionItem[]; audit?: ScopeAudit;
   rationale: string;
@@ -42,20 +42,12 @@ export interface GenerationInventory {
 export function invalidateChangedVerifiedPrerequisites(
   items: ExecutionItem[], previous?: GenerationInventory | null,
 ): void {
+  if (previous && previous.invalidationVersion !== 1)
+    throw Error("Obsolete Generation inventory cannot be reconciled; inspect the original checkpoint and start a current Turn.");
   for (const item of items) {
     const prior = previous?.items.find(other => other.id === item.id);
     if (item.status !== "verified") continue;
-    // A checkpoint written before this typed field cannot be promoted by
-    // parsing its diagnostic message. At an unchanged original commit the
-    // safest disposition is to preserve its block for explicit review.
-    if (previous?.invalidationVersion !== 1 &&
-        prior?.status === "blocked" && !prior.invalidation &&
-        item.verifiedSha === previous?.headSha) {
-      item.status = "blocked";
-      item.invalidation = "legacy-unclassified";
-      item.blockingReason = "Original blocked checkpoint lacks a typed invalidation proof; " +
-        "inspect the preserved source and review before restoring assurance.";
-    } else if (prior?.invalidation === "causal-new-edge" ||
+    if (prior?.invalidation === "causal-new-edge" ||
         (prior?.status === "verified" &&
           item.dependencies.some(dependency => !prior.dependencies.includes(dependency)))) {
       item.status = "blocked";
@@ -234,7 +226,7 @@ export function reconcileInventory(plan: Plan | undefined, validation: Validatio
     if (blocked) { item.status = "blocked"; item.blockingReason = "Blocked dependency: " + blocked; }
   }
   const fingerprint = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-  const changed = !previous || previous.invalidationVersion !== 1 || previous.headSha !== headSha ||
+  const changed = !previous || previous.headSha !== headSha ||
     previous.planVersion !== (plan?.version ?? null) ||
     fingerprint(previous.items) !== fingerprint(items);
   return { version: (previous?.version ?? 0) + (changed ? 1 : 0), planVersion: plan?.version ?? null,

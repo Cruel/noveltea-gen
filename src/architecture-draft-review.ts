@@ -479,8 +479,8 @@ export async function createArchitectureDraftReviewCycle(
     };
     const history: ArchitectureDraftRound[] = [];
     let stalled = 0;
-    let diagnosticsUsed = 0;
     let lastDiagnosedRound = 0;
+    const diagnosedSources = new Set<string>();
     let lastDigest: string | null = null;
     let lastPin: ArchitectureDraftReviewPin | undefined;
 
@@ -681,15 +681,11 @@ export async function createArchitectureDraftReviewCycle(
         lastDigest = sha(receipt);
         history.push({ sources, verdict });
         lastPin = verdict.status === "pass" ? { cycleId, round, receiptDigest: lastDigest } : undefined;
-        const diagnosticTrigger = sourceReviewDiagnosticTrigger(history, stalled,
-          diagnosticsUsed, lastDiagnosedRound);
+        const diagnosticTrigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
         return { verdict, convergence, pin: lastPin, diagnosticTrigger };
       },
       async diagnose() {
-        if (diagnosticsUsed >= 2)
-          throw Error("Architecture review exhausted bounded independent diagnostic reassessment.");
-        const trigger = sourceReviewDiagnosticTrigger(history, stalled,
-          diagnosticsUsed, lastDiagnosedRound);
+        const trigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
         if (!trigger)
           throw Error("Architecture diagnosis requires a shared reassessment trigger on sealed negative reviews.");
         const round = history.length - 1;
@@ -704,6 +700,9 @@ export async function createArchitectureDraftReviewCycle(
             sha(await sourceDraft(job, paths)) !== sha(history.at(-1)!.sources) ||
             (await openSkillSnapshot(snapshot.id)) !== snapshot.path)
           throw Error("Architecture diagnosis cannot reassess altered source or reviewer lineage.");
+        const sourceDigest = sha(history.at(-1)!.sources);
+        if (diagnosedSources.has(sourceDigest))
+          throw Error("Architecture diagnosis already assessed this nonconverging source.");
         const stepId = step + ":diagnostic:" + round;
         const diagnosticContext = await preparePiContext(job, project, {
           group: stepId, step: stepId, paths: [], snapshot: snapshot.id,
@@ -781,7 +780,7 @@ export async function createArchitectureDraftReviewCycle(
             transcriptBytes: bytes.length,
             transcriptDigest: sha(bytes.toString("utf8")),
           }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-          diagnosticsUsed++;
+          diagnosedSources.add(sourceDigest);
           lastDiagnosedRound = history.length;
           if (diagnosis.action === "continue") stalled = 0;
           return diagnosis;
