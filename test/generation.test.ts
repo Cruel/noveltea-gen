@@ -5014,7 +5014,7 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
   }
 });
 
-test("R05 World metadata and independent Review correction resume the original Thread before Character", { skip: !available, timeout: 120_000 }, async () => {
+test("R05 World and Character metadata and independent Review corrections resume the original Thread in order", { skip: !available, timeout: 120_000 }, async () => {
   const f = setup("r05-world-review");
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   saveFixtureTurn(f.job, contract, f.start[3]!, ["Keep the original archive mystery objective."]);
@@ -5034,6 +5034,13 @@ test("R05 World metadata and independent Review correction resume the original T
     type: "toolCall" as const, name: "write", id, arguments: { path, content },
   });
   const manifest = { modifiedRecords: paths, architecturalConflicts: [], laterObligations: [] };
+  const characterPaths = ["characters/ada.md", "characters/neri.md", "relationships/ada-neri.md", "arcs/truth.md"];
+  const record = (type: string, id: string, fields: string, body: string) =>
+    `---\nschema: '0.1'\ntype: ${type}\nid: ${type}.${id}\ntitle: ${id}\nstatus: draft\ndecisions: []\n${fields}\n---\n\n${body}\n`;
+  const ada = record("character", "ada", "motivation: Investigate without condemning a friend\ninitial_knowledge:\n  - fact: fact.evidence-concealed\n    value: disbelieves", "Ada investigates the disappearance.");
+  const neri = record("character", "neri", "motivation: Protect a witness\ninitial_knowledge:\n  - fact: fact.evidence-concealed\n    value: knows", "Neri maintains the archive ledger.");
+  const relationship = record("relationship", "ada-neri", "characters: [character.ada, character.neri]\ninitial: wary", "The former collaborators distrust each other.");
+  const characterManifest = { modifiedRecords: characterPaths, architecturalConflicts: [], laterObligations: [] };
   const { runtime, observed } = await scriptedStoryRuntime((i, context) => {
     if (i === 0) return { content: scriptedReadCalls(reads("nt-worldbuilding"), i), reason: "toolUse" };
     if (i === 1) return { content: [write(paths[0]!, world.replace("description:", "unknown_field: true\ndescription:"), "r05-invalid"), write(paths[1]!, fact, "r05-fact")], reason: "toolUse" };
@@ -5059,8 +5066,33 @@ test("R05 World metadata and independent Review correction resume the original T
       }), reason: "stop" };
     }
     if (i === 10) return { content: scriptedReadCalls(reads("nt-character-development"), i), reason: "toolUse" };
-    if (i === 11) return { content: scriptedText({ modifiedRecords: [],
-      architecturalConflicts: ["A prerequisite remains assigned to Architecture."], laterObligations: [] }), reason: "stop" };
+    if (i === 11) return { content: [
+      write(characterPaths[0]!, ada, "r05-ada"),
+      write(characterPaths[1]!, neri, "r05-neri"), write(characterPaths[2]!, relationship.replace("initial:", "unknown_field: true\ninitial:"), "r05-relationship-invalid"),
+      write(characterPaths[3]!, readFileSync(join(f.job.worktreeStoryRoot, characterPaths[3]!), "utf8")
+        .replace(/^characters:.*$/m, "characters: [character.ada, character.neri]"), "r05-arc-links"),
+    ], reason: "toolUse" };
+    if (i === 12 || i === 14) return { content: scriptedText(characterManifest), reason: "stop" };
+    if (i === 13) return { content: [write(characterPaths[2]!, relationship, "r05-character-metadata")], reason: "toolUse" };
+    if (i === 15) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), i), reason: "toolUse" };
+    if (i === 17) return { content: [write(characterPaths[1]!, neri + "\nNeri fears the official will retaliate against the missing witness.\n", "r05-character-repair")], reason: "toolUse" };
+    if (i === 18) return { content: scriptedText("Clarified Neri's motivation."), reason: "stop" };
+    if (i === 16 || i === 19) {
+      const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+      const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+        .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+      assert.ok(prompt);
+      const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+      const item = packet.items[0];
+      const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: characterPaths[1], line: 1 };
+      return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: i === 16 ? "fail" : "pass",
+        findings: i === 16 ? [{ ...ref, kind: "missing-requirement", message: "Neri's reason for concealment is unspecified.",
+          requiredCorrection: "Clarify the reason Neri protects the witness.", affectedPaths: [characterPaths[1]] }] : [],
+        evidence: i === 19 ? [{ ...ref, explanation: "The threatened retaliation establishes Neri's motivation." }] : [],
+        ...(i === 19 ? { progressDiagnosis: { status: "material", reason: "The fear of retaliation addresses the gap.",
+          evidence: { path: characterPaths[1], quote: "Neri fears the official will retaliate against the missing witness.", change: "added" } } } : {}),
+      }), reason: "stop" };
+    }
     throw Error("Unexpected replacement writer/reviewer: " + i);
   });
   const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
@@ -5099,11 +5131,21 @@ test("R05 World metadata and independent Review correction resume the original T
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), corrected.recoveryLifecycle);
     assert.equal(JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")).units[1].phase, "pending");
     const resumed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
-    assert.equal(resumed.recoveryLifecycle.active?.origin.operation, "specialist-result", JSON.stringify({reason: resumed.reason, recovery: resumed.recoveryLifecycle, calls: observed.length}));
+    assert.equal(resumed.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: resumed.reason, recovery: resumed.recoveryLifecycle, sources: resumed.recoverySources.slice(-1), calls: observed.length}));
     const after = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
     assert.deepEqual(after.units[0], original.units[0]);
     assert.equal(after.units[1].beforeHead, correctedHead);
-    assert.equal(observed.length, 12);
+    assert.equal(after.units[1].phase, "committed");
+    assert.equal(observed.length, 17);
+    const characterSelected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(characterSelected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(characterSelected.recoveryLifecycle));
+    const characterCorrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
+    assert.equal(characterCorrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: characterCorrected.reason, recovery: characterCorrected.recoveryLifecycle, calls: observed.length}));
+    assert.equal(characterCorrected.result?.status, "foundations-committed");
+    assert.equal(characterCorrected.result?.headSha, git(f.job.worktreeRoot, "rev-parse", "HEAD"));
+    assert.deepEqual(JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")), after);
+    assert.equal(observed.length, 20);
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), characterCorrected.recoveryLifecycle);
   } finally {
     saver.db.close();
     restoreSandbox();
