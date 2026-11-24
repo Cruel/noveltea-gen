@@ -125,13 +125,14 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(first.status, 200, JSON.stringify(first.body))
     assert.equal(first.body.session.phase, 'questions')
     assert.equal(first.body.session.questions.questions[0].id, 'feeling')
-    assert.equal(first.body.session.revision, 2)
+    const firstRevision = first.body.session.revision
+    assert.ok(firstRevision > 0)
     assert.equal((await request('POST', { action: 'start', model, text: 'Duplicate' })).status, 409)
-    assert.equal((await request('POST', { action: 'answer', revision: 2, text: 'wary' },
+    assert.equal((await request('POST', { action: 'answer', revision: firstRevision, text: 'wary' },
       foreign)).status, 404)
-    assert.equal((await request('POST', { action: 'answer', revision: 1, text: 'wary' })).status, 409)
+    assert.equal((await request('POST', { action: 'answer', revision: firstRevision - 1, text: 'wary' })).status, 409)
     const firstSet = first.body.session.questions
-    const second = await request('POST', { action: 'answer', revision: 2,
+    const second = await request('POST', { action: 'answer', revision: firstRevision,
       setId: firstSet.id, setRevision: firstSet.revision,
       responses: [{ questionId: 'feeling', answer: { kind: 'custom',
         text: 'The player should feel wary, and always have a choice.', note: '' } }],
@@ -145,17 +146,19 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(reopened.body.session.phase, 'questions')
     assert.equal(reopened.body.session.turns.length, 4)
     const secondSet = reopened.body.session.questions
+    const secondRevision = reopened.body.session.revision
+    assert.ok(secondRevision > firstRevision)
     assert.equal(secondSet.questions.length, 2)
     const validResponses = [
       { questionId: 'ending', answer: { kind: 'delegate', note: '' } },
       { questionId: 'direction', answer: { kind: 'custom',
         text: 'Please choose the ending structure; preserve player choice.', note: '' } },
     ]
-    assert.equal((await request('POST', { action: 'answer', revision: 4,
+    assert.equal((await request('POST', { action: 'answer', revision: secondRevision,
       setId: secondSet.id, setRevision: secondSet.revision,
       responses: validResponses.slice(0, 1),
     })).status, 422, 'missing mandatory answers cannot partially commit')
-    assert.equal((await request('POST', { action: 'answer', revision: 4,
+    assert.equal((await request('POST', { action: 'answer', revision: secondRevision,
       setId: secondSet.id, setRevision: secondSet.revision,
       responses: [{ questionId: 'ending', answer: { kind: 'option', optionId: 'yes', note: '' } },
         { questionId: 'direction', answer: { kind: 'delegate', note: '' } }],
@@ -163,12 +166,12 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     const draft = { direction: { selection: '__answer__', selectedIds: [],
       multiCustom: false, customAnswer: 'Please choose the ending structure; preserve player choice.',
       note: '' } }
-    const savedDraft = await request('POST', { action: 'draft', revision: 4,
+    const savedDraft = await request('POST', { action: 'draft', revision: secondRevision,
       setId: secondSet.id, setRevision: secondSet.revision, drafts: draft })
     assert.equal(savedDraft.status, 200)
-    assert.equal(savedDraft.body.session.revision, 5)
+    assert.ok(savedDraft.body.session.revision > secondRevision)
     assert.deepEqual(savedDraft.body.session.drafts, draft)
-    assert.equal((await request('POST', { action: 'draft', revision: 4,
+    assert.equal((await request('POST', { action: 'draft', revision: secondRevision,
       setId: secondSet.id, setRevision: secondSet.revision, drafts: {} })).status, 409,
       'second-tab stale draft must not overwrite newer input')
     store.close()
@@ -176,7 +179,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     auth = createStudioAuth(store, config)
     assert.deepEqual((await request('GET')).body.session.drafts, draft,
       'unsubmitted input survives server restart')
-    const third = await request('POST', { action: 'answer', revision: 5,
+    const third = await request('POST', { action: 'answer', revision: savedDraft.body.session.revision,
       setId: secondSet.id, setRevision: secondSet.revision,
       responses: validResponses,
     })
@@ -189,12 +192,13 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(third.body.session.proposal.foundation.decisions[4].authority, 'delegated')
     assert.match(third.body.session.proposal.foundation.decisions[3].statement, /Please choose/)
     const foundation = third.body.session.proposal.foundation
-    assert.equal((await request('POST', {action: 'approve', revision: 6, digest: 'f'.repeat(64)})).status, 409)
-    assert.equal((await request('POST', {action: 'approve', revision: 4,
+    assert.equal((await request('POST', {action: 'approve', revision: third.body.session.revision,
+      digest: 'f'.repeat(64)})).status, 409)
+    assert.equal((await request('POST', {action: 'approve', revision: secondRevision,
       digest: third.body.session.digest})).status, 409)
-    assert.equal((await request('POST', {action: 'revise', revision: 4,
+    assert.equal((await request('POST', {action: 'revise', revision: secondRevision,
       text: 'Unapproved edit'})).status, 409)
-    const accepted = await request('POST', {action: 'approve', revision: 7,
+    const accepted = await request('POST', {action: 'approve', revision: third.body.session.revision,
       digest: third.body.session.digest})
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body))
     assert.equal(accepted.body.session.phase, 'approved')
@@ -547,20 +551,44 @@ test('failed Pi turns are preserved and only user-initiated retry can reissue th
     assert.equal((await req({action:'retry', revision}, async () => { throw new Error('unexpected') })).status, 409)
     // Simulate a worker dying after reserving an expensive Pi turn. Recovery
     // must require an explicit acknowledgement, with no automatic model call.
-    const existing = (await store.persistence.onboarding.conversation(alice.id, repo, ''))!
-    const hanging = {...JSON.parse(existing.state), revision: existing.revision + 1,
-      phase: 'running', startedAt: Date.now() - 11 * 60_000 }
-    assert.equal(await store.persistence.onboarding.saveConversation(alice.id, repo, '',
-      hanging.revision, JSON.stringify(hanging), existing.revision, new Date().toISOString()), true)
-    const recovered = await req({action:'reconcile',revision:hanging.revision}, async () => {
-      throw new Error('reconcile must not call Pi')
+    let entered!: () => void
+    let release!: () => void
+    const began = new Promise<void>(resolve => { entered = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    const set = retry.body.session.questions
+    const running = req({ action: 'answer', revision: retry.body.session.revision,
+      setId: set.id, setRevision: set.revision,
+      responses: [{ questionId: 'conflict', answer: { kind: 'custom',
+        text: 'A conflict with a personal stake', note: '' } }],
+    }, async () => {
+      entered()
+      await held
+      return structuredQuestions([{ id: 'late', kind: 'free-text',
+        question: 'Late result from the former worker' }])
     })
-    assert.equal(recovered.status, 200)
-    assert.equal(recovered.body.session.phase, 'blocked')
-    assert.equal(calls, 2)
-    assert.equal((await req({action:'reconcile',revision:hanging.revision}, async () => {
-      throw new Error('duplicate reconcile must not call Pi')
-    })).status, 409)
+    try {
+      await Promise.race([began, running.then(() => { throw Error('Writer did not start') })])
+      const existing = (await store.persistence.onboarding.conversation(alice.id, repo, ''))!
+      const hanging = {...JSON.parse(existing.state), revision: existing.revision + 1,
+        startedAt: Date.now() - 11 * 60_000 }
+      assert.equal(hanging.phase, 'running')
+      assert.equal(hanging.graphOperation.status, 'claimed')
+      assert.equal(await store.persistence.onboarding.saveConversation(alice.id, repo, '',
+        hanging.revision, JSON.stringify(hanging), existing.revision, new Date().toISOString()), true)
+      const recovered = await req({action:'reconcile',revision:hanging.revision}, async () => {
+        throw new Error('reconcile must not call Pi')
+      })
+      assert.equal(recovered.status, 200, JSON.stringify(recovered.body))
+      assert.equal(recovered.body.session.phase, 'blocked')
+      assert.equal(calls, 2)
+      assert.equal((await req({action:'reconcile',revision:hanging.revision}, async () => {
+        throw new Error('duplicate reconcile must not call Pi')
+      })).status, 409)
+    } finally {
+      release()
+      const late = await running
+      assert.notEqual(late.status, 200, 'Late worker may not overwrite the reconciled checkpoint')
+    }
   } finally {
     store.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', prev.key], ['NT_STUDIO_SKILLS_SOURCE', prev.source],

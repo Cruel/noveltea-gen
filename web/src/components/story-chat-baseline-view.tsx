@@ -42,10 +42,11 @@ export function StoryChatBaselineView({ session, continuation, answer, onAnswerC
   if (session?.legacyQuestions) return <section aria-label="Story baseline discovery"
     className="grid gap-3 rounded-lg bg-muted/20 p-3 text-sm">
     <h3 className="m-0 text-sm font-semibold">Creative Direction</h3>
-    <p>This pre-v1 discovery session uses an unsupported question format. Restart explicitly
-      from the original first request and pinned discovery method; previous unapproved
-      questions and answers will not be converted.</p>
-    {session.phase === 'running' ? <Button size="sm" variant="outline"
+    {session.phase === 'approved' ? <p>This pre-cutover approval is read-only and cannot authorize new execution.</p> :
+      <p>This pre-cutover discovery session uses an unsupported execution format. Restart explicitly
+        from the original first request and pinned discovery method; previous unapproved
+        questions and answers will not be converted.</p>}
+    {session.phase === 'approved' ? null : session.phase === 'running' ? <Button size="sm" variant="outline"
       disabled={busy || !session.startedAt || Date.now() - session.startedAt < 600_000}
       onClick={() => onAction('reconcile')}>Reconcile interrupted turn</Button>
       : <div><Button size="sm" variant="outline" disabled={busy}

@@ -85,7 +85,7 @@ test('exact proposed foundation and author-decision provenance are reviewable be
 
 test('old proposed textual interviews cannot expose Creative Direction approval', () => {
   const markup = render('proposed', true)
-  assert.match(markup, /unsupported question format/)
+  assert.match(markup, /unsupported execution format/)
   assert.match(markup, /Restart discovery questions/)
   assert.doesNotMatch(markup, /Approve baseline|Request revision|Planning interpretations/)
 })

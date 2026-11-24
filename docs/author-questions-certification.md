@@ -32,8 +32,20 @@ and the existing source-bound Job/approval controls.
 - Discovery binds repository, Story, immutable first Turn and source SHA;
   question rounds bind set ID and revision; approval uses the exact proposed
   digest and native validation before the original Turn may continue.
-  A failed discovery model turn preserves accepted answers, fences unsafe
-  retry, and permits explicit recovery.
+  Since R10 (#256), the separate Studio-owned Discovery LangGraph is the sole
+  execution path for both existing discovery entry points. Its synchronous
+  checkpoints and pending writes use the shared Studio CAS persistence port,
+  scoped to the owner, repository and graph epoch. Checkpoints hold operation,
+  input and gate references, not a copy of authoritative author answers. Draft
+  changes do not resume the graph; only an authenticated, exact submission
+  resumes a pending interrupt. A durable claim precedes inference, and a
+  settled receipt can be reconciled without invoking Pi again. Uncertain
+  invocations require explicit reconciliation before retry. Older incomplete
+  sessions require explicit restart; their prior evidence is retained in a
+  reserved read-only archive, not imported into the new execution. No old
+  execution path is available.
+  R11 replaces per-round semantic correction policy; R12 owns the exact
+  post-approval handoff and cross-phase resource accounting.
 - Specialist questions retain their immutable proposal digest, session/worktree
   identity, Job lock, and graph checkpoint. A verified answered checkpoint may
   automatically queue the original assignment; absence of such a checkpoint
@@ -44,14 +56,14 @@ and the existing source-bound Job/approval controls.
 
 | Scenario | Test evidence |
 | --- | --- |
-| Baseline: sparse first Turn, recommended multi-question set, explicit and delegated answers, next question round, exact original objective, normalized provenance, native approval, blocked/retry recovery | `web/test/story-chat-discovery.test.ts` |
+| Baseline (SQLite and PostgreSQL): sparse first Turn, durable graph interrupt, independent OS-process resume and database reopening, draft without resume, concurrent and repeated resume fencing, recommended multi-question set, explicit and delegated answers, next question round, exact original objective, normalized provenance, native approval, blocked/retry recovery | `web/test/story-chat-discovery.test.ts` |
 | Repository discovery and Story Chat UI; compact radio/checkbox/Other, recommendation tooltip, free-text placeholder, default delegation, submitted answer history and summary | `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx`, `web/test/author-question-set-ui.test.tsx`, `web/test/author-question-affordances.test.tsx` |
 | Approved baseline continues the exact original Story Turn once, resumes after a web/server restart, queues a single owner-scoped execution and commits the reviewed foundation once | `web/test/story-approved-continuation.test.ts`, `web/test/new-story-resume.test.ts`, `test/chat-approved-commit.test.ts` |
 | Specialist: owner-scoped question response/delegation, immutable receipt, invalid identity or forged approval rejection, saved drafts, failure recovery | `web/test/author-decisions-api.test.ts`, `test/specialist-choice.test.ts`, `web/test/specialist-question-drafts.test.ts` |
 | Original paused specialist checkpoint queues on authenticated delegation, preserves draft bytes, rejects changed worktree on resumption | `web/test/fixture-jobs.test.ts` |
 | Generic validation: unknown/duplicate question IDs, recommendation targets, arbitrary model-defined fields, missing/duplicate replies, invalid choice IDs, forbidden delegation and invalid drafts | `test/author-question-set.test.ts`, `test/author-question.test.ts` |
 | Source-backed planning: exact author wording, interpretation vs explicit choice vs delegation, meaningful ambiguity and conflict, Git-only rationale, no unapproved Story edits | `web/test/story-chat-discovery.test.ts`, `test/planning-interpretation.test.ts` |
-| Pre-v1 unsupported textual questions: no old renderer, no conversion, explicit restart and no approval of an unconverted proposal | `web/test/story-chat-discovery.test.ts`, `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx` |
+| Pre-cutover discovery (including structured beta sessions): no execution fallback, no conversion, explicit restart and no approval of an unconverted proposal | `web/test/story-chat-discovery.test.ts`, `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx` |
 | Genuine browser controls: fresh proposed/blocked/approved/legacy reload and button actions, keyboard input, separate tabs in Story Chat and repository Guided Story, in-flight draft preservation, specialist answer and receipt reload, new specialist Question Set, and recovery after the specialist author panel unmounts | `web/test/browser-author-questions.test.ts`, with `NT_BROWSER_TEST=1` in headless Chromium |
 | Large multibyte specialist answer accepted at the same limit as its draft; combined large valid question-plus-answer receipt remains readable through claim and consumption; separated contradictory branching answers require clarification; mandatory clarification rejects model-proposed delegation | `web/test/author-decisions-api.test.ts`, `test/specialist-choice.test.ts`, `test/planning-interpretation.test.ts`, `web/test/story-chat-discovery.test.ts` |
 | Discovery transport accepts valid nine-question CJK drafts, maximum 16-question CJK draft and answer batches, and JSON-escaped maximum drafts; rejects oversized bodies with 413 before parsing | `web/test/onboarding-pi.test.ts` |

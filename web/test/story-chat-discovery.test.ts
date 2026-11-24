@@ -4,12 +4,14 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { removeTestTree } from '../../test/helpers'
 import { createStudioAuth } from '../src/lib/auth'
 import { submitFirstStoryTurn } from '../src/lib/story-first-chat.server'
 import { storyChatDiscoveryRequest } from '../src/lib/story-chat-discovery.server'
-import { openStudioDatabase, migrateStudio } from './support/studio-database'
+import { openStudioBusinessFixture } from './support/studio-database'
+import { openSharedStudioStore } from '../src/db/shared-studio-store'
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { listStoryThreads } from '../src/lib/story-threads.server'
 import type { DiscoveryInference } from '../src/lib/onboarding-pi.server'
@@ -17,6 +19,8 @@ import { planningDimensions, planningDimensionPaths } from '../../src/planning-i
 import { withFixtureSemanticReview } from './support/discovery-semantic-fixture'
 
 const url = 'http://localhost:3000'
+if (process.env.NT_REQUIRE_KYSELY_PROOF === '1' && !process.env.NT_TEST_PG_URL)
+  throw new Error('Discovery conformance requires NT_TEST_PG_URL')
 const questionsReply = (questions: unknown[]) => JSON.stringify({ phase: 'questions',
   questions: { questions } })
 const config = {
@@ -88,8 +92,9 @@ function skills(root: string) {
   return source
 }
 
-test('ordinary Story Chat discovery uses one pinned first Turn, preserves partial and delegated answers and requires native-validated exact approval', {
+for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinary Story Chat discovery uses one pinned first Turn, preserves partial and delegated answers and requires native-validated exact approval`, {
   timeout: 180_000,
+  skip: backend === 'postgres' && !process.env.NT_TEST_PG_URL && 'Set NT_TEST_PG_URL for PostgreSQL certification',
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-chat-discovery-'))
   const previous = { key: process.env.NT_PI_CREDENTIAL_KEY, source: process.env.NT_STUDIO_SKILLS_SOURCE,
@@ -97,10 +102,10 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills(root)
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
-  const filename = join(root, 'studio.sqlite')
-  let store = openStudioDatabase(filename)
+  const fixture = await openStudioBusinessFixture(backend)
+  let store = fixture.store
+  let reopened: typeof store | undefined
   try {
-    await migrateStudio(store, config)
     let auth = createStudioAuth(store, config)
     const adapter = (await auth.$context).internalAdapter
     const alice = (await adapter.createUser({ name: 'Alice', email: 'alice@chat-discovery.test',
@@ -145,6 +150,10 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     let calls = 0
     const infer: DiscoveryInference = async (session, instructions) => {
       calls++
+      assert.equal(session.graphOperation?.status, 'claimed')
+      assert.ok(await store.persistence.onboarding.conversation(alice, repositoryId,
+        'story-discovery-graph,' + session.graphEpoch), 'checkpoint must precede inference')
+      assert.equal(await store.persistence.generation.jobs.identity(firstId), null)
       assert.match(instructions, /nt-story-discovery\/SKILL.md/)
       assert.match(instructions, /initial baseline/)
       return questionsReply([
@@ -176,6 +185,13 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(questions.body.session.chat.sourceSha, sourceSha)
     assert.equal(questions.body.session.model.provider, model.provider)
     assert.ok(questions.body.session.skillId)
+    const execution = await store.persistence.onboarding.conversation(alice, repositoryId,
+      'story-chat,' + storyIds[0] + ',' + firstId)
+    const graphEpoch = JSON.parse(execution!.state).graphEpoch
+    assert.ok(graphEpoch, 'first Turn has an independent current-format graph identity')
+    const checkpoint = await store.persistence.onboarding.conversation(alice, repositoryId,
+      'story-discovery-graph,' + graphEpoch)
+    assert.ok(checkpoint, 'LangGraph interrupt is persisted before returning questions')
     const replay = await submitFirstStoryTurn(auth, store, headers, url, {
       storyId: storyIds[0]!, jobId: firstId, prompt: initial, creativeMode: 'autonomous',
     }, async () => { throw new Error('Never call the model again on transport retry') })
@@ -218,6 +234,12 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       action: 'answer', revision: savedDraft.body.session.revision, setId: set.id,
       setRevision: set.revision, responses: answers,
     }, bobCookie)).status, 404, 'foreign user cannot submit another owner’s set')
+    assert.deepEqual(await store.persistence.onboarding.conversation(alice, repositoryId,
+      'story-discovery-graph,' + graphEpoch), checkpoint, 'drafts cannot resume the graph')
+    reopened = openSharedStudioStore(fixture.databaseOptions)
+    store = reopened
+    auth = createStudioAuth(store, config)
+    assert.deepEqual((await req(storyIds[0]!, firstId, 'GET')).body.session.drafts, drafts)
     const interrupted = await storyChatDiscoveryRequest(auth, store,
       new Request(url + '/api/story-chat-discovery', { method: 'POST',
         headers: { cookie: aliceCookie, origin: url },
@@ -304,13 +326,14 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     const persisted = await store.persistence.onboarding.conversation(alice, repositoryId,
       'story-chat,' + storyIds[0] + ',' + firstId)
     assert.equal(JSON.parse(persisted!.state).chat.sourceSha, sourceSha)
-    store.close()
-    store = openStudioDatabase(filename)
+    await reopened.close()
+    reopened = openSharedStudioStore(fixture.databaseOptions)
+    store = reopened
     auth = createStudioAuth(store, config)
     assert.equal((await req(storyIds[0]!, firstId, 'GET')).body.session.phase, 'approved')
     assert.deepEqual((await req(storyIds[0]!, firstId, 'GET')).body.session.proposal.foundation.planning,
       proposed.proposal.foundation.planning)
-    await store.testing.records.update('stories', { id: storyIds[0]! },
+    await fixture.records.update('stories', { id: storyIds[0]! },
       { sourceCommitSha: 'c'.repeat(40) })
     assert.equal((await req(storyIds[0]!, firstId, 'GET')).status, 409,
       'moving the Story source invalidates the bound discovery')
@@ -342,30 +365,35 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(collaborative.state, 'discovery')
     const roundOne = (await req(storyIds[2]!, collaborativeId, 'GET')).body.session
     assert.equal(roundOne.phase, 'questions')
-    const followup = await storyChatDiscoveryRequest(auth, store,
-      new Request(url + '/api/story-chat-discovery', { method: 'POST',
-        headers: { cookie: aliceCookie, origin: url },
-        body: JSON.stringify({ action: 'answer', revision: roundOne.revision,
+    assert.equal((await req(storyIds[2]!, collaborativeId, 'POST', {
+      action: 'answer', revision: roundOne.revision, setId: set.id,
+      setRevision: roundOne.questions.revision, responses: answers,
+    })).status, 409, 'a Question Set from another Thread cannot resume this interrupt')
+    assert.equal(await store.persistence.generation.jobs.identity(collaborativeId), null)
+    const followup = JSON.parse(execFileSync(process.execPath, ['--import', 'tsx',
+      fileURLToPath(new URL('./support/discovery-restart-worker.ts', import.meta.url))], {
+      encoding: 'utf8', timeout: 60_000,
+      input: JSON.stringify({ options: fixture.databaseOptions, config, url,
+        cookie: aliceCookie, storyId: storyIds[2]!, turnId: collaborativeId,
+        submission: { action: 'answer', revision: roundOne.revision,
           setId: roundOne.questions.id, setRevision: roundOne.questions.revision,
           responses: [{ questionId: 'mystery', answer: { kind: 'custom',
-            text: 'Investigate a missing person', note: '' } }],
-        }),
-      }), url, storyIds[2]!, collaborativeId, async state => {
-        assert.equal(state.accepted?.length, 1)
-        assert.match(state.turns.at(-1)!.text, /Investigate a missing person/)
-        return questionsReply([{ id: 'ending', kind: 'yes-no',
-          question: 'Should the missing person return by the ending?',
-          allowStudioDecision: true },
+            text: 'Investigate a missing person', note: '' } }] },
+        questions: [{ id: 'ending', kind: 'yes-no',
+          question: 'Should the missing person return by the ending?', allowStudioDecision: true },
           { id: 'baseline', kind: 'free-text',
             question: 'May Studio decide all remaining Story baseline creative requirements?',
-            allowStudioDecision: true }])
-      })
+            allowStudioDecision: true }],
+      }),
+    }))
     assert.equal(followup.status, 200)
-    const roundTwo = (await followup.json() as any).session
+    const roundTwo = followup.body.session
+    assert.equal((await req(storyIds[2]!, collaborativeId, 'GET')).body.session.revision, roundTwo.revision)
     assert.equal(roundTwo.phase, 'questions')
     assert.notEqual(roundTwo.questions.id, roundOne.questions.id)
     assert.equal(roundTwo.accepted.length, 1)
-    const resolved = await storyChatDiscoveryRequest(auth, store,
+    let resolvingCalls = 0
+    const resolveRound = (connection: typeof store) => storyChatDiscoveryRequest(createStudioAuth(connection, config), connection,
       new Request(url + '/api/story-chat-discovery', { method: 'POST',
         headers: { cookie: aliceCookie, origin: url },
         body: JSON.stringify({ action: 'answer', revision: roundTwo.revision,
@@ -373,14 +401,25 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
           responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } },
             { questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
         }),
-      }), url, storyIds[2]!, collaborativeId, withFixtureSemanticReview(async state => proposalFor(state)))
-    assert.equal(resolved.status, 200)
+      }), url, storyIds[2]!, collaborativeId, withFixtureSemanticReview(async state => {
+        resolvingCalls++
+        return proposalFor(state)
+      }))
+    const results = await Promise.all([resolveRound(store), resolveRound(fixture.store)])
+    assert.deepEqual(results.map(r => r.status).sort(), [200, 409])
+    assert.equal(resolvingCalls, 1, 'concurrent resume cannot invoke the writer twice')
+    const resolved = results.find(r => r.status === 200)!
     const resolvedSession = (await resolved.json() as any).session
     assert.equal(resolvedSession.phase, 'proposed')
     assert.equal(resolvedSession.accepted.length, 2)
     assert.match(resolvedSession.proposal.foundation.decisions[1].statement, /Investigate a missing person/)
     assert.equal(resolvedSession.proposal.task, 'Help me make a mystery game')
+    assert.equal((await resolveRound(store)).status, 409, 'settled resume cannot be repeated')
+    assert.equal(resolvingCalls, 1)
     assert.equal((await listStoryThreads(store, alice, storyIds[2]!)).threads.length, 1)
+    assert.equal((await req(storyIds[2]!, collaborativeId, 'POST', {
+      action: 'approve', revision: resolvedSession.revision, digest: resolvedSession.digest,
+    })).status, 200)
     // An insufficiently constrained model cannot treat Autonomous as implied
     // permission to skip baseline questions. Correct it once within the same
     // reserved turn, without persisting its premature proposal.
@@ -404,14 +443,15 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(prematureCalls, 2)
     assert.equal((await req(storyIds[3]!, prematureId, 'GET')).body.session.phase, 'questions')
     assert.equal((await listStoryThreads(store, alice, storyIds[3]!)).threads.length, 1)
-    // A pre-v1 textual questionnaire is explicitly restarted, never adapted
+    // A pre-cutover questionnaire is explicitly restarted, never adapted
     // or replayed through a hidden compatibility reader/model call.
     const legacyKey = 'story-chat,' + storyIds[3] + ',' + prematureId
     const beforeLegacy = (await store.persistence.onboarding.conversation(alice,
       repositoryId, legacyKey))!
     const existingLegacy = JSON.parse(beforeLegacy.state)
     const oldSession = { ...existingLegacy, revision: beforeLegacy.revision + 1,
-      questionContract: undefined, questions: '1. Old numbered question; answer in prose.' }
+      graphEpoch: undefined, graphStartRevision: undefined, graphOperation: undefined }
+    // Even structured beta sessions cannot execute without a graph checkpoint.
     assert.equal(await store.persistence.onboarding.saveConversation(alice,
       repositoryId, legacyKey, oldSession.revision, JSON.stringify(oldSession),
       beforeLegacy.revision, new Date().toISOString()), true)
@@ -437,7 +477,7 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
       })
     assert.equal(rejectedRetry.status, 409)
     assert.equal(illegalRetryCalled, false)
-    // A pre-v1 session that already reached a proposal cannot quietly use
+    // A pre-cutover session that already reached a proposal cannot quietly use
     // the new exact-approval path either. Require explicit reset in both UIs.
     const oldProposed = { ...oldSession, phase: 'proposed',
       revision: oldBlocked.revision + 1, proposal: proposed.proposal,
@@ -471,6 +511,8 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(restartState.legacyQuestions, false)
     assert.equal(restartState.questions.questions[0].id, 'fresh-plot')
     assert.equal(restartState.chat.originalObjective, initial)
+    const resetRow = (await store.persistence.onboarding.conversation(alice, repositoryId, legacyKey))!
+    assert.notEqual(JSON.parse(resetRow.state).graphEpoch, existingLegacy.graphEpoch)
     // A contradictory answer requires a later clarification. The model cannot
     // choose its preferred interpretation or infer approval from the author.
     const conflictId = randomUUID()
@@ -583,9 +625,10 @@ test('ordinary Story Chat discovery uses one pinned first Turn, preserves partia
     assert.equal(repairedSession.phase, 'proposed')
     assert.ok(repairedSession.proposal.interpretations.every((item: { path: string }) =>
       item.path.startsWith('planning.')))
-    assert.deepEqual(await store.testing.foreignKeyViolations(), [])
+    assert.equal(await store.persistence.naturalStory.previousJob(alice, pathTurnId), null)
   } finally {
-    store.close()
+    await reopened?.close()
+    await fixture.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', previous.key],
       ['NT_STUDIO_SKILLS_SOURCE', previous.source], ['NT_SKILL_CACHE_DIR', previous.cache]] as const) {
       if (value === undefined) delete process.env[key]

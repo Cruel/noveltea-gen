@@ -81,9 +81,9 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
     setBrief(initialBrief); setError(null)
   }, [repositoryId, workspace, initialBrief])
   useEffect(() => {
-    if (session?.phase === 'approved' && session.proposal && session.digest)
+    if (session?.phase === 'approved' && !session.legacyQuestions && session.proposal && session.digest)
       onApproved(session.proposal, { revision: session.revision, digest: session.digest }, session.model)
-  }, [session?.phase, session?.revision, session?.digest])
+  }, [session?.phase, session?.revision, session?.digest, session?.legacyQuestions])
   const perform = async (input: Record<string, unknown>) => {
     setBusy(true); setError(null)
     try {
@@ -93,7 +93,7 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
       drafts.sessionRef.current = result.session
       queryClient.setQueryData(sessionKey, result)
       setAnswer('')
-      if (result.session.phase === 'approved' && result.session.proposal && result.session.digest)
+      if (result.session.phase === 'approved' && !result.session.legacyQuestions && result.session.proposal && result.session.digest)
         onApproved(result.session.proposal, {
           revision: result.session.revision, digest: result.session.digest,
         }, result.session.model)
@@ -162,14 +162,15 @@ export function PiStoryDiscovery({ repositoryId, workspace, initialBrief, onAppr
           Reconcile interrupted turn
         </Button>
       </div>}
-      {session.legacyQuestions && ['questions', 'blocked', 'proposed'].includes(session.phase) ? <div role="status">
-        <p>This session uses the previous textual question format. Restart from the saved
-          original Story idea and pinned method to use structured Question Sets.
-          Unapproved textual answers cannot be converted.</p>
-        <Button type="button" variant="outline" disabled={disabled}
-          onClick={() => void perform({ action: 'restart', revision: session.revision })}>
-          Restart discovery questions
-        </Button>
+      {session.legacyQuestions && session.phase !== 'running' ? <div role="status">
+        {session.phase === 'approved' ? <p>This pre-cutover approval is read-only and cannot authorize new execution.</p> : <>
+          <p>This session uses an unsupported execution format. Restart from the saved
+            original Story idea and pinned method. Unapproved answers cannot be converted.</p>
+          <Button type="button" variant="outline" disabled={disabled}
+            onClick={() => void perform({ action: 'restart', revision: session.revision })}>
+            Restart discovery questions
+          </Button>
+        </>}
       </div> : <>
         {session.phase === 'blocked' && <div role="alert">
           <p>Discovery was interrupted. The accepted answers remain saved;

@@ -9,7 +9,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 
 /** No caller supplies a repository/workspace, a source SHA or a creative brief.
  * Resolve all of them from the one durable, owner-scoped first Turn. The shared
- * Pi discovery state machine supplies CAS, crash fencing and exact approval. */
+ * checkpointed Discovery graph supplies CAS, crash fencing and exact approval. */
 export async function storyChatDiscoveryRequest(
   auth: StudioAuth, store: StudioStore, request: Request, baseURL: string,
   storyId: string, firstTurnId: string, infer?: DiscoveryInference,

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { StudioDiscoveryCheckpoints } from '../persistence/discovery-checkpoints'
+import { discoveryGraph, type DiscoveryOperation, type DiscoveryGate } from './discovery-graph.server'
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { chmod, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -65,6 +67,10 @@ export type ChatDiscoveryBinding = {
 }
 type Session = { phase: Phase; revision: number; model: PiSelection; skillId: string; brief: string;
   questionContract?: 'structured-v1';
+  /** Graph identity is derived from the original authenticated Studio source, pins and reset epoch. */
+  graphEpoch?: string; graphStartRevision?: number;
+  graphOperation?: DiscoveryOperation & { status: 'reserved' | 'claimed' | 'settled';
+    reconciledFrom?: 'reserved' | 'claimed' };
   turns: Turn[]; questions?: string | QuestionSet; proposal?: Proposal; digest?: string; startedAt?: number;
   drafts?: Record<string, QuestionDraft>;
   accepted?: Array<{ setId: string; setRevision: number; principal: string;
@@ -96,9 +102,9 @@ class DiscoveryReviewerFailure extends Error {
 }
 function scope(input: Session) {
   return { phase: input.phase, revision: input.revision, model: input.model,
-    turns: input.turns, questions: input.questionContract === 'structured-v1' &&
+    turns: input.turns, questions: currentGraph(input) &&
       input.questions && typeof input.questions !== 'string' ? input.questions : null,
-    legacyQuestions: input.questionContract !== 'structured-v1' && input.phase !== 'approved',
+    legacyQuestions: !currentGraph(input),
     drafts: input.drafts ?? {}, accepted: input.accepted ?? [], proposal: input.proposal ?? null,
     digest: input.digest ?? null, skillId: input.skillId, startedAt: input.startedAt ?? null,
     ...(input.chat ? { chat: input.chat } : {}) }
@@ -372,6 +378,108 @@ async function save(store: StudioDatabase, owner: string, repo: string, workspac
     owner, repo, workspace, state.revision, JSON.stringify(state), previous, new Date().toISOString())
   if (!changed) throw new DiscoveryError(409, 'Discovery changed concurrently. Reload the conversation.')
 }
+function currentGraph(state: Session): boolean {
+  return state.questionContract === 'structured-v1' && !!state.graphEpoch &&
+    Number.isSafeInteger(state.graphStartRevision) && !!state.graphOperation
+}
+function graphIdentity(owner: string, repo: string, workspace: string, state: Session): string {
+  return sha({ schema: 'studio-discovery/v1', owner, repo, workspace,
+    chat: state.chat ? { ...state.chat, threadId: 'root:' + state.chat.firstTurnId } : null,
+    objectiveDigest: sha(state.brief), model: state.model, skillId: state.skillId,
+    epoch: state.graphStartRevision })
+}
+function assertGraphIdentity(owner: string, repo: string, workspace: string, state: Session) {
+  if (!currentGraph(state) || state.graphEpoch !== graphIdentity(owner, repo, workspace, state))
+    throw new DiscoveryError(409, 'Discovery graph identity is unavailable or changed. Restart incomplete old discovery explicitly.')
+}
+function gateFor(state: Session): DiscoveryGate {
+  if (state.phase === 'running' || state.graphOperation?.status !== 'settled')
+    throw new DiscoveryError(409, 'Discovery has no settled author boundary.')
+  if ((state.phase === 'proposed' || state.phase === 'approved') &&
+      (!state.proposal || state.digest !== sha(state.proposal)))
+    throw new DiscoveryError(409, 'Discovery proposal evidence changed.')
+  return { phase: state.phase, operationId: state.graphOperation.id,
+    ref: sha({ identity: state.graphEpoch, operation: state.graphOperation.id,
+      phase: state.phase, question: state.questions, proposalDigest: state.digest,
+      authorEvidenceDigest: sha({ turns: state.turns, accepted: state.accepted }),
+      review: state.semanticReview,
+      pendingDigest: state.pendingDiscovery ? sha(state.pendingDiscovery) : undefined }) }
+}
+function operationInputDigest(state: Session): string {
+  return sha({ turns: state.turns, accepted: state.accepted, proposalDigest: state.digest,
+    review: state.semanticReview, pendingDiscovery: state.pendingDiscovery })
+}
+function sameOperation(saved: Session, operation: DiscoveryOperation) {
+  const candidate = saved.graphOperation
+  return candidate?.id === operation.id && candidate.kind === operation.kind &&
+    candidate.from === operation.from && candidate.inputDigest === operation.inputDigest &&
+    (candidate.status === 'settled' || operation.inputDigest === operationInputDigest(saved))
+}
+
+/** Studio remains the owner of exact author inputs and effect receipts.
+ * The graph owns dispatch and author interrupts, not a second copy of the
+ * conversation. Every execution is claimed durably before calling Pi. */
+async function openDiscoveryGraph(store: StudioDatabase, owner: string, repo: string,
+  workspace: string, original: Session, verifyAuthority: () => Promise<void>,
+  run?: (claimed: Session) => Promise<Session>) {
+  assertGraphIdentity(owner, repo, workspace, original)
+  const identity = original.graphEpoch!
+  const read = async (operation: DiscoveryOperation) => {
+    await verifyAuthority()
+    const saved = await load(store, owner, repo, workspace)
+    if (!saved) throw new DiscoveryError(409, 'Discovery author evidence disappeared')
+    assertGraphIdentity(owner, repo, workspace, saved)
+    if (saved.graphEpoch !== identity || !sameOperation(saved, operation))
+      throw new DiscoveryError(409, 'Discovery operation is stale or belongs to another Thread')
+    if (saved.chat && saved.phase !== 'approved' &&
+        await store.persistence.generation.jobs.identity(saved.chat.firstTurnId))
+      throw new DiscoveryError(409, 'Unapproved Discovery cannot own a Generation Job.')
+    return saved
+  }
+  const saver = await StudioDiscoveryCheckpoints.open(store.persistence.onboarding, owner, repo, identity)
+  return discoveryGraph(identity, saver, {
+    async authenticate(operation, gate) {
+      const saved = await read(operation)
+      if (gate && (gate.ref !== operation.from || gate.operationId >= operation.id))
+        throw new DiscoveryError(409, 'Discovery author submission is not bound to the pending boundary')
+      if (saved.graphOperation!.status === 'claimed')
+        throw new DiscoveryError(409, 'Discovery invocation may have run; reconcile before retrying')
+    },
+    async execute(operation) {
+      const saved = await read(operation)
+      if (saved.graphOperation!.status === 'settled') return gateFor(saved)
+      if (saved.graphOperation!.status !== 'reserved' || !run ||
+          !sameOperation(original, operation))
+        throw new DiscoveryError(409, 'Discovery invocation cannot safely be replayed')
+      const claimed: Session = { ...saved, revision: saved.revision + 1,
+        graphOperation: { ...operation, status: 'claimed' } }
+      await save(store, owner, repo, workspace, claimed, saved.revision)
+      const result = await run(claimed)
+      await read(operation)
+      const settled: Session = { ...result, revision: claimed.revision + 1,
+        graphOperation: { ...operation, status: 'settled' } }
+      await save(store, owner, repo, workspace, settled, claimed.revision)
+      return gateFor(settled)
+    },
+  })
+}
+
+async function reconcileDiscoveryGraph(store: StudioDatabase, owner: string, repo: string,
+  workspace: string, state: Session, verifyAuthority: () => Promise<void>) {
+  try {
+    const graph = await openDiscoveryGraph(store, owner, repo, workspace, state, verifyAuthority)
+    const { id, kind, from, inputDigest, reconciledFrom } = state.graphOperation!
+    await graph.reconcile({ id, kind, from, inputDigest }, gateFor(state), reconciledFrom === 'reserved')
+  } catch (error) {
+    // The author record and graph have separate CAS revisions. Another request
+    // can advance the operation between reading those two records.
+    const latest = await load(store, owner, repo, workspace)
+    if (latest?.revision !== state.revision)
+      throw new DiscoveryError(409, 'Discovery changed concurrently. Reload the conversation.')
+    throw error
+  }
+}
+
 /** The controller, not the model, owns stable source identities and verbatim
  * submitted author evidence (including explicit, authorized delegations). */
 function authorEvidence(state: Session): PlanningEvidence[] {
@@ -451,7 +559,10 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       onboardingWorkspace(params.get('workspace') ?? '')
     const own = await store.persistence.repositories.get(actor.id, repo)
     if (!own) throw new DiscoveryError(404, 'Repository is not connected to this account')
-    if (chat) {
+    const verifyAuthority = async () => {
+      if (!await store.persistence.repositories.get(actor.id, repo))
+        throw new DiscoveryError(404, 'Repository is not connected to this account')
+      if (!chat) return
       const story = await store.persistence.naturalStory.story(actor.id, chat.storyId)
       const message = await store.persistence.messages.owned(actor.id,
         'root:' + chat.firstTurnId, chat.firstTurnId)
@@ -465,13 +576,14 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           message.phase === 'cancelled')
         throw new DiscoveryError(409, 'Saved Story discovery identity or source revision changed')
     }
+    await verifyAuthority()
     const saved = await load(store, actor.id, repo, workspace)
     if (saved && (chat
       ? JSON.stringify(saved.chat) !== JSON.stringify(chat)
       : !!saved.chat))
       throw new DiscoveryError(409, 'Discovery is bound to another Story or source revision')
     const continuation = async (): Promise<ContinuationStatus | undefined> => {
-      if (!chat || saved?.phase !== 'approved') return undefined
+      if (!chat || saved?.phase !== 'approved' || !currentGraph(saved)) return undefined
       const message = await store.persistence.messages.owned(actor.id,
         'root:' + chat.firstTurnId, chat.firstTurnId)
       const queue = await store.persistence.generation.queue.record(chat.firstTurnId)
@@ -482,10 +594,20 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         message?.phase === 'preparing' ? { state: 'pending' } :
         { state: 'blocked', message: 'Approved baseline is saved but execution is not admitted. Check Settings and continue.' }
     }
-    if (request.method === 'GET')
+    if (request.method === 'GET') {
+      if (saved && currentGraph(saved) && saved.phase !== 'running')
+        await reconcileDiscoveryGraph(store, actor.id, repo, workspace, saved, verifyAuthority)
       return reply({ session: saved ? scope(saved) : null, continuation: await continuation() })
+    }
     const data = await input(request)
     const action = data.action
+    if (saved && !currentGraph(saved) && !['restart', 'reconcile'].includes(String(action)))
+      throw new DiscoveryError(409, 'Unsupported pre-cutover Discovery execution. Restart incomplete discovery explicitly.')
+    if (saved && currentGraph(saved)) {
+      assertGraphIdentity(actor.id, repo, workspace, saved)
+      if (saved.phase !== 'running' && action !== 'restart')
+        await reconcileDiscoveryGraph(store, actor.id, repo, workspace, saved, verifyAuthority)
+    }
     if (action === 'draft') {
       if (!saved || saved.questionContract !== 'structured-v1' ||
           saved.phase !== 'questions' || !saved.questions || typeof saved.questions === 'string' ||
@@ -503,14 +625,19 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     }
     if (action === 'reconcile') {
       if (!saved || saved.phase !== 'running' || data.revision !== saved.revision ||
+          (currentGraph(saved) && saved.graphOperation!.status === 'settled') ||
           !saved.startedAt || Date.now() - saved.startedAt < 10 * 60_000) {
         throw new DiscoveryError(409, 'Only a running turn older than ten minutes may be reconciled; refresh first')
       }
       // This is an explicit operator/author decision after the previous worker
       // may have died. It does not run any model or mutate a Story file. A
       // late former worker response cannot overwrite this CAS revision.
-      const blocked: Session = { ...saved, phase: 'blocked', revision: saved.revision + 1 }
+      const blocked: Session = { ...saved, phase: 'blocked', revision: saved.revision + 1,
+        ...(currentGraph(saved) ? { graphOperation: { ...saved.graphOperation!, status: 'settled' as const,
+          reconciledFrom: saved.graphOperation!.status === 'reserved' ? 'reserved' as const : 'claimed' as const } } : {}) }
       await save(store, actor.id, repo, workspace, blocked, saved.revision)
+      if (currentGraph(blocked))
+        await reconcileDiscoveryGraph(store, actor.id, repo, workspace, blocked, verifyAuthority)
       return reply({ session: scope(blocked) })
     }
     if (action === 'approve') {
@@ -529,13 +656,23 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       approved.digest = sha(approved.proposal)
       // Exact review is durable before any provider, worktree or queue effect.
       if (chat) await validateNewStory(candidate(approved.proposal!.foundation).file)
-      await save(store, actor.id, repo, workspace, approved, saved.revision)
+      const operation: DiscoveryOperation = { id: saved.revision + 1, kind: 'approve',
+        from: gateFor(saved).ref, inputDigest: operationInputDigest(saved) }
+      const reserved: Session = { ...saved, phase: 'running', startedAt: Date.now(),
+        revision: operation.id, graphOperation: { ...operation, status: 'reserved' } }
+      await save(store, actor.id, repo, workspace, reserved, saved.revision)
+      const graph = await openDiscoveryGraph(store, actor.id, repo, workspace, reserved,
+        verifyAuthority, async claimed => ({ ...claimed, phase: 'approved',
+          proposal: approved.proposal, digest: approved.digest }))
+      await graph.advance(operation, false)
+      const settled = (await load(store, actor.id, repo, workspace))!
+      await reconcileDiscoveryGraph(store, actor.id, repo, workspace, settled, verifyAuthority)
       const handoff = chat ? await continueApprovedStoryChat(auth, store,
         request.headers, baseURL, {
-          chat, digest: approved.digest!, skillId: approved.skillId,
-          model: approved.model, foundation: approved.proposal!.foundation,
+          chat, digest: settled.digest!, skillId: settled.skillId,
+          model: settled.model, foundation: settled.proposal!.foundation,
         }, gateways) : undefined
-      return reply({ session: scope(approved), continuation: handoff })
+      return reply({ session: scope(settled), continuation: handoff })
     }
     if (action === 'continue') {
       if (!chat || !saved || saved.phase !== 'approved' ||
@@ -549,10 +686,13 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     }
     if (!['start', 'answer', 'revise', 'retry', 'restart'].includes(String(action))) throw new DiscoveryError(400, 'Invalid discovery action')
     if (action === 'restart' && (!saved || data.revision !== saved.revision ||
-        saved.questionContract === 'structured-v1' ||
+        currentGraph(saved) ||
         !['questions', 'blocked', 'proposed'].includes(saved.phase)))
-      throw new DiscoveryError(409, 'Only an unsupported textual discovery session may be restarted.')
+      throw new DiscoveryError(409, 'Only an unsupported incomplete discovery session may be restarted.')
     if (action === 'start' && saved) throw new DiscoveryError(409, 'Discovery already exists. Resume it.')
+    if (chat && (action === 'start' || action === 'restart') &&
+        await store.persistence.generation.jobs.identity(chat.firstTurnId))
+      throw new DiscoveryError(409, 'Discovery must begin before a Generation Job exists.')
     if (action === 'answer' && (!saved || saved.phase !== 'questions' ||
         data.revision !== saved.revision)) throw new DiscoveryError(409, 'Question round is stale or unavailable')
     if (action === 'revise' && (!saved || saved.questionContract !== 'structured-v1' ||
@@ -587,10 +727,21 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         turns: [{ role: 'user', text: chat?.originalObjective ?? (data.text as string).trim() }],
         ...(chat ? { chat } : {}) }
     } else if (action === 'restart') {
+      // Retain old author/effect evidence for inspection without importing it
+      // into the new execution. This reserved row is never read by the runner.
+      const retired = JSON.stringify(saved)
+      const archiveKey = 'story-discovery-retired,' + sha({ workspace, retired })
+      if (!await store.persistence.onboarding.saveConversation(actor.id, repo, archiveKey,
+        1, retired, null, new Date().toISOString())) {
+        const archived = await store.persistence.onboarding.conversation(actor.id, repo, archiveKey)
+        if (archived?.state !== retired) throw new DiscoveryError(409, 'Retired Discovery evidence changed.')
+      }
       session = { ...saved!, phase: 'running', startedAt: Date.now(),
         questionContract: 'structured-v1',
         revision: saved!.revision + 1, questions: undefined, drafts: undefined,
         accepted: undefined, proposal: undefined, digest: undefined, pendingDiscovery: undefined,
+        semanticReview: undefined, graphEpoch: undefined, graphStartRevision: undefined,
+        graphOperation: undefined, discoveryEvidencePaths: undefined,
         turns: [{ role: 'user', text: saved!.chat?.originalObjective ?? saved!.brief }] }
     } else {
       let userTurn: Turn | undefined
@@ -620,10 +771,20 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         ...(accepted ? { accepted } : {}),
         turns: userTurn ? [...saved!.turns, userTurn] : saved!.turns }
     }
-    // Durable in-flight reservation precedes provider invocation, preventing
-    // duplicated model calls on concurrent requests and unsafe automatic replay
-    // after a worker dies during a provider turn.
+    const fresh = action === 'start' || action === 'restart'
+    const operation: DiscoveryOperation = { id: session.revision,
+      kind: action as DiscoveryOperation['kind'], from: fresh ? null : gateFor(saved!).ref,
+      inputDigest: operationInputDigest(session) }
+    if (fresh) {
+      session.graphStartRevision = session.revision
+      session.graphEpoch = graphIdentity(actor.id, repo, workspace, session)
+    }
+    session.graphOperation = { ...operation, status: 'reserved' }
+    // CAS reserves exact accepted author evidence before graph resume. Pi is
+    // invoked only inside the checkpointed execute_round node.
     await save(store, actor.id, repo, workspace, session, saved?.revision ?? null)
+    const graph = await openDiscoveryGraph(store, actor.id, repo, workspace, session,
+      verifyAuthority, async (session): Promise<Session> => {
     let diagnosticStage = 'load-skills'
     let evidence: DiscoveryEvidence | null = null
     let pendingDiscovery: Session['pendingDiscovery'] = session.pendingDiscovery
@@ -851,8 +1012,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         pendingDiscovery: undefined,
       }
       diagnosticStage = 'persist-valid-response'
-      await save(store, actor.id, repo, workspace, next, session.revision)
-      return reply({ session: scope(next) })
+      return next
     } catch (error) {
       // Explicit trusted local certification may classify a failing provider
       // turn without revealing error messages, transcript text or credentials.
@@ -900,9 +1060,15 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       const blocked: Session = { ...session, phase: 'blocked', revision: session.revision + 1,
         discoveryEvidencePaths: [...(session.discoveryEvidencePaths ?? []), ...evidencePaths],
         pendingDiscovery }
-      try { await save(store, actor.id, repo, workspace, blocked, session.revision) } catch { /* preserve races */ }
-      throw new DiscoveryError(503, 'Discovery turn did not complete. State preserved; inspect it before choosing a new conversation.')
+      return blocked
     }
+    })
+    await graph.advance(operation, fresh)
+    const settled = (await load(store, actor.id, repo, workspace))!
+    await reconcileDiscoveryGraph(store, actor.id, repo, workspace, settled, verifyAuthority)
+    if (settled.phase === 'blocked')
+      throw new DiscoveryError(503, 'Discovery turn did not complete. State preserved; inspect it before choosing a new conversation.')
+    return reply({ session: scope(settled) })
   } catch (error) {
     if (error instanceof DiscoveryError) return reply({ error: error.message }, error.status)
     return reply({ error: 'Story discovery is unavailable. Verify the connected model, discovery skills, validator and application configuration.' }, 503)
@@ -917,9 +1083,14 @@ export async function assertApprovedPiFoundation(store: StudioDatabase, owner: s
   if (!reference || typeof reference !== 'object' || Array.isArray(reference))
     throw new DiscoveryError(409, 'Missing reviewed discovery approval')
   const ref = reference as Record<string, unknown>
-  const session = await load(store, owner, repo, onboardingWorkspace(workspace))
-  if (!session || session.phase !== 'approved' || session.revision !== ref.revision ||
+  const key = onboardingWorkspace(workspace)
+  const session = await load(store, owner, repo, key)
+  if (!session || !currentGraph(session) || session.phase !== 'approved' || session.revision !== ref.revision ||
       session.digest !== ref.digest || JSON.stringify(session.proposal?.foundation) !== JSON.stringify(foundation)) {
     throw new DiscoveryError(409, 'Approved discovery proposal does not match the selected repository, workspace or exact foundation')
   }
+  await reconcileDiscoveryGraph(store, owner, repo, key, session, async () => {
+    if (!await store.persistence.repositories.get(owner, repo))
+      throw new DiscoveryError(409, 'Approved Discovery repository is no longer connected.')
+  })
 }
