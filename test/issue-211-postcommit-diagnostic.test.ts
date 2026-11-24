@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,7 +10,7 @@ import type { PostcommitReviewCycle } from "../src/postcommit-review-cycle.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "../src/semantic-assignment-review.js";
 import { beginProtocolInvocation, inspectCompletedProtocolResponse } from "../src/response-contract-recovery.js";
 import { postcommitDiagnosticAdmission, parsePostcommitDiagnosis,
-  savePostcommitDiagnosis, readPostcommitDiagnosis } from "../src/postcommit-repair-diagnostic.js";
+  savePostcommitDiagnosis, readPostcommitDiagnosis, foundationDiagnosticReason } from "../src/postcommit-repair-diagnostic.js";
 import { removeTestTree } from "./helpers.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -78,6 +79,50 @@ test("postcommit diagnostic is advisory at two corrections and soft later depths
     assert.equal(admitted?.reason ?? null, n === 3 ? "reassessment" :
       [5, 9].includes(n) ? "review-depth" : null);
   }
+});
+
+test("Foundation progress follows sealed Git and reviewer evidence rather than round count", async t => {
+  const { job, cycle } = fixture(t);
+  const root = join(job.stateDir, "story");
+  const path = "creative-direction/foundation.md";
+  mkdirSync(join(root, dirname(path)), { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  git("init", "-q");
+  git("config", "user.name", "Test");
+  git("config", "user.email", "test@example.invalid");
+  job.worktreeRoot = root;
+  job.storyRelativePath = "";
+  cycle.reviewer.file = join(job.stateDir, "review.jsonl");
+  cycle.rounds = [];
+  const revise = async (content: string, status?: "material" | "stalled", citation = content.trim()) => {
+    writeFileSync(join(root, path), content);
+    git("add", path);
+    git("commit", "-qm", "Revision");
+    const commitSha = git("rev-parse", "HEAD");
+    const sourceDigest = hash(commitSha);
+    const verdict = {
+      sourceDigest, verdict: "fail", findings: [{ path, message: "Resolve the witness motivation." }],
+      evidence: [],
+      ...(status ? { progressDiagnosis: { status, reason: "The independent reviewer compared the changed source.",
+        evidence: status === "material" ? { path, quote: citation } : null } } : {}),
+    };
+    appendFileSync(cycle.reviewer.file, JSON.stringify({ type: "message", message: {
+      role: "assistant", stopReason: "stop", content: [{ type: "text", text: JSON.stringify(verdict) }],
+    } }) + "\n");
+    const bytes = readFileSync(cycle.reviewer.file);
+    cycle.rounds.push({ commitSha, packetDigest: sourceDigest, verdictDigest: hash(verdict),
+      transcriptBytes: bytes.length, transcriptDigest: createHash("sha256").update(bytes).digest("hex") });
+    return foundationDiagnosticReason(job, cycle, [path]);
+  };
+  assert.equal(await revise("A witness arrives.\n"), null);
+  assert.equal(await revise("The witness seeks her lost brother.\n", "material"), null);
+  assert.equal(await revise("The witness seeks her lost brother and fears arrest.\n", "material"), null);
+  assert.equal(await revise("The witness seeks her lost brother and fears arrest. She has a red coat.\n", "stalled"), null);
+  assert.equal(await revise("The witness seeks her lost brother and fears arrest. She has a blue coat.\n", "stalled"), "reassessment");
+  assert.equal(await foundationDiagnosticReason(job, cycle, [path]), "reassessment", "restart derives the same disposition");
+  assert.equal(await revise("The witness seeks her lost brother.\n", "material"), "reassessment", "oscillation is not improvement");
+  assert.equal(await revise("The witness seeks her brother because he holds the key.\n", "material"), null);
+  await assert.rejects(revise("The witness holds a map.\n", "material", "fabricated changed line"), /changed canonical citation/);
 });
 
 test("Diagnostic citations are literal and two unrelated issues in one file need no stable IDs", t => {

@@ -20,7 +20,7 @@ import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
 import type { SkillConfig } from "./skills.js";
 import { parseSpecialistJson } from "./composition-specialist.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
-import { postcommitDiagnosticAdmission, parsePostcommitDiagnosis,
+import { postcommitDiagnosticAdmissionForSource, parsePostcommitDiagnosis,
   savePostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
 import { CHOICE_PAYOFF_REVIEW } from "./choice-payoff-guidance.js";
 import { validateEditorialRepairDiagnosis, type EditorialRepairDiagnosis,
@@ -598,6 +598,10 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "including the precise source-linked requirement and prior correction attempts. " +
       "A revised sentence alone does not satisfy an unchanged requirement; a " +
       "past failed verdict is not erased or deemed passed by the writer. " +
+      "If progressScope is present and the verdict is FAIL, include progressDiagnosis: " +
+      "{status: material|stalled|uncertain, reason: string, evidence: null or {path,quote,change: added|removed}}. " +
+      "Material means an actual improvement in satisfying a prior sealed finding, not just new wording or a new finding. " +
+      "Cite an exact changed line from progressScope for material; otherwise return null evidence. " +
       "Do not require unrelated future specialist work or expand authorization. " +
       "If rejectedEventComparison is present, verify the NEW committed typed " +
       "state and prose against the SAME original failed promise and findings; " +
@@ -668,7 +672,7 @@ async function reviewPostcommitDiagnosis(job: JobStartResult, snapshot: SkillSna
   packet: SemanticReviewPacket, verdict: SemanticVerdict,
   cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle,
   provider: string, model: string, thinking: "low" | "high" | undefined) {
-  const admission = postcommitDiagnosticAdmission(job, cycle, packet, verdict);
+  const admission = await postcommitDiagnosticAdmissionForSource(job, cycle, packet, verdict);
   if (!admission) return;
   const contract = admission.contract, receiptFile = admission.protocolRoot;
   const item = packet.items[0]!;

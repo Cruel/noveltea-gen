@@ -5317,12 +5317,13 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
   skip: !available, timeout: 120_000,
 }, async () => {
   const owner = scenario === "cli" ? "cli" : "server";
   const terminal = scenario === "protocol-exhausted" || scenario === "nonconverging";
+  const realReview = scenario === "review-rejected" || scenario === "review-converges";
   const f = setup("r01-real-foundation-pi-" + scenario);
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
@@ -5410,6 +5411,43 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       }, ...(i === 5 ? [{ type: "toolCall" as const, name: "write", id: "r02-foreign-write",
         arguments: { path: "events/foreign.md", content: "Unauthorized" } }] : [])], reason: "toolUse" };
       if (i === 6 || i === 8) return { content: scriptedText(report), reason: "stop" };
+      if (realReview && i === 9)
+        return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
+          .map(path => "skill://" + path), i), reason: "toolUse" };
+      const correction = i >= 11 ? Math.floor((i - 11) / 3) + 1 : 0;
+      const correctionStep = (i - 11) % 3;
+      const revisions = [
+        "The witness took a ledger from the archive before the theft.",
+        "The ledger records the stolen archive key at midnight.",
+        "The witness must identify who used the stolen key.",
+      ];
+      if (scenario === "review-converges" && correction && correctionStep === 0)
+        return { content: [{ type: "toolCall", name: "write", id: "r03-writer-" + correction,
+          arguments: { path: target, content: authored + "\n" + revisions.slice(0, correction).join("\n") + "\n" } }], reason: "toolUse" };
+      if (scenario === "review-converges" && correction && correctionStep === 1)
+        return { content: scriptedText("Corrected the source-linked witness obligation."), reason: "stop" };
+      if (realReview && (i === 10 || scenario === "review-converges" && correctionStep === 2)) {
+        const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+        const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+          .map(c => c.text ?? "").findLast(text => text.includes("\nIMMUTABLE REVIEW PACKET\n"));
+        assert.ok(prompt, "Original reviewer receives the source-bound packet");
+        const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        const item = packet.items[0];
+        const pass = correction === 3;
+        const finding = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+          path: target, line: 1, kind: "missing-requirement",
+          message: "The witness causal connection still needs the next specific link.",
+          requiredCorrection: "Specify the witness's concrete causal connection to the archive theft.",
+          affectedPaths: [target] };
+        return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: pass ? "pass" : "fail",
+          findings: pass ? [] : [finding],
+          evidence: pass ? [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+            path: target, line: 1, explanation: "The corrected source establishes the required causal connection." }] : [],
+          ...(correction ? { progressDiagnosis: { status: "material",
+            reason: "The exact changed line materially addresses the previous causal gap.",
+            evidence: { path: target, quote: revisions[correction - 1], change: "added" } } } : {}),
+        }), reason: "stop" };
+      }
       throw Error("R01 writer replayed or called another model unexpectedly: " + i);
     });
     const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "r01-generation.sqlite"));
@@ -5419,7 +5457,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
     try {
       let reviewCalls = 0;
       let reviewerError: string | null = null;
-      const graph = createGenerationGraph(saver, owner, async s => {
+      const graph = createGenerationGraph(saver, owner, realReview ? undefined : async s => {
         const job = await startStoryJob({ story: f.story, job: "single" }, false);
         const point = (await inspectRecoveryCheckpoints(job)).find(p =>
           p.eligible && p.workItem === "foundation");
@@ -5453,6 +5491,47 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       });
       let first = await withJobModelRuntime(runtime, () =>
         graph.invoke(input, { ...config, interruptAfter: ["specialist_dispatch"] }));
+      if (realReview) {
+        const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+        assert.equal(first.result?.headSha, head,
+          "A negative child Review must retain the settled original writer receipt for the assessor");
+        assert.equal(first.recoveryLifecycle.phase, "assessing", JSON.stringify(first.recoveryLifecycle));
+        const original = first.recoveryLifecycle.active!;
+        assert.equal(original.origin.operation, "independent-review");
+        assert.equal(original.origin.sourceHeadSha, head);
+        assert.equal((await inspectRecoveryCheckpoints(f.job))
+          .find(point => point.commitSha === head)?.semanticReview, "failed");
+        const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+          ...config, interruptAfter: ["assess_recovery"],
+        }));
+        assert.equal(selected.recoveryLifecycle.active?.id, original.id);
+        assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction",
+          JSON.stringify(selected.recoveryLifecycle));
+        assert.equal(observed.length, 13, "Selection cannot start a new Pi writer");
+        if (scenario === "review-converges") {
+          const repaired = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["independent_assignment_review"],
+          }));
+          assert.equal(repaired.recoveryLifecycle.phase, "idle",
+            JSON.stringify({ reason: repaired.reason, status: repaired.status,
+              lifecycle: repaired.recoveryLifecycle, calls: observed.slice(13).map(o => ({ tools: o.tools, last: JSON.stringify(o.messages.at(-1)).slice(0, 1400) })) }, null, 2));
+          const finalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+          assert.equal(repaired.recoveryLifecycle.discharged.at(-1)?.case.id, original.id);
+          assert.equal(repaired.result?.headSha, finalHead);
+          assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", head + "..HEAD"), "3");
+          assert.equal(observed.length, 22);
+          const cycle = await (await import("../src/postcommit-review-cycle.js"))
+            .inspectPostcommitReviewCycle(f.job, head, (await inspectRecoveryCheckpoints(f.job))
+              .find(p => p.commitSha === head)!.assurance!.assignmentDigest);
+          assert.equal(cycle?.rounds.length, 4);
+          const completed = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["verify_committed_work"],
+          }));
+          assert.ok(completed.completedStages.some(item => item.stage === "foundation"));
+          assert.equal(observed.length, 22);
+        }
+        return;
+      }
       if (terminal) {
         assert.equal(first.recoveryLifecycle.phase, "assessing", JSON.stringify({
           status: first.status, reason: first.reason, lifecycle: first.recoveryLifecycle,

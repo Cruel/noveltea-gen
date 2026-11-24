@@ -10,6 +10,8 @@ import type { JobStartResult } from "./job.js";
 import type { PostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import type { SemanticReviewPacket, SemanticVerdict } from "./semantic-assignment-review.js";
 import { inspectCompletedProtocolResponse } from "./response-contract-recovery.js";
+import { repairProgressScope, validateEditorialRepairDiagnosis } from "./editorial-repair-progress.js";
+import { execFileSync } from "./git-read-cache.js";
 
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -44,10 +46,76 @@ export function postcommitDiagnosticReason(round: number): PostcommitDiagnosisRe
     round >= 5 && (round - 5) % 4 === 0 ? "review-depth" : null;
 }
 
+/** Reconstruct progress from the existing immutable reviewer transcript and Git,
+ * not a new counter or mutable diagnosis cache. Scope changes start a new
+ * cycle; their first correction still compares against the sealed predecessor. */
+export async function foundationDiagnosticReason(job: JobStartResult,
+  cycle: PostcommitReviewCycle, paths: string[]): Promise<PostcommitDiagnosisReason | null> {
+  const { inspectPostcommitReviewCycle } = await import("./postcommit-review-cycle.js");
+  const { parseSpecialistJson } = await import("./composition-specialist.js");
+  const { normalizeFailedSemanticFindingKinds } = await import("./semantic-assignment-review.js");
+  const readRound = async (owner: PostcommitReviewCycle, round: PostcommitReviewCycle["rounds"][number]) => {
+    const bytes = (await readFile(owner.reviewer.file)).subarray(0, round.transcriptBytes);
+    const records = bytes.toString("utf8").trim().split("\n").map(line => JSON.parse(line));
+    const message = records.filter(r => r.type === "message" && r.message?.role === "assistant" &&
+      r.message.stopReason === "stop").at(-1)?.message;
+    const raw = message?.content?.filter((c: { type: string }) => c.type === "text")
+      .map((c: { text: string }) => c.text).join("\n");
+    if (!raw || createHash("sha256").update(bytes).digest("hex") !== round.transcriptDigest)
+      throw Error("Foundation review progress lost its sealed transcript");
+    const verdict = normalizeFailedSemanticFindingKinds(parseSpecialistJson(raw)) as SemanticVerdict;
+    if (verdict.sourceDigest !== round.packetDigest || digest(verdict) !== round.verdictDigest)
+      throw Error("Foundation review progress differs from its sealed verdict");
+    return verdict;
+  };
+  const blob = (sha: string) => digest(paths.map(path => execFileSync("git", [
+    "show", sha + ":" + (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path,
+  ], { cwd: job.worktreeRoot, encoding: "utf8" })));
+  const seen = new Set<string>();
+  let previous: { sha: string; verdict: SemanticVerdict } | undefined;
+  if (cycle.predecessor) {
+    const parent = await inspectPostcommitReviewCycle(job, cycle.rootSha, cycle.predecessor.assignmentDigest);
+    const round = parent?.rounds.find(r => r.commitSha === cycle.predecessor!.failedCommitSha);
+    if (!parent || parent.id !== cycle.predecessor.cycleId || !round)
+      throw Error("Foundation review progress lost its sealed predecessor");
+    previous = { sha: round.commitSha, verdict: await readRound(parent, round) };
+    seen.add(blob(previous.sha));
+  }
+  let stalled = 0;
+  for (const round of cycle.rounds) {
+    const verdict = await readRound(cycle, round);
+    const source = blob(round.commitSha);
+    if (previous && verdict.verdict === "fail") {
+      if (previous.verdict.verdict !== "fail")
+        throw Error("Foundation correction has no preceding negative review");
+      const priorPaths = [...new Set(previous.verdict.findings.map(f => f.path))];
+      if (!priorPaths.every(path => paths.includes(path)))
+        throw Error("Foundation convergence left its authorized record");
+      const scope = repairProgressScope(job, previous.sha, round.commitSha, priorPaths,
+        previous.verdict.findings.map(f => ({ severity: "blocking", source: f.path, message: f.message })));
+      const progress = validateEditorialRepairDiagnosis(verdict.progressDiagnosis, scope);
+      stalled = progress.status === "material" && !seen.has(source) ? 0 : stalled + 1;
+    }
+    seen.add(source);
+    previous = { sha: round.commitSha, verdict };
+  }
+  if (previous?.verdict.verdict !== "fail") return null;
+  return stalled >= 2 ? "reassessment" : null;
+}
+
+export async function postcommitDiagnosticAdmissionForSource(job: JobStartResult,
+  cycle: PostcommitReviewCycle, packet: SemanticReviewPacket, verdict: SemanticVerdict) {
+  const item = packet.items[0];
+  const reason = item?.progressScope && verdict.verdict === "fail"
+    ? await foundationDiagnosticReason(job, cycle, item.assurance.changedPaths)
+    : undefined;
+  return postcommitDiagnosticAdmission(job, cycle, packet, verdict, reason);
+}
+
 /** Advisory source-bound admission, never a new review verdict or write grant. */
 export function postcommitDiagnosticAdmission(job: JobStartResult,
   cycle: PostcommitReviewCycle, packet: SemanticReviewPacket,
-  verdict: SemanticVerdict): PostcommitDiagnosticAdmission | null {
+  verdict: SemanticVerdict, sourceReason?: PostcommitDiagnosisReason | null): PostcommitDiagnosticAdmission | null {
   if (verdict.verdict !== "fail" || packet.dispute ||
       packet.items.length !== 1 || !packet.items[0]?.priorNegative ||
       verdict.sourceDigest !== packet.sourceDigest ||
@@ -55,7 +123,7 @@ export function postcommitDiagnosticAdmission(job: JobStartResult,
       cycle.rounds.at(-1)?.commitSha !== packet.items[0].assurance.commitSha ||
       cycle.rounds.at(-1)?.verdictDigest !== digest(verdict)) return null;
   const round = cycle.rounds.length;
-  const reason = postcommitDiagnosticReason(round);
+  const reason = sourceReason === undefined ? postcommitDiagnosticReason(round) : sourceReason;
   if (!reason) return null;
   const sourceDigest = digest({
     schema: "noveltea-postcommit-diagnostic-source/v1",
@@ -131,7 +199,7 @@ export async function savePostcommitDiagnosis(job: JobStartResult,
   cycle: PostcommitReviewCycle, packet: SemanticReviewPacket,
   verdict: SemanticVerdict, admission: PostcommitDiagnosticAdmission,
   diagnosis: PostcommitDiagnosis) {
-  if (postcommitDiagnosticAdmission(job, cycle, packet, verdict)?.sourceDigest !== admission.sourceDigest ||
+  if ((await postcommitDiagnosticAdmissionForSource(job, cycle, packet, verdict))?.sourceDigest !== admission.sourceDigest ||
       diagnosis.sourceDigest !== admission.sourceDigest)
     throw Error("Diagnostic outcome changed its independently verified source.");
   const commitSha = packet.items[0]!.assurance.commitSha;

@@ -511,7 +511,18 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
     const proof = await readRepairCommitProof(job, point.workItem);
     const original = JSON.parse(await readFile(join(job.stateDir, "recovery-checkpoints",
       proof.sourceCommitSha + ".json"), "utf8")) as RecoveryCheckpoint;
-    initialFoundationRepair = original.workItem === "foundation" && original.plan === null;
+    const root = proof.rootFailureSha === proof.sourceCommitSha ? original :
+      JSON.parse(await readFile(join(job.stateDir, "recovery-checkpoints",
+        proof.rootFailureSha + ".json"), "utf8")) as RecoveryCheckpoint;
+    const predecessor = original.workItem.startsWith("repair-")
+      ? await readRepairCommitProof(job, original.workItem) : null;
+    initialFoundationRepair = original.plan === null && root.plan === null &&
+      root.workItem === "foundation" && root.commitSha === proof.rootFailureSha &&
+      original.commitSha === proof.sourceCommitSha &&
+      (proof.rootFailureSha === proof.sourceCommitSha ||
+        predecessor?.rootFailureSha === proof.rootFailureSha &&
+        predecessor.commitSha === proof.sourceCommitSha &&
+        predecessor.assignmentId === proof.assignmentId);
   }
   if (point.plan === null
     ? point.workItem !== "foundation" && !initialFoundationRepair

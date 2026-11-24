@@ -24,7 +24,7 @@ import { selectOperationStrategy, executeOperationStrategy,
 import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
 import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
-  finishVerifiedRecovery, recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
+  recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
@@ -736,6 +736,7 @@ export async function dispatchGenerationAssignment(s: { request: GenerationReque
 async function runFoundationAssignmentChild(
   s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+  correctionSelected = false,
 ): Promise<Partial<State>> {
   if (s.active?.stage !== "foundation" || !s.inventory)
     throw Error("R01 child requires the parent-admitted Foundation assignment.");
@@ -746,8 +747,10 @@ async function runFoundationAssignmentChild(
   // Parent reconciliation can refresh inventory HEAD after an original Git
   // effect but before the original assignment is recorded complete. Recover
   // the immutable source from the eligible native receipt, not refreshed HEAD.
+  const correction = correctionSelected ? s.recoveryLifecycle.active : null;
   const published = (await inspectRecoveryCheckpoints(job)).find(p =>
-    p.eligible && p.workItem === "foundation" && p.commitSha === s.inventory!.headSha &&
+    p.eligible && p.workItem === "foundation" &&
+    p.commitSha === (correction?.origin.sourceHeadSha ?? s.inventory!.headSha) &&
     p.planVersion === (s.planVersion ?? null) && p.validation.status === "passed" &&
     (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
   const interruptedCommit = !published && s.active.verifiedSha === s.inventory.headSha &&
@@ -775,7 +778,18 @@ async function runFoundationAssignmentChild(
   const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
     extra: Record<string, string>): AssignmentOutcome =>
     ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome;
+  const authenticateCorrection = async () => {
+    if (!correction || !published || !s.result ||
+        s.result.headSha !== published.commitSha || s.recoveryLifecycle.phase !== "correcting" ||
+        s.recoveryLifecycle.assessorPending || correction.origin.assignmentId !== identity.assignmentId)
+      return false;
+    const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
+    return !!s.recoveryLifecycle.decision &&
+      await authenticateOperationReviewProof(job, s, correction, s.recoveryLifecycle.decision);
+  };
   const child = createAssignmentLifecycleGraph({
+    authenticateContinuation: async state =>
+      state.continuationRef === correction?.id && await authenticateCorrection(),
     preflight: async () => {
       const control = await readJobControl(job);
       if (control === "cancelled") {
@@ -788,6 +802,11 @@ async function runFoundationAssignmentChild(
       // crash after model completion may leave its authenticated target dirty;
       // a blanket clean-worktree gate here would prevent safe verification.
       await checkPlan(job, s.request, s.planVersion);
+      if (correctionSelected) {
+        if (!await authenticateCorrection())
+          throw Error("Foundation correction lacks its original admitted Review case.");
+        return null;
+      }
       const currentHead = jobGit(job, "rev-parse", "HEAD");
       if (currentHead !== sourceHead) {
         // Two distinct crash windows: committed Git before the Foundation
@@ -837,7 +856,7 @@ async function runFoundationAssignmentChild(
         return outcome("unresolved", submission.receiptRef,
           { dispositionRef: "foundation.json" });
       try {
-        reviewPatch = await reviewBoundary(candidate);
+        reviewPatch = await reviewBoundary(candidate, correctionSelected);
       } catch (error) {
         // Review runs within the shared child, but its original failed check
         // is STILL independent-review, never the adjacent specialist writer.
@@ -864,6 +883,13 @@ async function runFoundationAssignmentChild(
         const head = await trustedHead(job);
         if (actual.headSha !== head)
           throw Error("Original Foundation result differs from independently reviewed Git HEAD.");
+        if (correction) {
+          const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+          if (!await verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
+            throw Error("Foundation correction has no independently passing original-session successor.");
+          return outcome("verified", "recovery-checkpoints:" + head,
+            { headSha: head, reviewRef: "review-checkpoints:" + head });
+        }
         const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
         const reviews = await resolvedCheckpointReviews(job, points);
         const reviewed = points.find(p => p.workItem === "foundation" &&
@@ -894,7 +920,10 @@ async function runFoundationAssignmentChild(
   // LangGraph passes the parent's persistent SQLite checkpointer to the
   // nested graph. No standalone child scheduler, database, or recovery ledger.
   const finished = await child.invoke({
-    identity, submission: null, outcome: null, continuationRef: null,
+    identity, submission: correction && s.result
+      ? { receiptRef: "foundation.json", status: s.result.status, headSha: s.result.headSha } : null,
+    submissionKey: correction ? key : null,
+    outcome: null, continuationRef: correction?.id ?? null,
   }, config);
   if (!finished.outcome)
     throw Error("Foundation child has a genuine pending author interrupt; return to parent control.");
@@ -913,7 +942,9 @@ async function runFoundationAssignmentChild(
   if (reviewedState && (reviewedState.status || reviewedState.operationRecovery ||
       reviewedState.recovery || reviewedState.unknownRecovery ||
       reviewedState.escalation || reviewedState.reviewSteeringHandoff))
-    return reviewedState;
+    return { ...reviewedState, result: finished.submission
+      ? { status: finished.submission.status, headSha: finished.submission.headSha }
+      : reviewedState.result };
   if (finished.outcome.status === "paused")
     return { status: "paused", reason: "Original Foundation child is suspended; inspect controller-owned control and review receipts." };
   if (finished.outcome.status === "unresolved" &&
@@ -1675,6 +1706,20 @@ export function recoveryNode(
       diagnosis?: { recommendation: "operator-intervention" | "inspect-existing-receipt";
         advisoryCategory: "software" | "unclassified" | "resources" | "integrity";
         receipt: RecoveryEvidence } } = {};
+    if (current && node === "independent_assignment_review" && domain.operationRecovery === null &&
+        prior.recoveryLifecycle.phase === "correcting" &&
+        current.origin.operation === "independent-review" &&
+        prior.recoveryLifecycle.decision?.action === "known-correction" &&
+        prior.recoveryLifecycle.decision.adapter === "review-cycle") {
+      const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
+      const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+      const head = await trustedHead(job);
+      if (await authenticateOperationReviewProof(job, local, current, prior.recoveryLifecycle.decision) &&
+          await verifyReviewCycleSuccessor(job, current.origin.sourceHeadSha, head)) {
+        assurance.verifiedHead = head;
+        assurance.verifiedReceipt = { store: "review-checkpoint", ref: head };
+      }
+    }
     if (current && domain.unknownRecovery?.phase === "operator-intervention") {
       try {
         const previous = projectRecovery(prior).unknownRecovery?.case;
@@ -2599,7 +2644,7 @@ export function createGenerationGraph(
           { reference: "dependency-plan", assignmentId: s.active?.id });
       }
     }))
-    .addNode("independent_assignment_review", recoveryNode("independent_assignment_review", async s => {
+    .addNode("independent_assignment_review", recoveryNode("independent_assignment_review", async (s, config) => {
       const selected = s.recoveryLifecycle;
       const correction = selected.phase === "correcting" &&
         !selected.assessorPending && selected.active?.origin.operation === "independent-review" &&
@@ -2612,7 +2657,9 @@ export function createGenerationGraph(
         if (!await authenticateOperationReviewProof(job, s, selected.active!, selected.decision!))
           throw Error("Saved Review correction lost its original failed verdict");
       }
-      const reviewed = await reviewBoundary(s, correction);
+      const reviewed = correction && s.active?.stage === "foundation"
+        ? await runFoundationAssignmentChild(s, config, reviewBoundary, true)
+        : await reviewBoundary(s, correction);
       if (correction) {
         if (reviewed.reviewSteeringHandoff)
           return reviewed; // Preserve original Review-to-author intake boundary.
@@ -2621,35 +2668,11 @@ export function createGenerationGraph(
           return reviewed; // Retain original correction decision and receipts.
         const job = await openJob(s);
         const head = await trustedHead(job);
-        const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
-        const { resolvedCheckpointReviews } = await import("./checkpoint-assurance.js");
-        const statuses = await resolvedCheckpointReviews(job, points);
-        const original = selected.active!;
-        // A passing successor alone is not proof that the original rejected
-        // writer was actually corrected. Walk the source-linked repair chain,
-        // requiring the terminal original-session repair receipt and its
-        // independently reviewed, exact committed successor.
-        const successor = points.find(p => p.commitSha === head && p.assurance &&
-          p.workItem.startsWith("repair-") &&
-          ["passed", "not-required"].includes(statuses.get(p.commitSha) ?? p.semanticReview));
-        let repairVerified = false;
-        if (successor) {
-          const sourceSha = successor.workItem.slice("repair-".length);
-          const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
-          const receipt = await inspectRejectedRepair(job, sourceSha);
-          repairVerified = receipt.phase === "passed" && receipt.repairedCommitSha === head &&
-            receipt.rootFailureSha === original.origin.sourceHeadSha;
-        }
-        const verified = repairVerified &&
-          statuses.get(original.origin.sourceHeadSha) === "not-required";
-        if (!verified)
+        const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+        if (!await verifyReviewCycleSuccessor(job, selected.active!.origin.sourceHeadSha, head))
           return { status: "blocked" as const,
             reason: "Original failed independent Review has no independently passing corrective successor." };
-        return { ...reviewed,
-          recoveryLifecycle: finishVerifiedRecovery(selected, {
-            status: "verified", caseId: original.id, sourceHeadSha: head,
-            assurance: { store: "review-checkpoint", ref: head },
-          }, true), status: "running" as const, reason: null };
+        return { ...reviewed, operationRecovery: null, status: "running" as const, reason: null };
       }
       // A trusted negative Review disposition must reach the same typed
       // assessment as a thrown reviewer failure. Keep the existing persistent

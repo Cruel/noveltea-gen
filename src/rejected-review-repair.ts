@@ -40,7 +40,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview } from "./semantic-assignment-review.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
-import { postcommitDiagnosticReason, readPostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
+import { foundationDiagnosticReason, postcommitDiagnosticReason, readPostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
 import { assertReviewCycleSession } from "./review-cycle.js";
 import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
@@ -912,7 +912,9 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   if (review.status === "failed" && point.assurance) {
     const cycle = await inspectPostcommitReviewCycle(job,
       state.rootFailureSha, point.assurance.assignmentDigest);
-    if (cycle && postcommitDiagnosticReason(cycle.rounds.length)) {
+    if (cycle && (state.origin.workItem === "foundation"
+      ? await foundationDiagnosticReason(job, cycle, state.allowedPaths)
+      : postcommitDiagnosticReason(cycle.rounds.length))) {
       const diagnosis = await readPostcommitDiagnosis(job, cycle, state.repairedCommitSha);
       if (!diagnosis)
         throw Error("Postcommit Diagnostic source-bound review is missing; reconcile its immutable Pi transcript.");
@@ -925,7 +927,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
       }
     }
   }
-  const stagnation = detectRepairStagnation(job, state, review.result);
+  const stagnation = state.origin.workItem === "foundation" ? null : detectRepairStagnation(job, state, review.result);
   if (stagnation) {
     finished.phase = "blocked";
     finished.failure = stagnation === "oscillation"

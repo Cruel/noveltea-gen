@@ -25,6 +25,20 @@ import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { trustedHead } from "./revision.js";
 import { independentObligation, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 
+/** A multi-round correction resolves only when the terminal successor's
+ * exact original-session receipt and the entire failed-root chain verify. */
+export async function verifyReviewCycleSuccessor(job: JobStartResult, rootSha: string, head: string) {
+  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const successor = points.find(p => p.commitSha === head && p.assurance &&
+    p.validation.status === "passed" && p.semanticReview === "passed" &&
+    p.workItem.startsWith("repair-"));
+  if (!successor) return false;
+  const receipt = await inspectRejectedRepair(job, successor.workItem.slice("repair-".length));
+  const reviews = await resolvedCheckpointReviews(job, points);
+  return receipt.phase === "passed" && receipt.repairedCommitSha === head &&
+    receipt.rootFailureSha === rootSha && reviews.get(rootSha) === "not-required";
+}
+
 /** C07: authenticate a previously verified ACTIVE case after its controller
  * has returned to the original scheduler. No model, author approval, or write
  * is performed here. The saved lifecycle carries only links to the EXISTING
@@ -67,11 +81,7 @@ export async function inspectActiveRecoveryResolution(
     }
     if (original.origin.operation === "independent-review" &&
         original.observation === "returned-failure") {
-      const repair = await inspectRejectedRepair(job, original.origin.sourceHeadSha);
-      const reviews = await resolvedCheckpointReviews(job, checkpoints.filter(p => p.eligible));
-      return repair.phase === "passed" && repair.rootFailureSha === original.origin.sourceHeadSha &&
-        repair.repairedCommitSha === correctedHeadSha &&
-        reviews.get(original.origin.sourceHeadSha) === "not-required";
+      return verifyReviewCycleSuccessor(job, original.origin.sourceHeadSha, correctedHeadSha);
     }
     return original.origin.operation === "independent-review" &&
       original.observation === "exception" && original.origin.sourceHeadSha === correctedHeadSha;

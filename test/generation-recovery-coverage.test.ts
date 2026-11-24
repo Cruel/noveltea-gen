@@ -49,7 +49,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
   specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:6,throws:7",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
-  independent_assignment_review: "returns:6,status:3,operationFailure:1,throws:1",
+  independent_assignment_review: "returns:6,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
   completion_decision:
     "returns:10,status:2,blocked:1,operationFailure:3,authorBoundary:2,reconcile:1,throws:2",
@@ -203,7 +203,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const reviewed = [
     [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
-    [file, "runFoundationAssignmentChild", "eea22554255045b960130bd4b7186f57de39eb7da1a7613140b06013c8c4559e"],
+    [file, "runFoundationAssignmentChild", "8889eadf91ddf63385dc773bd6a7618458d311579e848796e2ed6ef708826bb4"],
     [child, "createAssignmentLifecycleGraph", "9fa13f1f13a3729ec1fd9253f553483222c06492c7d1b490c59ccf5f225d7701"],
     [child, "authenticateAssignmentReentry", "5b24030609f9d19c2cd5c001a29dbcb865388377cfd865ee6c176b4996a2e135"],
   ] as const;

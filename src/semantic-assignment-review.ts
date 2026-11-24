@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { repairProgressScope, validateEditorialRepairDiagnosis, type EditorialRepairProgress, type EditorialRepairDiagnosis } from "./editorial-repair-progress.js";
 import { execFileSync } from "./git-read-cache.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -53,6 +54,7 @@ export interface SemanticReviewItem {
   priorNegative?: { sourceCommitSha: string; rootFailureSha: string;
     reviewDigest: string; findings: IndependentReviewResult["findings"];
     completedCorrections: number };
+  progressScope?: EditorialRepairProgress;
 }
 export interface ReviewDisputeClaim {
   sourceSha: string;
@@ -85,6 +87,7 @@ export interface SemanticFinding {
 export interface SemanticVerdict {
   sourceDigest: string;
   verdict: "pass" | "fail";
+  progressDiagnosis?: EditorialRepairDiagnosis;
   findings: SemanticFinding[];
   evidence: Array<{ commitSha: string; assignmentId: string; path: string; line: number; explanation: string;
     blueprintChallenge?: import("./milestone-blueprint-correction.js").BlueprintChallenge }>;
@@ -308,6 +311,7 @@ export async function prepareSemanticReview(job: JobStartResult,
       }
     }
     let priorNegative: SemanticReviewItem["priorNegative"];
+    let progressScope: EditorialRepairProgress | undefined;
     if (point.workItem.startsWith("repair-")) {
       const sourceSha = point.workItem.slice("repair-".length);
       if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw Error("Unsafe correction source identity.");
@@ -321,6 +325,11 @@ export async function prepareSemanticReview(job: JobStartResult,
       priorNegative = { sourceCommitSha: sourceSha, rootFailureSha: prior.rootFailureSha,
         reviewDigest: prior.sourceReviewDigest, findings: prior.findings,
         completedCorrections: prior.attempts };
+      if (prior.origin.workItem === "foundation" && !challenge)
+        progressScope = repairProgressScope(job, sourceSha, point.commitSha,
+          [...new Set(prior.findings.map(f => f.path))], prior.findings.map(f => ({
+            severity: "blocking", source: f.path, message: f.message,
+          })));
     }
     let rejectedEventComparison: SemanticReviewItem["rejectedEventComparison"];
     if (point.workItem.startsWith("repair-") && assignment.specialist === "nt-event-design") {
@@ -360,7 +369,8 @@ export async function prepareSemanticReview(job: JobStartResult,
         fields: ["completeness", "fulfillment"] as ["completeness", "fulfillment"] } } : {}),
       ...(eventConsequenceProof ? { eventConsequenceProof } : {}),
       ...(rejectedEventComparison ? { rejectedEventComparison } : {}),
-      ...(priorNegative ? { priorNegative } : {}) });
+      ...(priorNegative ? { priorNegative } : {}),
+      ...(progressScope ? { progressScope } : {}) });
   }
   // Group only commits on a single ancestry chain. Unrelated branches and
   // unrelated assignment batches are never silently combined.
@@ -510,6 +520,9 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
           f.assignmentId === item.assignment.id &&
           item.assurance.changedPaths.includes(f.path))))
     throw new Error("Semantic reviewer lacks assignment-specific, source-linked evidence.");
+  const progress = packet.items[0]?.progressScope;
+  if (progress && verdict.verdict === "fail")
+    validateEditorialRepairDiagnosis(verdict.progressDiagnosis, progress);
   return verdict;
 }
 
