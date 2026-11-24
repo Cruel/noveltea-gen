@@ -588,3 +588,34 @@ Planning provenance validation observes all applicable deterministic claim check
 For a disputed negative semantic Review, an independent read-only diagnostic must identify the exact negative predecessor on the same packet with verified claim and submitted-author quotations. The shared bounded-assignment assessment can admit one independent replacement for that packet, with the original negative and diagnosis receipt bound to its new request. The replacement must produce a complete source-backed Review, independent of the original writer, reviewer and diagnostic. An unresolved disagreement, fabricated quotation or adverse replacement cannot pass. The explicit author approval and native validation gates remain unchanged.
 
 Focused SQLite Story Chat regressions exercise the consecutive November 23 Luna provenance failures, multiple materially improving repairs, interruption after writer settlement, after correction admission and after corrective settlement, and recovery of a verified child before parent CAS. The SQLite Story Chat integration also proves changed-wording nonprogress with one independent diagnosis, exact original writer and reviewer session identities, independent replacement, deduplicated cumulative usage, budget/pre-dispatch refusal/uncertain-effect distinctions, and durable cancellation and archive refusal without new model or queue effects. The existing queued-instruction cancellation port refuses an already-preparing first Turn; a persisted cancellation is terminal. Isolated deterministic adapter tests additionally cover ungrounded reviewer drift and adverse replacement. Scripted Pi transcript tests are not live model certification. PostgreSQL qualification remains R14L.
+
+### R14I (#269) — nested author questions
+
+An eligible specialist question is a pending child task, not a parent pause.
+The [Generation question adapter](../src/generation-author-question.ts) binds the
+existing specialist receipt to the original assignment identity, source HEAD
+and nested checkpoint namespace under the Story lock, then releases the lock
+before interrupting. The existing Question Set and accepted answer remain
+authoritative; the checkpoint carries only references. The submitted answer
+is sealed with its principal and revision. The original child authenticates the
+seal before entering its original writer phase. The next substantive writer
+turn has its own normal assignment-round receipt and effect verification.
+
+[Studio admission](../web/src/lib/generation-controls.server.ts),
+[author interactions](../web/src/lib/author-interactions.server.ts) and the
+[worker](../web/src/agent-runner.ts) verify the original pending task before
+submitting a targeted resume command. Drafts do not authorize execution.
+Identical accepted submissions are idempotent. A stale parent interrupt after
+a durably consumed child answer resumes the pending computation without sending
+another answer command. A returned-END prerequisite is not an interrupt.
+The CLI-owned run accepts an answer JSON file with id, proposalSha256 and answer
+via `generate resume --answer <file>`; server-owned runs remain server-owned.
+
+World/Character, Narrative Event and focused original writer adapters use the
+shared boundary. The protected Foundation decision and rejected Review disputes
+remain existing parent decision paths; the latter's unchanged-scope corrective
+continuation requires further qualification. The scripted production World
+regression covers a real interrupt, restart before and after answer, and lost
+checkpoint after the resumed writer settles, including original session and
+independent Review. Event, focused and native Studio queue/worker end-to-end
+qualification are not established by this regression.

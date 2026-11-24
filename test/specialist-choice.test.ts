@@ -258,7 +258,7 @@ test("author answer survives restart; only the original session, HEAD and draft 
     assert.equal(actual.answer?.kind, "custom");
     assert.equal((await inspectSpecialistChoice(job, receipt.id)).answer?.principal, "user:owner");
     await assert.rejects(() => answerSpecialistChoice(job, receipt.id, receipt.proposalSha256,
-      { kind: "option", optionId: "personal", note: "" }, "user:owner"), /required author boundary/);
+      { kind: "option", optionId: "personal", note: "" }, "user:owner"), /already answered differently/);
     const claimed = await claimSpecialistChoice(job, receipt.id);
     assert.equal(claimed.sessionId, sessionId);
     assert.equal((await inspectSpecialistChoice(job, receipt.id)).phase, "resuming");

@@ -5465,6 +5465,124 @@ for (const needsCharacter of [false, true]) test("R14D Event native correction a
     restoreSandbox();
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
+
+test("R14I production World question resumes the same child and Pi session", { skip: !available, timeout: 120_000 }, async () => {
+  const f = setup("r14i-world-question");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  saveFixtureTurn(f.job, contract, f.start[3]!, ["Keep the original archive mystery objective."]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  const paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(paused.status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const paths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
+  const world = "---\nschema: '0.1'\ntype: world-entity\nid: world-entity.archive\ntitle: Archive\nstatus: draft\ndecisions: []\ndescription: A public archive with a restricted ledger\n---\n\nThe custodian guards the sealed ledger.\n";
+  const fact = "---\nschema: '0.1'\ntype: fact\nid: fact.evidence-concealed\ntitle: Hidden evidence\nstatus: draft\ndecisions: []\ninitial: true\n---\n\nNeri concealed an entry implicating an official.\n";
+  const { runtime, observed } = await scriptedStoryRuntime((i, context) => {
+    if (i === 0) return { content: scriptedReadCalls(["nt-worldbuilding/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/progression.md", "nt-catalog/references/authority-and-validation.md", "nt-catalog/references/glossary.md"].map(p => "skill://" + p), i), reason: "toolUse" };
+    if (i === 1) return { content: scriptedText({ authorDecisionRequest: {
+      kind: "free-text", question: "What evidence does the custodian protect in the archive?" },
+      modifiedRecords: [] }), reason: "stop" };
+    if (i === 2) return { content: [world, fact].map((content, n) => ({
+      type: "toolCall" as const, name: "write", id: "r14i-write-" + n,
+      arguments: { path: paths[n]!, content },
+    })), reason: "toolUse" };
+    if (i === 3) return { content: scriptedText({ modifiedRecords: paths,
+      architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
+    if (i === 4) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), i), reason: "toolUse" };
+    if (i === 5) {
+      const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+      const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+        .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+      assert.ok(prompt);
+      const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+      const item = packet.items[0];
+      return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+        evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+          path: paths[0], line: 1, explanation: "The custodian protects the sealed ledger." }] }), reason: "stop" };
+    }
+    throw Error("Unexpected extra specialist/reviewer call " + i);
+  });
+  const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  const { pendingGenerationQuestion, generationQuestionResume } = await import("../src/generation-author-question.js");
+  const { answerSpecialistChoice, inspectSpecialistChoice } = await import("../src/specialist-choice.js");
+  let saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    let graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const initial = (await graph.getState(cfg)).values;
+    const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "foundations");
+    await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
+      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
+    }, "author_update_intake");
+    await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+    assert.equal(observed.length, 2);
+    let pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
+    assert.ok(pending, JSON.stringify({tasks:(await graph.getState(cfg)).tasks, values:(await graph.getState(cfg)).values}));
+    assert.equal(pending.choice.phase, "awaiting-author");
+    assert.equal(existsSync(join(f.job.stateDir, ".story-job-running")), false);
+    const original = pending.choice;
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    graph = createGenerationGraph(saver, "cli");
+    pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
+    assert.equal(pending?.choice.id, original.id);
+    await answerSpecialistChoice(f.job, original.id, original.proposalSha256,
+      { kind: "custom", text: "The sealed ledger.", note: "" }, "user:cli");
+    pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
+    assert.ok(pending);
+    await assert.rejects(pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:other"), /different author/);
+    // Crash after the accepted answer's first substantive Pi turn settled but
+    // before its child submission is checkpointed. Reopen the same journal.
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    graph = createGenerationGraph(saver, "cli");
+    pending = await pendingGenerationQuestion(f.job, saver, await graph.getState(cfg), paused.threadId, "user:cli");
+    assert.ok(pending);
+    const put = saver.put.bind(saver);
+    const putWrites = saver.putWrites.bind(saver);
+    const abort = new AbortController();
+    let crashed = false;
+    const error = Error("R14I injected SQLite loss after answered writer settlement");
+    saver.put = async (...args) => { if (crashed) throw error; return put(...args); };
+    saver.putWrites = async (config, writes, task) => {
+      if (crashed) throw error;
+      if (config.configurable?.checkpoint_ns?.includes("assignment-") &&
+          writes.some(([channel, value]) => channel === "submission" &&
+            (value as { status?: string })?.status === "writer-round") && observed.length === 4) {
+        crashed = true; abort.abort(error); throw error;
+      }
+      return putWrites(config, writes, task);
+    };
+    await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(generationQuestionResume(pending!),
+      { ...cfg, signal: abort.signal, durability: "sync" })));
+    assert.ok(crashed);
+    assert.equal(observed.length, 4);
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    graph = createGenerationGraph(saver, "cli");
+    // The root may still hold the original interrupt while the child has
+    // checkpointed the authenticated answer and started its original turn.
+    const snapshot = await graph.getState(cfg);
+    const continuation = await pendingGenerationQuestion(f.job, saver, snapshot, paused.threadId, "user:cli");
+    assert.equal(continuation?.phase, "continuation");
+    await withJobModelRuntime(runtime, () => graph.invoke(generationQuestionResume(continuation!), { ...cfg, interruptAfter: ["specialist_dispatch"] }));
+    assert.equal(observed.length, 6);
+    const choice = await inspectSpecialistChoice(f.job, original.id);
+    assert.equal(choice.phase, "consumed");
+    const saved = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+    assert.equal(saved.units[0].phase, "committed");
+    assert.equal(saved.units[0].piSessionId, original.sessionId);
+    assert.equal(saved.units[1].phase, "pending");
+  } finally {
+    saver.db.close();
+    restoreSandbox();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 });

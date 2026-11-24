@@ -1,3 +1,4 @@
+import { pendingGenerationQuestion } from '../../../src/generation-author-question'
 import { execFileSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
@@ -28,7 +29,6 @@ import { assertUserPiSelection, validPiSelection, type PiSelection } from './pi-
 import type { PiPolicy } from '../../../src/job-pi-policy'
 import { readJobControl } from '../../../src/job-control'
 import { inspectFoundationConflict } from '../../../src/foundation-conflict'
-import { activeSpecialistChoice, verifySpecialistChoice } from '../../../src/specialist-choice'
 import { queueGeneration, queueRecord } from './generation-queue.server'
 import { readJobTurnPlan } from './turn-plan-receipt.server'
 import { inspectSavedPiSessions } from './saved-pi-sessions.server'
@@ -291,7 +291,8 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     }
     try { await assertServerClaimPermitted(job, row.threadId!, pinned) }
     catch { throw new JobError(409, 'Generation owner receipt conflicts with this job. Inspect saved state before recovery.') }
-    const interrupted = state.status === 'running'
+    const pendingQuestion = await pendingGenerationQuestion(job, saver, snapshot, row.threadId!, 'user:' + owner)
+    const interrupted = state.status === 'running' && pendingQuestion?.phase !== 'interrupt'
     const isFoundationHandoff = state.active?.stage === 'foundation' &&
       state.reason === 'Foundation requires an explicit author decision before generation can proceed.'
     const handoff = isFoundationHandoff ? await inspectFoundationConflict(job) : null
@@ -303,17 +304,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     let recovery: { kind: 'manual-specialist' | 'operator-reconciliation'; stage: string;
       workItem: string | null; files: string[]; candidateDigest: string | null;
       guidance: string } | null = null
-    let waitingForChoice = false
-    if (!revisionVerified && row.status === 'paused' && state.active?.stage === 'foundations' &&
-        checkpointReason?.startsWith('Specialist paused for an author choice.') === true) {
-      try {
-        const question = await activeSpecialistChoice(job)
-        if (question && (question.phase === 'awaiting-author' || question.phase === 'answered')) {
-          await verifySpecialistChoice(job, question.id, question.phase)
-          waitingForChoice = true
-        }
-      } catch { /* unsafe/stale choice keeps manual reconciliation required */ }
-    }
+    const waitingForChoice = pendingQuestion?.phase === 'interrupt'
     if (['blocked', 'paused'].includes(row.status) && !revisionVerified && !waitingForChoice) {
       if (state.active?.stage === 'foundations' && existsSync(join(job.stateDir, 'character-world.json'))) {
         // The specialist owns the reconciliation contract. Inspect only; its
@@ -364,7 +355,7 @@ export async function inspectRegisteredJob(store: StudioDatabase, row: SavedJob,
     const l = normalized.recoveryLifecycle
     const recoveryInspection = l.active || l.pending.length || l.inspectionFences.length
       ? projectRecoveryInspection(l) : null
-    return { ...initial, status: interrupted ? 'interrupted' : authorReady ? 'paused' :
+    return { ...initial, status: interrupted ? 'interrupted' : authorReady || waitingForChoice ? 'paused' :
         (state.status ?? 'interrupted'),
       revisionVerified, recovery, recoveryInspection,
       unknownRecovery: inspectedUnknownRecovery ? {

@@ -1,8 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { logicalAssignmentKey, type AssignmentIdentity } from "./generation-assignment-lifecycle.js";
+import { requireStoryJobLease } from "./job-lock.js";
 import type { JobStartResult } from "./job.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { parseAuthorQuestion, parseAuthorAnswer, authorQuestionDirection, authorQuestionKind,
@@ -37,7 +41,10 @@ export interface SpecialistChoiceReceipt {
   sessionSha256: string; question: SpecialistChoiceQuestion; proposalSha256: string;
   /** Controller-issued permission, included in the immutable proposal digest. */
   delegationAllowed?: true;
+  /** Generation's original child identity, stored with the existing proposal. */
+  assignment?: { identity: AssignmentIdentity; namespace: string; resumePhase: "writer" | "review" | "correction" };
   answer?: SpecialistChoiceAnswer & { principal: string; submittedAt: string };
+  answerSeal?: { draftRevision: number | null; digest: string };
 }
 export class SpecialistChoiceRequiredError extends Error {
   constructor() {
@@ -208,6 +215,17 @@ async function focusedChoiceStates(job: JobStartResult) {
     return { target, state };
   }));
 }
+function proposalDigest(r: SpecialistChoiceReceipt) {
+  return sha(JSON.stringify({ jobId: r.jobId, workItem: r.workItem, headSha: r.headSha,
+    worktreeDigest: r.worktreeDigest, sessionId: r.sessionId,
+    sessionSha256: r.sessionSha256, question: parseSpecialistChoice(r.question),
+    ...(r.delegationAllowed === true ? { delegationAllowed: true } : {}),
+    ...(r.assignment ? { assignment: r.assignment } : {}) }));
+}
+function answerDigest(r: SpecialistChoiceReceipt, revision: number | null) {
+  return sha(JSON.stringify({ id: r.id, proposal: r.proposalSha256,
+    thread: r.threadId, answer: r.answer, revision }));
+}
 async function safeRead(job: JobStartResult, id: string) {
   if (!/^[a-f0-9-]{36}$/.test(id)) throw Error("Invalid specialist-choice ID.");
   const path = file(job, id);
@@ -220,15 +238,18 @@ async function safeRead(job: JobStartResult, id: string) {
       !/^[a-f0-9]{64}$/.test(r.worktreeDigest) ||
       !/^[a-f0-9]{64}$/.test(r.sessionSha256) ||
       !/^[a-f0-9]{64}$/.test(r.proposalSha256) ||
-      sha(JSON.stringify({ jobId: r.jobId, workItem: r.workItem, headSha: r.headSha,
-        worktreeDigest: r.worktreeDigest, sessionId: r.sessionId,
-        sessionSha256: r.sessionSha256, question: parseSpecialistChoice(r.question),
-        ...(r.delegationAllowed === true ? { delegationAllowed: true } : {}) })) !== r.proposalSha256 ||
+      proposalDigest(r) !== r.proposalSha256 ||
       (r.delegationAllowed !== undefined &&
         (r.delegationAllowed !== true || r.question.allowStudioDecision !== true ||
           !specialistDelegationPolicy(r.workItem))))
     throw Error("Specialist-choice receipt is inconsistent or modified.");
-  if (r.phase === "awaiting-author" && r.answer)
+  if (r.assignment && (r.assignment.identity.jobId !== job.jobId ||
+      r.assignment.identity.jobThreadId !== job.threadId ||
+      !r.assignment.identity.turnDigest ||
+      !r.assignment.namespace.includes("assignment-" + logicalAssignmentKey(r.assignment.identity)) ||
+      !["writer", "review", "correction"].includes(r.assignment.resumePhase)))
+    throw Error("Specialist question has a foreign Generation assignment binding.");
+  if (r.phase === "awaiting-author" && (r.answer || r.answerSeal))
     throw Error("A pending author question cannot contain a prefilled answer.");
   if (r.phase !== "awaiting-author") {
     if (!r.answer ||
@@ -238,6 +259,9 @@ async function safeRead(job: JobStartResult, id: string) {
       throw Error("A resolved choice has no valid authenticated, source-bound answer.");
     const { principal: _principal, submittedAt: _submittedAt, ...authorAnswer } = r.answer;
     parseAuthorAnswer(r.question, authorAnswer, r.delegationAllowed === true);
+    if ((r.assignment || r.answerSeal) && (!r.answerSeal ||
+        r.answerSeal.digest !== answerDigest(r, r.answerSeal.draftRevision)))
+      throw Error("Specialist answer differs from its immutable accepted receipt.");
   }
   return r;
 }
@@ -333,22 +357,60 @@ export async function verifySpecialistChoice(job: JobStartResult, id: string,
     throw Error("Original Pi session changed since the author question; refuse replay.");
   return r;
 }
+/** Bind the independently verified pending question before exposing a child
+ * interrupt. The original receipt remains the authority; no graph-only answer. */
+export async function bindSpecialistChoice(job: JobStartResult, id: string,
+  binding: NonNullable<SpecialistChoiceReceipt["assignment"]>) {
+  requireStoryJobLease(job);
+  const r = await verifySpecialistChoice(job, id, "awaiting-author");
+  if (r.assignment) {
+    if (!isDeepStrictEqual(r.assignment, binding))
+      throw Error("Specialist question was already bound to another assignment.");
+    return r;
+  }
+  const bound = { ...r, assignment: binding };
+  bound.proposalSha256 = proposalDigest(bound);
+  await save(job, bound);
+  return bound;
+}
 /** Caller must authenticate author and hold the Story job lock. */
 export async function answerSpecialistChoice(job: JobStartResult, id: string, proposalSha256: string,
-  answer: SpecialistChoiceAnswer, principal: string) {
+  answer: SpecialistChoiceAnswer, principal: string, draftRevision: number | null = null) {
   if (!/^user:[A-Za-z0-9_-]{1,128}$/.test(principal)) throw Error("Author identity required.");
-  const r = await verifySpecialistChoice(job, id, "awaiting-author");
+  const r = await safeRead(job, id);
   if (r.proposalSha256 !== proposalSha256) throw Error("Invalid or stale author choice.");
   const validAnswer = parseAuthorAnswer(r.question, answer, r.delegationAllowed === true);
+  if (r.phase !== "awaiting-author") {
+    if (!r.answer || r.answer.principal !== principal ||
+        r.answerSeal?.draftRevision !== draftRevision ||
+        !isDeepStrictEqual(r.answer, { ...validAnswer, principal, submittedAt: r.answer.submittedAt }))
+      throw Error("Specialist choice is not at the required author boundary: already answered differently.");
+    return r;
+  }
+  await verifySpecialistChoice(job, id, "awaiting-author");
   const updated: SpecialistChoiceReceipt = { ...r, phase: "answered",
     answer: { ...validAnswer, principal, submittedAt: new Date().toISOString() } };
+  updated.answerSeal = { draftRevision, digest: answerDigest(updated, draftRevision) };
   await save(job, updated);
   return updated;
+}
+const answerAuthority = new AsyncLocalStorage<{ id: string; digest: string }>();
+/** Scope one verified child admission to the actual original writer call. */
+export async function withSpecialistAnswerAuthority<T>(job: JobStartResult,
+  receipt: SpecialistChoiceReceipt, run: () => Promise<T>): Promise<T> {
+  const original = await verifySpecialistChoice(job, receipt.id, "answered");
+  if (!original.assignment || !original.answerSeal ||
+      original.answerSeal.digest !== receipt.answerSeal?.digest)
+    throw Error("Original child answer authorization changed.");
+  return answerAuthority.run({ id: original.id, digest: original.answerSeal.digest }, run);
 }
 /** Mark a single answered turn as claimed before invoking the model. A crash
  * after this fence is MANUAL recovery; no repeated external writer calls. */
 export async function claimSpecialistChoice(job: JobStartResult, id: string) {
   const r = await verifySpecialistChoice(job, id, "answered");
+  if (r.assignment && (answerAuthority.getStore()?.id !== id ||
+      answerAuthority.getStore()?.digest !== r.answerSeal?.digest))
+    throw Error("Generation question can only be claimed by its authenticated pending child.");
   await save(job, { ...r, phase: "resuming" });
   return r;
 }

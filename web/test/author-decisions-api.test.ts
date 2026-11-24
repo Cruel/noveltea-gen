@@ -1,3 +1,4 @@
+import { stagePendingQuestion } from './support/pending-specialist-question'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
@@ -182,6 +183,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
         { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
       ],
     }))
+    choice = await stagePendingQuestion(job, job.threadId, choice)
     const list = await api('GET')
     assert.equal(list.status, 200)
     assert.equal(list.data.choice?.id, choice.id)
@@ -225,7 +227,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(answered.data.continuation, 'manual',
       'No verified graph checkpoint exists: accepted answer persists for explicit recovery')
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer?.kind, 'option')
-    assert.equal((await api('POST', payload)).status, 409, 'A submitted choice cannot be rewritten')
+    assert.equal((await api('POST', payload)).status, 200, 'An identical submission is idempotent')
     assert.equal((await api('GET')).data.choice?.phase, 'answered')
     assert.equal((await store.persistence.generation.jobs.state(owner.user.id, jobId))?.status, 'paused',
       'Unsafe automatic continuation is refused; the answer remains durable')
@@ -238,6 +240,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
         { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
       ],
     }))
+    choice = await stagePendingQuestion(job, job.threadId, choice)
     const custom = await api('POST', { action: 'choice', id: choice.id,
       proposalSha256: choice.proposalSha256, draftRevision: 1, kind: 'custom',
       text: '  Follow existing canon but include a distinct consequence for both investigation paths.  ' })
@@ -258,6 +261,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
         { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
       ],
     }))
+    choice = await stagePendingQuestion(job, job.threadId, choice)
     const delegateView = await api('GET')
     assert.equal(delegateView.data.choice?.delegationAllowed, true)
     assert.equal((await inspectSpecialistChoice(job, choice.id)).answer, undefined,
@@ -276,7 +280,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(persistedDelegate.answer?.kind, 'delegate')
     assert.equal(persistedDelegate.answer?.note, ' Keep established canon. ')
     assert.equal(persistedDelegate.answer?.principal, 'user:' + owner.user.id)
-    assert.equal((await api('POST', delegatePayload)).status, 409)
+    assert.equal((await api('POST', delegatePayload)).status, 200)
 
     const multiQuestion = { kind: 'multiple-choice' as const,
       question: 'Which compatible consequences should the next chapter retain?',
@@ -290,6 +294,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
         { id: 'character-foundations', phase: 'awaiting-author', authorChoiceId: choice.id },
       ],
     }))
+    choice = await stagePendingQuestion(job, job.threadId, choice)
     const multiPayload = { action: 'choice', id: choice.id,
       proposalSha256: choice.proposalSha256, draftRevision: 1, kind: 'multiple',
       optionIds: ['trust', 'history'],
@@ -317,7 +322,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     writeFileSync(worldFile, JSON.stringify({ type: 'session', id: worldSession,
       cwd: job.worktreeStoryRoot }) + '\n')
     const textQuestion = { kind: 'free-text' as const, question: 'How should this lost archive be remembered?' }
-    const plain = await recordSpecialistChoice(job, 'world-foundations',
+    let plain = await recordSpecialistChoice(job, 'world-foundations',
       textQuestion, worldSession, worldFile)
     writeFileSync(join(job.stateDir, 'character-world.json'), JSON.stringify({
       jobId, threadId: job.threadId, units: [
@@ -325,6 +330,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
         { id: 'character-foundations', phase: 'pending' },
       ],
     }))
+    plain = await stagePendingQuestion(job, job.threadId, plain)
     assert.equal((await inspectSpecialistChoice(job, plain.id)).question.kind, 'free-text')
     assert.equal((await api('POST', { action: 'choice', id: plain.id,
       proposalSha256: plain.proposalSha256, kind: 'option', optionId: 'yes' })).status, 409)
@@ -353,7 +359,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     const eventSession = randomUUID(), eventFile = join(eventDir, 'event.jsonl')
     writeFileSync(eventFile, JSON.stringify({ type: 'session', id: eventSession,
       cwd: job.worktreeStoryRoot }) + '\n')
-    const binary = await recordSpecialistChoice(job, 'event-revelation', {
+    let binary = await recordSpecialistChoice(job, 'event-revelation', {
       kind: 'yes-no', question: 'Should the witness disclose the ledger to the player?',
     }, eventSession, eventFile)
     mkdirSync(join(job.stateDir, 'event-items'), { recursive: true })
@@ -361,6 +367,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       jobId, workItemId: 'event-revelation',
       phase: 'awaiting-author', authorChoiceId: binary.id,
     }))
+    binary = await stagePendingQuestion(job, job.threadId, binary)
     assert.equal((await inspectSpecialistChoice(job, binary.id)).workItem, 'event-revelation')
     assert.equal((await api('POST', { action: 'choice', id: binary.id,
       proposalSha256: binary.proposalSha256, kind: 'option', optionId: 'maybe' })).status, 409)
@@ -392,12 +399,13 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
       choiceWorkItem: workItem, piSessionFile: focusedFile,
       piSessionId: focusedSession, phase: 'writing' }
     writeFileSync(stateFile, JSON.stringify(state))
-    const conversation = await recordSpecialistChoice(job, workItem,
+    let conversation = await recordSpecialistChoice(job, workItem,
       { ...question, allowStudioDecision: true }, focusedSession, focusedFile)
     assert.equal(conversation.delegationAllowed, undefined,
       'An author-gated focus assignment cannot be delegated by an agent request')
     writeFileSync(stateFile, JSON.stringify({ ...state, phase: 'awaiting-author',
       authorChoiceId: conversation.id }))
+    conversation = await stagePendingQuestion(job, job.threadId, conversation)
     const focusedListed = await api('GET')
     assert.equal(focusedListed.data.choice?.id, conversation.id)
     assert.equal(focusedListed.data.choice?.delegationAllowed, false)
@@ -412,7 +420,7 @@ test('one owner-scoped /author endpoint reviews and approves the exact no-write 
     assert.equal(focusedAnswer.status, 200, focusedAnswer.data.error)
     assert.equal(focusedAnswer.data.choice?.phase, 'answered')
     assert.equal((await inspectSpecialistChoice(job, conversation.id)).answer?.kind, 'custom')
-    assert.equal((await api('POST', delegated)).status, 409)
+    assert.equal((await api('POST', delegated)).status, 200)
     assert.equal(git(job.worktreeRoot, 'status', '--porcelain'), '',
       'Author choice may not create or authorize a Story write')
   } finally {

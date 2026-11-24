@@ -1,3 +1,6 @@
+import { parseAuthorAnswer } from "./author-question.js";
+import { answerSpecialistChoice } from "./specialist-choice.js";
+import { createGenerationQuestionGraph, pendingGenerationQuestion, generationQuestionResume } from "./generation-author-question.js";
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -58,6 +61,7 @@ import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-on
 import { runCompositionWorkItem, inspectCompositionFailure, inspectPendingCompositionInvocation } from "./composition-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { runNarrativeReview } from "./narrative-review.js";
+import { focusedChoiceWorkItem } from "./specialist-choice.js";
 import { inspectFocusedPrerequisite, inspectPendingFocusedCommit, inspectPendingFocusedInvocation, inspectFocusedFailure, runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
@@ -111,6 +115,7 @@ export interface GenerationOptions {
   story: string; job: string; action: "start" | "resume" | "inspect";
   task?: string; contract?: unknown; fixture?: boolean; skillsSource?: string;
   validatorSource?: string; provider?: string; model?: string; pauseAfter?: Stage;
+  answer?: { id: string; proposalSha256: string; answer: unknown };
 }
 type Status = "running" | "paused" | "blocked" | "cancelled" | "completed";
 export interface IdeaTask { id: string; action: "place" | "reassess"; signature: string; priorHead: string }
@@ -1665,7 +1670,8 @@ async function runCharacterWorldAssignmentChild(
       return outcome("verified", "recovery-checkpoints:" + head,
         { headSha: head, reviewRef: "review-checkpoints:" + head });
   };
-  const child = createAssignmentLifecycleGraph({
+  const child = (correction ? createAssignmentLifecycleGraph :
+    createGenerationQuestionGraph.bind(null, job, identity, workItem))({
     authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
     preflight: async state => { assertIdentity(state); return preflight(); },
     invoke: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
@@ -1854,7 +1860,8 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   const checkpointedReview = !!correction && active.stage !== "composition";
   const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight,
     (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome);
-  const child = createAssignmentLifecycleGraph({
+  const child = (correction ? createAssignmentLifecycleGraph :
+    createGenerationQuestionGraph.bind(null, job, identity, workItem))({
     authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
     preflight: async state => {
       assertIdentity(state.identity, state.continuationRef);
@@ -2059,7 +2066,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
     return result;
   };
   let patch: Partial<State> | undefined;
-  const child = createAssignmentLifecycleGraph({
+  const child = createGenerationQuestionGraph(job, identity, focusedChoiceWorkItem(target), {
     preflight: async state => {
       if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== (pin?.supportRef ?? null))
         throw new ProtocolIntegrityBlockedError("Focused checkpoint belongs to another assignment.");
@@ -4220,6 +4227,7 @@ export function createGenerationGraph(
               resultStatus: result.status }, "returned-failure");
         return { result };
       } catch (error) {
+        if (isGraphBubbleUp(error)) throw error;
         const stop = blocked(error);
         if (stop.status === "paused" || stop.status === "cancelled") return stop;
         const job = await openJob(s);
@@ -4647,6 +4655,9 @@ export async function runStoryGeneration(options: GenerationOptions) {
       const config = { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 10000 };
       const saved = await graph.getState(config);
       const persisted = saved.values as CoreState;
+      let pendingQuestion = await pendingGenerationQuestion(job, saver, saved, config.configurable.thread_id, "user:cli");
+      if (options.answer && (options.action !== "resume" || pendingQuestion?.phase !== "interrupt"))
+        throw Error("An answer requires the original pending Generation question.");
       const checkedModern = options.action === "start" ? null :
         await inspectModernGenerationRecovery(job, saver, config.configurable.thread_id);
       const untrustedModern = !!checkedModern &&
@@ -4729,7 +4740,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
         state.recoveryLifecycle.assessorPending &&
         state.recoveryLifecycle.decision?.action === "plan-amendment" &&
         state.recoveryLifecycle.decision.adapter === "cross-domain-closeout";
-      if (options.action === "resume" && !cancelled && !preflightStopped && !selectedCloseout &&
+      if (options.action === "resume" && !cancelled && !preflightStopped && !selectedCloseout && !pendingQuestion &&
           (state.operationRecovery?.phase !== "fenced" ||
            state.operationRecovery.operation === "specialist-dispatch")) {
         // The selected original closeout owns an unpublished Git successor
@@ -4768,13 +4779,30 @@ export async function runStoryGeneration(options: GenerationOptions) {
         // remain available for explicit, non-destructive reconciliation.
         if (cancelled) state = { ...state, ...cancellation };
         else if (!preflightStopped) {
-          const outcome = await graph.invoke({ ...state, pauseAfter: options.pauseAfter ?? null }, config);
+          if (pendingQuestion && options.answer) {
+            const answer = options.answer;
+            if (answer.id !== pendingQuestion.choice.id ||
+                answer.proposalSha256 !== pendingQuestion.choice.proposalSha256)
+              throw Error("Answer does not identify the pending question.");
+            await withStoryJobLock(job, "generation-author-answer", () =>
+              answerSpecialistChoice(job, answer.id, answer.proposalSha256,
+                parseAuthorAnswer(pendingQuestion!.choice.question, answer.answer, pendingQuestion!.choice.delegationAllowed === true),
+                "user:cli"));
+            pendingQuestion = await pendingGenerationQuestion(job, saver, saved, config.configurable.thread_id, "user:cli");
+          }
+          const outcome = pendingQuestion
+            ? (pendingQuestion.phase === "continuation" || pendingQuestion.choice.phase === "answered") && await readJobControl(job) === "running"
+              ? await graph.invoke(generationQuestionResume(pendingQuestion), config)
+              : state
+            : await graph.invoke({ ...state, pauseAfter: options.pauseAfter ?? null }, config);
           state = { ...outcome, ...projectRecovery({
             recoveryLifecycle: outcome.recoveryLifecycle,
             recoverySources: outcome.recoverySources,
           }) };
         }
       }
+      pendingQuestion = await pendingGenerationQuestion(job, saver, await graph.getState(config),
+        config.configurable.thread_id, "user:cli");
       // A broken intake receipt can also make the composite job report fail.
       // Do not lose the already checkpointed recovery decision during inspect:
       // retain the typed failure and explicitly mark the report unavailable.
@@ -4824,6 +4852,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
       if (options.action === "inspect") {
         current = selectionFailure ? blocked(selectionFailure) : cancelled ? cancellation :
           untrustedModern ? { status: "blocked", reason: state.reason } :
+          pendingQuestion?.phase === "interrupt" ? { status: "paused", reason: "Specialist Author Question is pending." } :
           state.operationRecovery?.phase === "fenced" || state.operationRecovery?.phase === "assessment"
             ? { status: "blocked", reason: state.operationRecovery.reason + " " + state.operationRecovery.nextAction } :
           await withStoryJobLock(job, "generation-inspect", async () => {
@@ -4840,6 +4869,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
       } else if (selectionFailure) {
         current = blocked(selectionFailure);
       }
+      if (pendingQuestion?.phase === "interrupt" && !cancelled && !preflightStopped && !selectionFailure)
+        current = { status: "paused", reason: "Specialist Author Question is pending." };
       const visible = { ...state, ...current };
       const recoveryCheckpoints = await inspectRecoveryCheckpoints(job);
       // Inspection is strictly read-only. Report the last source-bound
@@ -4896,6 +4927,11 @@ export async function runStoryGeneration(options: GenerationOptions) {
         unknownRecovery: await inspectUnknownRecoveryStatus(job, visible.unknownRecovery ?? null),
         recoveryInspection,
         correctiveAssignment,
+        authorQuestion: pendingQuestion?.phase === "interrupt" ? {
+          id: pendingQuestion.choice.id, proposalSha256: pendingQuestion.choice.proposalSha256,
+          phase: pendingQuestion.choice.phase, question: pendingQuestion.choice.question,
+          delegationAllowed: pendingQuestion.choice.delegationAllowed === true,
+        } : null,
         inventory: visible.inventory, selectedWorkItem: visible.active, completedStages: visible.completedStages,
         ideaTask: visible.ideaTask, ideaHistory: visible.ideaHistory,
         recoveryCheckpoints,

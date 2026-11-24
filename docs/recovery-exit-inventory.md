@@ -157,3 +157,33 @@ and no live Pi usage is claimed by this inventory.
 - [Shared bounded assessment](../src/generation-recovery-lifecycle.ts) admits an independent reviewer replacement only after the adapter establishes the exact negative predecessor and source-backed diagnostic dispute. [Semantic diagnostic parser](../src/discovery-semantic-review.ts) validates quotations and full claim coverage. A fresh metered replacement must independently assess the exact packet and pass; prior negatives remain sealed. Neither diagnostic nor replacement grants author approval or waives deterministic source rejection.
 - [Discovery evidence](../web/src/lib/discovery-evidence.server.ts) keeps the original writer and reviewer session identities and separately receipts the replacement. Existing budget, provider pre-dispatch refusal, uncertain-effect, stale author and approval boundaries remain authoritative. The current execution format explicitly rejects obsolete beta graph contracts. `realInference` uses the same source-bound Pi protocol, sealed transcript and budget admission for live and scripted responses; no fixture-only format allowance or extra substantive child correction remains. A cancelled first Turn is ineligible before dispatch/approval; the queued-message control cannot cancel an already-preparing first Turn, and an archived Thread cannot authorize handoff.
 - Proof gates: [reviewed source AST](../test/generation-recovery-coverage.test.ts), [model consumer AST](../test/generation-model-consumer-coverage.test.ts), [semantic diagnostic tests](../test/discovery-semantic-review.test.ts), [Studio adapter regressions](../web/test/onboarding-pi.test.ts), [SQLite Story Chat checkpoint loss](../web/test/story-chat-discovery.test.ts), and [Pi transcript evidence](../web/test/discovery-evidence.test.ts). See the [R14J contract](generation-recovery-contract.md#r14j-270--studio-discovery-source-correction-and-independent-review).
+
+### R14I author question exits (#269)
+
+- [Generation question adapter](../src/generation-author-question.ts):
+  original World/Character, Narrative Event and focused writer questions bind
+  the original receipt and interrupt in the shared child. The root pending
+  task, nested SQLite namespace and receipt must match; no writer lease spans
+  the wait. The answer does not grant a new assignment or broaden scope.
+- [Shared child](../src/generation-assignment-lifecycle.ts): authenticated
+  author answer transitions back to the original phase; the next writer round
+  is admitted separately. Returned-END prerequisites retain the existing
+  parent re-entry path. The parent propagates the LangGraph interrupt instead
+  of assessing it as a specialist failure.
+- [Receipt](../src/specialist-choice.ts): immutable accepted answer seal,
+  duplicate submission check and scoped child claim authority. Drafts do not
+  confer authority. Existing protected Foundation and rejected Review dispute
+  decisions remain parent-owned, with unchanged-scope Review continuation
+  still requiring qualification.
+- [CLI](../src/generation.ts), [Studio admission](../web/src/lib/generation-controls.server.ts),
+  [HTTP](../web/src/lib/author-interactions.server.ts) and
+  [worker](../web/src/agent-runner.ts): ordinary pause alone is not author
+  authorization. Only a matching pending child uses a targeted resume command;
+  after durable child consumption, continue without another command. Cancellation
+  and original effect fences remain authoritative.
+- Regression evidence: [production World restart](../test/generation.test.ts),
+  [child lifecycle](../test/generation-assignment-lifecycle.test.ts),
+  [receipt checks](../test/specialist-choice.test.ts) and
+  [HTTP boundary](../web/test/author-decisions-api.test.ts). The HTTP test
+  stages a real nested interrupt in a fixture; it is not a production Studio
+  worker end-to-end certification.

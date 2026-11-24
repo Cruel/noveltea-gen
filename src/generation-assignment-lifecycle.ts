@@ -84,7 +84,7 @@ export type AssignmentOutcome<I extends LifecycleIdentity = AssignmentIdentity> 
   | (OutcomeBase & Readonly<{ status: "verified"; reviewRef: string }> &
       (I extends DiscoveryAssignmentIdentity ? Readonly<{ sourceDigest: string }> : Readonly<{ headSha: string }>))
   | AssignmentPrerequisiteSuspension
-  | (OutcomeBase & Readonly<{ status: "awaiting-author"; questionRef: string }>)
+  | (OutcomeBase & Readonly<{ status: "awaiting-author"; questionRef: string; resumePhase: "writer" | "review" | "correction" }>)
   | (OutcomeBase & Readonly<{ status: "paused"; controlRef: string }>)
   | (OutcomeBase & Readonly<{ status: "fenced"; inspectionRef: string }>)
   | (OutcomeBase & Readonly<{ status: "unresolved"; dispositionRef: string }>);
@@ -123,6 +123,8 @@ function lifecycleChannels<I extends LifecycleIdentity>() {
   continuationRef: Annotation<string | null>({ reducer: (_, next) => next, default: () => null }),
   /** Original returned-END suspension, not an author interrupt or a new assignment. */
   suspension: Annotation<AssignmentPrerequisiteSuspension | null>({ reducer: (_, next) => next, default: () => null }),
+  authorAnswerRef: Annotation<unknown>({ reducer: (_, next) => next, default: () => null }),
+  authorResumePhase: Annotation<"writer" | "review" | "correction" | null>({ reducer: (_, next) => next, default: () => null }),
   correction: Annotation<AssignmentCorrection | null>({ reducer: (_, next) => next, default: () => null }),
   });
 }
@@ -173,6 +175,8 @@ function assertAssignmentOutcome(identity: LifecycleIdentity, outcome: Assignmen
       (!outcome.owner?.trim() || !outcome.scopeRef?.trim() ||
        !["writer", "review"].includes(outcome.pendingPhase)))
     throw Error("Prerequisite suspension lacks its bounded owner, scope or pending phase.");
+  if (outcome.status === "awaiting-author" && !["writer", "review", "correction"].includes(outcome.resumePhase))
+    throw Error("Author question lacks its original continuation phase.");
   if (typeof ref !== "string" || !ref.trim() ||
       outcome.status === "verified" && (identity.schema === "noveltea-discovery-assignment/v1"
         ? !("sourceDigest" in outcome) || outcome.sourceDigest !== identity.scopeDigest
@@ -265,7 +269,7 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       const settled = await adapter.correct(state, config);
       if ("assignmentKey" in settled) {
         assertAssignmentOutcome(state.identity, settled);
-        return { outcome: settled, correction: null };
+        return { outcome: settled, correction: settled.status === "awaiting-author" ? state.correction : null };
       }
       if (!settled.receiptRef || !settled.status)
         throw Error("An assignment cannot checkpoint an unreceipted correction.");
@@ -281,9 +285,14 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       if (!adapter.authenticateAnswer ||
           !await adapter.authenticateAnswer(state, response))
         throw Error("Author answer is not authenticated for this pending assignment.");
-      // The parent must reconcile the author response and re-enter the exact
-      // logical assignment. A resumed interrupt is not a writer grant.
-      return { outcome: null };
+      const phase = state.outcome.resumePhase;
+      if (phase === "review" && !state.submission ||
+          phase === "correction" && (!state.submission || !state.correction))
+        throw Error("Author question lost its original pending Review/correction.");
+      // The domain receipt owns the original session and the next admission.
+      // A new writer turn after an answer must settle its own invocation.
+      return { outcome: null, authorResumePhase: phase, authorAnswerRef: response,
+        ...(phase === "writer" ? { submission: null, submissionKey: null, correction: null } : {}) };
     })
     .addEdge(START, "preflight")
     .addConditionalEdges("preflight",
@@ -293,13 +302,16 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       state => state.outcome ? state.outcome.status === "awaiting-author" ? "author_gate" : END : "verify_original",
       ["author_gate", "verify_original", END])
     .addConditionalEdges("verify_original",
-      state => state.correction ? "correct_original" : state.outcome?.status === "awaiting-author" ? "author_gate" :
+      state => state.outcome?.status === "awaiting-author" ? "author_gate" : state.correction ? "correct_original" :
         !state.outcome && state.submission ? "verify_original" : END,
       ["correct_original", "verify_original", "author_gate", END])
     .addConditionalEdges("correct_original",
       state => state.outcome ? state.outcome.status === "awaiting-author" ? "author_gate" : END : "verify_original",
       ["author_gate", "verify_original", END])
-    .addEdge("author_gate", END)
+    .addConditionalEdges("author_gate",
+      state => state.authorResumePhase === "writer" ? "invoke_original" :
+        state.authorResumePhase === "review" ? "verify_original" : "correct_original",
+      ["invoke_original", "verify_original", "correct_original"])
     .compile({ checkpointer: true });
 }
 

@@ -42,7 +42,7 @@ export const reviewedReturnExits = {
   operationFailure: "d7c8939bedacfd7d:B 6f8e137a514dd144:F d44d809a12edfc48:R",
   blocked: "7951930ab4e30f72:B",
   runStoryGeneration:
-    "f8256fa7252df27d:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B b00891ce57d109ec:V",
+    "0127f9c811446116:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B 69bf7a4d265a44ea:V",
   observeNodeOutcome: "cafa5b26a70d2f15:S 457eb16703d85c3e:R 791c12224fd3d55c:F",
   recoveryNode:
     "a1797cf18b88651d:G 91923d53221cfb1b:F 1b2bfd3978e6627c:F d62792531537fa8b:F 7078555ef957e21c:F 0edadc4c8151f4c0:F 533e9704b50c7d64:G 45f4af1e86ee7162:U 1e00488edc815471:G 7e5396dcc912a986:U b30aaa267d235346:G 4d083c13dcc1e236:G a9f99a3d7669241a:G 48472d6f8dc29579:F c4b51670f46c9b41:S ae4b8b3ed4e09466:F ac12745831f57568:G e42edb38568b51ce:S 320b1f63aadcf2d7:U ea5866c942ed2435:R 01df10b54b921335:F 952bd06592f1d376:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
@@ -56,7 +56,7 @@ export const reviewedThrowExits = {
   author_update_intake: "0abd139e9b6f45a4",
   idea_integration: "5c212deb6b599f1b 2e0ec52402b79d11 8e87eec152864718 c98f90ca62ed64ed c7c8d830407dd1e5",
   verify_idea_integration: "308c430973f6b74e 43e1138180314eb1 a4b0709f69a7c2f3 63cc21025b2defc5",
-  specialist_dispatch: "b306d96cffbf864c 8c468a57ba68bc74 086baca322d6ec07 44903bac895ce58d 95fa1456013e2d48 a1beda487210eb50",
+  specialist_dispatch: "b306d96cffbf864c 8c468a57ba68bc74 086baca322d6ec07 44903bac895ce58d 95fa1456013e2d48 a1beda487210eb50 8c468a57ba68bc74",
   dependency_amendment: "ba56ceef28aadcc7 31c32f029ac15a97 6d9bcb7f81920391 0546c40eba97d45f 4b99521c61fca4d0 8c468a57ba68bc74",
   independent_assignment_review: "e646f3af90c171bf",
   verify_committed_work: "302ad04127f5c981 d2f4490bb4e0c467 8c468a57ba68bc74 a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",
@@ -69,7 +69,7 @@ export const reviewedThrowExits = {
   operationFailure: "",
   blocked: "",
   runStoryGeneration:
-    "360d5873992ab308 1f073098fec5b883 81328ed5be7b3037 0322d7c089c80c95 92a11bc28aa574d0 6d650ac07ddbbb11 1ef54c75bb3f63d1 1584a040886ce2c1 0d6a3899cce3ad54 8c468a57ba68bc74 864da9fe60badee0 8fbc3551aaf81e59 362c25579a3d70fb ec97d854a242f0ab a0aa48577281543a",
+    "360d5873992ab308 eea88531a4b0fcdb 1f073098fec5b883 81328ed5be7b3037 0322d7c089c80c95 92a11bc28aa574d0 6d650ac07ddbbb11 1ef54c75bb3f63d1 1584a040886ce2c1 0d6a3899cce3ad54 91c5965ffb27587f 8c468a57ba68bc74 864da9fe60badee0 8fbc3551aaf81e59 362c25579a3d70fb ec97d854a242f0ab a0aa48577281543a",
   observeNodeOutcome: "8c468a57ba68bc74",
   recoveryNode: "3e60c157a47d661c f7ec8691c6e8a121 95161aa63e35fdb3 9bade762daaba516 b3c0274d7dab621b 73867eb451597de4 d80ab09057ed5a27 6960b10ed7e29938 bdad3b8e9553e820 35b7a5797d675d8b 4241c629da04fa25 dc9a0db1d6302219 667d48b9cd9049bb 108b6749c1bc9195",
 } as const;
@@ -98,7 +98,7 @@ export const reviewedStatusExits = {
   operationFailure: "2b78ad3f49b1ead6:F",
   blocked: "2143ea9951284798:B",
   runStoryGeneration:
-    "4b91bbe4dcd1d136:G 28b465f0a9b56ebd:U 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F aa0aa6c25fa8d276:S",
+    "4b91bbe4dcd1d136:G 28b465f0a9b56ebd:U 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 0937e2eb0b6e647d:U 2b78ad3f49b1ead6:F 0937e2eb0b6e647d:U aa0aa6c25fa8d276:S",
   observeNodeOutcome: "4409d48b659f1cfc:S 4b91bbe4dcd1d136:G",
   recoveryNode: "2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G b3c3a129ee36d4e4:U 4b91bbe4dcd1d136:G 088baada343b4451:U 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F 588b1193d86f7111:S 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G c914ec9c9a7adce8:U 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F",
 } as const;

@@ -7,7 +7,7 @@ import { Annotation, Command, END, START, StateGraph } from "@langchain/langgrap
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { removeTestTree } from "./helpers.js";
 import {
-  authenticateAssignmentReentry, createAssignmentLifecycleGraph, logicalAssignmentKey,
+  authenticateAssignmentReentry, createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig,
   type AssignmentAdapter, type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
 } from "../src/generation-assignment-lifecycle.js";
 
@@ -118,9 +118,9 @@ test("R01 genuine author interrupt resumes same pending child task, not a comple
   let authorChecks = 0;
   const adapter: AssignmentAdapter = {
     preflight: async () => ({ status: "awaiting-author", assignmentKey: key,
-      evidenceRef: "original-question-set:q1", questionRef: "q1" }),
-    invoke: async () => { throw Error("writer must not be called at author gate"); },
-    verify: async () => { throw Error("review must not run before author choice"); },
+      evidenceRef: "original-question-set:q1", questionRef: "q1", resumePhase: "writer" }),
+    invoke: async () => { assert.equal(authorChecks, 1); return { receiptRef: "original-answer-turn", status: "committed" }; },
+    verify: async () => verified(),
     authenticateAnswer: async (_state, answer) => {
       authorChecks++;
       return (answer as { questionRef: string })?.questionRef === "q1";
@@ -134,7 +134,7 @@ test("R01 genuine author interrupt resumes same pending child task, not a comple
   assert.ok(snapshot.next.length > 0);
   const resumed = await parent.invoke(new Command({ resume: { questionRef: "q1" } }), config);
   assert.equal(authorChecks, 1);
-  assert.equal(resumed.outcome, null);
+  assert.equal(resumed.outcome?.status, "verified");
   assert.equal((await parent.getState(config)).next.length, 0);
 });
 
@@ -377,4 +377,50 @@ test("R01 crash windows reuse settled original invocation/Git/reviewer receipts 
     assert.equal(calls, 1, phase + ": inspecting existing external receipts needs no new model");
     saver.db.close();
   }
+});
+
+test("R14I dynamic assignment resumes the writer phase after an interrupted settled question", async () => {
+  const path = join(dir, "dynamic-author.sqlite");
+  const config = { configurable: { thread_id: identity.graphThreadId }, durability: "sync" as const };
+  let calls = 0, authenticated = false;
+  const channels = Annotation.Root({ identity: Annotation<AssignmentIdentity>(),
+    outcome: Annotation<AssignmentOutcome | null>() });
+  const make = (saver: SqliteSaver) => {
+    const child = createAssignmentLifecycleGraph({
+      preflight: async () => null,
+      invoke: async () => {
+        calls++;
+        return { receiptRef: authenticated ? "answer-invocation" : "question-invocation", status: "settled" };
+      },
+      verify: async state => state.submission?.receiptRef === "question-invocation"
+        ? { status: "awaiting-author", assignmentKey: key, evidenceRef: "question-receipt",
+            questionRef: "question:1", resumePhase: "writer" }
+        : verified(),
+      authenticateAnswer: async (state, response) => {
+        assert.equal(state.submission?.receiptRef, "question-invocation");
+        authenticated = response === "accepted-answer";
+        return authenticated;
+      },
+    });
+    return new StateGraph(channels)
+      .addNode("specialist_dispatch", async (state, cfg) =>
+        child.invoke({ identity: state.identity, submission: null, submissionKey: null,
+          outcome: null, continuationRef: null }, assignmentChildConfig(cfg, state.identity)))
+      .addEdge(START, "specialist_dispatch").addEdge("specialist_dispatch", END)
+      .compile({ checkpointer: saver });
+  };
+  let saver = SqliteSaver.fromConnString(path);
+  try {
+    await make(saver).invoke({ identity, outcome: null }, config);
+    const pending = await make(saver).getState(config);
+    assert.deepEqual(pending.next, ["specialist_dispatch"]);
+    assert.equal(pending.tasks[0]?.interrupts[0]?.value?.questionRef, "question:1");
+    assert.equal(calls, 1);
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(path);
+    const resumed = await make(saver).invoke(new Command({ resume: "accepted-answer" }), config);
+    assert.equal(resumed.outcome?.status, "verified");
+    assert.equal(calls, 2);
+    assert.deepEqual((await make(saver).getState(config)).next, []);
+  } finally { saver.db.close(); }
 });

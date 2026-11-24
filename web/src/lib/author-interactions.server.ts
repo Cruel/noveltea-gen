@@ -1,3 +1,7 @@
+import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { pendingGenerationQuestion } from '../../../src/generation-author-question'
+import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
 import { createHash } from 'node:crypto'
 import type { StudioAuth } from './auth'
 import type { StudioStore as StudioDatabase } from '../persistence/store'
@@ -9,7 +13,7 @@ import { inspectFoundationConflict } from '../../../src/foundation-conflict'
 import { inspectAuthorDecisions, decideAuthorDecision, isRecoveryDecisionKind, statusAfterAuthorDecision } from '../../../src/author-decisions'
 import { withStoryJobLock } from '../../../src/job-lock'
 import { queueRecord } from './generation-queue.server'
-import { activeSpecialistChoice, answerSpecialistChoice } from '../../../src/specialist-choice'
+import { activeSpecialistChoice, answerSpecialistChoice, inspectSpecialistChoice } from '../../../src/specialist-choice'
 import { parseAuthorAnswer } from '../../../src/author-question'
 import { readSpecialistQuestionDraft, saveSpecialistQuestionDraft } from './specialist-question-drafts.server'
 import { enqueueAnsweredSpecialistContinuation } from './generation-controls.server'
@@ -53,10 +57,25 @@ async function readCommand(request: Request): Promise<string> {
   return text
 }
 
-async function getRecords(job: JobStartResult, recoverable: boolean, owner: string) {
+async function checkQuestion(job: JobStartResult, thread: string | null | undefined,
+  owner: string, choice: NonNullable<Awaited<ReturnType<typeof activeSpecialistChoice>>>) {
+  // Unbound Review disputes are parent-owned scope decisions, not writer interrupts.
+  if (!choice.assignment && choice.workItem.startsWith('repair-')) return
+  const path = join(job.stateDir, 'web-generation.sqlite')
+  if (!thread || !existsSync(path)) throw Error('The original Generation Question Set is unavailable.')
+  const { saver, graph } = openWebGenerationGraph(path)
+  try {
+    const snapshot = await graph.getState({ configurable: { thread_id: thread } })
+    const pending = await pendingGenerationQuestion(job, saver, snapshot, thread, 'user:' + owner)
+    if (!pending || pending.phase !== 'interrupt' || pending.choice.id !== choice.id)
+      throw Error('The original Generation Question Set is not pending.')
+  } finally { saver.db.close() }
+}
+async function getRecords(job: JobStartResult, recoverable: boolean, owner: string, thread?: string | null) {
   const updates = await inspectAuthorUpdates(job)
   const decisions = recoverable ? await inspectAuthorDecisions(job) : []
   const choice = recoverable ? await activeSpecialistChoice(job) : null
+  if (choice) await checkQuestion(job, thread, owner, choice)
   const items = await Promise.all(updates.records.map(async ({ message, acknowledgement }) => {
     if (message.kind !== 'question' && message.kind !== 'approval') return null
     const payload = message.payload as Record<string, unknown>
@@ -106,7 +125,7 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
     const queue = (await queueRecord(store, jobId))
     const recoverable = !!row?.request && ['paused', 'blocked'].includes(row.status) &&
       queue?.phase === 'finished'
-    if (request.method === 'GET') return json(await getRecords(job, recoverable, user.id))
+    if (request.method === 'GET') return json(await getRecords(job, recoverable, user.id, saved?.threadId))
 
     // Strict, bounded typed commands. Do not accept a caller-provided identity
     // or approval payload, and do not consume arbitrary controller references.
@@ -138,13 +157,14 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
         if (!active || active.id !== input.id || active.phase !== 'awaiting-author' ||
             active.proposalSha256 !== input.proposalSha256)
           throw new Error('Specialist Question Set has changed.')
+        await checkQuestion(job, saved?.threadId, user.id, active)
         return saveSpecialistQuestionDraft(job, active, user.id,
           input.draftRevision as number, input.drafts)
       })
       return json({ draft })
     }
     if (input?.action === 'choice') {
-      if (!recoverable || row?.status !== 'paused' ||
+      if (!row?.request ||
           typeof input.id !== 'string' || !/^[a-f0-9-]{36}$/.test(input.id) ||
           typeof input.proposalSha256 !== 'string' || !SHA.test(input.proposalSha256) ||
           !Number.isSafeInteger(input.draftRevision) || (input.draftRevision as number) < 1)
@@ -152,23 +172,31 @@ export async function authorInteractionRequest(auth: StudioAuth, store: StudioDa
       const { action: _action, id: _id, proposalSha256: _hash,
         draftRevision: _revision, ...response } = input
       const completed = await withStoryJobLock(job, 'specialist-author-choice', async () => {
-        const active = await activeSpecialistChoice(job)
-        if (!active || active.id !== input.id || active.phase !== 'awaiting-author')
-          throw new Error('Author choice has changed or was already answered.')
-        const draft = await readSpecialistQuestionDraft(job, active, user.id)
-        if (draft.revision !== input.draftRevision)
-          throw new Error('Question Set draft changed in another browser.')
+        const active = await inspectSpecialistChoice(job, input.id as string)
+        if (active.phase === 'awaiting-author') {
+          if (!recoverable || row?.status !== 'paused') throw Error('Generation is not awaiting an author.')
+          await checkQuestion(job, saved?.threadId, user.id, active)
+          const draft = await readSpecialistQuestionDraft(job, active, user.id)
+          if (draft.revision !== input.draftRevision)
+            throw new Error('Question Set draft changed in another browser.')
+        } else if (active.assignment && active.assignment.identity.graphThreadId !== saved?.threadId) {
+          throw Error('Answer belongs to a different Generation Thread.')
+        }
         const answer = parseAuthorAnswer(active.question, {
           ...response, ...(response.note === undefined ? { note: '' } : {}),
         }, active.delegationAllowed === true)
         return answerSpecialistChoice(job, active.id, input.proposalSha256 as string,
-          answer, 'user:' + user.id)
+          answer, 'user:' + user.id, input.draftRevision as number)
       })
       // The answer is already durable. A rejected checkpoint/queue transition
       // cannot undo it or implicitly retry an uncertain specialist model call.
       let continuation: 'queued' | 'manual' = 'manual'
       try {
-        await enqueueAnsweredSpecialistContinuation(store, user.id, job, jobId)
+        const currentQueue = await queueRecord(store, jobId)
+        if (completed.phase === 'answered' && currentQueue?.phase === 'finished')
+          await enqueueAnsweredSpecialistContinuation(store, user.id, job, jobId)
+        else if (!['queued', 'running'].includes(currentQueue?.phase ?? ''))
+          throw Error('Answer was already accepted; no new work is required.')
         continuation = 'queued'
       } catch { /* Keep the saved answer and the existing explicit Continue/recovery path. */ }
       return json({ choice: { id: completed.id, phase: completed.phase,

@@ -1,3 +1,4 @@
+import { pendingGenerationQuestion, generationQuestionResume } from '../../src/generation-author-question'
 import { assertNativeVersion } from '../../src/native-cli-version';
 import { withPiStatusReporter } from '../../src/pi-work-status'
 import { withControllerReviewPhase } from '../../src/controller-review-phase'
@@ -66,13 +67,26 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   verifyWebExecution(pinned.fixture, true)
   await verifyTrustedRevision(job)
   if (await readJobControl(job) !== 'running') throw new Error('Generation is not authorized to run.')
+  const threadId = row.threadId!
+  const questionAtDispatch = async () => {
+    if (item.intent !== 'resume') return null
+    const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
+    try {
+      const snapshot = await graph.getState({ configurable: { thread_id: threadId } })
+      const question = await pendingGenerationQuestion(job, saver, snapshot, threadId, 'user:' + item.ownerId)
+      if (question && (question.phase === 'interrupt' && question.choice.phase !== 'answered' || item.fixId ||
+          item.resumeKind !== 'ordinary' || !sameGenerationRequest(snapshot.values.request, pinned)))
+        throw Error('Queued continuation lost the exact authenticated Author Question.')
+      return question
+    } finally { saver.db.close() }
+  }
+  const pendingAtDispatch = await questionAtDispatch()
   // Check again at dispatch, not only at enqueue: queued work can be mutated.
   const env = { ...process.env }
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-  if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+  if (!pendingAtDispatch && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
     cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()) throw new Error('Job has uncommitted work; manual reconciliation required.')
-  const threadId = row.threadId!
   // A known-verifier-fix pickup already carries its durable fixId and exact
   // indexed-stop proof, which claim() re-verifies under the Story lock. It is
   // not an approved-Blueprint correction. Other blocked resumes (guided
@@ -89,7 +103,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         if (!item.resumeKind || item.resumeKind === 'ordinary')
           throw Error('Blocked original Thread lost its queued recovery reason.')
         const admitted = await verifiedResumeAdmission(job, threadId,
-          JSON.stringify(pinned), false, 'blocked')
+          JSON.stringify(pinned), false, 'blocked', 'user:' + item.ownerId)
         if (admitted.intent !== 'resume' || admitted.resumeKind !== item.resumeKind)
           throw Error('Queued recovery reason differs from the original verified Studio admission.')
       } else if (item.resumeKind && item.resumeKind !== 'ordinary') {
@@ -107,9 +121,9 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       if (state?.status !== 'paused' || state.requestJson !== row.requestJson ||
           state.threadId !== row.threadId || lease?.phase !== 'running' ||
           lease.workerId !== item.workerId || await trustedHead(job) !== job.headSha ||
-          execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+          (!await questionAtDispatch() && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
             cwd: job.worktreeRoot, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-          }).trim())
+          }).trim()))
         throw new Error('Preflight source changed; retain job for explicit reconciliation.')
     }
     runtime = await retryReadOnlyPreflight(async () => {
@@ -131,6 +145,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         await readJobControl(job) !== 'running')
       throw new Error('Conflicting generation admission.')
     await requireGenerationTurn(job, pinned)
+    if (pendingAtDispatch && !await questionAtDispatch()) throw Error('Pending author interrupt changed before claim.')
     if (fix && indexedStop) await verifyKnownFixProof(job, pinned, indexedStop)
     let sandbox: SandboxClient | null = null
     if (selected) {
@@ -159,13 +174,17 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
     await appendGenerationEvent(store, item.ownerId, row.id, { kind: 'started', turnId })
     const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
     try {
-      if (item.intent !== 'start') {
+      const prior = await graph.getState({ configurable: { thread_id: threadId } })
+      const pending = await pendingGenerationQuestion(job, saver, prior, threadId, 'user:' + item.ownerId)
+      if (!!pending !== !!pendingAtDispatch || pending && (!pendingAtDispatch || pending.interruptId !== pendingAtDispatch.interruptId ||
+          pending.choice.answerSeal?.digest !== pendingAtDispatch.choice.answerSeal?.digest))
+        throw Error('Pending author interrupt changed before execution.')
+      if (item.intent !== 'start' && !pending) {
         // A committed specialist can precede its parent LangGraph snapshot.
         // Reconcile only the original trusted receipt, never repeat the writer.
         await withStoryJobLock(job, 'studio-recovery-finalization', () =>
           reconcileRecoveryCheckpoints(job))
       }
-      const prior = await graph.getState({ configurable: { thread_id: threadId } })
       const modern = await inspectModernGenerationRecovery(job, saver, threadId)
       if (modern && !isDeepStrictEqual(modern,
         (prior.values as { recoveryLifecycle?: RecoveryLifecycle }).recoveryLifecycle))
@@ -174,7 +193,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
       const stages = (prior.values as { completedStages?: GenerationEvidence[] }).completedStages ?? []
       let working = '', verified = stages.length
       let previousHead = stages.at(-1)?.headSha ?? job.headSha
-      for await (const patch of await graph.stream({ request: pinned,
+      for await (const patch of await graph.stream(pending ? generationQuestionResume(pending) : { request: pinned,
         fixPickup: fix && indexedStop ? { id: fix.id, check: fix.check,
           failedVersion: fix.failedVersion, signature: indexedStop.signature } : null,
         pauseAfter: item.intent === 'start' && (pinned.fixture || config?.pauseAfter === 'foundation')
@@ -245,12 +264,13 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         recoveryLifecycle: outcome.recoveryLifecycle,
         recoverySources: outcome.recoverySources,
       })
-      const state = ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
+      const waiting = await pendingGenerationQuestion(job, saver, snapshot, threadId, 'user:' + item.ownerId)
+      const state = waiting?.phase === 'interrupt' ? 'paused' : ['running', 'paused', 'blocked', 'completed', 'cancelled'].includes(outcome.status || '')
         ? outcome.status! : 'blocked'
       if (state === 'running') throw new Error('Graph stream ended without safe terminal state.')
       // The graph owns the author-input distinction; a generic pause must
       // never be presented as a request for creative approval.
-      const needsAuthor = (state === 'paused' || state === 'blocked') &&
+      const needsAuthor = waiting?.phase === 'interrupt' || (state === 'paused' || state === 'blocked') &&
         typeof outcome.reason === 'string' &&
         /author (decision|choice|approval|question|input)|waiting for (your|an author)|approval required|author review/i.test(outcome.reason)
       if (!await store.persistence.generation.jobs.finish(

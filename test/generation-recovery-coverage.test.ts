@@ -47,7 +47,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:21,status:1,blocked:1,operationFailure:6,throws:6",
+  specialist_dispatch: "returns:21,status:1,blocked:1,operationFailure:6,throws:7",
   dependency_amendment: "returns:5,blocked:1,operationFailure:1,authorBoundary:1,throws:6",
   independent_assignment_review: "returns:8,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:6",
@@ -58,7 +58,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independentAssignmentBoundary: "returns:15,status:6,operationFailure:2,throws:8",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
-  runStoryGeneration: "returns:5,status:7,blocked:6,reconcile:1,throws:15",
+  runStoryGeneration: "returns:5,status:9,blocked:6,reconcile:1,throws:17",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
   recoveryNode: "returns:24,status:18,throws:14",
 };
@@ -694,7 +694,7 @@ const reviewedDirectStopFamilies = {
     regression: ["test/generation.test.ts", "generation start and read-only inspect preserve invalid corrective evidence without replay"],
     sites: [
       "runStoryGeneration/status#3", "runStoryGeneration/status#4",
-      "runStoryGeneration/status#5", "runStoryGeneration/status#6",
+      "runStoryGeneration/status#5", "runStoryGeneration/status#7",
     ],
   },
 } as const;
@@ -742,4 +742,62 @@ test("new terminal returns, throws or recovery bypass sites require explicit exi
     "New production graph stop/throw or repair-routing shape; inspect its source and update the C01 matrix AND reviewed baseline: " +
       JSON.stringify(actual, null, 2),
   );
+});
+
+// R14I: the nested interrupt, receipt and public dispatch gates are reviewed together.
+test("R14I author questions retain the reviewed receipt and nested resume gates", () => {
+  const gates = [
+    [
+      "src/generation-author-question.ts",
+      "createGenerationQuestionGraph",
+      "302856f281f371c16818d1118b4eabc7de709b6079d568e1c310d045538c6f73"
+    ],
+    [
+      "src/generation-author-question.ts",
+      "pendingGenerationQuestion",
+      "4376bc0c45d0b770789dc5d609ce385da91aed10d90d4d9636e1757751bc131b"
+    ],
+    [
+      "src/generation-author-question.ts",
+      "generationQuestionResume",
+      "ff8c3e2bb3b500f1586122108b03a53b67f065ec0e262a6822e0c2e1d172736e"
+    ],
+    [
+      "src/specialist-choice.ts",
+      "bindSpecialistChoice",
+      "55fc68ea45ba4062e7084f1732a5bae18f5966a93d11c69840e1147f972ad887"
+    ],
+    [
+      "src/specialist-choice.ts",
+      "answerSpecialistChoice",
+      "8f6e0e2fce6de75836a218792d375e51a896cc0e7576dec5f9226891e048f414"
+    ],
+    [
+      "src/specialist-choice.ts",
+      "claimSpecialistChoice",
+      "c61320116c867b978af9d0242485d9c72c2cce99835495dd1fe3626536c13aad"
+    ],
+    [
+      "web/src/agent-runner.ts",
+      "runPersistedGeneration",
+      "e0454188ffdcdd9611e6d6c2b3347f02581b504412ddc41ab5aea7d4b2e2b804"
+    ],
+    [
+      "web/src/lib/generation-controls.server.ts",
+      "verifiedResumeAdmission",
+      "2810d077eaf00869e4990fb1beb831ac936f0b26177f41e8972d81a2dcbac190"
+    ],
+    [
+      "web/src/lib/author-interactions.server.ts",
+      "authorInteractionRequest",
+      "96162f4721610e0ee8d8fe2a61616cb857ce1540cc451870d96f54a86afd1870"
+    ]
+  ];
+  const printer = ts.createPrinter({ removeComments: true });
+  for (const [path, name, expected] of gates) {
+    const source = ts.createSourceFile(path!, readFileSync(path!, "utf8"), ts.ScriptTarget.Latest, true);
+    const body = helpers(source).get(name!);
+    assert.ok(body, name);
+    assert.equal(createHash("sha256").update(printer.printNode(ts.EmitHint.Unspecified, body, source)).digest("hex"), expected, name);
+  }
 });

@@ -1,3 +1,4 @@
+import { pendingGenerationQuestion } from '../../../src/generation-author-question'
 import { execFileSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
@@ -221,20 +222,17 @@ export function matchesRepairSteeringReviewBoundary(
 
 /** Read-only, evidence-checked admission. Exported for crash/restart regression tests. */
 export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof authorizedStoryJob>>,
-  threadId: string, pinned: string, retry: boolean, originalStatus?: string):
+  threadId: string, pinned: string, retry: boolean, originalStatus?: string, principal?: string):
   Promise<{ intent: QueueIntent; resumeKind: ResumeKind | null }> {
   return withStoryJobLock(job, 'studio-control-recovery', async () => {
     const env = { ...process.env }
     for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key]
-    const choice = await activeSpecialistChoice(job)
-    const choiceAnswer = choice?.phase === 'answered'
-      ? await verifySpecialistChoice(job, choice.id, 'answered') : null
-    if (!choiceAnswer && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
-      cwd: job.worktreeRoot, env, encoding: 'utf8',
-    }).trim()) throw new Error('Uncommitted files require manual reconciliation; the writer will not be replayed.')
     await trustedHead(job)
     const checkpoint = join(job.stateDir, 'web-generation.sqlite')
     if (!existsSync(checkpoint)) {
+      if (execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+        cwd: job.worktreeRoot, env, encoding: 'utf8',
+      }).trim()) throw new Error('Uncommitted files require manual reconciliation; the writer will not be replayed.')
       if (retry || existsSync(join(job.stateDir, 'generation-server-owner.json')) ||
           originalStatus === 'blocked')
         throw new Error('An unfinished writer claim has no checkpoint; operator recovery is required.')
@@ -251,6 +249,23 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
         recoverySources: raw.recoverySources ?? [],
       }
       const saved = { ...raw, ...projectRecovery(recovered) }
+      const pending = await pendingGenerationQuestion(job, saver, state, threadId, principal)
+      if (pending) {
+        if (!principal || pending.phase === 'interrupt' && pending.choice.phase !== 'answered' ||
+            await readJobControl(job) === 'cancelled' ||
+            !raw.request || !sameGenerationRequest(raw.request as GenerationRequest, JSON.parse(pinned)) ||
+            checkedModern && !isDeepStrictEqual(checkedModern, raw.recoveryLifecycle))
+          throw Error('The original pending Author Question requires its authenticated answer and unchanged checkpoint.')
+        return { intent: 'resume', resumeKind: 'ordinary' }
+      }
+      const choice = await activeSpecialistChoice(job)
+      const choiceAnswer = choice?.phase === 'answered'
+        ? await verifySpecialistChoice(job, choice.id, 'answered') : null
+      if (!choiceAnswer && execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+            cwd: job.worktreeRoot, env, encoding: 'utf8',
+          }).trim()) throw new Error('Uncommitted files require manual reconciliation; the writer will not be replayed.')
+      if (choiceAnswer?.assignment)
+        throw Error('Answered specialist has no matching pending Generation interrupt.')
       if (originalStatus === 'blocked' && saved.status !== 'blocked')
         throw new Error('Blocked Studio status differs from its original graph checkpoint.')
       if (originalStatus === 'blocked' && await readJobControl(job) === 'cancelled')
@@ -263,10 +278,6 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
         ['paused', 'blocked'].includes(saved.status ?? '') && !saved.result &&
         ['Foundation requires an explicit author decision before generation can proceed.',
           'Pi did not author the canonical Markdown through a standard write/edit tool.'].includes(saved.reason ?? '')
-      const choiceBoundary = !!choiceAnswer &&
-        authorChoiceMatchesActiveAssignment(choiceAnswer.workItem, saved.active) &&
-        saved.status === 'paused' && !saved.result &&
-        saved.reason?.startsWith('Specialist paused for an author choice.') === true
       const budgetBoundary = !!policy.budget.pause && !!saved.active && !saved.result &&
         saved.reason?.startsWith('Pi budget exhausted at safe boundary:') === true
       // The original specialist already committed before its independent
@@ -336,8 +347,8 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
       if (checkedModern && !isDeepStrictEqual(checkedModern, raw.recoveryLifecycle))
         throw new Error('Saved recovery has untrusted original checkpoint, model attempt or decision proof.')
       const correctedBoundary = approvedWork?.eligible === true
-      if ((!authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !correctedBoundary && saved.status !== 'paused') ||
-          (saved.active && !budgetBoundary && !authorBoundary && !choiceBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) ||
+      if ((!authorBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !correctedBoundary && saved.status !== 'paused') ||
+          (saved.active && !budgetBoundary && !authorBoundary && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) ||
           (saved.result && !reviewRepairBoundary && !guidedRepairBoundary && !steeringReviewBoundary && !correctedBoundary) || saved.ideaTask || saved.ideaResult ||
           (!saved.request || !sameGenerationRequest(saved.request as GenerationRequest,
             JSON.parse(pinned) as GenerationRequest)) || state.next.length !== 0)
@@ -411,7 +422,7 @@ export async function enqueueAnsweredSpecialistContinuation(store: StudioDatabas
   const choice = await activeSpecialistChoice(job)
   if (choice?.phase !== 'answered')
     throw Error('An exact answered specialist receipt is required before continuation.')
-  const { intent, resumeKind } = await verifiedResumeAdmission(job, current.threadId, current.requestJson, false)
+  const { intent, resumeKind } = await verifiedResumeAdmission(job, current.threadId, current.requestJson, false, undefined, 'user:' + owner)
   if (intent !== 'resume') throw Error('Original specialist checkpoint is unavailable.')
   await setJobControl(job, 'running')
   await store.persistence.generation.queue.reconcileAndEnqueue(owner, id, intent, {
@@ -536,7 +547,7 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       })
       const current = await store.persistence.generation.jobs.state(user.id, id)
       if (!current?.requestJson || !current.threadId) throw Error('Repair continuation lost its pinned job.')
-      const { intent, resumeKind } = await verifiedResumeAdmission(job, current.threadId, current.requestJson, false)
+      const { intent, resumeKind } = await verifiedResumeAdmission(job, current.threadId, current.requestJson, false, undefined, 'user:' + user.id)
       await setJobControl(job, 'running')
       await store.persistence.generation.queue.reconcileAndEnqueue(user.id, id, intent, {
         status: current.status, request: current.requestJson, thread: current.threadId,
@@ -616,7 +627,7 @@ export async function generationControlRequest(auth: StudioAuth, store: StudioDa
       return reply({ error: 'Interrupted writers need explicit recovery inspection, not Resume.' }, 409)
     if (action === 'retry' && queued?.phase !== 'interrupted')
       return reply({ error: 'Retry is reserved for a reconciled interrupted attempt.' }, 409)
-    const { intent, resumeKind } = await verifiedResumeAdmission(job, saved.thread, saved.request, action === 'retry', saved.status)
+    const { intent, resumeKind } = await verifiedResumeAdmission(job, saved.thread, saved.request, action === 'retry', saved.status, 'user:' + user.id)
     // Persist one exact transition; a second attempt never races this queue
     // claim into a changed request or alternate thread.
     await setJobControl(job, 'running')

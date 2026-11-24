@@ -1013,6 +1013,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       if (unit.phase === "writing" && !resumingInvocation)
         throw new Error("Interrupted specialist writing; inspect preserved files and Pi session, then reconcile exact bytes. Never replay the writer.");
       const resumingChoice = unit.phase === "awaiting-author";
+      if (resumingChoice && unit.authorChoiceId &&
+          (await inspectSpecialistChoice(job, unit.authorChoiceId)).phase === "awaiting-author")
+        throw new SpecialistChoiceRequiredError();
       const choice = resumingChoice && unit.authorChoiceId
         ? await verifySpecialistChoice(job, unit.authorChoiceId, "answered") : null;
       const currentHead = git(job, "rev-parse", "HEAD");

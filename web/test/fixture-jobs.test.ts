@@ -427,8 +427,8 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     assert.equal(pinnedRequest.model, undefined)
     assert.equal(pinnedRequest.provider, undefined)
 
-    // A deliberate, answered specialist question can resume with preserved
-    // draft bytes. The very same dirty tree without an answer cannot.
+    // An obsolete plain paused status and question receipt cannot authorize
+    // an answer or writer continuation without a pending nested checkpoint.
     const choiceGraph = openWebGenerationGraph(join(acquired.stateDir, 'web-generation.sqlite'))
     try {
       await choiceGraph.graph.updateState(
@@ -471,16 +471,6 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
     await assert.rejects(
       () => safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
       /Uncommitted files/)
-    const deliberate = await fixtureJobRequest(restoredAuth, store,
-      new Request(config.baseURL + '/api/jobs/' + jobId, { headers: { cookie: aliceCookie } }),
-      jobId, config.baseURL)
-    assert.equal(deliberate.status, 200)
-    const pause = (await deliberate.json() as any).job
-    assert.equal(pause.status, 'paused')
-    assert.equal(pause.revisionVerified, false)
-    assert.equal(pause.recovery, null, 'Answered question is not an unsafe-writer repair prompt')
-    assert.match(pause.reason, /waiting for your answer/)
-    assert.equal(pendingChoice.delegationAllowed, true);
     const accepted = await authorInteractionRequest(restoredAuth, store,
       new Request(config.baseURL + '/api/jobs/' + jobId + '/author', {
         method: 'POST', headers: { cookie: aliceCookie, origin: config.baseURL,
@@ -489,27 +479,11 @@ test('authenticated fixture start binds one checkpoint and returns it after a da
           proposalSha256: pendingChoice.proposalSha256, draftRevision: 1,
           kind: 'delegate', note: 'Choose only within the authorized Character assignment.' }),
       }), jobId, config.baseURL)
-    assert.equal(accepted.status, 200, await accepted.clone().text())
-    const acceptedBody = await accepted.json() as { choice: { phase: string }; continuation: string }
-    assert.equal(acceptedBody.choice.phase, 'answered')
-    assert.equal(acceptedBody.continuation, 'queued',
-      'A durable authenticated delegation automatically re-enters the verified original checkpoint')
-    assert.equal((await inspectSpecialistChoice(acquired, pendingChoice.id)).answer?.kind, 'delegate')
-    assert.equal((await queueRecord(store, jobId))?.phase, 'queued')
-    // The test does not launch another model call. Simulate finishing only the
-    // queued transition so later independent recovery assertions stay isolated.
-    const queueWorker = 'fixture:accepted-choice'
-    const now = '2026-11-18T00:00:00.000Z'
-    assert.equal((await store.persistence.generation.queue.claim(queueWorker, 1, now))?.jobId, jobId)
-    assert.equal(await store.persistence.generation.queue.finish(jobId, queueWorker, true, now), true)
-    await setJobControl(acquired, 'paused')
-    assert.equal(await safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
-      'resume', 'Only an exact settled, answered specialist may continue on preserved draft bytes')
-    writeFileSync(pendingDraft, 'tampered while the author was answering')
-    await assert.rejects(
-      () => safeToResume(acquired, saved.threadId, JSON.stringify(pinnedRequest), false),
-      /changed/)
+    assert.equal(accepted.status, 409, await accepted.clone().text())
+    assert.equal((await inspectSpecialistChoice(acquired, pendingChoice.id)).answer, undefined)
+    assert.notEqual((await queueRecord(store, jobId))?.phase, 'queued')
     unlinkSync(pendingDraft)
+    unlinkSync(join(acquired.stateDir, 'character-world.json'))
 
     // A later specialist can leave a dirty worktree on an otherwise verified
     // HEAD. Inspection must show the original blocked reason, not the generic

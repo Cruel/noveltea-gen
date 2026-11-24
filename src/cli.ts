@@ -413,7 +413,7 @@ async function main(): Promise<void> {
     if (action !== "start" && action !== "resume" && action !== "inspect")
       throw new Error("Expected job generate start|resume|inspect.");
     const values = parseJobOptions(args, "generate", ["--story", "--job", "--task", "--contract",
-      "--skills-source", "--validator-source", "--provider", "--model", "--fixture", "--pause-after"], ["--fixture"]);
+      "--skills-source", "--validator-source", "--provider", "--model", "--fixture", "--pause-after", "--answer"], ["--fixture"]);
     const story = values.get("--story"), job = values.get("--job");
     if (!story || !job) throw new Error("job generate requires --story and --job.");
     disableJobCloudTracing();
@@ -423,7 +423,9 @@ async function main(): Promise<void> {
       throw new Error("--pause-after must name a generation stage and cannot be used with inspect.");
     const { readFile } = await import("node:fs/promises");
     const contract = values.has("--contract") ? JSON.parse(await readFile(values.get("--contract")!, "utf8")) : undefined;
-    const result = await runStoryGeneration({ story, job, action, contract, pauseAfter,
+    const answer = values.has("--answer") ? JSON.parse(await readFile(values.get("--answer")!, "utf8")) : undefined;
+    if (answer !== undefined && action !== "resume") throw Error("--answer is only valid on generate resume.");
+    const result = await runStoryGeneration({ story, job, action, contract, pauseAfter, answer,
       task: values.get("--task"), fixture: values.has("--fixture") ? true : undefined,
       skillsSource: values.get("--skills-source"), validatorSource: values.get("--validator-source"),
       provider: values.get("--provider"), model: values.get("--model") });
