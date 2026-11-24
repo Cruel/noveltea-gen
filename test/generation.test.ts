@@ -5189,6 +5189,51 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
   }
 });
 
+/** R14C negative controls use a real admitted Case and its sealed Review.
+ * A different owner or plan cannot borrow that Case or the native source. */
+async function assertSubunitReviewAuthority(job: Awaited<ReturnType<typeof startStoryJob>>,
+  state: GenerationGraphState, workItem: string, other: string, assignmentKey: string) {
+  const c = state.recoveryLifecycle.active!;
+  const d = state.recoveryLifecycle.decision!;
+  assert.equal(d.action, "known-correction");
+  const { authenticateOperationReviewProof } = await import("../src/generation-operation-strategy.js");
+  assert.equal(await authenticateOperationReviewProof(job, state, c, d), true);
+  const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+  const calls = (await inspectPiPolicy(job)).budget.modelCalls;
+  const { executeReviewRound } = await import("../src/rejected-review-repair.js");
+  await assert.rejects(executeReviewRound(job, { rootSha: c.origin.sourceHeadSha, caseId: c.id,
+    assignmentKey, workItem: other }, { phase: "admit", sourceSha: c.origin.sourceHeadSha },
+    { skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id }), /Foreign repair source/);
+  assert.equal(await authenticateOperationReviewProof(job,
+    { ...state, planVersion: (state.planVersion ?? 0) + 1 }, c, d), false);
+  assert.equal(await authenticateOperationReviewProof(job, state,
+    { ...c, origin: { ...c.origin, assignmentId: other } }, d), false);
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.commitSha === c.origin.sourceHeadSha)!;
+  assert.equal(point.workItem, workItem);
+  assert.equal(point.semanticReview, "failed");
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal((await inspectPiPolicy(job)).budget.modelCalls, calls);
+}
+
+async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startStoryJob>>,
+  unit: { commitSha: string; piSessionFile: string }, successor: string) {
+  const points = await inspectRecoveryCheckpoints(job);
+  const original = points.find(p => p.commitSha === unit.commitSha)!;
+  const corrected = points.find(p => p.commitSha === successor)!;
+  assert.equal(original.semanticReview, "failed");
+  assert.equal(corrected.semanticReview, "passed");
+  const { inspectPostcommitReviewCycle } = await import("../src/postcommit-review-cycle.js");
+  const cycle = await inspectPostcommitReviewCycle(job, original.commitSha, original.assurance!.assignmentDigest);
+  assert.ok(cycle);
+  assert.deepEqual(cycle.rounds.map(r => r.commitSha), [original.commitSha, successor]);
+  assert.notEqual(cycle.reviewer.file, unit.piSessionFile);
+  const { readRepairCommitProof } = await import("../src/checkpoint-assurance.js");
+  const proof = await readRepairCommitProof(job, corrected.workItem);
+  assert.equal(proof.sessionFile, unit.piSessionFile);
+  assert.equal(proof.rootFailureSha, original.commitSha);
+  return cycle.reviewer.file;
+}
+
 test("R05 World and Character metadata and independent Review corrections resume the original Thread in order", { skip: !available, timeout: 120_000 }, async () => {
   const f = setup("r05-world-review");
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
@@ -5327,10 +5372,14 @@ test("R05 World and Character metadata and independent Review corrections resume
       ["foundation", "global-architecture"].includes(point.workItem));
     const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(selected.recoveryLifecycle));
+    await assertSubunitReviewAuthority(f.job, selected, "world-foundations", "character-foundations", original.units[0].assignmentKey);
     const corrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
     assert.equal(corrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: corrected.reason, recovery: corrected.recoveryLifecycle, calls: observed.length}));
+    assert.equal(corrected.recoveryLifecycle.discharged.at(-1)?.case.id, selected.recoveryLifecycle.active?.id);
+    assert.ok((await graph.getState(cfg)).next.includes("author_update_intake"));
     const correctedHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
     assert.notEqual(correctedHead, original.units[0].commitSha);
+    const worldReviewer = await assertSubunitReviewSessions(f.job, original.units[0], correctedHead);
     assert.equal(corrected.result, null, "Passing World correction is not cluster completion");
     const reviewed = await inspectRecoveryCheckpoints(f.job);
     for (const point of preceding) {
@@ -5358,17 +5407,28 @@ test("R05 World and Character metadata and independent Review corrections resume
     assert.equal(observed.length, 17);
     const characterSelected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(characterSelected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(characterSelected.recoveryLifecycle));
+    await assertSubunitReviewAuthority(f.job, characterSelected, "character-foundations", "world-foundations", after.units[1].assignmentKey);
     await crashAtSubmission("repair-round", 19, { interruptAfter: ["independent_assignment_review"] });
     const repairedCharacterHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
     assert.notEqual(repairedCharacterHead, after.units[1].commitSha);
     assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === repairedCharacterHead)?.semanticReview, "required-pending");
     const characterCorrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
     assert.equal(characterCorrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: characterCorrected.reason, recovery: characterCorrected.recoveryLifecycle, calls: observed.length}));
+    assert.equal(characterCorrected.recoveryLifecycle.discharged.at(-1)?.case.id, characterSelected.recoveryLifecycle.active?.id);
     assert.equal(characterCorrected.result?.status, "foundations-committed");
     assert.equal(characterCorrected.result?.headSha, git(f.job.worktreeRoot, "rev-parse", "HEAD"));
     assert.deepEqual(JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")), after);
     assert.equal(observed.length, 20);
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), characterCorrected.recoveryLifecycle);
+    assert.notEqual(await assertSubunitReviewSessions(f.job, after.units[1], repairedCharacterHead), worldReviewer);
+    const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+    assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", JSON.stringify({ reason: next.reason, active: next.active, recovery: next.recoveryLifecycle }));
+    assert.equal(next.active?.stage, "event");
+    assert.equal(next.request.turnPlanDigest, turnDigest);
+    assert.equal(observed.length, 20);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, observed.length,
+      "Restart, refused authority and parent intake cannot charge another model call.");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), repairedCharacterHead);
   } finally {
     saver.db.close();
     restoreSandbox();
@@ -5640,12 +5700,16 @@ test("R14C Choice and Puzzle native and independent Review corrections preserve 
     assert.equal(choice.units[0].invocationProof.ordinal, 1);
     const decision = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(decision.recoveryLifecycle.decision?.action, "known-correction");
+    await assertSubunitReviewAuthority(f.job, decision, "interactive-choice-disclosure", "interactive-puzzle-disclosure", choice.units[0].assignmentKey);
     const corrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
     assert.equal(corrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: corrected.reason, calls: observed.length}));
     assert.equal(corrected.result, null);
     assert.equal(observed.length, 10);
+    assert.equal(corrected.recoveryLifecycle.discharged.at(-1)?.case.id, decision.recoveryLifecycle.active?.id);
+    assert.ok((await graph.getState(cfg)).next.includes("author_update_intake"));
     const choiceHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
     assert.notEqual(choiceHead, choice.units[0].commitSha);
+    const choiceReviewer = await assertSubunitReviewSessions(f.job, choice.units[0], choiceHead);
     saver.db.close();
     saver = SqliteSaver.fromConnString(paused.checkpointPath);
     graph = createGenerationGraph(saver, "cli");
@@ -5660,17 +5724,41 @@ test("R14C Choice and Puzzle native and independent Review corrections preserve 
     assert.notEqual(both.units[0].piSessionFile, both.units[1].piSessionFile);
     const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction");
+    await assertSubunitReviewAuthority(f.job, selected, "interactive-puzzle-disclosure", "interactive-choice-disclosure", both.units[1].assignmentKey);
     await crashAtSubmission("repair-round", 19, { interruptAfter: ["independent_assignment_review"] });
     const repairedPuzzleHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
     assert.notEqual(repairedPuzzleHead, both.units[1].commitSha);
     assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === repairedPuzzleHead)?.semanticReview, "required-pending");
+    const { preflightCompositionBoundary } = await import("../src/cross-domain-prerequisite-controller.js");
+    const preflight = () => preflightCompositionBoundary(f.job, selected.request,
+      "milestone.disclosure", selected.planVersion!);
+    const unreviewed = await preflight();
+    assert.deepEqual(unreviewed, { kind: "refuse", reason: "Deferred Milestone has no fresh independently approved Choice/Puzzle prerequisite." });
     const complete = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
     assert.equal(complete.recoveryLifecycle.phase, "idle", JSON.stringify({reason: complete.reason, calls: observed.length}));
+    assert.equal(complete.recoveryLifecycle.discharged.at(-1)?.case.id, selected.recoveryLifecycle.active?.id);
     assert.equal(complete.result?.status, "interactive-slice-committed");
     assert.equal(observed.length, 20);
     assert.equal(complete.result?.headSha, git(f.job.worktreeRoot, "rev-parse", "HEAD"));
     for (let i = 0; i < 2; i++) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, paths[i]!), "utf8").includes(quote[i]!));
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+    assert.notEqual(await assertSubunitReviewSessions(f.job, both.units[1], repairedPuzzleHead), choiceReviewer);
+    // This fixture Event has no production field grant. The repaired Choice
+    // and Puzzle pass the Review gate, but must NOT waive that separate owner.
+    assert.deepEqual(await preflight(), { kind: "refuse", reason: "Original Event has no signed selected Milestone field grant." });
+    const next = await withJobModelRuntime(runtime, () => graph.invoke(null,
+      { ...cfg, interruptBefore: ["specialist_dispatch", "assess_recovery"] }));
+    assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", JSON.stringify({ reason: next.reason, active: next.active, recovery: next.recoveryLifecycle }));
+    assert.equal(next.recoveryLifecycle.active?.origin.operation, "dependency-amendment", JSON.stringify({ reason: next.reason, recovery: next.recoveryLifecycle, active: next.active }));
+    assert.equal(next.recoveryLifecycle.active?.origin.assignmentId, "composition:milestone.disclosure");
+    assert.equal(next.recoveryLifecycle.active?.observation, "returned-failure");
+    assert.equal(next.escalation?.kind, "dependency-replan");
+    assert.equal(next.inventory?.items.find(i => i.id === "composition:milestone.disclosure")?.status !== "verified", true);
+    assert.equal(next.request.turnPlanDigest, turnDigest);
+    assert.equal(observed.length, 20);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, observed.length,
+      "Restart, refused authority and parent intake cannot charge another model call.");
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), repairedPuzzleHead);
   } finally {
     saver.db.close();
     restoreSandbox();

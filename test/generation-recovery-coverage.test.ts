@@ -206,7 +206,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "dispatch", "2d0ae0bb50efb78022eb14cd6b9b746b6b76409daeb3f9b6578a9d8791aa6710"],
     [file, "runFoundationAssignmentChild", "14f0bcfef6a2e02ff4ffbf35b9dae088bde0573cee138c7151421bc4ebc835d0"],
     [file, "runArchitectureAssignmentChild", "de81c4f2d41329138a92e9d69ec13045b5add3e08edf017078a675143cdd4957"],
-    [file, "runCharacterWorldAssignmentChild", "ee44829482e1d467ff9d7adb76f4b0c191ad79be096d966e8aa8f1008c567ab9"],
+    [file, "runCharacterWorldAssignmentChild", "63e941b5033a0c99fc1186ab145c3559b840b21a96f0563b6bca3b1b8f25d802"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
     [file, "runNarrativeAssignmentChild", "6f2a435a8f738baa4154e67b72ef71fbab0a43a2911974601c33493c254df8cc"],
     [file, "runReviewPrerequisiteChild", "62cc631e406b5b80b84955896da317846bfe0443a7904649412fc9b10804ae33"],
@@ -220,7 +220,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "subunitWriterResult", "f37d39dce1f50b1cb032b235712bd6e37ef55f1de8b7b3dc36b0b1ea0ab05e56"],
     [file, "subunitReviewTransitions", "34552a8f637d15a358c73c4b627cadea6460aa1a927d5ecb58c2c3514526b2c4"],
     [file, "subunitReviewStop", "4416cbfcd99527aa44c9bd2d11f664bc7a446c5505830d51ffdaadaaffcb5fa3"],
-    [file, "runInteractiveAssignmentChildren", "84b1f49ab9165913475b5df83b01db57cd0cc9565fc08038b100c14abf109b22"],
+    [file, "runInteractiveAssignmentChildren", "57ad4e10462ee0c13a3e8ade3d0526a778355c62f98850306fe90c38d969c785"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
     const body = helpers(source).get(name);
@@ -252,6 +252,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["assignment-metadata-recovery.ts", "executeAssignmentRound", "5bf30230c0b323a25aa4e78454a8d135bbc7c9214c3e7b4ede556701f0a6f870"],
     ["assignment-metadata-recovery.ts", "runAssignmentReceipts", "0097e241b3d58e96d4371105e406ac09465197617ac8b06c538b95c7087b812e"],
     ["assignment-metadata-recovery.ts", "recoverSubmittedAssignment", "bee3d42257382337c2f3da9ecc6ced3d036c029806cbf37b93c53f48a38774e7"],
+    ["cross-domain-prerequisite-controller.ts", "preflightCompositionBoundary", "1485e8f736a11e3b77cc1d17a460880d41ae4f24431c3a984e3ca5ddaa4617ec"],
     ["character-world.ts", "runCharacterWorldJob", "bb7888f1a8f51af39b8df3c8af6c4b63bc77ba0a866c4ba8fc987771c4255f8a"],
     ["character-world.ts", "invocationSource", "203ae344e2447dc4efef389cb44649b679f023b641f7fe861ee1ec98908ac04e"],
     ["interactive-work.ts", "runInteractiveWorkItem", "450d505d4c3c7e96929108fcb4549a79183da83716952e0602e98eee8ff05353"],

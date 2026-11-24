@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { execFileSync } from "./git-read-cache.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
 import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
 import { inspectCompositionPrerequisite,
   type CloseoutProposal, type CompositionPrerequisiteInput } from "./cross-domain-prerequisite.js";
@@ -90,9 +91,6 @@ export async function preflightCompositionBoundary(
       point.assurance?.turnDigest !== turn.digest ||
       point.planVersion !== planVersion || !ancestor(job, event.commitSha, head))
     return refuse("Original Event has no independently reviewed, Turn-bound native checkpoint.");
-  const grant = await readEventMilestoneRepairGrant(job, point, eventOwner,
-    "deferred-choice-closeout");
-  if (!grant) return refuse("Original Event has no signed selected Milestone field grant.");
   if (!Array.isArray(interactive.units) || interactive.units.length !== 2 ||
       !ancestor(job, interactive.units[0]?.commitSha ?? "", head) ||
       interactive.units[0]?.commitSha === event.commitSha ||
@@ -101,17 +99,30 @@ export async function preflightCompositionBoundary(
     return refuse("Choice/Puzzle source is stale, unreviewed or not on the verified Story branch.");
   // This exact Choice/Puzzle source must have independently passed before
   // the controller may propose a narrower Event-owned correction.
-  const checkpoints = await inspectRecoveryCheckpoints(job);
+  const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible &&
+    ancestor(job, p.commitSha, head));
+  const coverage = await resolvedCheckpointReviews(job, checkpoints);
+  // A historical negative stays negative. Only an authenticated passing
+  // successor of that exact checkpoint can discharge its mandatory Review.
+  const reviewed = (p: (typeof checkpoints)[number]) => p.validation.status === "passed" &&
+    p.planVersion === planVersion && p.assurance?.turnDigest === turn.digest &&
+    (p.semanticReview === "passed" ||
+      p.semanticReview === "failed" && coverage.get(p.commitSha) === "not-required");
   const choicePoint = checkpoints.find(p => p.eligible && p.commitSha === interactive.units[0].commitSha);
   const puzzle = interactive.units[1]?.phase === "committed"
     ? checkpoints.find(p => p.eligible && p.commitSha === interactive.units[1].commitSha) : null;
   if (!choicePoint || choicePoint.workItem !== "interactive-choice-" + milestoneId.slice(10) ||
-      choicePoint.semanticReview !== "passed" ||
-      choicePoint.assurance?.turnDigest !== turn.digest ||
+      !reviewed(choicePoint) ||
       (interactive.units[1]?.phase === "committed" &&
-        (!puzzle || puzzle.semanticReview !== "passed" ||
-          puzzle.assurance?.turnDigest !== turn.digest)))
+        (!puzzle || puzzle.workItem !== "interactive-puzzle-" + milestoneId.slice(10) ||
+          !reviewed(puzzle))))
     return refuse("Deferred Milestone has no fresh independently approved Choice/Puzzle prerequisite.");
+  // A reviewed Interactive repair is not a grant to edit the Event owner's
+  // Milestone. Refuse even if all downstream native coverage is now valid.
+  if (event.worker !== "pi") return refuse("Original Event has no signed selected Milestone field grant.");
+  const grant = await readEventMilestoneRepairGrant(job, point, eventOwner,
+    "deferred-choice-closeout");
+  if (!grant) return refuse("Original Event has no signed selected Milestone field grant.");
   const checked = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,
     { ...job, baseSha: head });
   const report = checked.report as unknown as CompositionPrerequisiteInput["report"] & {

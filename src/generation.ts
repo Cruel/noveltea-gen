@@ -1462,7 +1462,7 @@ async function runCharacterWorldAssignmentChild(
   const receiptPath = join(job.stateDir, "character-world.json");
   const saved = existsSync(receiptPath) ? JSON.parse(await readFile(receiptPath, "utf8")) as {
     jobId: string; planVersion: number; startHead?: string; architectureHead: string;
-    units: { id: string; domain: "world" | "character"; phase: string; beforeHead?: string; commitSha?: string }[];
+    units: { id: string; domain: "world" | "character"; phase: string; beforeHead?: string; commitSha?: string; assignmentKey?: string }[];
   } : null;
   if (saved && (saved.jobId !== job.jobId || saved.planVersion !== s.planVersion ||
       saved.units?.length !== 2 || saved.units[0]?.id !== "world-foundations" ||
@@ -1532,7 +1532,10 @@ async function runCharacterWorldAssignmentChild(
       job, s, correction, s.recoveryLifecycle.decision);
   };
   const preflight = async (): Promise<AssignmentOutcome | null> => {
-      await checkPlan(job, s.request, s.planVersion);
+      const currentPlan = await checkPlan(job, s.request, s.planVersion);
+      if (currentPlan?.plan?.version !== s.planVersion)
+        throw new ProtocolIntegrityBlockedError("Subunit round cannot use a stale plan; reconcile at parent intake.");
+      if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
       const control = await readJobControl(job);
       if (control === "cancelled") {
         const error = Error("Original Turn was cancelled before World/Character dispatch.");
@@ -1540,7 +1543,8 @@ async function runCharacterWorldAssignmentChild(
       }
       if (control === "paused") return outcome("paused", "job-control", { controlRef: correction ? "author-pause:job-control" : "job-control" });
       if (correction) {
-        if (!await authenticateCorrection()) throw Error("Original World/Character correction lacks its sealed Review.");
+        if (unit?.assignmentKey !== key || !await authenticateCorrection())
+          throw new ProtocolIntegrityBlockedError("Original World/Character correction lacks its original assignment key or sealed Review.");
       } else {
         if (domain === "character") await assertNativeReviewDependencies(job, workItem);
         const current = existsSync(receiptPath) ? JSON.parse(await readFile(receiptPath, "utf8")) as typeof saved : null;
@@ -2211,12 +2215,15 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       await (await import("./generation-operation-strategy.js")).authenticateOperationReviewProof(
         job, s, correction, s.recoveryLifecycle.decision);
     const preflight = async (): Promise<AssignmentOutcome | null> => {
-        await checkPlan(job, s.request, s.planVersion);
+        const currentPlan = await checkPlan(job, s.request, s.planVersion);
+        if (currentPlan?.plan?.version !== s.planVersion)
+          throw new ProtocolIntegrityBlockedError("Subunit round cannot use a stale plan; reconcile at parent intake.");
+        if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
         const control = await readJobControl(job);
         if (control === "cancelled") { const e = Error("Original Interactive assignment cancelled"); e.name = "StoryCancelledError"; throw e; }
         if (control !== "running") return outcome("paused", { controlRef: correction ? "author-pause:job-control" : "job-control" });
-        if (correction && !await authenticateCorrection())
-          throw Error("Interactive child correction lacks its admitted Review case");
+        if (correction && (original?.unit.assignmentKey !== key || !await authenticateCorrection()))
+          throw new ProtocolIntegrityBlockedError("Interactive child correction lacks its original assignment key or admitted Review case");
         const saved = await inspectInteractiveUnit(job, milestone, domain);
         if (saved?.unit.beforeHead && saved.unit.beforeHead !== sourceHead)
           throw Error("Interactive child source changed");

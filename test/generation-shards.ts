@@ -7,6 +7,7 @@ const slowCases: Record<string, number> = {
   "R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (review-converges)": 147,
   "R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (review-stalled)": 111,
   "R05 World and Character metadata and independent Review corrections resume the original Thread in order": 51,
+  "R14C Choice and Puzzle native and independent Review corrections preserve their distinct original assignments": 90,
   "actual generation graph resumes Event-only Composition after historical knowledge correction (#229/#231 fixture)": 42,
   "C05 contradictory independently passed final report admits one read-only Pi diagnosis, never a Story pass": 36,
   "actual generation graph resumes Event-only Composition after historical specialist correction (#229/#231 fixture)": 33,
