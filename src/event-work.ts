@@ -8,7 +8,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
-import { assignmentDraftEffect, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { assignmentDraftEffect, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { authorEventCluster, eventInvocationDirectory, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
   scopedDecisionSetupConflict, eventDecisionSetupCorrection,
@@ -46,6 +46,7 @@ interface EventReceipt {
   provider: string; model: string; snapshot?: SkillSnapshot;
   sessionFile?: string; sessionId?: string; authorChoiceId?: string;
   invocationSource?: string; invocationChoice?: string; invocationProof?: AssignmentInvocationProof;
+  assignmentKey?: string;
   /** Older Event items predate the local Blueprint gate; new items require it. */
   blueprintRequired?: boolean; blueprintTask?: string; blueprintPin?: MilestoneBlueprintPin;
   assignment?: EventAssignment;
@@ -95,6 +96,7 @@ export interface EventOptions {
   provider?: string; model?: string; task?: string;
   /** Internal controller-only reassignment, never a model-provided grant. */
   reroute?: { reportDigest: string; sourceSha: string; task: string };
+  round?: { assignmentKey: string; command: AssignmentRoundCommand };
 }
 const idPattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -116,7 +118,7 @@ function eventInvocationSource(job: JobStartResult, receipt: EventReceipt) {
     workItem: receipt.workItemId, head: receipt.expectedHead, planVersion: receipt.planVersion,
     plan: receipt.planDigest, assignment: receipt.assignment, snapshot: receipt.snapshot?.id,
     provider: receipt.provider, model: receipt.model, reroutedFrom: receipt.reroutedFrom,
-    choice: receipt.invocationChoice ?? null }));
+    choice: receipt.invocationChoice ?? null, assignmentKey: receipt.assignmentKey }));
 }
 function eventInvocationOptions(job: JobStartResult, receipt: EventReceipt) {
   if (!receipt.invocationSource || receipt.invocationSource !== eventInvocationSource(job, receipt) ||
@@ -659,6 +661,10 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
 
 export async function runEventWorkItem(input: EventOptions) {
   if (!idPattern.test(input.milestone)) throw new Error("--milestone must be a typed milestone.<slug> ID.");
+  if (input.action === "run" && !input.fixture && !input.round)
+    throw Error("Event Pi writing requires its checkpointed Generation assignment child.");
+  if (input.round && !/^[a-f0-9]{64}$/.test(input.round.assignmentKey))
+    throw Error("Event round lacks its admitted assignment identity.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const root = job.stateDir;
   const receiptFile = join(root, "event-items", input.milestone.slice(10) + ".json");
@@ -862,6 +868,14 @@ export async function runEventWorkItem(input: EventOptions) {
         await persist(receiptFile, receipt);
       } else return output(job, receipt);
     }
+    if (input.round && receipt.worker === "pi" && receipt.assignmentKey && receipt.assignmentKey !== input.round.assignmentKey)
+      throw Error("Event round belongs to another logical assignment.");
+    if (input.round && receipt.worker === "pi" && !receipt.assignmentKey) {
+      if (receipt.phase !== "ready" || input.round.command.phase !== "invoke")
+        throw Error("Event receipt lacks its original child assignment admission.");
+      receipt.assignmentKey = input.round.assignmentKey;
+      await persist(receiptFile, receipt);
+    }
     if (receipt.phase === "committed") {
       if (!receipt.commitSha) throw new Error("Committed Event work item lacks a commit.");
       verifyCommit(job, receipt, receipt.commitSha);
@@ -886,7 +900,8 @@ export async function runEventWorkItem(input: EventOptions) {
       receipt.blueprintTask = task;
       await persist(receiptFile, receipt);
     }
-    const Channels = Annotation.Root({ receipt: Annotation<EventReceipt>() });
+    const Channels = Annotation.Root({ receipt: Annotation<EventReceipt>(),
+      round: Annotation<AssignmentRoundResult | null>({ reducer: (_, next) => next, default: () => null }) });
     const graph = new StateGraph(Channels)
       .addNode("event_specialist", async ({ receipt }) => {
         if (receipt.phase === "authored") return { receipt };
@@ -1060,7 +1075,7 @@ export async function runEventWorkItem(input: EventOptions) {
               }
             }
           } else {
-            evidence = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
+            const authored = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
               async (file, id) => { receipt.sessionFile = file; receipt.sessionId = id; await persist(receiptFile, receipt); }, verifyDraft,
               { sourceDigest: receipt.invocationSource!, sessionFile: receipt.sessionFile, sessionId: receipt.sessionId,
                 authorize: async () => {
@@ -1069,7 +1084,9 @@ export async function runEventWorkItem(input: EventOptions) {
                     throw Error("Event assignment source changed before original invocation");
                 },
                 effect: () => assignmentDraftEffect(job, receipt.expectedHead) },
-              choice ?? undefined, receipt.reroutedFrom);
+              choice ?? undefined, receipt.reroutedFrom, input.round!.command);
+            if ("round" in authored) return { receipt, round: authored.round };
+            evidence = authored;
             if (!evidence.invocationProof) throw Error("Event writer did not settle its original invocation");
             receipt.invocationProof = evidence.invocationProof;
             await verifySettledAssignment({ ...eventInvocationOptions(job, receipt),
@@ -1217,9 +1234,11 @@ export async function runEventWorkItem(input: EventOptions) {
         }
       })
       .addEdge(START, "event_specialist")
-      .addEdge("event_specialist", "validate_and_commit_event")
+      .addConditionalEdges("event_specialist", state => state.round ? END : "validate_and_commit_event",
+        [END, "validate_and_commit_event"])
       .addEdge("validate_and_commit_event", END).compile();
     const result = await graph.invoke({ receipt });
+    if (result.round) return { ...output(job, result.receipt), status: "writer-round", round: result.round };
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "event-work");

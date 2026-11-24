@@ -36,7 +36,8 @@ export function usesSharedAssignmentReview(workItem: string | undefined | null):
  * admitted here; the older policy registry alone is not proof of migration. */
 export function usesCheckpointedReviewRounds(workItem: string): boolean {
   return ["foundation", "world-foundations", "character-foundations"].includes(workItem) ||
-    /^interactive-(?:choice|puzzle)-[a-z][a-z0-9-]*$/.test(workItem);
+    /^(?:interactive-(?:choice|puzzle)|event)-[a-z][a-z0-9-]*$/.test(workItem) ||
+    /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem);
 }
 /** Studio Discovery precedes any Generation job or Git write grant. */
 export type DiscoveryAssignmentIdentity = Readonly<{

@@ -571,10 +571,16 @@ export async function finalizeReviewEventDependency(job: JobStartResult, failedS
   const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
   let repairedSource = failedSourceSha;
   let repairedCommit: string | undefined;
-  // The existing bounded repair controller permits a second attempt only
-  // after an independently failed successor. Both negative verdicts survive.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Traverse only the existing independently rejected successor chain; the
+  // shared recovery policy, not an arbitrary local attempt ceiling, governs progress.
+  const seen = new Set<string>();
+  for (;;) {
+    if (seen.has(repairedSource)) throw Error("Cyclic Event repair predecessor chain.");
+    seen.add(repairedSource);
     const repair = await inspectRejectedRepair(job, repairedSource);
+    if (repair.rootFailureSha !== failedSourceSha || repair.origin.workItem !==
+        plan.reviewRequests?.find(r => r.sourceSha === failedSourceSha)?.originalWorkItem)
+      throw Error("Event prerequisite repair belongs to another original assignment.");
     if (repair.phase === "passed") {
       repairedCommit = repair.repairedCommitSha;
       break;

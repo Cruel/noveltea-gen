@@ -43,7 +43,7 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
 import { runFoundationJob, inspectPendingFoundationInvocation, inspectFoundationFailure } from "./foundation.js";
-import { AssignmentNonconvergenceError, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { AssignmentNonconvergenceError, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob, inspectCharacterWorldFailure, inspectPendingCharacterWorldInvocation, inspectRecoverableCharacterWorldCommit } from "./character-world.js";
 import { runEventWorkItem, inspectEventFailure, inspectPendingEventInvocation } from "./event-work.js";
@@ -57,7 +57,7 @@ import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-on
 import { runCompositionWorkItem, inspectCompositionFailure, inspectPendingCompositionInvocation } from "./composition-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { runNarrativeReview } from "./narrative-review.js";
-import { inspectFocusedPrerequisite, inspectPendingFocusedCommit, runFocusedWorkItem } from "./focused-work.js";
+import { inspectFocusedPrerequisite, inspectPendingFocusedCommit, inspectPendingFocusedInvocation, inspectFocusedFailure, runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
 import { canonicalPreviousAdaptiveInventory, reconcileAdaptiveWork } from "./adaptive-work.js";
@@ -742,7 +742,8 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
         if (pending) return steeringForAssignment(job, turnDigest, s.active.id, pending.unit.beforeHead!);
       }
       if (s.active?.stage === "focus" && s.active.milestone) {
-        const pending = await inspectPendingFocusedCommit(job, s.active.milestone);
+        const pending = await inspectPendingFocusedCommit(job, s.active.milestone) ??
+          await inspectPendingFocusedInvocation(job, s.active.milestone);
         if (pending) return steeringForAssignment(job, turnDigest, s.active.id, pending.expectedHead);
       }
       if (s.active?.milestone && ["event", "composition"].includes(s.active.stage)) {
@@ -767,14 +768,14 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
     case "foundation": throw Error("Foundation dispatch requires the checkpointed assignment child.");
     case "architecture": return runArchitectureJob({ ...input, action: "run" });
     case "foundations": return runCharacterWorldJob({ ...input, steering, action: "run", unit: foundationUnit, round });
-    case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
+    case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run", round });
     case "interactive": case "choice": case "puzzle": return runInteractiveWorkItem({ ...input,
       generationObjective: input.task, task: guidedTask, milestone, action: "run",
       unit: interactiveUnit ?? (s.active.stage === "interactive" ? undefined : s.active.stage),
       deferBoundary: s.active.stage === "interactive" && interactiveUnit === "choice",
       interactionInventory: s.inventory?.items, round });
     case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
-    case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering });
+    case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering, round });
     case "review": return runNarrativeReview({ ...input, action: "run" });
     default: throw new Error("Invalid generation stage.");
   }
@@ -1740,7 +1741,9 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     throw Error("Narrative correction lacks its original native and Review receipts.");
   const focusSource = active.stage === "focus" && s.request.turnPlanDigest
     ? await inspectFocusedPrerequisite(job, active.milestone, s.request.turnPlanDigest, s.request.fixture, s.planVersion) : null;
-  const sourceHead = focusSource?.report.sourceSha ?? (root ? root.parentSha : s.inventory.headSha);
+  const pendingEvent = active.stage === "event" && !reroute && !correction
+    ? await inspectPendingEventInvocation(job, active.milestone) : null;
+  const sourceHead = focusSource?.report.sourceSha ?? (root ? root.parentSha : pendingEvent?.expectedHead ?? s.inventory.headSha);
   const workItem = active.stage === "focus" ? active.id : active.stage + "-" + active.milestone.slice(10);
   const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
   const identity: AssignmentIdentity = {
@@ -1767,39 +1770,89 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   const disposition = (status: "unresolved" | "paused", evidence: string): AssignmentOutcome =>
     status === "unresolved" ? { status, assignmentKey: key, evidenceRef: ref, dispositionRef: evidence } :
       { status, assignmentKey: key, evidenceRef: ref, controlRef: evidence };
+  const preflight = async () => {
+    await checkPlan(job, s.request, s.planVersion);
+    const control = await readJobControl(job);
+    if (control === "cancelled") {
+      const error = Error("Original narrative assignment cancelled");
+      error.name = "StoryCancelledError"; throw error;
+    }
+    if (control !== "running") return disposition("paused", correction ? "author-pause:job-control" : "job-control");
+    if (correction && !await authenticateCorrection())
+      throw Error("Narrative correction lost its authenticated original Review case.");
+    if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
+    return null;
+  };
+  const assertIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
+    if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
+      throw new ProtocolIntegrityBlockedError("Narrative checkpoint belongs to another admitted logical assignment.");
+  };
+  const runRound = async (command: AssignmentRoundCommand): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
+    const stopped = await preflight();
+    if (stopped) return stopped;
+    try {
+      const round = active.stage === "event" ? { assignmentKey: key, command } : undefined;
+      result = reroute ? await runEventWorkItem({ ...s.request, action: "run", milestone,
+        task: reroute.task, reroute, round }) : await dispatch(s, undefined, round);
+      return subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, ref);
+    } catch (error) {
+      if (error instanceof AssignmentAuthorPauseError) return disposition("paused", "job-control");
+      if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
+      const terminal = await inspectTerminal();
+      if (!terminal) throw error;
+      patch = await operationFailure(s, job, "specialist-result", error,
+        { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
+          assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } }, "returned-failure");
+      return disposition("unresolved", terminal.proof.receiptDigest);
+    }
+  };
+  const invokeRound = async (command: AssignmentRoundCommand) => {
+    const invoked = await runRound(command);
+    if ("correctionRef" in invoked) throw new ProtocolIntegrityBlockedError("Event invocation cannot admit its own correction.");
+    return invoked;
+  };
+  const checkpointedReview = !!correction && active.stage !== "composition";
+  const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight,
+    (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome);
   const child = createAssignmentLifecycleGraph({
     authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
-    preflight: async () => {
-      await checkPlan(job, s.request, s.planVersion);
-      const control = await readJobControl(job);
-      if (control === "cancelled") {
-        const error = Error("Original narrative assignment cancelled");
-        error.name = "StoryCancelledError"; throw error;
-      }
-      if (control !== "running") return disposition("paused", "job-control");
-      if (correction && !await authenticateCorrection())
-        throw Error("Narrative correction lost its authenticated original Review case.");
-      // The native adapters reconcile commit-before-receipt and interrupted
-      // writes. The initial child cannot authorize a second writer.
-      return null;
+    preflight: async state => {
+      assertIdentity(state.identity, state.continuationRef);
+      return preflight();
     },
-    invoke: async () => {
-      try {
-        result = reroute ? await runEventWorkItem({ ...s.request, action: "run", milestone,
-          task: reroute.task, reroute }) : await dispatch(s);
-        return { receiptRef: ref, status: result.status, headSha: result.headSha };
-      } catch (error) {
-        if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
-        const terminal = await inspectTerminal();
-        if (!terminal) throw error;
-        patch = await operationFailure(s, job, "specialist-result", error,
-          { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
-            assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } }, "returned-failure");
-        return disposition("unresolved", terminal.proof.receiptDigest);
-      }
+    invoke: async state => {
+      assertIdentity(state.identity, state.continuationRef);
+      return invokeRound({ phase: "invoke" });
+    },
+    correct: async state => {
+      assertIdentity(state.identity, state.continuationRef);
+      if (checkpointedReview) return reviewRounds.correct(state.submission!, state.correction!);
+      if (active.stage !== "event" || correction)
+        throw new ProtocolIntegrityBlockedError("Writer correction has no original Event assignment.");
+      return invokeRound({ phase: "correct", proof: subunitRoundProof(state.submission!),
+        grantDigest: state.correction!.correctionRef });
     },
     verify: async state => {
-      const submission = state.submission!;
+      assertIdentity(state.identity, state.continuationRef);
+      const stopped = await preflight();
+      if (stopped) return stopped;
+      let submission = state.submission!;
+      if (checkpointedReview) return reviewRounds.verify(submission);
+      if (submission.status === "writer-round") {
+        if (active.stage !== "event" || correction)
+          throw new ProtocolIntegrityBlockedError("Foreign Event round submission.");
+        const verified = await runRound({ phase: "verify", proof: subunitRoundProof(submission) });
+        if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
+        if (verified.status === "writer-round")
+          throw new ProtocolIntegrityBlockedError("Event verification did not settle the original round.");
+        submission = verified;
+        if (accepted[active.stage].includes(submission.status) && submission.headSha)
+          return { submission, reviewPending: true as const };
+      }
+      return { submission, outcome: await verifyCommitted(submission) };
+    },
+  });
+  const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
       if (submission.receiptRef !== ref) throw Error("Narrative submission belongs to another work item.");
       if (!correction && !accepted[active.stage].includes(submission.status)) {
         // Preserve the full original negative report for the existing parent
@@ -1830,23 +1883,29 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
         throw Error("Narrative child did not settle its mandatory independent Review.");
       return { status: "verified", assignmentKey: key, evidenceRef: ref,
         reviewRef: "review-checkpoints:" + native.commitSha, headSha: head };
-    },
-  });
+  };
   const finished = await child.invoke({ identity,
     submission: correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null },
-    assignmentChildConfig(config, identity, correction ? "correction" : "original"));
+    { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Narrative child returned without an authenticated disposition.");
+  if (checkpointedReview && correction) {
+    if (finished.outcome.status !== "verified")
+      return subunitReviewStop(s, job, identity, correction, finished.outcome);
+    if (await trustedHead(job) !== finished.outcome.headSha)
+      throw new ProtocolIntegrityBlockedError("Narrative Review successor changed.");
+    return { result: { ...s.result!, headSha: finished.outcome.headSha } };
+  }
   const submission = finished.submission;
-  const candidate = correction ? s.result : submission &&
-    { status: submission.status, headSha: submission.headSha };
+  const candidate = correction ? s.result : submission && submission.status !== "writer-round"
+    ? { status: submission.status, headSha: submission.headSha } : null;
   if (patch && (patch.status || patch.operationRecovery || patch.reviewAssessmentRequested ||
       patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest))
     return { ...patch, result: candidate ?? null };
   if (finished.outcome.status === "paused") return { status: "paused",
     reason: "Original narrative assignment suspended at a safe boundary.", result: candidate ?? null };
-  if (!submission && finished.outcome.status === "unresolved") {
+  if ((!submission || submission.status === "writer-round") && finished.outcome.status === "unresolved") {
     const terminal = await inspectTerminal();
     if (terminal && terminal.proof.receiptDigest === finished.outcome.dispositionRef)
       return operationFailure(s, job, "specialist-result", Error("Original narrative assignment " + terminal.proof.kind),
@@ -1889,11 +1948,12 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
   const planVersion = s.planVersion;
   const pin = s.focusedPrerequisite;
   const prior = await inspectFocusedPrerequisite(job, target, turnDigest, s.request.fixture, planVersion);
+  const pending = await inspectPendingFocusedCommit(job, target) ?? await inspectPendingFocusedInvocation(job, target);
   const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = active;
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
     graphThreadId, turnDigest, assignmentId: active.id, planVersion,
-    sourceHeadSha: prior?.report.sourceSha ?? s.inventory.headSha,
+    sourceHeadSha: prior?.report.sourceSha ?? pending?.expectedHead ?? s.inventory.headSha,
     scopeDigest: dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }),
   };
   const key = logicalAssignmentKey(identity);
@@ -1917,8 +1977,33 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
     return original.phase === "committed" && (await inspectRecoveryCheckpoints(job)).some(p =>
       p.eligible && p.workItem === active.id && p.parentSha === entry.commitSha && p.commitSha === head);
   };
-  const invoke = async () => {
-    const result = await dispatch(s);
+  const preflight = async () => {
+    await checkPlan(job, s.request, planVersion);
+    await assertSteeringReceipts(job, turnDigest);
+    const control = await readJobControl(job);
+    if (control === "cancelled") { const error = Error("Focused assignment cancelled."); error.name = "StoryCancelledError"; throw error; }
+    if (control === "paused") return { status: "paused", assignmentKey: key, evidenceRef: active.id,
+      controlRef: "job-control" } as AssignmentOutcome;
+    if (pin && !await authenticate()) throw Error("Focused continuation has no authenticated support.");
+    if (!pin && prior?.phase === "waiting-dependency") return suspensionOf(prior);
+    return null;
+  };
+  const runRound = async (command: AssignmentRoundCommand): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
+    const stopped = await preflight();
+    if (stopped) return stopped;
+    let result: Awaited<ReturnType<typeof dispatch>>;
+    try {
+      result = await dispatch(s, undefined, { assignmentKey: key, command });
+    } catch (error) {
+      if (error instanceof AssignmentAuthorPauseError) return { status: "paused", assignmentKey: key,
+        evidenceRef: active.id, controlRef: "job-control" };
+      if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
+      const failureHead = pin ? (await inspectPendingFocusedInvocation(job, target))?.expectedHead : identity.sourceHeadSha;
+      const terminal = failureHead && await inspectFocusedFailure(job, target, failureHead);
+      if (!terminal) throw error;
+      return { status: "unresolved", assignmentKey: key, evidenceRef: terminal.proof.receiptDigest,
+        dispositionRef: terminal.proof.kind };
+    }
     if (result.status === "dependency-required") {
       const original = await inspectFocusedPrerequisite(job, target, turnDigest, s.request.fixture, planVersion);
       if (!original || original.phase !== "waiting-dependency" ||
@@ -1926,23 +2011,37 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
         throw Error("Focused no-write result lost its sealed original report.");
       return suspensionOf(original);
     }
-    return { receiptRef: active.id, status: result.status, headSha: result.headSha };
+    return subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, active.id);
+  };
+  const invokeRound = async (command: AssignmentRoundCommand) => {
+    const result = await runRound(command);
+    if ("correctionRef" in result) throw new ProtocolIntegrityBlockedError("Focused writer cannot admit its own correction.");
+    return result;
   };
   let patch: Partial<State> | undefined;
   const child = createAssignmentLifecycleGraph({
-    preflight: async () => {
-      await checkPlan(job, s.request, planVersion);
-      if (pin && !await authenticate()) throw Error("Focused continuation has no authenticated support.");
-      if (!pin && prior?.phase === "waiting-dependency")
-        return suspensionOf(prior);
-      return null;
+    preflight: async state => {
+      if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== (pin?.supportRef ?? null))
+        throw new ProtocolIntegrityBlockedError("Focused checkpoint belongs to another assignment.");
+      return preflight();
     },
     authenticateContinuation: async state =>
       state.continuationRef === pin?.supportRef && await authenticate(),
-    invoke,
-    reenterWriter: invoke,
+    invoke: async () => invokeRound({ phase: "invoke" }),
+    reenterWriter: async () => invokeRound({ phase: "invoke" }),
+    correct: async state => invokeRound({ phase: "correct", proof: subunitRoundProof(state.submission!),
+      grantDigest: state.correction!.correctionRef }),
     verify: async state => {
-      const submission = state.submission!;
+      const stopped = await preflight();
+      if (stopped) return stopped;
+      let submission = state.submission!;
+      if (submission.status === "writer-round") {
+        const verified = await runRound({ phase: "verify", proof: subunitRoundProof(submission) });
+        if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
+        if (verified.status !== "focused-committed" || !verified.headSha)
+          throw new ProtocolIntegrityBlockedError("Focused round did not settle its original commit.");
+        return { submission: verified, reviewPending: true as const };
+      }
       const candidate = { ...s, result: { status: submission.status, headSha: submission.headSha } };
       patch = await reviewBoundary(candidate);
       const actual = patch.result === undefined ? candidate.result : patch.result;
@@ -1962,12 +2061,25 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
     },
   });
   const finished = await child.invoke({ identity, submission: null, submissionKey: null,
-    outcome: null, continuationRef: pin?.supportRef ?? null, suspension: pin?.suspension ?? null }, config);
+    outcome: null, continuationRef: pin?.supportRef ?? null, suspension: pin?.suspension ?? null }, { ...assignmentChildConfig(config, identity), durability: "sync" });
   if (finished.outcome?.status === "needs-prerequisite")
     return { result: { status: "dependency-required" },
       focusedPrerequisite: { identity, suspension: finished.outcome, supportRef: null } };
+  if (finished.outcome?.status === "paused") return { status: "paused",
+    reason: "Original Focused assignment suspended at a safe boundary." };
+  if (finished.outcome?.status === "unresolved" &&
+      ["protocol-exhausted", "nonconverging"].includes(finished.outcome.dispositionRef)) {
+    const sourceHeadSha = (await inspectPendingFocusedInvocation(job, target))?.expectedHead ?? identity.sourceHeadSha;
+    const terminal = await inspectFocusedFailure(job, target, sourceHeadSha);
+    if (!terminal || terminal.proof.receiptDigest !== finished.outcome.evidenceRef)
+      throw new ProtocolIntegrityBlockedError("Focused terminal lost its original invocation proof.");
+    return operationFailure(s, job, "specialist-result", "Original Focused correction did not settle.",
+      { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
+        assignmentFailure: { sourceHeadSha, proof: terminal.proof } }, "returned-failure");
+  }
   if (!finished.submission) throw Error("Focused child returned without its original submission.");
   const result = { status: finished.submission.status, headSha: finished.submission.headSha };
+  if (!patch && finished.outcome?.status === "unresolved") patch = await reviewBoundary({ ...s, result });
   // The parent reattests review and native completion; unresolved review keeps
   // its original submitted receipt rather than restarting the writer.
   return { ...patch, result: patch?.result === undefined ? result : patch.result,
@@ -2009,11 +2121,15 @@ async function reviewPrerequisiteIdentity(s: State, config: RunnableConfig,
   const owner = request.classification === "new-full-story-record" ? "nt-character-development" :
     request.classification === "other-owner" && owners.length === 1 ? owners[0]!.specialist : null;
   if (!owner) throw Error("Review prerequisite does not have a unique authorized owner.");
+  const migrated = /^(?:event-|focus:)/.test(request.originalWorkItem);
+  const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = s.active;
+  const focusSource = migrated && s.active.stage === "focus" && s.active.milestone
+    ? await inspectFocusedPrerequisite(job, s.active.milestone, request.turnDigest, false, request.basePlanVersion) : null;
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
-    graphThreadId, turnDigest: request.turnDigest, assignmentId: s.active.id,
-    planVersion: request.basePlanVersion, sourceHeadSha: point.parentSha,
-    scopeDigest: request.originalAssignmentDigest,
+    graphThreadId, turnDigest: request.turnDigest, assignmentId: migrated ? request.originalWorkItem : s.active.id,
+    planVersion: request.basePlanVersion, sourceHeadSha: focusSource?.report.sourceSha ?? point.parentSha,
+    scopeDigest: migrated ? dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }) : request.originalAssignmentDigest,
   };
   const suspension: AssignmentPrerequisiteSuspension = {
     status: "needs-prerequisite", assignmentKey: logicalAssignmentKey(identity),
@@ -2045,8 +2161,11 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
   const job = await openJob(s);
   const key = logicalAssignmentKey(initial.identity);
   const { inspectReviewSupport, continueReviewDependency } = await import("./dependency-work.js");
-  let paused: string | null = null;
-  let reassessment = false;
+  const eventSource = request.classification === "new-full-story-record" &&
+    request.originalWorkItem.startsWith("event-");
+  const correction = s.recoveryLifecycle.active!;
+  const outcome = (status: AssignmentOutcome["status"], evidenceRef: string, extra: Record<string, string>) =>
+    ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome;
   const authenticate = async () => {
     const verified = await reviewPrerequisiteIdentity(s, config, request);
     if (!isDeepStrictEqual({ ...initial, supportRef: null }, verified)) return false;
@@ -2054,43 +2173,36 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
     const support = await inspectReviewSupport(job, request);
     return support.ref === initial.supportRef && support.entry.amendment?.assignment.specialist === initial.suspension.owner;
   };
+  const preflight = async () => {
+    if (!await authenticate()) throw Error("Original Review prerequisite is not authenticated.");
+    await checkPlan(job, s.request, s.planVersion);
+    const control = await readJobControl(job);
+    if (control === "paused") return outcome("paused", "job-control", { controlRef: "author-pause:job-control" });
+    if (control === "cancelled") return outcome("unresolved", "job-control", { dispositionRef: "cancelled" });
+    return null;
+  };
+  const reviewRounds = subunitReviewTransitions(s, job, initial.identity, initial.submission.receiptRef,
+    correction, preflight, outcome);
   const child = createAssignmentLifecycleGraph({
-    preflight: async () => {
-      if (!await authenticate()) throw Error("Original Review prerequisite is not authenticated.");
-      return null;
+    preflight: async state => {
+      if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== initial.supportRef)
+        throw new ProtocolIntegrityBlockedError("Review prerequisite checkpoint changed.");
+      return preflight();
     },
     authenticateContinuation: async state =>
       state.continuationRef === initial.supportRef && await authenticate(),
     invoke: async () => { throw Error("Review prerequisite must not replay its original writer."); },
-    verify: async () => {
+    correct: async state => {
+      if (!eventSource || !initial.supportRef) throw Error("No original Event corrective grant.");
+      return reviewRounds.correct(state.submission!, state.correction!);
+    },
+    verify: async state => {
       if (!initial.supportRef) return initial.suspension;
       const support = await inspectReviewSupport(job, request);
       if (support.ref !== initial.supportRef) throw Error("Supporting assignment proof changed.");
-      const eventSource = request.classification === "new-full-story-record" &&
-        request.originalWorkItem.startsWith("event-");
-      if (eventSource && support.entry.phase !== "verified") {
-        const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
-        const repair = await advanceRejectedRepair(job, request.sourceSha, {
-          skillsSource: s.request.skillsSource, provider: s.request.provider, model: s.request.model,
-          sharedAssessment: true,
-        });
-        if (repair.next === "assess-review") {
-          reassessment = true;
-          return { status: "unresolved", assignmentKey: key, evidenceRef: request.digest,
-            dispositionRef: "review-reassessment:" + request.sourceSha };
-        }
-        if (repair.next === "author-choice") {
-          paused = "Original Event correction awaits an authenticated Author Choice.";
-          return { status: "paused", assignmentKey: key, evidenceRef: request.digest,
-            controlRef: "review-repairs:" + request.sourceSha };
-        }
-        if (repair.next !== "completed") throw Error("Original Event correction has not independently passed.");
-        const { finalizeReviewEventDependency } = await import("./dependency-state.js");
-        await withStoryJobLock(job, "event-dependency-review-completion", () =>
-          finalizeReviewEventDependency(job, request.sourceSha));
-      } else if (!eventSource) {
-        await continueReviewDependency(job, request, initial.supportRef);
-      }
+      if (eventSource && support.entry.phase !== "verified")
+        return reviewRounds.verify(state.submission!);
+      if (!eventSource) await continueReviewDependency(job, request, initial.supportRef);
       if (request.classification === "other-owner") {
         const { revalidateOtherOwnerPrerequisite } = await import("./review-other-owner-revalidation.js");
         const { policy } = await (await import("./job-pi-policy.js")).inspectPiPolicy(job);
@@ -2113,17 +2225,21 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
   });
   const finished = await child.invoke({ identity: initial.identity, submission: initial.submission,
     submissionKey: key, outcome: null, continuationRef: initial.supportRef,
-    suspension: initial.supportRef ? initial.suspension : null }, config);
+    suspension: initial.supportRef ? initial.suspension : null },
+    { ...assignmentChildConfig(config, initial.identity, "correction"), durability: "sync" });
   if (finished.outcome?.status === "needs-prerequisite")
     return { reviewPrerequisite: initial };
-  if (finished.outcome?.status === "unresolved" &&
-      (reassessment || finished.outcome.dispositionRef === "review-reassessment:" + request.sourceSha))
-    return { reviewAssessmentRequested: true, reason: "Assessing the sealed Event Review continuation." };
-  if (finished.outcome?.status === "paused")
-    return { status: "paused", reason: paused ?? "Original Review awaits its saved Author Choice." };
+  if (finished.outcome && finished.outcome.status !== "verified")
+    return subunitReviewStop(s, job, initial.identity, correction, finished.outcome);
   if (finished.outcome?.status !== "verified" || !initial.supportRef ||
       finished.outcome.assignmentKey !== key)
     throw Error("Original Review prerequisite child did not return authenticated coverage.");
+  if (eventSource) {
+    const { finalizeReviewEventDependency } = await import("./dependency-state.js");
+    if (!await withStoryJobLock(job, "event-dependency-review-completion", () =>
+      finalizeReviewEventDependency(job, request.sourceSha)))
+      throw new ProtocolIntegrityBlockedError("Original Event repair did not settle the supporting dependency.");
+  }
   // Re-attest even when the child END result was restored from SQLite.
   const head = await trustedHead(job);
   const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
@@ -2722,7 +2838,8 @@ async function pendingNarrativeForResume(s: State, job: JobStartResult) {
     ? inspectPendingEventInvocation(job, s.active.milestone, s.inventory.headSha)
     : s.active.stage === "composition"
       ? inspectPendingCompositionInvocation(job, s.active.milestone, s.inventory.headSha)
-      : s.active.stage === "focus" ? inspectPendingFocusedCommit(job, s.active.milestone) : null;
+      : s.active.stage === "focus" ? await inspectPendingFocusedCommit(job, s.active.milestone) ??
+        await inspectPendingFocusedInvocation(job, s.active.milestone) : null;
 }
 
 async function inspectOriginalSpecialistCommitForResume(

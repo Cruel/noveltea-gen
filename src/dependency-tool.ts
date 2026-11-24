@@ -9,7 +9,7 @@ import { sourceDigest } from "./dependency-state.js";
  * the caller. Identity and source hashes are stamped by the trusted host. */
 export function createDependencyTool(job: JobStartResult, binding: {
   head: string; turnDigest: string; assignmentId: string; obligations: string[];
-}, receive: (report: DependencyReport) => void): ToolDefinition {
+}, receive: (report: DependencyReport) => void | Promise<void>): ToolDefinition {
   return {
     name: "report_dependency", label: "Report a missing narrative prerequisite",
     description: "Report a causally necessary cross-domain prerequisite, then stop WITHOUT edits. " +
@@ -54,7 +54,7 @@ export function createDependencyTool(job: JobStartResult, binding: {
         if (!content.includes(source.quote)) throw Error("Dependency quote does not match Story bytes.");
         source.sha256 = sourceDigest(content);
       }
-      receive(value);
+      await receive(value);
       return { content: [{ type: "text", text: "Dependency evidence recorded. Stop now without Story edits; the controller will decide authority at a clean boundary." }], details: undefined };
     },
   };

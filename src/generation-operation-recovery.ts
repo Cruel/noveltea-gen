@@ -133,6 +133,9 @@ export async function authenticateAssignmentFailure(job: JobStartResult,
       const event = /^event:(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
       if (event && !evidence.interactiveDomain)
         return (await import("./event-work.js")).inspectEventFailure(job, event[1]!, sourceHead).catch(() => null);
+      const focus = /^focus:([a-z][a-z-]*\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
+      if (focus && !evidence.interactiveDomain)
+        return (await import("./focused-work.js")).inspectFocusedFailure(job, focus[1]!, sourceHead).catch(() => null);
       const composition = /^composition:(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
       if (composition && !evidence.interactiveDomain)
         return (await import("./composition-work.js")).inspectCompositionFailure(job, composition[1]!, sourceHead).catch(() => null);

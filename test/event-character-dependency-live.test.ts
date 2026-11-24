@@ -26,7 +26,7 @@ import {
 } from "../web/src/sandbox-controller.js";
 import { SandboxClient } from "../src/sandbox-client.js";
 import { startStoryJob } from "../src/job.js";
-import { runEventWorkItem } from "../src/event-work.js";
+import { runEventTestAssignment as runEventWorkItem } from "./event-round-fixture.js";
 import { runCharacterWorldJob } from "../src/character-world.js";
 import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";

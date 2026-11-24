@@ -26,7 +26,9 @@ import {
   type ControllerConfig,
 } from "../web/src/sandbox-controller.js";
 import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
-import { runEventWorkItem } from "../src/event-work.js";
+import { runEventWorkItem, type EventOptions } from "../src/event-work.js";
+import type { AssignmentRoundResult } from "../src/assignment-metadata-recovery.js";
+import { eventTestAssignmentKey } from "./event-round-fixture.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { removeTestTree } from "./helpers.js";
 
@@ -401,17 +403,25 @@ Ada and Neri disagree about whether a concealed ledger should be revealed.
       assert.ok(runtime.getModel(model.provider, model.id));
       assert.ok((await runtime.getAvailable(model.provider)).some((value) => value.id === model.id));
 
-      const outcome = await withJobModelRuntime(runtime, () =>
-        runEventWorkItem({
-          story,
-          job: realId,
-          action: "run",
-          milestone: "milestone.disclosure",
-          skillsSource: source,
-          provider: model.provider,
-          model: model.id,
-        }),
-      );
+      const input: EventOptions = {
+        story, job: realId, action: "run", milestone: "milestone.disclosure",
+        skillsSource: source, provider: model.provider, model: model.id,
+      };
+      const assignmentKey = eventTestAssignmentKey(input);
+      await assert.rejects(runEventWorkItem(input), /checkpointed Generation assignment child/);
+      const first = await withJobModelRuntime(runtime, () =>
+        runEventWorkItem({ ...input, round: { assignmentKey, command: { phase: "invoke" } } }));
+      assert.equal(first.status, "writer-round");
+      const settled = (first as { round: AssignmentRoundResult }).round;
+      assert.equal(settled.status, "settled");
+      assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), firstHead,
+        "Original authoring effects must settle before native/Git publication");
+      await assert.rejects(withJobModelRuntime(runtime, () => runEventWorkItem({
+        ...input, round: { assignmentKey: "f".repeat(64), command: { phase: "verify", proof: settled.proof } },
+      })), /another logical assignment/);
+      const outcome = await withJobModelRuntime(runtime, () => runEventWorkItem({
+        ...input, round: { assignmentKey, command: { phase: "verify", proof: settled.proof } },
+      }));
       assert.equal(outcome.status, "event-cluster-committed");
       assert.equal(outcome.validation.status, "passed");
       assert.equal(observed.length, 8,
@@ -456,12 +466,12 @@ Ada and Neri disagree about whether a concealed ledger should be revealed.
       assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
       assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD^"), firstHead);
       assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
-      const receipt = JSON.parse(
-        readFileSync(join(job.stateDir, "protocol-recovery/event-event-disclosure-0.json"), "utf8"),
-      );
+      const eventReceipt = JSON.parse(readFileSync(join(job.stateDir, "event-items/disclosure.json"), "utf8"));
+      const receipt = JSON.parse(readFileSync(join(job.stateDir, "event-invocations",
+        "event-disclosure", eventReceipt.sessionId, eventReceipt.invocationSource, "0.initial.json"), "utf8"));
       assert.equal(receipt.status, "accepted");
       assert.equal(receipt.attempts, 2);
-      assert.equal(receipt.contract, "specialist.changed-paths.v1");
+      assert.equal(receipt.contract, "event.manifest-or-author-choice.v1");
       assert.equal(receipt.sessionFile, outcome.sessionFile);
       assert.ok(
         readFileSync(receipt.sessionFile, "utf8").includes("RESPONSE-CONTRACT CORRECTION ONLY"),
@@ -475,17 +485,9 @@ Ada and Neri disagree about whether a concealed ledger should be revealed.
       assert.ok(outcome.paths.includes("events/disclose-ledger.md"));
       assert.ok(outcome.paths.includes("milestones/disclosure.md"));
       assert.match(git(job.worktreeRoot, "log", "-1", "--format=%B"), /NovelTea-Work-Item: event-disclosure/);
-      const replay = await withJobModelRuntime(runtime, () =>
-        runEventWorkItem({
-          story,
-          job: realId,
-          action: "run",
-          milestone: "milestone.disclosure",
-          skillsSource: source,
-          provider: model.provider,
-          model: model.id,
-        }),
-      );
+      const replay = await withJobModelRuntime(runtime, () => runEventWorkItem({
+        ...input, round: { assignmentKey, command: { phase: "verify", proof: settled.proof } },
+      }));
       assert.equal(replay.headSha, outcome.headSha);
       assert.equal(observed.length, 8, "replayed graph must not invoke Pi again");
     } finally {

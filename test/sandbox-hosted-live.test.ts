@@ -30,7 +30,7 @@ import { runArchitectureJob } from "../src/architecture.js";
 import { runAuthorAction } from "../src/author-updates.js";
 import { inspectTrustedApproval, requestTrustedApproval } from "../src/trusted-approval.js";
 import { runCharacterWorldJob } from "../src/character-world.js";
-import { runEventWorkItem } from "../src/event-work.js";
+import { runEventTestAssignment as runEventWorkItem } from "./event-round-fixture.js";
 import { hasUserProtectedDecision } from "../src/foundation-record.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
 import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";

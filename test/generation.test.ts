@@ -14,7 +14,7 @@ import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
 import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
   scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
-import { runEventWorkItem } from "../src/event-work.js";
+import { runEventTestAssignment as runEventWorkItem } from "./event-round-fixture.js";
 import { runInteractiveWorkItem, inspectInteractiveConflict } from "../src/interactive-work.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { emptyAdaptiveState, beginAdaptiveAttempt, settleAdaptiveAttempt, readAdaptiveState } from "../src/adaptive-state.js";

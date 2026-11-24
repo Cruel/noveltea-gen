@@ -7,10 +7,10 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
+import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { parseEventManifest } from "./event-manifest.js";
-import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { createHash } from "node:crypto";
 import { readJobControl } from "./job-control.js";
 import { StoryCancelledError } from "./story-interruption.js";
@@ -471,8 +471,8 @@ export async function authorEventCluster(
   verifyDraft: (evidence: EventEvidence) => Promise<string[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
-  resume?: SpecialistChoiceReceipt, reroutedFrom?: string,
-): Promise<EventEvidence> {
+  resume: SpecialistChoiceReceipt | undefined, reroutedFrom: string | undefined, round: AssignmentRoundCommand,
+): Promise<EventEvidence | { round: AssignmentRoundResult }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
     skillDirs: [], requiredSkills: ["nt-event-design", "nt-catalog"] };
@@ -522,7 +522,7 @@ export async function authorEventCluster(
     const direction = resume?.answer
       ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true) +
         "\nContinue in this exact session without changing protected decisions.\n" : "";
-    const invocationProof = await recoverSubmittedAssignment({
+    const settled = await executeAssignmentRound({
       session, directory: eventInvocationDirectory(job, assignment.workItemId, session.sessionId, original.sourceDigest),
       sourceDigest: original.sourceDigest, sessionRoots: [sessionDir], responseKind: "event-manifest-or-choice",
       initialTranscriptSha256: resume?.sessionSha256,
@@ -543,7 +543,11 @@ export async function authorEventCluster(
         await recordPiSession(job, file);
       },
       verify: async manifest => {
-        const skillReads = await requirePinnedSkillReads(session, project.root, required, "Event specialist");
+        const skillReads = completedPinnedSkillReads(session.messages, project.root, snapshot.path);
+        const missing = required.filter(path => !skillReads.includes(path));
+        if (missing.length) return missing.map(path => ({ kind: "requirement" as const,
+          path: assignment.milestonePath, code: "missing-pinned-skill-read",
+          detail: "Read skill://" + path.slice(path.lastIndexOf("/skills/") + 8) }));
         const common = { skillReads, sessionFile: file, piSessionId: session.sessionId };
         if ("authorDecisionRequest" in manifest) {
           accepted = { ...common, claimedPaths: manifest.modifiedRecords as string[], conflicts: [], obligations: [],
@@ -573,7 +577,9 @@ export async function authorEventCluster(
         return diagnostics.map(detail => ({ kind: "semantic" as const, path: assignment.milestoneId,
           code: createHash("sha256").update(detail).digest("hex"), detail }));
       },
-    });
+    }, round);
+    if (settled.status !== "accepted") return { round: settled };
+    const invocationProof = settled.proof;
     if (!accepted) throw Error("Original Event invocation has no independently checked result");
     await context.completed(file, session.sessionId);
     return { ...accepted, invocationProof };

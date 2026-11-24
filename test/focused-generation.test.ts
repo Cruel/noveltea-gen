@@ -653,9 +653,9 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
     await saveJobTurnPlan(job, turn);
     const correction = "Explain in Ada's Character profile why she discloses the ledger.";
     const restore = fixtureSandboxClient(job.jobId, job.worktreeStoryRoot);
-    const saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+    let saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
     let originalNegative = false, repairYield = false, supportWrites = 0, originalReviews = 0;
-    let writerYield = false, originalWrites = 0;
+    let writerYield = false, originalWrites = 0, localCorrections = 0;
     let lastPrompt = "", step = 0;
     try {
       const { runtime, calls } = await scriptedStoryRuntime((index, context) => {
@@ -702,6 +702,11 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
           repairYield = true;
           return stop("OUT_OF_AUTHORITY: " + characterPath);
         }
+        if (prompt.includes("SOURCE-BOUND STORY CORRECTION") &&
+            prompt.includes("focused-manifest-path-mismatch")) {
+          localCorrections++;
+          return stop({ modifiedRecords: [eventPath], architecturalConflicts: [], laterObligations: [] });
+        }
         if (prompt.includes("revision specialist. FIRST")) {
           const path = prompt.includes("Only edit these PREEXISTING canonical Markdown files:\n" + eventPath) ? eventPath : characterPath;
           const support = prompt.includes("THIS IS A SEPARATELY AUTHORIZED SUPPORTING ASSIGNMENT");
@@ -724,7 +729,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
                 (support ? "Ada discloses the ledger to protect the witness from a false accusation." :
                   "Ada hesitates before giving the witness her account of the ledger.") + "\n" }] } }] };
           }
-          return stop("The authorized revision is complete.");
+          return stop({ modifiedRecords: scenario === "writer" && writerYield && !support ? [] : [path], architecturalConflicts: [], laterObligations: [] });
         }
         throw Error("Unexpected R04 model prompt: " + prompt.slice(0, 1000));
       });
@@ -767,7 +772,39 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         const resumed = await invoke(null, { ...config, interruptBefore: ["completion_decision", "specialist_dispatch"] });
         // The first dispatch boundary is the exact original continuation.
         assert.ok(resumed.focusedPrerequisite?.supportRef);
+        // Lose the actual SQLite child output after the corrective Pi response
+        // has settled, but before its ordinal is checkpointed in LangGraph.
+        const abort = new AbortController();
+        const error = Error("R14D injected SQLite loss after Focused correction");
+        const put = saver.put.bind(saver);
+        const putWrites = saver.putWrites.bind(saver);
+        let crashed = false;
+        saver.put = async (...args) => {
+          if (crashed) throw error;
+          return put(...args);
+        };
+        saver.putWrites = async (cfg, writes, task) => {
+          if (crashed) throw error;
+          const submission = writes.find(([channel]) => channel === "submission")?.[1] as
+            { status?: string } | undefined;
+          if (cfg.configurable?.checkpoint_ns?.includes("assignment-") &&
+              submission?.status === "writer-round" && localCorrections === 1) {
+            crashed = true;
+            abort.abort(error);
+            throw error;
+          }
+          return putWrites(cfg, writes, task);
+        };
+        await assert.rejects(withJobModelRuntime(runtime, () => createGenerationGraph(saver, "cli").invoke(null, {
+          ...config, interruptAfter: ["verify_committed_work"], signal: abort.signal, durability: "sync",
+        })), err => { if (!crashed) throw err; return true; });
+        assert.ok(crashed, "Expected settled Focused correction output to be lost");
+        assert.equal(originalWrites, 1);
+        assert.equal(localCorrections, 1);
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
         const finished = await invoke(null, { ...config, interruptAfter: ["verify_committed_work"] });
+        assert.equal(localCorrections, 1, "Original correction must not be invoked again");
         assert.equal(finished.focusedPrerequisite, null, finished.reason ?? "");
         assert.equal(originalWrites, 1);
         const finalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));

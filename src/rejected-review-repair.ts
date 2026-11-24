@@ -2205,6 +2205,25 @@ export async function executeReviewRound(job: JobStartResult,
   const boundary = async (): Promise<ReviewRoundResult | null> => {
     const assessment = await foundationReviewBoundary(job, state);
     if (assessment) return { status: "assess", sourceSha, assessment };
+    if (state.phase === "needs-plan" && state.outOfAuthority &&
+        /^(?:event-|focus:)/.test(state.origin.workItem)) {
+      // The negative verdict and exact out-of-authority report are evidence,
+      // never authority to run the other owner. The parent admits support.
+      await attestNegativeReviewRound(job, state, point);
+      const turn = await readReviewTurnEvidence(job);
+      const original = turn?.assignments.find(a => a.id === point.assurance?.assignmentId);
+      if (!turn || !original || !point.assurance || sourceSha !== rootSha ||
+          !isAncestor(job, turn.source.verifiedSha, sourceSha))
+        throw new ProtocolIntegrityBlockedError("Cross-owner request lost its original Turn and Review.");
+      const review = await verifiedFailure(job, point);
+      const request = deriveReviewDependencyRequest({
+        assurance: point.assurance, review, original, turn,
+        planVersion: point.planVersion ?? turn.version, originWorkItem: workItem,
+        otherOwnerPath: state.outOfAuthority.path,
+      });
+      await withStoryJobLock(job, "other-owner-prerequisite-evidence", () => recordReviewDependency(job, request));
+      throw new ReviewDependencyRequiredError(request);
+    }
     if (state.phase === "awaiting-author")
       return { status: "paused", sourceSha, reason: "author-choice", ref: state.choiceId ?? sourceSha };
     if (["repairing", "adjudicating", "blocked", "needs-plan", "disputing"].includes(state.phase))
