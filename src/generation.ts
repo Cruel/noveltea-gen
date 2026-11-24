@@ -308,7 +308,8 @@ export async function requireGenerationTurn(job: JobStartResult, request: Genera
   admitted = false) {
   if (!request || request.story !== job.storyRoot || request.job !== job.jobId)
     throw Error("Generation request belongs to another Story Job.");
-  if (request.fixture !== true && (typeof request.turnPlanDigest !== "string" ||
+  const requiresTurn = request.fixture !== true || !!request.contract && isFocusedScope(request.contract);
+  if (requiresTurn && (typeof request.turnPlanDigest !== "string" ||
       !/^[a-f0-9]{64}$/.test(request.turnPlanDigest)))
     throw Error("Generation requires an authenticated current-format Turn plan digest.");
   const { readDiscoveryHandoff } = await import("./discovery-generation-handoff.js");
@@ -326,7 +327,7 @@ export async function requireGenerationTurn(job: JobStartResult, request: Genera
   if (request.orchestrationPolicy === "fixture-test" && !request.fixture)
     throw Error("Fixture-only orchestration cannot authorize production execution.");
   const digest = request.turnPlanDigest;
-  if (request.fixture === true && digest === undefined) return null;
+  if (!requiresTurn && digest === undefined) return null;
   if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))
     throw Error("Generation requires an authenticated current-format Turn plan digest.");
   const path = join(job.stateDir, "turn-plan.json");
@@ -3153,7 +3154,7 @@ export function recoveryNode(
       if (!state.request) throw Error("Missing Generation request.");
       if (state.inventory && state.inventory.invalidationVersion !== 1)
         throw Error("Obsolete Generation inventory cannot authorize execution.");
-      if (state.request.fixture !== true || state.request.turnPlanDigest !== undefined ||
+      if (state.request.fixture !== true || isFocusedScope(state.request.contract) || state.request.turnPlanDigest !== undefined ||
           state.request.orchestrationPolicy !== undefined &&
           state.request.orchestrationPolicy !== "explicit" && state.request.orchestrationPolicy !== "fixture-test") {
         const job = await openJob(state);
@@ -4274,7 +4275,7 @@ export function createGenerationGraph(
           return await runArchitectureAssignmentChild(s, config, reviewBoundary);
         if (s.active?.stage === "foundations")
           return await runCharacterWorldAssignmentChild(s, config, reviewBoundary);
-        if (s.active?.stage === "focus" && s.request.turnPlanDigest)
+        if (s.active?.stage === "focus")
           return runFocusedAssignmentChild(s, config, reviewBoundary);
         let result;
         if (s.active && ["interactive", "choice", "puzzle"].includes(s.active.stage)) {
@@ -4282,7 +4283,7 @@ export function createGenerationGraph(
           if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
               child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest || child.result.status === "review-handoff") return child;
           result = child.result;
-        } else if (s.active && ["event", "composition", "focus"].includes(s.active.stage)) {
+        } else if (s.active && ["event", "composition"].includes(s.active.stage)) {
           const child = await runNarrativeAssignmentChild(s, config, reviewBoundary);
           if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
               child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest) return child;
@@ -4835,12 +4836,12 @@ export async function runStoryGeneration(options: GenerationOptions) {
   assertNativeVersion(job.validatorVersion);
   // An obsolete start must not create generation.sqlite (which would claim
   // CLI ownership even though no authenticated Turn was ever admitted).
-  if (options.action === "start" && !options.fixture) {
+  if (options.action === "start" && (!options.fixture || isFocusedScope(parseGenerationContract(options.contract)))) {
     if (!options.task?.trim()) throw Error("Generation start requires --task and --contract.");
     const contract = parseGenerationContract(options.contract);
     const turn = await readTurnEvidence(job, contract, options.task);
     await requireGenerationTurn(job, { story: job.storyRoot, job: job.jobId,
-      task: options.task, contract, fixture: false, turnPlanDigest: turn?.digest,
+      task: options.task, contract, fixture: !!options.fixture, turnPlanDigest: turn?.digest,
       provider: options.provider, model: options.model, orchestrationPolicy: "explicit" });
   }
   return withStoryGenerationLock(job, async () => {

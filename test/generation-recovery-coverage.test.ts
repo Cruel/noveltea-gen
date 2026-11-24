@@ -204,7 +204,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const writer = ts.createSourceFile("generation-writer-round.ts", readFileSync(resolve(root, "src/generation-writer-round.ts"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const reviewed = [
-    [file, "requireGenerationTurn", "6659df361f454e0df2946268bcb5b14eae21c85711ed16b0859195aced5c8a65"],
+    [file, "requireGenerationTurn", "2a7f518a9cfa60199151142a476b437d5d6ec8d9b2e2927759a95c1f863ff384"],
     [file, "dispatch", "1405fcbbacbf4ce2dc8ee8be2a0fd75aaf3bcbdfca5b67f4d687a19281f326ad"],
     [file, "runFoundationAssignmentChild", "09eceae0c76ac0f082fc2eb896625a6c89bb4d9f0e741e0bbdfdc0f44d153bfa"],
     [file, "runArchitectureAssignmentChild", "3a202a428fc66d7eebec3b36525a0abb4c6829efeeda4fabbeb26d626b8270ec"],

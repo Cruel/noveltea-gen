@@ -1,12 +1,14 @@
 /** CLI revision certification. The only substituted effects are Pi transport
  * and the sandbox filesystem. No fixture flag or injected Review boundary. */
 import assert from "node:assert/strict";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { startStoryJob } from "../../src/job.js";
 import { parseGenerationContract } from "../../src/generation.js";
 import { validateStoryJob } from "../../src/validator.js";
-import type { CanonicalScopeRecord } from "../../src/focused-scope.js";
+import { resolveFocusedScope, type CanonicalScopeRecord } from "../../src/focused-scope.js";
 import { readTurnEvidence, type TurnEvidence } from "../../src/turn-plan-evidence.js";
 import { planObjective } from "../../web/src/lib/turn-plan.js";
 import { saveJobTurnPlan } from "../../web/src/lib/turn-plan-receipt.server.js";
@@ -33,11 +35,7 @@ if (args[2] === "start") {
   assert.equal(native.status, "passed", JSON.stringify(native));
   const catalog = (native.report as { records: CanonicalScopeRecord[] }).records;
   const targets = contract.scope.targets;
-  const paths = [...targets, ...(contract.scope.supportingTargets ?? [])].map(id => {
-    const record = catalog.find(r => r.metadata.id === id);
-    assert.ok(record, "No canonical revision target: " + id);
-    return record.path;
-  });
+  const paths = resolveFocusedScope(catalog, contract).allowedPaths;
   plan = planObjective({ kind: "revision", request: arg("--task"), contract, base: job.baseSha,
     sourceJobId: "author-baseline", catalog, targetIds: targets, allowedPaths: paths });
   await saveJobTurnPlan(job, plan);
@@ -79,6 +77,11 @@ const { runtime } = await scriptedStoryRuntime((index, context) => {
       return { type: "toolCall" as const, name: "edit", id: "focused-edit-" + index + "-" + i,
         arguments: { path, edits: [{ oldText: old, newText: old + "\nAda seeks the missing ledger to protect the witness from a false accusation.\n" }] } };
     }) };
+    if (process.env.NT_TEST_FOCUS_EXTERNAL_DRIFT === "1") {
+      const foreign = join(job.worktreeStoryRoot, "characters/neri.md");
+      assert.ok(!owned.has("characters/neri.md"));
+      writeFileSync(foreign, readFileSync(foreign, "utf8") + "\nExternal edit during the writer round.\n");
+    }
     return stop({ modifiedRecords: paths, architecturalConflicts: [], laterObligations: [] });
   }
   if (prompt.includes("IMMUTABLE REVIEW PACKET")) {
@@ -179,5 +182,22 @@ const { runtime } = await scriptedStoryRuntime((index, context) => {
 });
 // The CLI starts its async main on import; retain the isolated sandbox for
 // the lifetime of this subprocess.
+if (process.env.NT_TEST_FOCUS_CRASH_AFTER_INTENT === "1") {
+  const rename = fsPromises.rename;
+  let crashed = false;
+  fsPromises.rename = async (from, to) => {
+    await rename(from, to);
+    if (!crashed && String(to).startsWith(join(job.stateDir, "recovery-checkpoints") + "/") &&
+        String(to).endsWith(".intent.json")) {
+      const intent = JSON.parse(readFileSync(String(to), "utf8"));
+      if (intent.workItem === "focus:character.ada") {
+        crashed = true;
+        appendFileSync(process.env.NT_TEST_SCRIPTED_MODEL_LOG!, "Injected post-intent publication interruption\n");
+        process.exit(91);
+      }
+    }
+  };
+  syncBuiltinESMExports();
+}
 fixtureSandboxClient(job.jobId, job.worktreeStoryRoot);
 await withJobModelRuntime(runtime, () => import("../../src/cli.js"));

@@ -141,9 +141,11 @@ function setup(name: string, seed?: (story: string) => void) {
   const env = { ...process.env, NT_STATE_DIR: join(root, name + "-state"),
     NT_CONFIG_FILE: join(root, "config.json"), NT_SKILL_CACHE_DIR: join(root, "skills") };
   function cli(args: string[], success = true) {
-    const entry = args[0] === "generate" && (env as NodeJS.ProcessEnv).NT_TEST_SCRIPTED_FOUNDATION === "1"
-      ? ["--import", "tsx", resolve("test/support/scripted-foundation-cli.ts")]
-      : cliEntry();
+    const scripted = (env as NodeJS.ProcessEnv).NT_TEST_SCRIPTED_ARCHIVE === "1"
+      ? "test/support/scripted-archive-cli.ts"
+      : (env as NodeJS.ProcessEnv).NT_TEST_SCRIPTED_FOUNDATION === "1"
+        ? "test/support/scripted-foundation-cli.ts" : null;
+    const entry = args[0] === "generate" && scripted ? ["--import", "tsx", resolve(scripted)] : cliEntry();
     const result = spawnSync(process.execPath, [...entry,
       "job", ...args, "--story", story, "--job", "single"], {
       encoding: "utf8", env, timeout: process.env.NT_LIVE_GENERATION === "1" ||
@@ -173,6 +175,36 @@ async function useScriptedFoundationCli(f: ReturnType<typeof setup>) {
   f.start.push("--provider", scriptedModel.provider, "--model", scriptedModel.id);
   Object.assign(f.env, { NT_TEST_SCRIPTED_FOUNDATION: "1", NT_TEST_SCRIPTED_MODEL_LOG: f.contract + ".model-calls" });
 }
+
+async function useScriptedArchiveCli(f: ReturnType<typeof setup>) {
+  await useScriptedFoundationCli(f);
+  Object.assign(f.env, { NT_TEST_SCRIPTED_ARCHIVE: "1" });
+}
+
+test("R14K canonical archive baseline executes Foundation, Blueprint, Architecture and World/Character with actual current Turn", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("r14k-archive-baseline");
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
+  const first = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(first.status, "paused", first.reason + "\n" + readFileSync(log, "utf8"));
+  const architecture = f.cli(["generate", "resume", "--pause-after", "architecture"]);
+  assert.equal(architecture.status, "paused", architecture.reason + "\n" + readFileSync(log, "utf8"));
+  const foundations = f.cli(["generate", "resume", "--pause-after", "foundations"]);
+  assert.equal(foundations.status, "paused", foundations.reason + "\n" + readFileSync(log, "utf8"));
+  const points = foundations.recoveryCheckpoints.filter((point: any) => point.eligible);
+  assert.deepEqual(points.map((point: any) => point.workItem).sort(),
+    ["character-foundations", "foundation", "global-architecture", "world-foundations"]);
+  assert.ok(points.every((point: any) => point.assurance && ["passed", "not-required"].includes(point.semanticReview)));
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const calls = readFileSync(log, "utf8");
+  assert.equal(f.cli(["generate", "inspect"]).status, "paused");
+  assert.equal(readFileSync(log, "utf8"), calls);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+});
 
 test("parent integrates eligible deferred ideas through the dedicated placement workflow and preserves source intent", { skip: !available }, () => {
   const f = setup("ideas-parent");
@@ -5508,15 +5540,11 @@ test(mode === "event-only-complete"
 
 test("C04 real Pi World negative selects source-bound owner strategy in the original production graph", { skip: !available }, async () => {
   const f = setup("c04-world-owner-pi");
-  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
-  saveFixtureTurn(f.job, contract, f.start[3]!, [
-    "World Foundations may not rewrite an independently approved Architecture prerequisite.",
-  ]);
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
   assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "foundation");
   const paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
-  assert.equal(paused.status, "paused", JSON.stringify(paused));
-  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(log, "utf8"));
   const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const sources = ["nt-worldbuilding/SKILL.md", "nt-catalog/SKILL.md",
@@ -5538,13 +5566,10 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
     try {
       const graph = createGenerationGraph(saver, "cli");
       const cfg = { configurable: { thread_id: paused.threadId } };
-      const initial = (await graph.getState(cfg)).values;
       const item = paused.inventory.items.find((i: { id: string }) => i.id === "foundations");
       assert.ok(item);
       await graph.updateState(cfg, {
         status: "running", reason: null, active: item, result: null, pauseAfter: null,
-        request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest,
-          provider: scriptedModel.provider, model: scriptedModel.id },
       }, "author_update_intake");
       const admitted = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
       assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "specialist-result",
@@ -5632,45 +5657,20 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
   const needsCharacter = mode === "support";
   const diagnosis = mode === "diagnosis";
   const f = setup("r14d-event-rounds-" + mode);
-  f.env.NT_ARCHITECTURE_FIXTURE_CASE = "decision-choice";
-  f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
-  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
-  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
-  writeFileSync(f.contract, JSON.stringify(contract));
   if (needsCharacter) f.start[3] += " Include Mara, the central night witness, in the disclosure Event.";
-  saveFixtureTurn(f.job, contract, f.start[3]!, [
-    "Release and withhold must produce independently evidenced Choice consequences.",
-    ...(needsCharacter ? ["Characters include Mara, a required night witness who participates in the disclosure Event."] : []),
-  ]);
-  if (needsCharacter) {
-    // The generic fixture Turn lacks a Character-creation owner. Use the
-    // real authority shape required for the full-Story support grant.
-    const file = join(f.job.stateDir, "turn-plan.json");
-    const { digest: _digest, ...body } = JSON.parse(readFileSync(file, "utf8"));
-    const foundations = body.assignments.find((a: { id: string }) => a.id === "foundations");
-    foundations.specialist = "nt-worldbuilding + nt-character-development";
-    foundations.authority.recordTypes = ["character", "world-entity"];
-    writeFileSync(file, JSON.stringify({ ...body, digest: createHash("sha256").update(JSON.stringify(body)).digest("hex") }, null, 2));
-  }
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
   assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "foundation");
   assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "global-architecture");
-  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
-    /review|independent/i);
-  await sealFixtureGenerationCheckpoint(f, "world-foundations");
-  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
-  await sealFixtureGenerationCheckpoint(f, "character-foundations");
   const paused = f.cli(["generate", "resume", "--pause-after", "foundations"]);
-  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(log, "utf8"));
   const saved = Object.fromEntries(["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR",
     "NT_SANDBOX_SOCKET", "NT_SANDBOX_TOKEN_FILE",
-    "NT_ARCHITECTURE_FIXTURE_CASE"].map(key => [key, process.env[key]]));
+    ].map(key => [key, process.env[key]]));
   Object.assign(process.env, {
     NT_STATE_DIR: f.env.NT_STATE_DIR,
     NT_CONFIG_FILE: f.env.NT_CONFIG_FILE,
     NT_SKILL_CACHE_DIR: f.env.NT_SKILL_CACHE_DIR,
-    NT_ARCHITECTURE_FIXTURE_CASE: f.env.NT_ARCHITECTURE_FIXTURE_CASE,
   });
   const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
   let saver = SqliteSaver.fromConnString(paused.checkpointPath);
@@ -5798,12 +5798,10 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
     });
     let graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
-    const initial = (await graph.getState(cfg)).values;
     const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "event:milestone.disclosure");
     assert.ok(item);
     const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
     await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
-      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
     }, "author_update_intake");
     async function crashAtSubmission(status: string, calls: number, options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
       const abort = new AbortController();
@@ -5860,7 +5858,9 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
       assert.equal(observed.length, 16);
       assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
       const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
-      assert.equal(next.active?.stage, "interactive");
+      assert.equal(next.active?.id, "event:milestone.reckoning");
+      assert.equal(next.inventory?.items.find(i => i.id === "interactive:milestone.disclosure")?.status, "pending");
+      assert.equal(next.inventory?.items.find(i => i.id === "event:milestone.disclosure")?.status, "verified");
       assert.equal(observed.length, 16);
       return;
     }
@@ -5907,7 +5907,9 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
     assert.ok(readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(quote));
     const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
     assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", JSON.stringify({ reason: next.reason, active: next.active, recovery: next.recoveryLifecycle }));
-    assert.equal(next.active?.stage, "interactive");
+    assert.equal(next.active?.id, "event:milestone.reckoning");
+      assert.equal(next.inventory?.items.find(i => i.id === "interactive:milestone.disclosure")?.status, "pending");
+      assert.equal(next.inventory?.items.find(i => i.id === "event:milestone.disclosure")?.status, "verified");
     assert.equal(observed.length, needsCharacter ? 21 : 14);
   } finally {
     saver.db.close();
@@ -5944,12 +5946,12 @@ for (const mode of ["crash", "public-cli", "studio"] as const) test("R14I produc
     };
   }
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
-  saveFixtureTurn(f.job, contract, f.start[3]!, ["Keep the original archive mystery objective."]);
-  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
   let paused: any;
   if (studio) {
-    // Seed only the already validated prerequisite commits on the eventual
-    // server Thread. The real writer starts after authenticated server claim.
+    const turn = planWholeStory(f.start[3]!, contract, f.job.baseSha);
+    await saveJobTurnPlan(f.job, turn);
     const checkpointPath = join(f.job.stateDir, "web-generation.sqlite");
     const threadId = f.job.threadId + ":generation:web";
     const seedSaver = SqliteSaver.fromConnString(checkpointPath);
@@ -5957,33 +5959,41 @@ for (const mode of ["crash", "public-cli", "studio"] as const) test("R14I produc
     const cfg = { configurable: { thread_id: threadId }, recursionLimit: 1000 };
     const before = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
     Object.assign(process.env, f.env);
+    const restore = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
     try {
+      const { archiveStages } = await import("./support/scripted-archive-stages.js");
+      const { runtime } = await scriptedStoryRuntime(archiveStages(f.job, turn));
       const request = { story: f.story, job: f.job.jobId, task: f.start[3]!, contract,
-        fixture: true, skillsSource: source, turnPlanDigest: turnDigest, orchestrationPolicy: "explicit" as const };
-      const foundation = await seedGraph.invoke({ request, pauseAfter: "foundation" }, cfg);
+        fixture: false, skillsSource: source, turnPlanDigest: turn.digest, orchestrationPolicy: "explicit" as const,
+        provider: scriptedModel.provider, model: scriptedModel.id };
+      // Claim the actual current server request once; every prerequisite uses
+      // that same Thread and model profile. Never remove/recreate the owner.
+      await studio.admit(request, threadId);
+      const foundation = await withJobModelRuntime(runtime, () =>
+        seedGraph.invoke({ request, pauseAfter: "foundation" }, cfg));
       assert.equal(foundation.status, "paused", foundation.reason ?? "");
-      await sealFixtureGenerationCheckpoint(f, "foundation");
-      const architecture = await seedGraph.invoke({ request, pauseAfter: "architecture" }, cfg);
+      const architecture = await withJobModelRuntime(runtime, () =>
+        seedGraph.invoke({ request, pauseAfter: "architecture" }, cfg));
       assert.equal(architecture.status, "paused", architecture.reason ?? "");
       paused = { ...architecture, checkpointPath, threadId };
-      await sealFixtureGenerationCheckpoint(f, "global-architecture");
-      // Deterministic prerequisite fixture only: replace the fixture transport
-      // request with the real scripted Pi request before Studio admission.
-      // Both checkpoints retain the same web Thread; no production owner changes.
-      unlinkSync(join(f.job.stateDir, "generation-server-owner.json"));
     } finally {
+      restore();
       seedSaver.db.close();
       for (const [key, value] of Object.entries(before)) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
     }
   } else {
+    await useScriptedArchiveCli(f);
     assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-    await sealFixtureGenerationCheckpoint(f, "foundation");
     paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
-    assert.equal(paused.status, "paused");
-    await sealFixtureGenerationCheckpoint(f, "global-architecture");
+    assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(f.contract + ".model-calls", "utf8"));
+    // The following read-only inspect and paused answer commands use the
+    // public CLI without installing a provider in the subprocess.
+    delete (f.env as NodeJS.ProcessEnv).NT_TEST_SCRIPTED_ARCHIVE;
+    delete (f.env as NodeJS.ProcessEnv).NT_TEST_SCRIPTED_FOUNDATION;
   }
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
   const paths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
   const world = "---\nschema: '0.1'\ntype: world-entity\nid: world-entity.archive\ntitle: Archive\nstatus: draft\ndecisions: []\ndescription: A public archive with a restricted ledger\n---\n\nThe custodian guards the sealed ledger.\n";
   const fact = "---\nschema: '0.1'\ntype: fact\nid: fact.evidence-concealed\ntitle: Hidden evidence\nstatus: draft\ndecisions: []\ninitial: true\n---\n\nNeri concealed an entry implicating an official.\n";
@@ -6030,11 +6040,9 @@ for (const mode of ["crash", "public-cli", "studio"] as const) test("R14I produc
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
     const initial = (await graph.getState(cfg)).values;
     const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "foundations");
-    const request = { ...initial.request, fixture: false, turnPlanDigest: turnDigest,
-      provider: scriptedModel.provider, model: scriptedModel.id };
-    if (studio) await studio.admit(request, paused.threadId);
+    assert.equal(initial.request.turnPlanDigest, turnDigest);
+    assert.equal(initial.request.fixture, false);
     await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
-      request,
     }, "author_update_intake");
     await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
     assert.equal(observed.length, 2);
@@ -6189,15 +6197,14 @@ for (const mode of ["crash", "public-cli", "studio"] as const) test("R14I produc
 
 test("R05 World and Character metadata and independent Review corrections resume the original Thread in order", { skip: !available, timeout: 120_000 }, async () => {
   const f = setup("r05-world-review");
-  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
-  saveFixtureTurn(f.job, contract, f.start[3]!, ["Keep the original archive mystery objective."]);
+  await useScriptedArchiveCli(f);
+  const log = f.contract + ".model-calls";
   assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "foundation");
   const paused = f.cli(["generate", "resume", "--pause-after", "architecture"]);
-  assert.equal(paused.status, "paused");
-  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(log, "utf8"));
   const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
   const paths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
+  const preludeCalls = readFileSync(log, "utf8").trim().split("\n").length;
   const world = "---\nschema: '0.1'\ntype: world-entity\nid: world-entity.archive\ntitle: Archive\nstatus: draft\ndecisions: []\ndescription: A public archive with a restricted ledger\n---\n\nThe custodian guards the sealed ledger.\n";
   const fact = "---\nschema: '0.1'\ntype: fact\nid: fact.evidence-concealed\ntitle: Hidden evidence\nstatus: draft\ndecisions: []\ninitial: true\n---\n\nNeri concealed an entry implicating an official.\n";
   const reads = (specialist: string) => [specialist + "/SKILL.md", "nt-catalog/SKILL.md",
@@ -6275,10 +6282,8 @@ test("R05 World and Character metadata and independent Review corrections resume
   try {
     let graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
-    const initial = (await graph.getState(cfg)).values;
     const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "foundations");
     await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
-      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
     }, "author_update_intake");
     async function crashAtSubmission(status: string, calls: number, options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
       const abort = new AbortController();
@@ -6379,7 +6384,7 @@ test("R05 World and Character metadata and independent Review corrections resume
     assert.equal(next.active?.stage, "event");
     assert.equal(next.request.turnPlanDigest, turnDigest);
     assert.equal(observed.length, 20);
-    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, observed.length,
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, preludeCalls + observed.length,
       "Restart, refused authority and parent intake cannot charge another model call.");
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), repairedCharacterHead);
   } finally {

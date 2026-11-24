@@ -148,6 +148,15 @@ test("obsolete CLI Generation start does not claim SQLite ownership or mutate Gi
     assert.match(refused.stderr, /authenticated current-format Turn plan/);
     assert.deepEqual(readdirSync(job.stateDir).sort(), before);
     assert.equal(git("rev-parse", "HEAD"), head);
+    writeFileSync(contract, JSON.stringify({
+      scope: { kind: "partial", depth: "architecture", targets: ["character.ada"], branches: [] },
+      constraints: [], envelope: { presentation: "Interactive Story", hardLimits: [], preferences: [] },
+    }));
+    const obsoleteFocus = cli("generate", "start", "--task", "Continue", "--contract", contract, "--fixture");
+    assert.notEqual(obsoleteFocus.status, 0);
+    assert.match(obsoleteFocus.stderr, /authenticated current-format Turn plan/);
+    assert.deepEqual(readdirSync(job.stateDir).sort(), before);
+    assert.equal(git("rev-parse", "HEAD"), head);
     assert.equal(git("status", "--porcelain"), "");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

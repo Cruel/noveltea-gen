@@ -417,20 +417,21 @@ test("R07 focused commit before checkpoint finalization resumes without replay",
 }, () => {
   const f = fixture("r07-focus-crash");
   seedArchiveWitness(f.story);
-  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const log = f.contractPath + ".model-calls";
+  Object.assign(f.env, { NT_TEST_FOCUSED_CLI: "1", NT_TEST_SCRIPTED_MODEL_LOG: log });
   const job = f.cli("focused", ["start"]);
   f.contract(["character.ada"], "architecture");
   const env = f.env as NodeJS.ProcessEnv;
-  env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = "focus:character.ada";
-  const crashed = f.cli("focused", ["generate", "start", "--task", "Clarify Ada's motivation",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source, "--pause-after", "focus"]);
-  assert.equal(crashed.status, "blocked", crashed.reason);
+  env.NT_TEST_FOCUS_CRASH_AFTER_INTENT = "1";
+  f.cli("focused", ["generate", "start", "--task", "Clarify Ada's motivation",
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source, "--pause-after", "focus"], false);
+  assert.match(readFileSync(log, "utf8"), /Injected post-intent publication interruption/);
   const head = git(job.worktreeRoot, "rev-parse", "HEAD");
-  delete env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT;
+  delete env.NT_TEST_FOCUS_CRASH_AFTER_INTENT;
   const resumed = f.cli("focused", ["generate", "resume"]);
-  // A resumed fixture may advance to the final editorial gate; the
-  // recovered focused assignment itself must be independently verified.
-  assert.ok(resumed.status === "paused" || resumed.reason === "editorial-unverified", resumed.reason);
+  assert.ok(["paused", "completed"].includes(resumed.status), JSON.stringify({reason:resumed.reason,lifecycle:resumed.recoveryLifecycle,operation:resumed.operationRecovery, sources:resumed.recoverySources}) + "\n" + readFileSync(log, "utf8"));
+  const calls = readFileSync(log, "utf8").trim().split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+  assert.equal(calls.filter(c => c.kind === "writer").length, 3, "Original writer cannot replay after durable intent");
   assert.equal(resumed.inventory.items.find((i: any) => i.id === "focus:character.ada")?.status, "verified");
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
@@ -443,14 +444,15 @@ test("focused revisions reject missing existing target IDs and unauthorized file
 }, () => {
   const f = fixture("reject-expansion");
   seedArchiveWitness(f.story);
-  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const log = f.contractPath + ".model-calls";
+  Object.assign(f.env, { NT_TEST_FOCUSED_CLI: "1", NT_TEST_SCRIPTED_MODEL_LOG: log });
   const baseline = git(f.repo, "rev-parse", "HEAD");
   f.cli("missing", ["start"]);
   f.contract(["event.not-present"], "interactive");
   const missing = f.cli("missing", ["generate", "start", "--task", "Revise missing Event",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  assert.equal(missing.status, "blocked");
-  assert.match(missing.reason, /scope target|authorized target|architecture/i);
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source], false);
+  assert.match(missing, /scope target|authorized target|architecture/i);
+  assert.equal(existsSync(log), false);
   assert.equal(git(f.repo, "rev-parse", "HEAD"), baseline);
   const related = f.cli("related-support", ["start"]);
   f.contract(["event.disclose-ledger"], "interactive");
@@ -458,24 +460,25 @@ test("focused revisions reject missing existing target IDs and unauthorized file
   relatedContract.scope.supportingTargets = ["character.ada"];
   writeFileSync(f.contractPath, JSON.stringify(relatedContract));
   const relatedResult = f.cli("related-support", ["generate", "start", "--task", "Revise the Event and its protagonist",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  assert.equal(relatedResult.reason, "editorial-unverified", JSON.stringify(relatedResult));
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source]);
+  assert.equal(relatedResult.status, "completed", relatedResult.reason + "\n" + readFileSync(log, "utf8"));
   assert.deepEqual(git(related.worktreeRoot, "diff", "--name-only", baseline, "HEAD").split("\n"),
     ["story/characters/ada.md", "story/events/disclose-ledger.md"]);
+  const previousCalls = readFileSync(log, "utf8");
   const unrelated = f.cli("unrelated-support", ["start"]);
   relatedContract.scope.supportingTargets = ["authored-content.seal-clue"];
   writeFileSync(f.contractPath, JSON.stringify(relatedContract));
   const unrelatedResult = f.cli("unrelated-support", ["generate", "start", "--task", "Revise only this Event",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  assert.equal(unrelatedResult.status, "blocked");
-  assert.match(unrelatedResult.reason, /scope expansion|unrelated|scope context/i);
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source], false);
+  assert.match(unrelatedResult, /scope expansion|unrelated|scope context/i);
+  assert.equal(readFileSync(log, "utf8"), previousCalls);
   assert.equal(git(unrelated.worktreeRoot, "rev-parse", "HEAD"), baseline);
   assert.equal(git(unrelated.worktreeRoot, "status", "--porcelain"), "");
   const job = f.cli("out-of-scope", ["start"]);
   f.contract(["event.disclose-ledger"], "interactive");
-  f.env.NT_FOCUS_FIXTURE_CASE = "unauthorized-edit";
+  f.env.NT_TEST_FOCUS_EXTERNAL_DRIFT = "1";
   const unauthorized = f.cli("out-of-scope", ["generate", "start", "--task", "Revise this Event",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source]);
   assert.equal(unauthorized.status, "blocked");
   assert.match(unauthorized.reason, /unauthorized|dirty|preserv|scope/i);
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), baseline,
@@ -901,12 +904,14 @@ test("missing target and missing upstream context block without creating or edit
   skip: !available, timeout: 90_000,
 }, () => {
   const f = fixture("missing-context");
+  const log = f.contractPath + ".model-calls";
+  Object.assign(f.env, { NT_TEST_FOCUSED_CLI: "1", NT_TEST_SCRIPTED_MODEL_LOG: log });
   const job = f.cli("focus", ["start"]);
   f.contract(["event.unknown"], "interactive");
   const result = f.cli("focus", ["generate", "start", "--task", "Revise one Event",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  assert.equal(result.status, "blocked");
-  assert.match(result.reason, /missing verified upstream|upstream Creative Direction/i);
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source], false);
+  assert.match(result, /missing.*canonical scope target|missing verified upstream|upstream Creative Direction|Expected one non-superseded Creative Direction/i);
+  assert.equal(existsSync(log), false);
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), git(f.repo, "rev-parse", "HEAD"));
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 });

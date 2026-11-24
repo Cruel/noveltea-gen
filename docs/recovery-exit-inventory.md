@@ -323,3 +323,11 @@ The reviewed AST changes remove the deleted parent exits and the retired Discove
 This increment migrates the public scoped revision scenario and removes its
 legacy seed execution prerequisite. Other focused structural fixtures and
 missing-Turn dispatch paths remain pending; this is not final R14K certification.
+
+#### R14K authenticated archive prelude and focused admission
+
+- [Archive scripted transport](../test/support/scripted-archive-stages.ts) and [CLI entry](../test/support/scripted-archive-cli.ts) exercise the ordinary Foundation, compact Blueprint, Architecture, World and Character checkpoints. They supply model responses and sandbox tool effects, not synthetic approval or recovery receipts. R05 World/Character, C04 World-negative, R14D Event correction and R14I question-resume tests now use the real prelude; R14I Studio preserves the original server owner and Turn rather than replacing an admitted fixture request.
+- [Focused CLI](../test/support/scripted-focused-cli.ts) uses the canonical scope resolver, authenticates the actual revision plan, and tests a process exit after the durable intent publication. Missing scope, unsupported expansion and external worktree drift remain rejected. The recovered writer is not replayed.
+- [Generation admission](../src/generation.ts) now requires the original Turn even for focused requests carrying the historical fixture flag, before CLI SQLite ownership and on node re-entry. Focus dispatch always goes through the focused assignment child rather than its missing-Turn narrative fallback. [Negative admission regression](../test/recovery-cutover.test.ts) checks no SQLite or Git effect.
+
+Whole-story structural fixtures, their remaining standalone paths, and Studio fixture admission still require migration; this increment does not certify final R14K cutover.
