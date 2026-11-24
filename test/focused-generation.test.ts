@@ -274,7 +274,7 @@ test("native-verified focused Turn restores a source-bound pending omission afte
     const saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
     try {
       const graph = createGenerationGraph(saver, "cli");
-      const graphRequest = { ...request, orchestrationPolicy: "fixture-legacy" as const };
+      const graphRequest = { ...request, orchestrationPolicy: "fixture-test" as const };
       const result = await graph.invoke({ request: graphRequest, pauseAfter: "review" },
         { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 });
       assert.equal(result.status, "paused", result.reason ?? JSON.stringify(result));
@@ -485,7 +485,7 @@ test("discovered prerequisite amends a focused plan and survives process restart
       const graph = createGenerationGraph(saver, "cli");
       const result = await graph.invoke({ request: { story: f.story, job: "dependency", task,
         contract, fixture: true, skillsSource: source, turnPlanDigest: turn.digest,
-        orchestrationPolicy: "fixture-legacy" }, pauseAfter: "focus" },
+        orchestrationPolicy: "fixture-test" }, pauseAfter: "focus" },
         { configurable: { thread_id: job.threadId + ":generation" }, recursionLimit: 100 });
       assert.equal(result.status, "paused", result.reason ?? JSON.stringify(result));
     } finally { saver.db.close(); }

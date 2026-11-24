@@ -42,12 +42,12 @@ const siteNames = [
 /** Explicitly reviewed counts. Changes require a source-linked matrix review
  * in docs/generation-recovery-contract.md rather than silent test regeneration. */
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
-  schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:12",
+  schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:10",
   assess_recovery: "returns:18,status:7,blocked:1,throws:9",
   author_update_intake: "returns:20,status:2,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:15,status:1,blocked:1,operationFailure:6,throws:7",
+  specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:6,throws:7",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
   independent_assignment_review: "returns:6,status:3,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
@@ -58,9 +58,9 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independentAssignmentBoundary: "returns:19,status:8,operationFailure:2,throws:9",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
-  runStoryGeneration: "returns:5,status:7,blocked:5,reconcile:1,throws:14",
+  runStoryGeneration: "returns:5,status:7,blocked:6,reconcile:1,throws:15",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
-  recoveryNode: "returns:20,status:14,throws:10",
+  recoveryNode: "returns:21,status:15,throws:11",
 };
 const operations = [
   "adaptive-admission",
@@ -192,6 +192,30 @@ function helpers(source: ts.SourceFile = file): Map<string, ts.Node> {
   }
   return functions;
 }
+// R01: the parent's dispatch return is inventoried above; the child is a
+// real nested graph, so its routes and receipt gates also require explicit
+// review. Fingerprint the complete admission/adapter/child bodies rather than
+// merely counting exits (which would miss changed predicates).
+test("R01 admission and nested assignment lifecycle retain reviewed proof gates", () => {
+  const child = ts.createSourceFile("generation-assignment-lifecycle.ts",
+    readFileSync(resolve(root, "src/generation-assignment-lifecycle.ts"), "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const printer = ts.createPrinter({ removeComments: true });
+  const reviewed = [
+    [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
+    [file, "runFoundationAssignmentChild", "570895ae2e57fb71092bca9ccefa41beeef633f2ccac6d5024027290f993ce9a"],
+    [child, "createAssignmentLifecycleGraph", "9fa13f1f13a3729ec1fd9253f553483222c06492c7d1b490c59ccf5f225d7701"],
+    [child, "authenticateAssignmentReentry", "5b24030609f9d19c2cd5c001a29dbcb865388377cfd865ee6c176b4996a2e135"],
+  ] as const;
+  for (const [source, name, expected] of reviewed) {
+    const body = helpers(source).get(name);
+    assert.ok(body, name + " must remain source-linked");
+    const actual = createHash("sha256")
+      .update(printer.printNode(ts.EmitHint.Unspecified, body, source)).digest("hex");
+    assert.equal(actual, expected, name + " changed: review R01 proof gates and contract");
+  }
+});
+
 function exitShape(node: ts.Node): string {
   const counts = {
     returns: 0,
@@ -472,12 +496,18 @@ const reviewedDirectStopFamilies = {
       "assess_recovery/status#2",
       "completion_decision/return#6", "completion_decision/status#1",
       "observeNodeOutcome/return#3",
-      "recoveryNode/return#2", "recoveryNode/return#3", "recoveryNode/return#5",
-      "recoveryNode/return#13", "recoveryNode/return#15", "recoveryNode/return#18",
-      "recoveryNode/status#1", "recoveryNode/status#2", "recoveryNode/status#3",
-      "recoveryNode/status#4", "recoveryNode/status#10",
-      "recoveryNode/status#12", "recoveryNode/status#14",
+      "recoveryNode/return#3", "recoveryNode/return#4", "recoveryNode/return#6",
+      "recoveryNode/return#14", "recoveryNode/return#16", "recoveryNode/return#19",
+      "recoveryNode/status#2", "recoveryNode/status#3", "recoveryNode/status#4",
+      "recoveryNode/status#5", "recoveryNode/status#11",
+      "recoveryNode/status#13", "recoveryNode/status#15",
     ],
+  },
+  "current-turn-admission": {
+    disposition: "integrity-fence",
+    proof: "Mandatory source-authenticated current Turn or isolated fixture identity before any executable node; no legacy fallback",
+    regression: ["test/generation.test.ts", "R01 obsolete Generation entry is fenced before any model or Git effect"],
+    sites: ["recoveryNode/return#2", "recoveryNode/status#1"],
   },
   "original-check-unresolved": {
     disposition: "reconciliation-required",
@@ -511,7 +541,7 @@ const reviewedDirectStopFamilies = {
     disposition: "operator-advisory",
     proof: "Started-and-settled original Pi transcript is authenticated, but no corrective adapter is authorized",
     regression: ["test/generation.test.ts", "C03 production graph diagnoses a source-authenticated unknown scheduling exception once"],
-    sites: ["recoveryNode/return#4"],
+    sites: ["recoveryNode/return#5"],
   },
   "returned-terminal-projection": {
     disposition: "read-only-output",

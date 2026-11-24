@@ -319,12 +319,12 @@ test("C02 production recovery wrapper prevents completion with an active or defe
       phase: "idle" as const,
     } },
   ]) {
-    const outcome = await complete(state as never, {} as never);
+    const outcome = await complete({ ...state, request: { fixture: true } } as never, {} as never);
     assert.equal(outcome.status, "blocked");
     assert.match(outcome.reason ?? "", /Unresolved recovery cases/);
   }
   const unchanged = recoveryNode("completion_decision", async () => ({}));
-  const inherited = await unchanged({ ...admitted, status: "completed" } as never, {} as never);
+  const inherited = await unchanged({ ...admitted, status: "completed", request: { fixture: true } } as never, {} as never);
   assert.equal(inherited.status, "blocked",
     "a missing status patch must not preserve an earlier completed flag with pending recovery");
 });

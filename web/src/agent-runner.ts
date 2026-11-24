@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { join } from 'node:path'
 import type { StudioStore as StudioDatabase } from './persistence/store'
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
-import type { GenerationEvidence } from '../../src/generation'
+import { requireGenerationTurn, type GenerationEvidence } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
 import { claimServerGeneration } from '../../src/generation-owner'
 import { withStoryJobLock } from '../../src/job-lock'
@@ -62,6 +62,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   const selected = config?.model ?? null
   if (selected && !validPiSelection(selected)) throw new Error('Saved Pi model is invalid.')
   if (pinned.fixture === !!selected) throw new Error('Saved Pi model disagrees with pinned execution.')
+  await requireGenerationTurn(job, pinned)
   verifyWebExecution(pinned.fixture, true)
   await verifyTrustedRevision(job)
   if (await readJobControl(job) !== 'running') throw new Error('Generation is not authorized to run.')
@@ -129,6 +130,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         current.threadId !== threadId || (await queueRecord(store, row.id))?.phase !== 'running' ||
         await readJobControl(job) !== 'running')
       throw new Error('Conflicting generation admission.')
+    await requireGenerationTurn(job, pinned)
     if (fix && indexedStop) await verifyKnownFixProof(job, pinned, indexedStop)
     let sandbox: SandboxClient | null = null
     if (selected) {

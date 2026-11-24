@@ -82,11 +82,13 @@ incompatible/old `nt-story-generate` snapshots, and changed pinned bytes fail
 closed. `job generate inspect` returns `orchestrationSelection` with that
 source-bound evidence; it does not confer additional authoring permissions.
 
-Requests saved before this selection contract (no `orchestrationPolicy`) retain
-their historical generation path without silently adopting a new method. A
-new untagged real-Pi request is rejected unless there is prior checkpointed
-specialist progress. Fixture-only generation without a configured skills checkout
-uses the explicit `fixture-legacy` policy, which cannot authorize a real writer.
+Production Generation requires a prepared, authenticated `turn-plan.json`
+receipt in the job-private state directory. Standalone CLI `generate start`
+pins that receipt to the supplied task, completion contract and source SHA;
+unplanned start or obsolete resume is refused before any writer runs. Requests
+use the pinned method and never dispatch through a historical compatibility
+path. Fixture-only generation without a configured skills checkout uses the
+isolated `fixture-test` policy, which cannot authorize a real Pi writer.
 New live requests require the compatible skill checkout configured via
 `--skills-source`, `NT_STUDIO_SKILLS_SOURCE`, or trusted local config.
 

@@ -189,7 +189,7 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
     const pinned: GenerationRequest = { story: child.storyRoot, job: child.jobId,
       task: claim.content, contract: scope.contract, fixture: !model,
       orchestrationPolicy: model || prior.skillsSource || process.env.NT_STUDIO_SKILLS_SOURCE
-        ? 'explicit' : 'fixture-legacy',
+        ? 'explicit' : 'fixture-test',
       turnPlanDigest: scope.turnPlan.digest,
       ...(prior.skillsSource ? { skillsSource: prior.skillsSource } : {}),
       ...(model ? { provider: model.provider, model: model.id } : {}) }

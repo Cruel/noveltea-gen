@@ -8,6 +8,8 @@ import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
+import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
 import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
   scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
@@ -21,6 +23,7 @@ import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { parseStoryPlanning } from "../src/story-planning.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics } from "../src/story-metrics.js";
 import { runCharacterWorldJob } from "../src/character-world.js";
+import { renderFoundation } from "../src/demo.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { startStoryJob } from "../src/job.js";
 import { validateStoryJob } from "../src/validator.js";
@@ -1953,13 +1956,8 @@ test(live
   assert.equal(paused.status, "paused");
   saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
     ["Preserve existing verified checkpoints and reconcile any transient scheduler failure."]);
-  // A pre-#149 approved Turn has no mandatory objective-planner subreceipt.
-  const legacyFile = join(f.job.stateDir, "turn-plan.json");
-  const legacy = JSON.parse(readFileSync(legacyFile, "utf8"));
-  delete legacy.objective;
-  delete legacy.digest;
-  const digest = createHash("sha256").update(JSON.stringify(legacy)).digest("hex");
-  writeFileSync(legacyFile, JSON.stringify({ ...legacy, digest }, null, 2));
+  const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+  const digest = turn.digest;
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   const tasksFile = join(f.job.stateDir, "idea-placement-tasks.json");
   const originalTasks = existsSync(tasksFile) ? readFileSync(tasksFile) : null;
@@ -1967,19 +1965,48 @@ test(live
   const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
   Object.assign(process.env, f.env);
   const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  const restoreSandbox = live ? () => {} : fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
   try {
-    const transport = live ? null : await (await import("./scripted-recovery-model.js"))
-      .scriptedRecoveryModel("reconcile-original");
-    const provider = transport?.model.provider ?? (process.env.NT_RECOVERY_PI_PROVIDER ?? "openai-codex");
-    const model = transport?.model.id ?? (process.env.NT_RECOVERY_PI_MODEL ?? "gpt-6-luna");
+    // Build the actual current-format planner proof for the disposable
+    // fixture's original Turn before injecting the scheduler failure.
+    const transport = live ? null : await scriptedStoryRuntime((index, context) => {
+      if (index === 0) return { content: scriptedReadCalls(requiredOrchestratorSkillReads("autonomous")
+        .map(path => "skill://" + path), 0), reason: "toolUse" };
+      if (index === 1) return { content: scriptedText({ sourceSha: f.job.baseSha,
+        turnDigest: digest, assignments: turn.assignments.map((a: { id: string }) => ({
+          id: a.id, reason: "Perform the source-bound author objective." })) }), reason: "stop" };
+      assert.equal(index, 2, "No additional diagnostic invocation is authorized");
+      const serialized = JSON.stringify(context.messages);
+      const signature = serialized.match(/signature=([0-9a-f]{64})/)?.[1];
+      const sourceRef = serialized.match(/sourceRef=([^;]+); category=/)?.[1];
+      assert.ok(signature && sourceRef);
+      return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1",
+        signature, sourceRef, category: "infrastructure",
+        diagnosis: "The original read-only operation should reconcile against sealed receipts.",
+        strategy: "reconcile-original", owner: null, scopeRef: null, prerequisites: [],
+        uncertainty: "No authenticated writer scope for this failure." }), reason: "stop" };
+    });
+    const provider = live ? (process.env.NT_RECOVERY_PI_PROVIDER ?? "openai-codex") : scriptedModel.provider;
+    const model = live ? (process.env.NT_RECOVERY_PI_MODEL ?? "gpt-6-luna") : scriptedModel.id;
     await (await import("../src/job-pi-policy.js")).configurePiPolicy(f.job, { version: 1,
-      profile: { provider, model }, limits: { modelCalls: 2 } });
+      profile: { provider, model }, limits: { modelCalls: 12 } });
+    const runtime = transport?.runtime ?? await (await import("../src/model-runtime.js")).createJobModelRuntime();
+    unlinkSync(join(f.job.stateDir, "orchestrator-selection.json"));
+    const selection = await selectStoryOrchestrator(f.job, paused.threadId,
+      { task: f.start[3]!, kind: turn.contract.scope.kind, turnPlanDigest: digest }, source);
+    const { runPinnedObjectivePlanner } = await import("../src/orchestrator-planner.js");
+    const planning = await withJobModelRuntime(runtime,
+      () => runPinnedObjectivePlanner(f.job, selection, turn, provider, model));
+    const priorCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
     const graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId } };
     const values = (await graph.getState(cfg)).values;
     await graph.updateState(cfg, {
       request: { ...values.request, fixture: false, turnPlanDigest: digest,
         provider: undefined, model: undefined },
+      orchestratorSnapshotId: selection.receipt.skillSnapshot.id,
+      orchestratorOrder: planning.proposal!.assignments.map(a => a.id),
+      orchestratorPlanningDigest: planning.digest,
       status: "running", active: null, result: null, ideaTask: null,
       escalation: null, causalAmendment: null, pauseAfter: null,
     }, "schedule");
@@ -1987,8 +2014,6 @@ test(live
     assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "scheduling");
     const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
     assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic");
-    const { withJobModelRuntime, createJobModelRuntime } = await import("../src/model-runtime.js");
-    const runtime = transport?.rt ?? await createJobModelRuntime();
     const proposed = await withJobModelRuntime(runtime,
       () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(proposed.recoveryLifecycle.attempt?.phase, "settled",
@@ -1999,13 +2024,13 @@ test(live
       assert.equal(attempt.mode, "read-only");
       assert.equal(attempt.startedRef?.store, "pi-session");
       assert.equal(attempt.settledRef?.store, "response-contract");
-      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 1,
-        "One real model response must be metered exactly once");
+      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, priorCalls + 1,
+        "One real diagnosis response must be metered exactly once");
     }
     assert.equal(proposed.recoveryLifecycle.decision?.action, "reconcile-effects",
       JSON.stringify({ status: proposed.status, reason: proposed.reason, lifecycle: proposed.recoveryLifecycle }));
     assert.equal(proposed.recoveryLifecycle.assessorPending, true);
-    if (transport) assert.equal(transport.calls.length, 1);
+    if (transport) assert.equal(transport.calls(), 3);
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
       proposed.recoveryLifecycle);
 
@@ -2022,14 +2047,15 @@ test(live
     assert.equal(reconciled.status, "running");
     assert.deepEqual((await graph.getState(cfg)).next, ["author_update_intake"],
       "The original graph resumes after independently verified read-only reconciliation");
-    if (transport) assert.equal(transport.calls.length, 1);
-    else assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, 1,
+    if (transport) assert.equal(transport.calls(), 3);
+    else assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, priorCalls + 1,
       "Read-only independent recheck must not consume another external Pi call");
     assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head,
       "Neither the diagnosis nor original read-only reconciliation can commit");
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
       reconciled.recoveryLifecycle);
   } finally {
+    restoreSandbox();
     saver.db.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -5226,6 +5252,218 @@ test("parent restart reconciles a specialist commit made before receipt/checkpoi
   assert.equal(recovered.completedStages[0].headSha, head);
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).stage, "committed");
+});
+
+test("R01 obsolete Generation entry is fenced before any model or Git effect", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("r01-reject-obsolete");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const args = f.start.filter(arg => arg !== "--fixture");
+  assert.match(f.cli(args, false), /authenticated Turn plan/);
+  const plan = planWholeStory(f.start[3]!, contract, f.job.baseSha);
+  const planPath = join(f.job.stateDir, "turn-plan.json");
+  const before = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  try {
+    const { runtime, observed } = await scriptedStoryRuntime(() => {
+      throw Error("Unauthenticated Generation attempted a model effect");
+    });
+    for (const owner of ["cli", "server"] as const) {
+      for (const [name, digest, corrupt] of [
+        ["absent", undefined, false],
+        ["malformed", "not-a-digest", false],
+        ["missing-receipt", plan.digest, false],
+        ["wrong-digest", "f".repeat(64), false],
+        ["corrupt-receipt", plan.digest, true],
+      ] as const) {
+        if (existsSync(planPath)) unlinkSync(planPath);
+        if (name === "wrong-digest" || corrupt)
+          writeFileSync(planPath, JSON.stringify(corrupt ? { ...plan, goal: "tampered" } : plan));
+        const saver = SqliteSaver.fromConnString(join(f.job.stateDir, owner + "-" + name + ".sqlite"));
+        try {
+          const graph = createGenerationGraph(saver, owner);
+          const cfg = { configurable: { thread_id: f.job.threadId +
+            (owner === "server" ? ":generation:web" : ":generation") } };
+          const request = { story: f.story, job: "single", task: f.start[3]!,
+            contract, fixture: false, skillsSource: source,
+            orchestrationPolicy: "explicit" as const,
+            ...(digest === undefined ? {} : { turnPlanDigest: digest }) };
+          if (name === "malformed") {
+            // LangGraph validates malformed external input before the first node.
+            await assert.rejects(withJobModelRuntime(runtime, () =>
+              graph.invoke({ request }, cfg)), /turnPlanDigest|invalid_format/);
+          } else {
+            const output = await withJobModelRuntime(runtime, () =>
+              graph.invoke({ request }, cfg));
+            assert.equal(output.status, "blocked", owner + "/" + name + ": " + output.reason);
+            assert.equal(output.recoveryLifecycle.phase, "fenced");
+          }
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
+          assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+          assert.equal(existsSync(join(f.job.stateDir, "foundation.json")), false);
+          assert.equal(existsSync(join(f.job.stateDir, "orchestrator-selection.json")), false);
+          assert.equal(existsSync(join(f.job.stateDir, "generation-server-owner.json")), false);
+        } finally { saver.db.close(); }
+      }
+    }
+    assert.equal(observed.length, 0);
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
+for (const owner of ["cli", "server"] as const)
+test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + owner + ")", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("r01-real-foundation-pi-" + owner);
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  const plan = planWholeStory(f.start[3]!, contract, f.job.baseSha);
+  const pinnedDigest = plan.digest;
+  writeFileSync(join(f.job.stateDir, "turn-plan.json"), JSON.stringify(plan));
+  const before = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const authored = renderFoundation({
+      id: "foundation", title: "The Last Bell",
+      premise: "A midnight bell reveals an archive theft.",
+      central_conflict: "The archivist must decide whether to expose a witness.",
+      genre: "Mystery", tone: "Suspenseful",
+      player_experience: "Interview witnesses and resolve a consequential secret.",
+      scope: "A small town, a single archive, two major decisions",
+      decisions: [
+        { id: "author-brief", statement: "A missing archive witness; invent unspecified details",
+          origin: "user", authority: "user-protected" },
+        { id: "archive-bell", statement: "A bell marks the last known sighting",
+          origin: "agent", authority: "delegated" },
+      ],
+      body: "# The Last Bell\n\nThe archivist hears a bell from a shuttered building. Each interview reveals new evidence; the protagonist may protect the witness or share the truth.",
+    });
+    const reads = [
+      "nt-story-discovery/SKILL.md", "nt-catalog/SKILL.md",
+      "nt-catalog/references/records.md",
+      "nt-catalog/references/authority-and-validation.md",
+      "nt-catalog/references/glossary.md",
+    ].map(path => "skill://" + path);
+    const { runtime, observed } = await scriptedStoryRuntime(index => {
+      if (index === 0) return { content: scriptedReadCalls(requiredOrchestratorSkillReads("autonomous")
+        .map(path => "skill://" + path), 0), reason: "toolUse" };
+      if (index === 1) return { content: scriptedText({ sourceSha: f.job.baseSha,
+        turnDigest: pinnedDigest, assignments: plan.assignments.map(a => ({ id: a.id,
+          reason: "Perform the source-bound author objective in causal order." })) }), reason: "stop" };
+      const i = index - 2;
+      if (i === 0) return { content: scriptedReadCalls(reads, 0), reason: "toolUse" };
+      if (i === 1) return { content: [{
+        type: "toolCall", name: "write", id: "r01-real-foundation-write",
+        arguments: { path: "creative-direction/foundation.md", content: authored },
+      }], reason: "toolUse" };
+      if (i === 2) return { content: [{
+        type: "toolCall", name: "story_validate", id: "r01-foundation-validate", arguments: {},
+      }], reason: "toolUse" };
+      if (i === 3) return { content: scriptedText("Original Creative Direction authored and validated."), reason: "stop" };
+      throw Error("R01 writer replayed or called another model unexpectedly: " + i);
+    });
+    const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "r01-generation.sqlite"));
+    const config = { configurable: { thread_id: f.job.threadId +
+      (owner === "server" ? ":generation:web" : ":generation") },
+      recursionLimit: 10000 };
+    try {
+      let reviewCalls = 0;
+      let reviewerError: string | null = null;
+      const graph = createGenerationGraph(saver, owner, async s => {
+        const job = await startStoryJob({ story: f.story, job: "single" }, false);
+        const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+          p.eligible && p.workItem === "foundation");
+        assert.ok(point?.assurance, "The child cannot verify without its native/Git Foundation receipt");
+        if (point.semanticReview === "required-pending") {
+          reviewCalls++;
+          await reviewBoundedAssignments(job, [point], async packet => ({
+            sourceDigest: packet.sourceDigest, verdict: "pass" as const, findings: [],
+            evidence: packet.items.map(item => ({
+              commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+              path: item.assurance.changedPaths[0]!, line: 1,
+              explanation: "Independent deterministic reviewer checked the original source-bound Foundation.",
+            })),
+          }), "deterministic-r01-independent-review", true).catch(error => {
+            reviewerError = String(error); throw error;
+          });
+        }
+        return { result: s.result };
+      });
+      const input = { request: {
+        story: f.story, job: "single", task: f.start[3]!,
+        contract, turnPlanDigest: pinnedDigest,
+        fixture: false, skillsSource: source, validatorSource: source,
+        provider: scriptedModel.provider, model: scriptedModel.id,
+        orchestrationPolicy: "explicit" as const,
+      } };
+      const first = await withJobModelRuntime(runtime, () =>
+        graph.invoke(input, { ...config, interruptAfter: ["specialist_dispatch"] }));
+      assert.equal(first.active?.stage, "foundation", JSON.stringify({
+        status: first.status, reason: first.reason, operationRecovery: first.operationRecovery,
+        active: first.active, result: first.result }));
+      assert.equal(first.result?.status, "committed", JSON.stringify({ reason: first.reason,
+        recovery: currentOperationRecovery(first), active: first.active, status: first.status,
+        result: first.result, calls: observed.length, reviewCalls, reviewerError,
+        points: (await inspectRecoveryCheckpoints(f.job)).map(p => ({
+          workItem: p.workItem, eligible: p.eligible, reason: p.reason,
+          semanticReview: p.semanticReview, planVersion: p.planVersion,
+        })),
+        recoveryLifecycle: first.recoveryLifecycle,
+        recoverySources: first.recoverySources, nativeFoundation: existsSync(join(f.job.stateDir, "foundation.json"))
+          ? JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8")) : null }, null, 2));
+      const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+      assert.notEqual(head, f.initial, "The child must commit real Story bytes to Git");
+      assert.equal(first.result.headSha, head);
+      assert.equal(reviewCalls, 1);
+      assert.equal(observed.length, 6, "One pinned planning session and one original writer session settled");
+      assert.ok(observed[0]!.tools.includes("read"));
+      assert.ok(!observed[0]!.tools.includes("write"));
+      assert.ok(observed[3]!.tools.includes("write"));
+      assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
+      const points = await inspectRecoveryCheckpoints(f.job);
+      assert.equal(points.find(p => p.workItem === "foundation")?.semanticReview, "passed");
+      const namespaces = new Set<string>();
+      for await (const tuple of saver.list({ configurable: { thread_id: config.configurable.thread_id } }))
+        namespaces.add(tuple.config.configurable?.checkpoint_ns ?? "");
+      assert.ok(namespaces.size >= 2, "Parent and production Foundation child need distinct SQLite namespaces");
+      // Reopen the parent checkpoint immediately before child dispatch after
+      // the physical child already reached END. The original Pi/Git/Review
+      // effects must be reconciled, not repeated in the new physical task.
+      let pendingDispatch: Awaited<ReturnType<typeof graph.getState>> | undefined;
+      for await (const snapshot of graph.getStateHistory(config)) {
+        if (snapshot.next.includes("specialist_dispatch")) { pendingDispatch = snapshot; break; }
+      }
+      assert.ok(pendingDispatch, "Missing original parent dispatch checkpoint");
+      const replay = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+        ...pendingDispatch!.config, recursionLimit: 10000, interruptAfter: ["specialist_dispatch"],
+      }));
+      assert.equal(replay.result?.headSha, head);
+      assert.equal(observed.length, 6, "Child END before parent publication cannot replay Pi");
+      assert.equal(reviewCalls, 1);
+      assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
+      // Only the controller's original next edges may accept the child result.
+      const next = await withJobModelRuntime(runtime, () =>
+        graph.invoke(null, { ...config, interruptAfter: ["verify_committed_work"] }));
+      assert.equal(observed.length, 6, "Parent verification cannot repeat the Foundation writer");
+      assert.equal(reviewCalls, 1, "Already-sealed review must not require another reviewer");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+      assert.ok(next.completedStages.some((item: { stage: string }) => item.stage === "foundation"),
+        "Only the production parent's verified-work node advances completedStages");
+    } finally { saver.db.close(); }
+  } finally {
+    restoreSandbox();
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test("opt-in real Pi generation semantically chooses and reviews a deferred idea", {

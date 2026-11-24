@@ -98,7 +98,7 @@ test('new explicit-policy owner receipt rejects a changed orchestration policy',
     const explicit: GenerationRequest = { ...pinned, orchestrationPolicy: 'explicit' }
     await claimServerGeneration(job, thread, explicit)
     await assert.rejects(() => assertServerClaimPermitted(job, thread, {
-      ...explicit, orchestrationPolicy: 'fixture-legacy',
+      ...explicit, orchestrationPolicy: 'fixture-test',
     }), /conflicts/)
     await assert.rejects(() => assertServerClaimPermitted(job, thread, pinned), /conflicts/)
   } finally {

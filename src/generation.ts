@@ -1,5 +1,8 @@
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createAssignmentLifecycleGraph, logicalAssignmentKey,
+  type AssignmentIdentity, type AssignmentOutcome } from "./generation-assignment-lifecycle.js";
 import { readRecoveryFork, verifyReadyRecoveryFork, resolvedInheritedRecoveryReviews } from "./recovery-fork-state.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -94,8 +97,8 @@ export interface GenerationRequest {
   story: string; job: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string;
   provider?: string; model?: string; turnPlanDigest?: string;
-  /** New controller admission only. Absent means a pre-cutover pinned generation. */
-  orchestrationPolicy?: "explicit" | "fixture-legacy";
+  /** Fixtures may omit the model planner, never the shared assignment lifecycle. */
+  orchestrationPolicy?: "explicit" | "fixture-test";
 }
 export interface GenerationOptions {
   story: string; job: string; action: "start" | "resume" | "inspect";
@@ -198,7 +201,7 @@ export const GenerationInputSchema = z.object({
     provider: z.string().optional(),
     model: z.string().optional(),
     turnPlanDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-    orchestrationPolicy: z.enum(["explicit", "fixture-legacy"]).optional(),
+    orchestrationPolicy: z.enum(["explicit", "fixture-test"]).optional(),
   }),
   pauseAfter: z.enum(generationStages).nullable().optional(),
   fixPickup: z.object({ id: z.string(), check: z.string(), failedVersion: z.number().int(),
@@ -271,14 +274,33 @@ export function parseGenerationContract(value: unknown): CompletionContract {
     throw new Error("Partial generation requires explicit typed Story record targets.");
   return contract;
 }
+/** Execution admission, including direct checkpoint re-entry. Fixture identity is
+ * isolated from live Pi authority; a missing live Turn is never a fallback. */
+export async function requireGenerationTurn(job: JobStartResult, request: GenerationRequest,
+  admitted = false) {
+  if (request.orchestrationPolicy !== undefined && request.orchestrationPolicy !== "explicit" &&
+      request.orchestrationPolicy !== "fixture-test")
+    throw Error("Obsolete Generation execution format; inspect or start a current Turn.");
+  if (request.orchestrationPolicy === "fixture-test" && !request.fixture)
+    throw Error("Fixture-only orchestration cannot authorize production execution.");
+  const digest = request.turnPlanDigest;
+  if (request.fixture === true && digest === undefined) return null;
+  if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))
+    throw Error("Generation requires an authenticated current-format Turn plan digest.");
+  const path = join(job.stateDir, "turn-plan.json");
+  // An already admitted Turn can have a separately authenticated amended
+  // Work-plan contract; its original immutable Turn remains the source pin.
+  const contract = admitted && existsSync(join(job.stateDir, "architecture.json")) && existsSync(path)
+    ? (JSON.parse(await readFile(path, "utf8")) as { contract: CompletionContract }).contract
+    : request.contract;
+  const turn = await readTurnEvidence(job, contract, request.task, digest);
+  if (!turn) throw Error("Generation requires the original authenticated Turn receipt.");
+  if (!request.fixture && !turn.objective)
+    throw Error("Generation requires a current-format Turn objective; obsolete execution is refused.");
+  return turn;
+}
 async function checkPlan(job: JobStartResult, request: GenerationRequest, version: number | null | undefined) {
-  if (request.turnPlanDigest) {
-    const path = join(job.stateDir, "turn-plan.json");
-    const contract = existsSync(path)
-      ? (JSON.parse(await readFile(path, "utf8")) as { contract: CompletionContract }).contract
-      : request.contract;
-    await readTurnEvidence(job, contract, request.task, request.turnPlanDigest);
-  }
+  await requireGenerationTurn(job, request, true);
   const file = join(job.stateDir, "architecture.json");
   if (!existsSync(file)) {
     if (version != null) throw new Error("Pinned architecture receipt is missing; restore it before resuming.");
@@ -667,9 +689,8 @@ async function applyLiveSteeringAtBoundary(job: JobStartResult, request: Generat
 
 async function dispatch(s: Pick<State, "request" | "active">) {
   const input = s.request;
-  // Pre-cutover jobs retain their exact historical dispatch path. Modern
-  // pinned Turns load their saved amendment even on CLI recovery, so bypassing
-  // the Studio adapter can never silently discard applied author steering.
+  // Authenticated Turns load their saved amendment even on CLI recovery.
+  // Isolated fixture transports have no live author steering authority.
   const turnDigest = input.turnPlanDigest;
   const steering = turnDigest
     ? await (async () => {
@@ -700,6 +721,191 @@ export async function dispatchGenerationAssignment(s: { request: GenerationReque
   Promise<{ status: string; headSha?: string }> {
   return dispatch(s);
 }
+/**
+ * R01 production slice: only the atomic Creative Direction/Foundation writer
+ * enters the reusable checkpointed child. Composite work items retain their
+ * existing independent per-subunit review boundaries until their own migration.
+ * The parent still owns RecoveryLifecycle, plan reconciliation, inventory and
+ * author-update intake. The original foundation.json, Git and review receipts
+ * remain the only authorities for external effects.
+ */
+async function runFoundationAssignmentChild(
+  s: State, config: RunnableConfig,
+  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+): Promise<Partial<State>> {
+  if (s.active?.stage !== "foundation" || !s.inventory)
+    throw Error("R01 child requires the parent-admitted Foundation assignment.");
+  const job = await openJob(s);
+  const graphThreadId = config.configurable?.thread_id;
+  if (typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId)
+    throw Error("Foundation child lacks its exact authenticated parent graph Thread.");
+  // Parent reconciliation can refresh inventory HEAD after an original Git
+  // effect but before the original assignment is recorded complete. Recover
+  // the immutable source from the eligible native receipt, not refreshed HEAD.
+  const published = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.workItem === "foundation" && p.commitSha === s.inventory!.headSha &&
+    p.planVersion === (s.planVersion ?? null) && p.validation.status === "passed" &&
+    (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+  const interruptedCommit = !published && s.active.verifiedSha === s.inventory.headSha &&
+    jobGit(job, "rev-parse", "HEAD") === s.inventory.headSha &&
+    await inspectOriginalSpecialistCommitForResume(s, job);
+  const sourceHead = published?.parentSha ?? (interruptedCommit
+    ? jobGit(job, "rev-parse", "HEAD^") : s.inventory.headSha);
+  const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...assignmentScope } = s.active;
+  const scopeDigest = createHash("sha256").update(JSON.stringify({
+    task: s.request.task, contract: s.request.contract, active: assignmentScope,
+    planVersion: s.planVersion, turnDigest: s.request.turnPlanDigest ?? null,
+  })).digest("hex");
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
+    jobThreadId: job.threadId, graphThreadId,
+    turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
+      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
+      turnDigest: null, fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
+    }),
+    assignmentId: s.active.id, planVersion: s.planVersion,
+    sourceHeadSha: sourceHead, scopeDigest,
+  };
+  const key = logicalAssignmentKey(identity);
+  let reviewPatch: Partial<State> | null = null;
+  const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
+    extra: Record<string, string>): AssignmentOutcome =>
+    ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome;
+  const child = createAssignmentLifecycleGraph({
+    preflight: async () => {
+      const control = await readJobControl(job);
+      if (control === "cancelled") {
+        const error = Error("Original Turn was cancelled before Foundation dispatch.");
+        error.name = "StoryCancelledError"; throw error;
+      }
+      if (control === "paused")
+        return outcome("paused", "job-control", { controlRef: "job-control" });
+      // The original specialist owns dirty/authored-byte reconciliation. A
+      // crash after model completion may leave its authenticated target dirty;
+      // a blanket clean-worktree gate here would prevent safe verification.
+      await checkPlan(job, s.request, s.planVersion);
+      const currentHead = jobGit(job, "rev-parse", "HEAD");
+      if (currentHead !== sourceHead) {
+        // Two distinct crash windows: committed Git before the Foundation
+        // receipt was finalized (inspectOriginalSpecialistCommitForResume),
+        // and finalized native receipt before the parent task was checkpointed
+        // (the already-published recovery checkpoint). Both remain bound to
+        // the original source parent and *same* work-item identity.
+        const finalized = (await inspectRecoveryCheckpoints(job)).some(point =>
+          point.eligible && point.workItem === "foundation" &&
+          point.commitSha === currentHead && point.parentSha === sourceHead &&
+          point.planVersion === (s.planVersion ?? null) &&
+          point.validation.status === "passed");
+        if (!finalized && !await inspectOriginalSpecialistCommitForResume(s, job))
+          throw Error("Foundation source advanced without an authenticated original commit.");
+      } else if (!existsSync(join(job.stateDir, "foundation.json"))) {
+        if (await trustedHead(job) !== sourceHead)
+          throw Error("Foundation source does not match the admitted parent HEAD.");
+        clean(job);
+      }
+      return null;
+    },
+    invoke: async () => {
+      // Foundation's own started/settled Pi and Git receipt reconciliation
+      // prevents duplicate model turns, charges and commits after a crash.
+      const result = await dispatch(s);
+      if (!result.status)
+        throw Error("Foundation returned no settled specialist status.");
+      return { receiptRef: "foundation.json", status: result.status, headSha: result.headSha };
+    },
+    verify: async state => {
+      const submission = state.submission!;
+      const candidate: State = { ...s,
+        result: { status: submission.status, headSha: submission.headSha } };
+      if (!accepted.foundation.includes(submission.status))
+        return outcome("unresolved", submission.receiptRef,
+          { dispositionRef: "foundation.json" });
+      try {
+        reviewPatch = await reviewBoundary(candidate);
+      } catch (error) {
+        // Review runs within the shared child, but its original failed check
+        // is STILL independent-review, never the adjacent specialist writer.
+        // Admit it through the existing RecoveryLifecycle with its original
+        // source and receipt, not a second child-local recovery case.
+        reviewPatch = await operationFailure(candidate, job, "independent-review",
+          error, { reference: "review-checkpoints", assignmentId: identity.assignmentId });
+        return outcome("unresolved", "review-checkpoints",
+          { dispositionRef: "review-checkpoints" });
+      }
+      if (reviewPatch.status === "paused")
+        return outcome("paused", "review-checkpoints", { controlRef: "review-checkpoints" });
+      if (reviewPatch.status === "blocked" || reviewPatch.status === "cancelled" ||
+          reviewPatch.escalation || reviewPatch.operationRecovery || reviewPatch.recovery ||
+          reviewPatch.unknownRecovery)
+        return outcome("unresolved", "review-checkpoints", { dispositionRef: "review-checkpoints" });
+      if (reviewPatch.reviewSteeringHandoff)
+        return outcome("paused", "author-updates", { controlRef: "author-updates" });
+      const actual = reviewPatch.result === undefined ? candidate.result : reviewPatch.result;
+      if (!actual || !accepted.foundation.includes(actual.status) || !actual.headSha)
+        return outcome("unresolved", "review-checkpoints",
+          { dispositionRef: "review-checkpoints" });
+      try {
+        const head = await trustedHead(job);
+        if (actual.headSha !== head)
+          throw Error("Original Foundation result differs from independently reviewed Git HEAD.");
+        const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const reviews = await resolvedCheckpointReviews(job, points);
+        const reviewed = points.find(p => p.workItem === "foundation" &&
+          p.commitSha === head && p.parentSha === sourceHead &&
+          (s.request.fixture
+            ? p.validation.status === "passed"
+            : p.assurance?.turnDigest === s.request.turnPlanDigest &&
+              ["passed", "not-required"].includes(reviews.get(p.commitSha) ?? p.semanticReview)));
+        if (!reviewed) {
+          reviewPatch = await operationFailure(candidate, job, "independent-review",
+            "Foundation has no authenticated passing independent Review.",
+            { reference: "review-checkpoints", assignmentId: identity.assignmentId }, "returned-failure");
+          return outcome("unresolved", "review-checkpoints",
+            { dispositionRef: "review-checkpoints" });
+        }
+        return outcome("verified", "recovery-checkpoints:" + head,
+          { headSha: head, reviewRef: "review-checkpoints:" + head });
+      } catch (error) {
+        // The child must not relabel source/commit verification failures as a
+        // specialist-write error merely because verification is nested.
+        reviewPatch = await operationFailure(candidate, job, "commit-verification",
+          error, { reference: "generation-checkpoints", assignmentId: identity.assignmentId });
+        return outcome("unresolved", "recovery-checkpoints",
+          { dispositionRef: "generation-verification" });
+      }
+    },
+  });
+  // LangGraph passes the parent's persistent SQLite checkpointer to the
+  // nested graph. No standalone child scheduler, database, or recovery ledger.
+  const finished = await child.invoke({
+    identity, submission: null, outcome: null, continuationRef: null,
+  }, config);
+  if (!finished.outcome)
+    throw Error("Foundation child has a genuine pending author interrupt; return to parent control.");
+  if (finished.outcome.assignmentKey !== key)
+    throw Error("Foundation child returned a foreign assignment.");
+  // A completed child does not self-authorize a parent Work-plan change.
+  // The existing independent-assignment and commit-verification parent nodes
+  // will independently reauthenticate the review, Git and plan before advancing.
+  const reviewedState = reviewPatch as Partial<State> | null;
+  if (finished.outcome.status === "verified")
+    return { ...reviewedState,
+      result: { status: finished.submission!.status, headSha: finished.outcome.headSha } };
+  // Preserve an actual existing Review/RecoveryLifecycle disposition. An
+  // empty reviewer patch is NOT proof of completion: it must not return {}
+  // to the parent and cause the same Foundation writer to be selected again.
+  if (reviewedState && (reviewedState.status || reviewedState.operationRecovery ||
+      reviewedState.recovery || reviewedState.unknownRecovery ||
+      reviewedState.escalation || reviewedState.reviewSteeringHandoff))
+    return reviewedState;
+  if (finished.outcome.status === "paused")
+    return { status: "paused", reason: "Original Foundation child is suspended; inspect controller-owned control and review receipts." };
+  return operationFailure(s, job, "specialist-result",
+    "Original Foundation child returned a nonverified result; inspect the exact native/review receipt.",
+    { reference: "specialist-receipt", assignmentId: s.active.id,
+      resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
+}
+
 const accepted: Record<Stage, readonly string[]> = {
   ...verifiableResultStatus,
   review: ["complete-in-scope", "editorial-unverified", "blocked"],
@@ -1224,6 +1430,20 @@ export function recoveryNode(
       recoveryLifecycle: state.recoveryLifecycle ?? emptyRecoveryLifecycle(),
       recoverySources: state.recoverySources ?? [],
     };
+    // Authenticate before *any* node can run an effect, including a pending
+    // child/parent task resumed directly from SQLite rather than via START.
+    try {
+      if (!state.request) throw Error("Missing Generation request.");
+      if (state.request.fixture !== true || state.request.turnPlanDigest !== undefined ||
+          state.request.orchestrationPolicy !== undefined &&
+          state.request.orchestrationPolicy !== "explicit" && state.request.orchestrationPolicy !== "fixture-test")
+        await requireGenerationTurn(await openJob(state), state.request, !!state.graphThreadId);
+    } catch (error) {
+      return { status: "blocked", reason: error instanceof Error ? error.message : String(error),
+        recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+          fence: inspectionFence("untrusted-source", {}, [], null,
+            "Inspect the original Turn receipt; obsolete Generation execution cannot resume.") }) };
+    }
     try { assertRecoverySources(prior); }
     catch {
       return { status: "blocked", reason: "Recovery source inputs are missing or contradictory.",
@@ -1590,8 +1810,8 @@ export function createGenerationGraph(
         if (executionOwner === "cli") ensureNotServerOwned(job);
         else await claimServerGeneration(job, graphThreadId, request);
         // The trusted controller selects a METHOD, not a worker or write grant.
-        // Requests without a policy were checkpointed before this cutover and
-        // retain their original legacy plan path; never silently upgrade them.
+        // Every real Turn uses the pinned method; only isolated fixture
+        // transports may omit model planning.
         const sourceIdentity = {
           task: request.task, kind: request.contract.scope.kind,
           turnPlanDigest: request.turnPlanDigest,
@@ -1604,7 +1824,7 @@ export function createGenerationGraph(
         if (hasSelection) {
           selection = await loadSelectedStoryOrchestrator(job, graphThreadId, sourceIdentity);
           orchestratorSnapshotId = selection.receipt.skillSnapshot.id;
-        } else if (request.orchestrationPolicy === "explicit") {
+        } else if (!request.fixture || request.orchestrationPolicy === "explicit") {
           const checkout = request.skillsSource ?? process.env.NT_STUDIO_SKILLS_SOURCE ??
             (await loadSkillConfig()).novelteaSkills;
           if (!checkout) throw new Error(
@@ -1612,12 +1832,6 @@ export function createGenerationGraph(
             "nt-story-generate cannot be substituted.");
           selection = await selectStoryOrchestrator(job, graphThreadId, sourceIdentity, checkout);
           orchestratorSnapshotId = selection.receipt.skillSnapshot.id;
-        } else if (request.orchestrationPolicy === "fixture-legacy" && !request.fixture) {
-          throw new Error("Legacy fixture orchestration cannot run a real Pi writer.");
-        } else if (!request.orchestrationPolicy && !request.fixture && !s.cursor &&
-                   !s.completedStages?.length) {
-          throw new Error("Untagged real-Pi orchestration is not permitted for a new workflow. " +
-            "Restore a verified legacy checkpoint or select the pinned orchestrator explicitly.");
         }
         if (s.orchestratorSnapshotId && orchestratorSnapshotId !== s.orchestratorSnapshotId)
           throw new Error("Pinned orchestrator snapshot changed during generation resume.");
@@ -1626,22 +1840,18 @@ export function createGenerationGraph(
         if (selection && request.turnPlanDigest && !request.fixture) {
           const plan = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
           if (!plan) throw new Error("A selected objective lacks the controller's pinned Turn plan.");
-          // A previously started, pre-#149 Turn retains its original receipt and
-          // stage graph; it must not acquire a new Pi planning step on resume.
-          if (plan.objective) {
-            const { inspectPiPolicy } = await import("./job-pi-policy.js");
-            const { policy } = await inspectPiPolicy(job);
-            const provider = request.provider ?? policy.profile.provider;
-            const model = request.model ?? policy.profile.model;
-            if (s.orchestratorPlanningDigest && !s.orchestratorOrder)
-              throw new Error("Checkpointed orchestrator receipt digest has no assignment order; model replay refused.");
-            const receipt = s.orchestratorOrder
-              ? await restoreCheckpointedObjectivePlanning(job, selection, plan, provider, model,
-                  s.orchestratorPlanningDigest, s.orchestratorOrder)
-              : await runPinnedObjectivePlanner(job, selection, plan, provider, model);
-            orchestratorOrder = receipt.proposal!.assignments.map(a => a.id);
-            orchestratorPlanningDigest = receipt.digest;
-          }
+          const { inspectPiPolicy } = await import("./job-pi-policy.js");
+          const { policy } = await inspectPiPolicy(job);
+          const provider = request.provider ?? policy.profile.provider;
+          const model = request.model ?? policy.profile.model;
+          if (s.orchestratorPlanningDigest && !s.orchestratorOrder)
+            throw new Error("Checkpointed orchestrator receipt digest has no assignment order; model replay refused.");
+          const receipt = s.orchestratorOrder
+            ? await restoreCheckpointedObjectivePlanning(job, selection, plan, provider, model,
+                s.orchestratorPlanningDigest, s.orchestratorOrder)
+            : await runPinnedObjectivePlanner(job, selection, plan, provider, model);
+          orchestratorOrder = receipt.proposal!.assignments.map(a => a.id);
+          orchestratorPlanningDigest = receipt.digest;
         }
         if (s.orchestratorOrder && JSON.stringify(s.orchestratorOrder) !== JSON.stringify(orchestratorOrder))
           throw new Error("Pinned orchestration assignment order changed during resume.");
@@ -2102,8 +2312,12 @@ export function createGenerationGraph(
             priorHead: s.ideaTask?.priorHead, resultStatus: s.ideaResult?.status }); }
       });
     }))
-    .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async s => {
+    .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async (s, config) => {
       if (s.crossDomainCloseout) throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
+      // Every admitted Foundation assignment uses the shared child. A missing
+      // production Turn proof is fenced by the common execution boundary.
+      if (s.active?.stage === "foundation" && !s.result)
+        return runFoundationAssignmentChild(s, config, reviewBoundary);
       // A saved dispatch result means the external stage completed before a parent
       // verification checkpoint. Otherwise the stage API reconciles its receipt,
       // including a commit published before its receipt; never invent a new writer.
@@ -2659,11 +2873,16 @@ export async function runStoryGeneration(options: GenerationOptions) {
       if (options.action === "start") {
         if (state.request) throw new Error("Generation already exists; use resume or inspect, never overwrite its contract.");
         if (!options.task?.trim()) throw new Error("Generation start requires --task and --contract.");
+        const contract = parseGenerationContract(options.contract);
+        const turn = await readTurnEvidence(job, contract, options.task);
+        if (!options.fixture && !turn)
+          throw Error("Generation start requires a prepared authenticated Turn plan; obsolete unplanned CLI execution is not supported.");
         const request: GenerationRequest = { story: job.storyRoot, job: job.jobId, task: options.task,
-          contract: parseGenerationContract(options.contract), fixture: options.fixture ?? false,
+          contract, fixture: options.fixture ?? false,
+          ...(turn ? { turnPlanDigest: turn.digest } : {}),
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model,
-          orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-legacy" : "explicit" };
+          orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-test" : "explicit" };
         state = { request, recoveryLifecycle: emptyRecoveryLifecycle(), recoverySources: [],
           recovery: null, unknownRecovery: null, operationRecovery: null, fixPickup: null,
           cursor: 0, completedStages: [], status: "running", reason: null,
@@ -2691,6 +2910,10 @@ export async function runStoryGeneration(options: GenerationOptions) {
         throw new Error("Cannot start generation for a terminally cancelled Story job.");
       }
       let preflightStopped = untrustedModern;
+      if (options.action !== "inspect") {
+        try { await requireGenerationTurn(job, state.request, !!state.graphThreadId); }
+        catch (error) { state = { ...state, ...blocked(error) }; preflightStopped = true; }
+      }
       if (untrustedModern) {
         state = { ...state, status: "blocked", reason:
           "Saved modern recovery source/decision/attempt failed authenticated checkpoint inspection; " +
