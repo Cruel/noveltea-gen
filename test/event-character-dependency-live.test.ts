@@ -2,10 +2,10 @@
  * Opt-in self-contained end-to-end live Pi regression for a missing Character
  * first identified during an independently sealed Event review.
  *
- * Fixture: the original negative review is a deterministic source-linked
- * evaluator, NEVER represented as an actual model-authored verdict. The
- * original Event, support Character, original Event correction and both
- * successor reviews use real sandboxed Pi and the production controller.
+ * The original Event, independent negative Review, support Character,
+ * Event correction and successor reviews use real sandboxed Pi and the
+ * production controller. The deterministic SQLite certification lives in
+ * generation.test.ts (R14D).
  * No historical job SHA, issue ID, or private Story is required.
  *
  * NT_LIVE_EVENT_CHARACTER_DEPENDENCY=1 pnpm exec tsx --test test/event-character-dependency-live.test.ts
@@ -32,9 +32,50 @@ import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { readIndependentReview, resolvedCheckpointReviews } from "../src/checkpoint-assurance.js";
-import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
-import { advanceRejectedRepair, ReviewDependencyRequiredError } from "../src/rejected-review-repair.js";
-import { advanceReviewCharacterDependency } from "../src/dependency-work.js";
+import { createSkillSnapshot } from "../src/snapshot.js";
+import { reviewBoundedAssignments, runPiAssignmentReview } from "../src/semantic-assignment-review.js";
+import { ReviewDependencyRequiredError } from "../src/rejected-review-repair.js";
+import { advanceReviewCharacterDependency as runReviewSupport } from "../src/dependency-work.js";
+import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { executeReviewRound } from "../src/rejected-review-repair.js";
+import type { ReviewRoundCommand } from "../src/rejected-review-repair.js";
+
+/** Adapter certification runs the actual nested supporting writer child under
+ * a persisted test parent, rather than retaining an uncheckpointed runtime API. */
+async function advanceReviewCharacterDependency(input: Parameters<typeof runReviewSupport>[0]) {
+  const job = await startStoryJob({ story: input.story, job: input.job }, false);
+  const saver = SqliteSaver.fromConnString(join(job.stateDir, "event-character-test.sqlite"));
+  try {
+    const channels = Annotation.Root({ result: Annotation<Awaited<ReturnType<typeof runReviewSupport>>>() });
+    const graph = new StateGraph(channels)
+      .addNode("support", async (_, config) => ({ result: await runReviewSupport(input, config) }))
+      .addEdge(START, "support").addEdge("support", END).compile({ checkpointer: saver });
+    return (await graph.invoke({}, { configurable: { thread_id: job.threadId + ":support-test" }, durability: "sync" })).result;
+  } finally { saver.db.close(); }
+}
+
+/** Direct live adapter test, not a second production scheduler. The original
+ * adapter uses real independent review evidence; the production case is
+ * separately certified through the Generation graph. */
+async function executeEventReviewTest(job: Awaited<ReturnType<typeof startStoryJob>>, sourceSha: string,
+  options: Parameters<typeof executeReviewRound>[3]) {
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.commitSha === sourceSha && p.eligible)!;
+  const authority = { rootSha: sourceSha, caseId: "event-character-live-test",
+    assignmentKey: hash(job.threadId + ":" + point.workItem + ":" + sourceSha), workItem: point.workItem };
+  let command: ReviewRoundCommand = { phase: "admit", sourceSha };
+  for (;;) {
+    const result = await executeReviewRound(job, authority, command, options);
+    if (result.status === "admitted") command = { phase: "correct", sourceSha: result.sourceSha, grantDigest: result.grantDigest };
+    else if (result.status === "committed") command = { phase: "verify", sourceSha: result.sourceSha, successorSha: result.successorSha };
+    else if (result.status === "native-rejected") command = { phase: "native-invoke", sourceSha: result.sourceSha, grantDigest: result.grantDigest };
+    else if (result.status === "native-settled") command = { phase: "native-verify", sourceSha: result.sourceSha, proof: result.proof };
+    else if (result.status === "native-correction") command = { phase: "native-correct", sourceSha: result.sourceSha, proof: result.proof, grantDigest: result.grantDigest };
+    else if (result.status === "passed") return { next: "completed" };
+    else if (result.status === "failed") command = { phase: "admit", sourceSha: result.successorSha };
+    else throw Error("Unexpected Event Review test boundary: " + JSON.stringify(result));
+  }
+}
 import { finalizeReviewEventDependency, inspectDependencyPlan } from "../src/dependency-state.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { removeTestTree } from "./helpers.js";
@@ -319,52 +360,26 @@ night witness who may be able to identify its source.
         "The exercise requires an unregistered witness",
       );
 
-      // Deterministic independent negative evaluator, not a model-generated
-      // finding. Production seals and validates exact source/assignment proof.
-      await reviewBoundedAssignments(
-        job,
-        [point],
-        async (packet) => {
-          const item = packet.items[0]!;
-          return {
-            sourceDigest: packet.sourceDigest,
-            verdict: "fail",
-            findings: [
-              {
-                commitSha: sourceSha,
-                assignmentId: item.assignment.id,
-                path: eventPath,
-                line: citedLine,
-                kind: "missing-requirement",
-                message:
-                  "The original approved Turn requires Mara, but this Event has only the existing cast: the central night witness is missing and has no Character record.",
-                requiredCorrection:
-                  "Create a missing Character record for Mara and add her to Event participants; deliver her required on-screen witness dialogue.",
-                affectedPaths: [eventPath],
-              },
-            ],
-            evidence: [
-              {
-                commitSha: sourceSha,
-                assignmentId: item.assignment.id,
-                path: eventPath,
-                line: citedLine,
-                explanation:
-                  "Pinned Event omits the central witness required by the original whole-Story Turn objective.",
-              },
-            ],
-          };
-        },
-        "deterministic-independent-negative-fixture",
-        true,
-      );
+      // A migrated Review must authenticate an actual settled independent
+      // Pi verdict; a fabricated negative fixture cannot authorize a repair.
+      const reviewSnapshot = await createSkillSnapshot({ discovery: "explicit-only",
+        novelteaSkills: source, skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"] });
+      assert.ok(reviewSnapshot);
+      const firstReview = await withStoryJobLock(job, "independent-assignment-review", () =>
+        runPiAssignmentReview(job, [point], { snapshot: reviewSnapshot, provider, model,
+          reviewer: "independent-pi-assignment-review", onSession: async () => {} }));
+      assert.equal(firstReview.verdict.verdict, "fail", JSON.stringify(firstReview.verdict));
+      assert.ok(firstReview.verdict.findings.some(finding =>
+        finding.path === eventPath && /character/i.test(finding.requiredCorrection ?? "") &&
+        /mara/i.test(finding.requiredCorrection ?? "")),
+        "Original reviewer must identify the actual missing Character.");
       assert.equal((await readIndependentReview(job, point.assurance)).status, "failed");
       const sourceEventDigest = hash(text);
       assert.equal((await new SandboxClient().acquire(jobId)).status, "running");
       const options = { provider, model, skillsSource: source };
       let request: ReviewDependencyRequiredError["request"] | undefined;
       try {
-        await advanceRejectedRepair(job, sourceSha, options);
+        await executeEventReviewTest(job, sourceSha, options);
       } catch (error) {
         if (!(error instanceof ReviewDependencyRequiredError)) throw error;
         request = error.request;
@@ -388,7 +403,7 @@ night witness who may be able to identify its source.
         "failed",
         "Supporting Character review cannot erase the negative Event review",
       );
-      const repair = await advanceRejectedRepair(job, sourceSha, options);
+      const repair = await executeEventReviewTest(job, sourceSha, options);
       assert.equal(
         repair.next,
         "completed",

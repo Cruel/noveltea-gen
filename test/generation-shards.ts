@@ -3,6 +3,8 @@
  * expensive outliers need explicit weights; new tests participate automatically.
  * This affects scheduling only, never whether a test is eligible to run. */
 const slowCases: Record<string, number> = {
+  "R14D Event native correction and negative Review recover in the original SQLite assignment": 32,
+  "R14D Event native correction and negative Review recover in the original SQLite assignment with Character support": 60,
   "R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (review-stalled-continue)": 210,
   "R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (review-converges)": 147,
   "R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (review-stalled)": 111,

@@ -37,7 +37,7 @@ import { readTurnEvidence, assertFocusedTurnAssignment } from "./turn-plan-evide
 import { creativePolicyInstruction, DEFAULT_CREATIVE_POLICY, type CreativePolicy } from "./creative-policy.js";
 import { focusedChoiceWorkItem, recordSpecialistChoice, inspectSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
   completeSpecialistChoice, SpecialistChoiceRequiredError, authorChoiceDirection,
-  extractSpecialistChoice, parseSpecialistChoice, type SpecialistChoiceQuestion,
+  parseSpecialistChoice, type SpecialistChoiceQuestion,
   type SpecialistChoiceReceipt } from "./specialist-choice.js";
 
 interface Receipt {
@@ -151,13 +151,15 @@ export async function inspectFocusedFailure(job: JobStartResult, target: string,
   const terminal = await inspectAssignmentFailure({ ...options, effect: await assignmentDraftEffect(job, sourceHead) });
   return terminal && { ...terminal, ref: options.directory + "/terminal.json" };
 }
-export async function inspectPendingFocusedInvocation(job: JobStartResult, target: string) {
+export async function inspectPendingFocusedInvocation(job: JobStartResult, target: string, workItemId = "focus:" + target) {
   if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
-  const file = receiptPath(job, { workItemId: "focus:" + target, target });
+  if (workItemId !== "focus:" + target && !new RegExp("^dependency:[1-9][0-9]*:" + target.replace(".", "\\.") + "$").test(workItemId))
+    throw new ProtocolIntegrityBlockedError("Invalid Focused work-item identity.");
+  const file = receiptPath(job, { workItemId, target });
   if (!existsSync(file)) return null;
   const r = JSON.parse(await readFile(file, "utf8")) as Receipt;
   if (r.worker !== "pi" || r.phase !== "writing") return null;
-  if (r.jobId !== job.jobId || r.target !== target || r.workItemId !== "focus:" + target ||
+  if (r.jobId !== job.jobId || r.target !== target || r.workItemId !== workItemId ||
       !r.assignmentKey || r.invocationSource !== focusedInvocationSource(job, r))
     throw new ProtocolIntegrityBlockedError("Focused pending writer source changed.");
   await assignmentDraftEffect(job, r.expectedHead);
@@ -192,16 +194,18 @@ function changes(job: JobStartResult) {
     .split("\0").filter(Boolean);
 }
 /** Only an exact committed focused effect can cross the publication gap. */
-export async function inspectPendingFocusedCommit(job: JobStartResult, target: string, sourceHead?: string) {
+export async function inspectPendingFocusedCommit(job: JobStartResult, target: string, sourceHead?: string, workItemId = "focus:" + target) {
   if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
-  const file = receiptPath(job, { workItemId: "focus:" + target, target });
+  if (workItemId !== "focus:" + target && !new RegExp("^dependency:[1-9][0-9]*:" + target.replace(".", "\\.") + "$").test(workItemId))
+    throw new ProtocolIntegrityBlockedError("Invalid Focused work-item identity.");
+  const file = receiptPath(job, { workItemId, target });
   if (!existsSync(file)) return null;
   const receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
   if (!["authored", "committed"].includes(receipt.phase) ||
       sourceHead && receipt.expectedHead !== sourceHead) return null;
   const head = git(job, "rev-parse", "HEAD").trim();
   if (head === receipt.expectedHead || receipt.commitSha && receipt.commitSha !== head) return null;
-  if (receipt.jobId !== job.jobId || receipt.workItemId !== "focus:" + target || receipt.target !== target ||
+  if (receipt.jobId !== job.jobId || receipt.workItemId !== workItemId || receipt.target !== target ||
       !receipt.sha256 || changes(job).length ||
       git(job, "symbolic-ref", "--short", "HEAD").trim() !== job.branch ||
       git(job, "rev-parse", head + "^").trim() !== receipt.expectedHead)
@@ -370,7 +374,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   resume?: SpecialistChoiceReceipt,
   arcLink?: { path: string; characterId: string },
   eventReviewSupport = false, dependencyResume?: { file: string; id: string; changedPaths: string[] },
-  round?: AssignmentRoundCommand, verifyDraft?: (manifest: Record<string, unknown>) => Promise<AssignmentDefect[]>): Promise<DependencyReport | {
+  round: AssignmentRoundCommand | undefined = undefined, verifyDraft?: (manifest: Record<string, unknown>) => Promise<AssignmentDefect[]>): Promise<DependencyReport | {
     authorQuestion: SpecialistChoiceQuestion; sessionFile: string; sessionId: string;
   } | { round: AssignmentRoundResult } | undefined> {
   let dependencyReport: DependencyReport | undefined = receipt.pendingDependencyReport;
@@ -601,32 +605,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
       await context.completed(file, session.sessionId);
       return answer ?? dependencyReport;
     }
-    await context.beforeTurn(file);
-    await promptStorySpecialist(session, initialPrompt);
-    if (missingReads().length)
-      await promptStorySpecialist(session, "You did not successfully read all required pinned skill " +
-        "references. Read EACH exact path below using the read tool, then stop. " +
-        "Do not edit any Story file, redo work, or repeat a previously recorded dependency report. " +
-        "If your last response was an author question, repeat the COMPLETE authorDecisionRequest " +
-        "and empty modifiedRecords JSON after reading, without editing. Otherwise finish with a brief status.\nMISSING READS:\n" +
-        missingReads().join("\n"));
-    const last = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
-      throw new Error("Focused Pi specialist failed or was interrupted.");
-    if (missingReads().length)
-      throw new Error("Focused Pi specialist failed to read pinned skill guidance.");
-    const requested = extractSpecialistChoice(session.getLastAssistantText() ?? "");
-    if (requested) {
-      const question = parseSpecialistChoice(requested.authorDecisionRequest);
-      if (!Array.isArray(requested.modifiedRecords) || requested.modifiedRecords.length ||
-          changes(job).length || git(job, "rev-parse", "HEAD").trim() !== receipt.expectedHead ||
-          dependencyReport)
-        throw Error("Focused author question requires a clean unchanged, authorized work item.");
-      await context.completed(file, session.sessionId);
-      return { authorQuestion: question, sessionFile: file, sessionId: session.sessionId };
-    }
-    await context.completed(file, session.sessionId);
-    return dependencyReport;
+    throw new ProtocolIntegrityBlockedError("Focused Pi invocation requires its admitted round.");
   } finally { session.dispose(); }
 }
 export interface FocusedWorkOptions {
@@ -639,7 +618,7 @@ export interface FocusedWorkOptions {
   round?: { assignmentKey: string; command: AssignmentRoundCommand };
 }
 export async function runFocusedWorkItem(input: FocusedWorkOptions) {
-  if (!input.fixture && !input.dependencyAssignmentId && !input.round)
+  if (!input.fixture && !input.round)
     throw new ProtocolIntegrityBlockedError("Focused Pi writing requires its checkpointed assignment child.");
   if (input.round && !/^[a-f0-9]{64}$/.test(input.round.assignmentKey))
     throw new ProtocolIntegrityBlockedError("Focused writer lacks an admitted logical assignment key.");
@@ -698,7 +677,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       throw new Error("Focused target is outside the explicit completion contract.");
     const workItemId = input.dependencyAssignmentId ?? "focus:" + input.target;
     const file = receiptPath(job, { workItemId, target: input.target });
-    const pendingCommit = !dependency && await inspectPendingFocusedCommit(job, input.target);
+    const pendingCommit = await inspectPendingFocusedCommit(job, input.target, undefined, workItemId);
     if (pendingCommit) {
       const receipt = pendingCommit;
       const turn = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
@@ -709,6 +688,16 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         throw Error("Focused committed receipt no longer matches original Turn authority.");
       const records = reportOf(await validateStoryJob(job, input.validatorSource ?? input.skillsSource,
         { ...job, baseSha: receipt.expectedHead }), receipt.expectedHead);
+      if (dependency) {
+        const grant = dependency.amendment!.assignment.authority;
+        const paths = [...grant.existingPaths, ...(grant.newPaths ?? [])].sort();
+        if (receipt.assignmentKey !== input.round?.assignmentKey && !input.fixture ||
+            receipt.expectedHead !== dependency.amendment!.sourceSha ||
+            JSON.stringify(paths) !== JSON.stringify(receipt.paths) ||
+            paths.some(path => !records.some(record => record.path === path)))
+          throw new ProtocolIntegrityBlockedError("Supporting commit differs from its original grant.");
+        receipt.validation = { status: "passed", validatorVersion: job.validatorVersion, baseSha: receipt.expectedHead };
+      } else {
       const ownedIds = [input.target, ...(input.target === input.contract.scope.targets[0] ?
         input.contract.scope.supportingTargets ?? [] : [])];
       const owned = records.filter(record => ownedIds.includes(record.metadata.id));
@@ -716,6 +705,9 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           owned.length !== ownedIds.length) throw Error("Focused committed paths differ from authorized targets.");
       if (turn) assertFocusedTurnAssignment(turn, input.target, receipt.paths,
         [...new Set(owned.map(r => r.metadata.type))].sort());
+      }
+      if (!input.fixture && receipt.assignmentKey !== input.round?.assignmentKey)
+        throw new ProtocolIntegrityBlockedError("Committed Focused receipt belongs to another assignment.");
       receipt.phase = "committed";
       await save(file, receipt);
       if (receipt.authorChoiceId && (await inspectSpecialistChoice(job, receipt.authorChoiceId)).phase === "resuming")

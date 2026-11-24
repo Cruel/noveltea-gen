@@ -714,7 +714,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
           if (!phase) return read([skill + "/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
             ...(path === eventPath ? ["nt-catalog/references/progression.md"] : [])].map(p => "skill://" + p));
           if (phase === 1) {
-            if (scenario === "support-no-write" && support) return stop("The prerequisite needs no edits.");
+            if (scenario === "support-no-write" && support) return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [] });
             if (scenario === "writer" && !support && !writerYield) {
               writerYield = true;
               return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-prerequisite", name: "report_dependency",
@@ -737,9 +737,46 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
       const invoke = (input: Parameters<ReturnType<typeof createGenerationGraph>["invoke"]>[0],
         options: typeof config & { interruptBefore?: string[]; interruptAfter?: string[] }) =>
         withJobModelRuntime(runtime, () => createGenerationGraph(saver, "cli").invoke(input, options));
-      const suspended = await invoke({ request: { story: f.story, job: job.jobId, task, contract,
+      const initialRequest = { request: { story: f.story, job: job.jobId, task, contract,
         fixture: false, skillsSource: source, turnPlanDigest: turn.digest, provider: scriptedModel.provider,
-        model: scriptedModel.id }, pauseAfter: null }, { ...config, interruptBefore: ["dependency_amendment"] });
+        model: scriptedModel.id }, pauseAfter: null };
+      type Input = Parameters<ReturnType<typeof createGenerationGraph>["invoke"]>[0];
+      async function crashAt(input: Input, boundary: string, match: (namespace: string, writes: Array<[string, unknown]>) => boolean,
+        options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
+        const abort = new AbortController();
+        const error = Error("R14D injected SQLite loss after " + boundary);
+        const put = saver.put.bind(saver);
+        const putWrites = saver.putWrites.bind(saver);
+        let crashed = false;
+        saver.put = async (...args) => {
+          if (crashed) throw error;
+          return put(...args);
+        };
+        saver.putWrites = async (cfg, writes, task) => {
+          if (crashed) throw error;
+          if (match(String(cfg.configurable?.checkpoint_ns ?? ""), writes)) {
+            crashed = true;
+            abort.abort(error);
+            throw error;
+          }
+          return putWrites(cfg, writes, task);
+        };
+        await assert.rejects(withJobModelRuntime(runtime, () => createGenerationGraph(saver, "cli").invoke(input, {
+          ...config, ...options, signal: abort.signal, durability: "sync",
+        })), err => { if (!crashed) throw err; return true; });
+        assert.ok(crashed, "Expected actual SQLite output loss: " + boundary);
+        assert.equal(existsSync(join(job.stateDir, ".story-job")), false);
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+      }
+      if (scenario === "writer") {
+        await crashAt(initialRequest, "returned no-write child outcome", (ns, writes) =>
+          !ns && writes.some(([channel, value]) => channel === "focusedPrerequisite" &&
+            !!value && (value as { supportRef?: string }).supportRef === null),
+        { interruptBefore: ["dependency_amendment"] });
+      }
+      const suspended = await invoke(scenario === "writer" ? null : initialRequest,
+        { ...config, interruptBefore: ["dependency_amendment"] });
       const pin = scenario === "writer" ? suspended.focusedPrerequisite : suspended.reviewPrerequisite;
       assert.ok(pin, JSON.stringify({ reason: suspended.reason, status: suspended.status }));
       assert.equal(pin.suspension.pendingPhase, scenario === "writer" ? "writer" : "review");
@@ -749,6 +786,16 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
       const originalHead = git(job.worktreeRoot, "rev-parse", "HEAD");
       const receiptPath = join(job.stateDir, "focused-items", event + ".json");
       const originalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      if (scenario === "writer") {
+        await crashAt(null, "support commit before original child reentry", (ns, writes) =>
+          ns.includes("assignment-") && writes.some(([channel, value]) => channel === "submission" &&
+            (value as { status?: string; receiptRef?: string } | undefined)?.status === "focused-committed" &&
+            (value as { receiptRef?: string }).receiptRef?.startsWith("dependency:") === true),
+        { interruptAfter: ["dependency_amendment"] });
+        assert.equal(supportWrites, 1);
+        assert.equal(originalWrites, 0);
+        assert.equal(git(job.worktreeRoot, "rev-list", "--count", originalHead + "..HEAD"), "1");
+      }
       const supported = await invoke(null, { ...config, interruptAfter: ["dependency_amendment"] });
       if (scenario === "support-no-write") {
         assert.equal(supportWrites, 0);
@@ -772,37 +819,12 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         const resumed = await invoke(null, { ...config, interruptBefore: ["completion_decision", "specialist_dispatch"] });
         // The first dispatch boundary is the exact original continuation.
         assert.ok(resumed.focusedPrerequisite?.supportRef);
-        // Lose the actual SQLite child output after the corrective Pi response
-        // has settled, but before its ordinal is checkpointed in LangGraph.
-        const abort = new AbortController();
-        const error = Error("R14D injected SQLite loss after Focused correction");
-        const put = saver.put.bind(saver);
-        const putWrites = saver.putWrites.bind(saver);
-        let crashed = false;
-        saver.put = async (...args) => {
-          if (crashed) throw error;
-          return put(...args);
-        };
-        saver.putWrites = async (cfg, writes, task) => {
-          if (crashed) throw error;
-          const submission = writes.find(([channel]) => channel === "submission")?.[1] as
-            { status?: string } | undefined;
-          if (cfg.configurable?.checkpoint_ns?.includes("assignment-") &&
-              submission?.status === "writer-round" && localCorrections === 1) {
-            crashed = true;
-            abort.abort(error);
-            throw error;
-          }
-          return putWrites(cfg, writes, task);
-        };
-        await assert.rejects(withJobModelRuntime(runtime, () => createGenerationGraph(saver, "cli").invoke(null, {
-          ...config, interruptAfter: ["verify_committed_work"], signal: abort.signal, durability: "sync",
-        })), err => { if (!crashed) throw err; return true; });
-        assert.ok(crashed, "Expected settled Focused correction output to be lost");
+        await crashAt(null, "settled Focused correction", (ns, writes) =>
+          ns.includes("assignment-") && localCorrections === 1 && writes.some(([channel, value]) =>
+            channel === "submission" && (value as { status?: string } | undefined)?.status === "writer-round"),
+        { interruptAfter: ["verify_committed_work"] });
         assert.equal(originalWrites, 1);
         assert.equal(localCorrections, 1);
-        saver.db.close();
-        saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
         const finished = await invoke(null, { ...config, interruptAfter: ["verify_committed_work"] });
         assert.equal(localCorrections, 1, "Original correction must not be invoked again");
         assert.equal(finished.focusedPrerequisite, null, finished.reason ?? "");
@@ -811,6 +833,9 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.ok(originalReceipt.piSessionFile && originalReceipt.piSessionId);
         assert.equal(finalReceipt.piSessionFile, originalReceipt.piSessionFile);
         assert.equal(finalReceipt.piSessionId, originalReceipt.piSessionId);
+        assert.equal(finalReceipt.assignmentKey, pin.suspension.assignmentKey);
+        assert.deepEqual(finalReceipt.paths, originalReceipt.paths);
+        assert.equal(finalReceipt.invocationProof.ordinal, 1);
         assert.equal(git(job.worktreeRoot, "rev-list", "--count", job.baseSha + "..HEAD"), "2");
         assert.equal((await inspectDependencyPlan(job))!.entries[0]!.phase, "verified");
         return;

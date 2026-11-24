@@ -12,7 +12,7 @@ export function eventTestAssignmentKey(input: EventOptions) {
 }
 
 export async function runEventTestAssignment(input: EventOptions) {
-  if (input.fixture || input.action === "inspect") return runEventWorkItem(input);
+  if (input.action === "inspect" || input.fixture && !["repair", "failed-repair"].includes(process.env.NT_EVENT_FIXTURE_CASE ?? "")) return runEventWorkItem(input);
   const assignmentKey = eventTestAssignmentKey(input);
   let command: AssignmentRoundCommand = { phase: "invoke" };
   for (;;) {

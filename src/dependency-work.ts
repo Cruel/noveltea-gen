@@ -1,11 +1,16 @@
+import { subunitRoundProof, subunitWriterResult } from "./generation-writer-round.js";
+import { AssignmentAuthorPauseError, type AssignmentRoundCommand } from "./assignment-metadata-recovery.js";
+import { readJobControl } from "./job-control.js";
+import { trustedHead } from "./revision.js";
+import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { RunnableConfig } from "@langchain/core/runnables";
-import { createAssignmentLifecycleGraph, logicalAssignmentKey, type AssignmentIdentity } from "./generation-assignment-lifecycle.js";
+import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, type AssignmentIdentity, type AssignmentOutcome, type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
 import { join } from "node:path";
 import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { inspectFocusedPrerequisite, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
+import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, registerReviewDependency, approveDependency,
   inspectDependencyPlan, saveDependencyPlan } from "./dependency-state.js";
@@ -19,6 +24,80 @@ import { focusedSpecialist } from "./focused-specialist.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { openSkillSnapshot } from "./snapshot.js";
 import { reviewNarrative, type ReviewAssignment } from "./narrative-review-specialist.js";
+
+/** The existing plan entry is the sole supporting authority. A dirty
+ * restart may only reconcile the exact already admitted Focused round. */
+async function supportingBoundary(job: import("./job.js").JobStartResult,
+  entry: NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>["entries"][number] | undefined) {
+  if (entry?.amendment && entry.phase === "authorized" && !entry.fixture) {
+    const { assignment, sourceSha } = entry.amendment;
+    const pending = await inspectPendingFocusedInvocation(job, assignment.targets[0]!, assignment.id);
+    if (pending) {
+      if (pending.expectedHead !== sourceSha || await trustedHead(job) !== sourceSha ||
+          pending.assignmentDigest !== entry.report.turnDigest ||
+          JSON.stringify(pending.paths) !== JSON.stringify([...assignment.authority.existingPaths,
+            ...(assignment.authority.newPaths ?? [])].sort()))
+        throw new ProtocolIntegrityBlockedError("Supporting draft lost its original grant.");
+      return sourceSha;
+    }
+    const committed = await inspectPendingFocusedCommit(job, assignment.targets[0]!, sourceSha, assignment.id);
+    if (committed) return committed.commitSha;
+    const head = await dependencyBoundary(job);
+    if (head !== sourceSha) throw new ProtocolIntegrityBlockedError("Supporting assignment source HEAD changed.");
+    return head;
+  }
+  return dependencyBoundary(job);
+}
+
+function supportingWriterRounds(job: import("./job.js").JobStartResult, identity: AssignmentIdentity,
+  input: FocusedWorkOptions, currentEntry: () => Promise<NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>["entries"][number] | undefined>) {
+  const key = logicalAssignmentKey(identity);
+  const preflight = async (): Promise<AssignmentOutcome | null> => {
+    const entry = await currentEntry();
+    if (!entry?.amendment || dependencyDigest(entry.amendment.assignment) !== identity.scopeDigest ||
+        entry.amendment.afterVersion !== identity.planVersion ||
+        entry.amendment.sourceSha !== identity.sourceHeadSha ||
+        !["authorized", "reviewing", "verified"].includes(entry.phase))
+      throw new ProtocolIntegrityBlockedError("Supporting child lost its original grant.");
+    const control = await readJobControl(job);
+    if (control === "cancelled") { const error = Error("Supporting assignment cancelled."); error.name = "StoryCancelledError"; throw error; }
+    if (control === "paused") return { status: "paused", assignmentKey: key,
+      evidenceRef: entry.reportDigest, controlRef: "job-control" };
+    await supportingBoundary(job, entry);
+    return null;
+  };
+  const run = async (command: AssignmentRoundCommand) => {
+    const stopped = await preflight();
+    if (stopped) return stopped;
+    const entry = (await currentEntry())!;
+    if (entry.phase === "reviewing" || entry.phase === "verified")
+      return { receiptRef: identity.assignmentId, status: "focused-committed", headSha: entry.commitSha };
+    const result = await runFocusedWorkItem({ ...input, round: { assignmentKey: key, command } });
+    if (result.status !== "writer-round" && (result.status !== "focused-committed" || !result.headSha))
+      throw new ProtocolIntegrityBlockedError("Supporting writer failed to settle its bounded native commit.");
+    return subunitWriterResult(result, identity.assignmentId);
+  };
+  const invoke = async (command: AssignmentRoundCommand) => {
+    const result = await run(command);
+    if ("correctionRef" in result) throw new ProtocolIntegrityBlockedError("Supporting writer cannot self-admit a correction.");
+    return result;
+  };
+  return {
+    preflight,
+    invoke: () => invoke({ phase: "invoke" }),
+    correct: (submission: AssignmentSubmission, correction: { correctionRef: string }) =>
+      invoke({ phase: "correct", proof: subunitRoundProof(submission), grantDigest: correction.correctionRef }),
+    verify: async (submission: AssignmentSubmission) => {
+      const stopped = await preflight();
+      if (stopped) return stopped;
+      const result = await run({ phase: "verify", proof: subunitRoundProof(submission) });
+      if ("assignmentKey" in result || "correctionRef" in result) return result;
+      if (result.status !== "focused-committed" || !result.headSha)
+        throw new ProtocolIntegrityBlockedError("Supporting native commit not settled.");
+      return { submission: result, reviewPending: true as const };
+    },
+  };
+}
 
 /** Serialized sub-work at the originating assignment's no-write boundary.
  * The parent stays on that assignment, so no second origin writer is scheduled.
@@ -43,9 +122,9 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
   const report = suspension.report;
   const reportDigest = suspension.seal.reportDigest;
   const assignment = await withStoryJobLock(job, "dependency-authorization", async () => {
-    const head = await dependencyBoundary(job);
     let plan = await inspectDependencyPlan(job);
     let entry = plan?.entries.find(e => e.reportDigest === reportDigest);
+    const head = await supportingBoundary(job, entry);
     if (!entry) ({ plan, entry } = await recordDependency(job, report, input.fixture));
     if (!plan || !entry || entry.fixture !== input.fixture) throw Error("Dependency mode/provenance changed.");
     if (entry.phase === "verified") {
@@ -94,27 +173,15 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     sourceHeadSha: report.sourceSha, scopeDigest: dependencyDigest(assignment),
   };
   const key = logicalAssignmentKey(identity);
+  const rounds = supportingWriterRounds(job, identity, { ...input, target: assignment.targets[0]!,
+    dependencyAssignmentId: assignment.id }, async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest));
   const child = createAssignmentLifecycleGraph({
-    preflight: async () => {
-      const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
-      if (!current?.amendment || dependencyDigest(current.amendment.assignment) !== identity.scopeDigest ||
-          current.amendment.afterVersion !== identity.planVersion ||
-          !["authorized", "reviewing", "verified"].includes(current.phase))
-        throw Error("Supporting child lost its exact controller authorization.");
-      return null;
-    },
-    invoke: async () => {
-      const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
-      if (current?.phase === "reviewing")
-        return { receiptRef: assignment.id, status: "focused-committed", headSha: current.commitSha };
-      const result = await runFocusedWorkItem({ ...input, target: assignment.targets[0]!,
-        dependencyAssignmentId: assignment.id });
-      if (result.status !== "focused-committed" || !result.headSha)
-        throw Error("Dependency specialist did not publish a native-validated bounded commit.");
-      return { receiptRef: assignment.id, status: result.status, headSha: result.headSha };
-    },
+    preflight: rounds.preflight,
+    invoke: rounds.invoke,
+    correct: state => rounds.correct(state.submission!, state.correction!),
     verify: async state => {
       const result = state.submission!;
+      if (result.status === "writer-round") return rounds.verify(result);
       const complete = await withStoryJobLock(job, "dependency-review", async () => {
     const head = await dependencyBoundary(job);
     saved = await inspectDependencyPlan(job);
@@ -188,7 +255,8 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     },
   });
   const finished = await child.invoke({ identity, submission: null, submissionKey: null,
-    outcome: null, continuationRef: null, suspension: null }, config);
+    outcome: null, continuationRef: null, suspension: null }, { ...assignmentChildConfig(config!, identity), durability: "sync" });
+  if (finished.outcome?.status === "paused") throw new AssignmentAuthorPauseError();
   if (finished.outcome?.status !== "verified" || finished.outcome.assignmentKey !== key)
     throw Error("Supporting child did not independently verify the approved prerequisite.");
   return { status: "dependency-verified", reportDigest };
@@ -216,9 +284,13 @@ export async function advanceReviewDependency(input: {
       request.turnDigest !== input.turnPlanDigest)
     throw Error("Review-dependency execution requires an unchanged full-Story Character obligation.");
   const assignment = await withStoryJobLock(job, "review-dependency-authorization", async () => {
-    const head = await dependencyBoundary(job);
-    const { plan, entry } = await registerReviewDependency(job, request,
-      input.validatorSource ?? input.skillsSource);
+    const existing = await inspectDependencyPlan(job);
+    const prior = existing?.entries.find(e => e.reviewSourceSha === request.sourceSha);
+    const head = await supportingBoundary(job, prior);
+    const { plan, entry } = existing && prior?.amendment && prior.phase === "authorized" &&
+      existing.reviewRequests?.some(r => dependencyDigest(r) === dependencyDigest(request))
+      ? { plan: existing, entry: prior }
+      : await registerReviewDependency(job, request, input.validatorSource ?? input.skillsSource);
     if (entry.phase === "verified") return entry.amendment!.assignment;
     if (entry.phase === "reviewing" && entry.commitSha === head)
       return entry.amendment!.assignment;
@@ -253,21 +325,6 @@ export async function advanceReviewDependency(input: {
     return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
   if (entry.phase !== "authorized" && entry.phase !== "reviewing")
     throw Error("Review-dependency authoring is not in an approved phase.");
-  const invoke = async () => {
-    if (entry.phase === "reviewing")
-      return { receiptRef: assignment.id, status: "focused-committed", headSha: entry.commitSha };
-    const result = await runFocusedWorkItem({
-    story: input.story, job: input.job, target: assignment.targets[0]!,
-    task: input.task, contract: input.contract, fixture: false,
-    skillsSource: input.skillsSource, validatorSource: input.validatorSource,
-    provider: input.provider, model: input.model,
-    turnPlanDigest: input.turnPlanDigest,
-    dependencyAssignmentId: assignment.id,
-  });
-    if (result.status !== "focused-committed" || !result.headSha)
-      throw Error("Supporting specialist did not publish a native-validated, bounded commit.");
-    return { receiptRef: assignment.id, status: result.status, headSha: result.headSha };
-  };
   const verify = async (result: { headSha?: string }) => withStoryJobLock(job, "review-dependency-independent-review", async () => {
     const head = await dependencyBoundary(job);
     const persisted = await inspectDependencyPlan(job);
@@ -392,8 +449,8 @@ export async function advanceReviewDependency(input: {
     await saveDependencyPlan(job, persisted);
     return current;
   });
-  if (graphConfig) {
-    const graphThreadId = graphConfig.configurable?.thread_id;
+  {
+    const graphThreadId = graphConfig?.configurable?.thread_id;
     if (typeof graphThreadId !== "string")
       throw Error("Review support requires the admitting parent graph Thread.");
     const identity: AssignmentIdentity = {
@@ -403,16 +460,15 @@ export async function advanceReviewDependency(input: {
       scopeDigest: dependencyDigest(assignment),
     };
     const key = logicalAssignmentKey(identity);
+    const rounds = supportingWriterRounds(job, identity, {
+      ...input, target: assignment.targets[0]!, fixture: false, dependencyAssignmentId: assignment.id,
+    }, async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === entry.reportDigest));
     const child = createAssignmentLifecycleGraph({
-      preflight: async () => {
-        const current = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === entry.reportDigest);
-        if (!current?.amendment || dependencyDigest(current.amendment.assignment) !== identity.scopeDigest ||
-            !["authorized", "reviewing", "verified"].includes(current.phase))
-          throw Error("Supporting Review child lost its original grant.");
-        return null;
-      },
-      invoke,
+      preflight: rounds.preflight,
+      invoke: rounds.invoke,
+      correct: state => rounds.correct(state.submission!, state.correction!),
       verify: async state => {
+        if (state.submission!.status === "writer-round") return rounds.verify(state.submission!);
         const reviewed = await verify(state.submission!);
         if (reviewed.review?.verdict !== "pass" || !reviewed.commitSha)
           throw Error("Supporting child lacks independent positive review.");
@@ -421,13 +477,10 @@ export async function advanceReviewDependency(input: {
       },
     });
     const finished = await child.invoke({ identity, submission: null, submissionKey: null,
-      outcome: null, continuationRef: null, suspension: null }, graphConfig);
+      outcome: null, continuationRef: null, suspension: null }, { ...assignmentChildConfig(graphConfig!, identity), durability: "sync" });
+    if (finished.outcome?.status === "paused") throw new AssignmentAuthorPauseError();
     if (finished.outcome?.status !== "verified" || finished.outcome.assignmentKey !== key)
       throw Error("Supporting Review child did not verify its authorized prerequisite.");
-  } else {
-    // Direct adapter certification uses the same writer and verifier; the
-    // production parent always supplies its inherited LangGraph config.
-    await verify(await invoke());
   }
   return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
 }

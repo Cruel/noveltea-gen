@@ -4,12 +4,15 @@ import { assertMilestoneFulfillmentOnly, milestoneBodyOnlyDrift,
   milestoneBaselineBody } from "./milestone-field-scope.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
-import { assignmentDraftEffect, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
-import { authorEventCluster, eventInvocationDirectory, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
+import { assignmentDraftEffect, executeAssignmentRound, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
+import { readJobControl } from "./job-control.js";
+import { StoryCancelledError } from "./story-interruption.js";
+import type { ResponseContractSession } from "./response-contract-recovery.js";
+import { parseEventManifest, authorEventCluster, eventInvocationDirectory, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
   scopedDecisionSetupConflict, eventDecisionSetupCorrection,
   observedNondecisionMilestone,
@@ -29,7 +32,7 @@ import { buildEventConsequenceProof, eventConsequenceProofDigest,
 import { assertPlanContinuity, assertFoundationArchitectureContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
-import { preflightPiAssignment } from "./job-pi-policy.js";
+import { guardPiBudget, preflightPiAssignment } from "./job-pi-policy.js";
 import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint,
   inspectMilestoneBlueprint, readReviewedMilestoneBlueprint,
   type MilestoneBlueprintPin } from "./milestone-blueprint.js";
@@ -47,6 +50,7 @@ interface EventReceipt {
   sessionFile?: string; sessionId?: string; authorChoiceId?: string;
   invocationSource?: string; invocationChoice?: string; invocationProof?: AssignmentInvocationProof;
   assignmentKey?: string;
+  fixtureCorrectionCase?: "repair" | "failed-repair";
   /** Older Event items predate the local Blueprint gate; new items require it. */
   blueprintRequired?: boolean; blueprintTask?: string; blueprintPin?: MilestoneBlueprintPin;
   assignment?: EventAssignment;
@@ -118,7 +122,7 @@ function eventInvocationSource(job: JobStartResult, receipt: EventReceipt) {
     workItem: receipt.workItemId, head: receipt.expectedHead, planVersion: receipt.planVersion,
     plan: receipt.planDigest, assignment: receipt.assignment, snapshot: receipt.snapshot?.id,
     provider: receipt.provider, model: receipt.model, reroutedFrom: receipt.reroutedFrom,
-    choice: receipt.invocationChoice ?? null, assignmentKey: receipt.assignmentKey }));
+    choice: receipt.invocationChoice ?? null, assignmentKey: receipt.assignmentKey, fixtureCorrectionCase: receipt.fixtureCorrectionCase }));
 }
 function eventInvocationOptions(job: JobStartResult, receipt: EventReceipt) {
   if (!receipt.invocationSource || receipt.invocationSource !== eventInvocationSource(job, receipt) ||
@@ -126,8 +130,9 @@ function eventInvocationOptions(job: JobStartResult, receipt: EventReceipt) {
     throw Error("Event invocation receipt lost its original source or session");
   return { directory: eventInvocationDirectory(job, receipt.workItemId, receipt.sessionId, receipt.invocationSource),
     sourceDigest: receipt.invocationSource, sessionId: receipt.sessionId, sessionFile: receipt.sessionFile,
-    sessionRoots: [join(job.stateDir, "event-sessions", receipt.workItemId,
-      ...(receipt.reroutedFrom ? ["rerouted-" + receipt.reroutedFrom] : []))],
+    sessionRoots: [receipt.fixtureCorrectionCase ? join(job.stateDir, "event-fixture-sessions", receipt.workItemId) :
+      join(job.stateDir, "event-sessions", receipt.workItemId,
+        ...(receipt.reroutedFrom ? ["rerouted-" + receipt.reroutedFrom] : []))],
     responseKind: "event-manifest-or-choice" as const };
 }
 export async function inspectPendingEventInvocation(job: JobStartResult, milestone: string, sourceHead?: string) {
@@ -139,7 +144,7 @@ export async function inspectPendingEventInvocation(job: JobStartResult, milesto
       sourceHead && r.expectedHead !== sourceHead) return null;
   if (r.jobId !== job.jobId || r.baseSha !== job.baseSha || r.milestoneId !== milestone ||
       r.workItemId !== "event-" + milestone.slice(10)) throw Error("Event pending receipt identity changed");
-  if (r.worker === "pi") {
+  if (r.worker === "pi" || r.fixtureCorrectionCase) {
     if (!r.assignment || !r.snapshot || r.invocationSource !== eventInvocationSource(job, r) ||
         await openSkillSnapshot(r.snapshot.id) !== r.snapshot.path)
       throw Error("Original Event invocation source changed");
@@ -162,7 +167,7 @@ export async function inspectPendingEventInvocation(job: JobStartResult, milesto
         !git(job, "log", "-1", "--format=%B", head).includes("NovelTea-Event-Design: " + r.contentDigest))
       return null;
     if (r.phase === "committed") verifyCommit(job, r, head);
-    if (r.worker === "pi") {
+    if (r.worker === "pi" || r.fixtureCorrectionCase) {
       if (!r.invocationProof) throw Error("Original Event commit lacks settled writer proof");
       await verifySettledAssignment({ ...eventInvocationOptions(job, r), proof: r.invocationProof, effect: r.contentDigest! });
     }
@@ -659,6 +664,94 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
     skillReads: [] };
 }
 
+/** Deterministic test transport for the corrective fixture cases. It emits
+ * the same manifest and effects as Pi, but never supplies Pi assurance or
+ * charges invented model usage. All correction policy lives in the shared
+ * round service; this function only performs the admitted fixture effect. */
+async function authorFixtureEventRound(job: JobStartResult, receipt: EventReceipt,
+  receiptFile: string, assignment: EventAssignment, command: AssignmentRoundCommand,
+  verifyDraft: (candidate: EventEvidence) => Promise<string[]>) {
+  const root = join(job.stateDir, "event-fixture-sessions", receipt.workItemId);
+  await mkdir(root, { recursive: true });
+  if (!receipt.sessionId && !receipt.sessionFile) {
+    receipt.sessionId = randomUUID();
+    receipt.sessionFile = join(root, receipt.sessionId + ".jsonl");
+    await writeFile(receipt.sessionFile, JSON.stringify({ type: "session", id: receipt.sessionId }) + "\n", { flag: "wx" });
+    await persist(receiptFile, receipt);
+  }
+  const file = receipt.sessionFile!;
+  if (!file.startsWith(root + "/") || await realpath(file) !== file ||
+      receipt.invocationSource !== eventInvocationSource(job, receipt))
+    throw Error("Fixture Event round lost its original source or session.");
+  const entries = (await readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  if (entries[0]?.type !== "session" || entries[0]?.id !== receipt.sessionId)
+    throw Error("Fixture Event session changed.");
+  const messages: Array<ResponseContractSession["messages"][number]> =
+    entries.slice(1).map(entry => entry.message);
+  let tools = ["write", "edit"];
+  const session: ResponseContractSession = {
+    sessionId: receipt.sessionId!, sessionManager: { getSessionFile: () => file }, messages,
+    getActiveToolNames: () => tools, setActiveToolsByName: names => { tools = names; },
+  };
+  const add = async (message: ResponseContractSession["messages"][number]) => {
+    messages.push(message);
+    await appendFile(file, JSON.stringify({ type: "message", message }) + "\n");
+  };
+  let accepted: EventEvidence | undefined;
+  const settled = await executeAssignmentRound({
+    session, directory: eventInvocationDirectory(job, receipt.workItemId, session.sessionId, receipt.invocationSource!),
+    sourceDigest: receipt.invocationSource!, sessionRoots: [root], responseKind: "event-manifest-or-choice",
+    initialPrompt: "Deterministic Event fixture for admitted original assignment",
+    authorize: async () => {
+      assertHead(job, receipt.expectedHead);
+      if (receipt.invocationSource !== eventInvocationSource(job, receipt) ||
+          receipt.fixtureCorrectionCase !== process.env.NT_EVENT_FIXTURE_CASE)
+        throw Error("Fixture Event grant changed.");
+    },
+    effect: () => assignmentDraftEffect(job, receipt.expectedHead),
+    beforeTurn: async () => {
+      const control = await readJobControl(job);
+      if (control === "cancelled") throw new StoryCancelledError(receipt.workItemId);
+      if (control !== "running") throw new AssignmentAuthorPauseError();
+      await guardPiBudget(job, "event:" + receipt.workItemId);
+    },
+    prompt: async prompt => {
+      const initial = !messages.length;
+      await add({ role: "user", content: prompt });
+      let manifest: ReturnType<typeof parseEventManifest>;
+      if (initial) {
+        const evidence = await fixtureAuthor(job, assignment);
+        manifest = { modifiedRecords: evidence.claimedPaths, architecturalConflicts: evidence.conflicts,
+          laterObligations: evidence.obligations };
+      } else {
+        const prior = [...messages].reverse().find(m => m.role === "assistant");
+        if (!prior || !Array.isArray(prior.content)) throw Error("Fixture Event lost its original manifest.");
+        manifest = parseEventManifest(prior.content.map(part => part.text ?? "").join(""));
+        if (receipt.fixtureCorrectionCase === "repair" && tools.includes("edit")) {
+          const cluster = fixtureCluster(assignment.milestoneId);
+          const target = join(job.worktreeStoryRoot, "events", cluster.slug("disclose-ledger") + ".md");
+          await writeFile(target, (await readFile(target, "utf8")).replace(
+            cluster.text("completed: [event.inspect-ledger]\n      not_completed: [event.inspect-ledger]"),
+            "completed: []\n      not_completed: []"));
+        }
+      }
+      await add({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: JSON.stringify(manifest) }] });
+    },
+    verify: async manifest => {
+      const summary = parseEventManifest(JSON.stringify(manifest));
+      const evidence: EventEvidence = { claimedPaths: summary.modifiedRecords,
+        conflicts: summary.architecturalConflicts, obligations: summary.laterObligations, skillReads: [] };
+      const diagnostics = await verifyDraft(evidence);
+      if (!diagnostics.length) accepted = evidence;
+      return diagnostics.map(detail => ({ kind: "semantic" as const, path: assignment.milestoneId,
+        code: hash(detail), detail }));
+    },
+  }, command);
+  if (settled.status !== "accepted") return { round: settled };
+  if (!accepted) throw Error("Fixture Event has no verified result.");
+  return { ...accepted, invocationProof: settled.proof };
+}
+
 export async function runEventWorkItem(input: EventOptions) {
   if (!idPattern.test(input.milestone)) throw new Error("--milestone must be a typed milestone.<slug> ID.");
   if (input.action === "run" && !input.fixture && !input.round)
@@ -868,9 +961,12 @@ export async function runEventWorkItem(input: EventOptions) {
         await persist(receiptFile, receipt);
       } else return output(job, receipt);
     }
-    if (input.round && receipt.worker === "pi" && receipt.assignmentKey && receipt.assignmentKey !== input.round.assignmentKey)
+    const correctiveFixture = receipt.worker === "fixture" && (receipt.fixtureCorrectionCase || ["repair", "failed-repair"].includes(process.env.NT_EVENT_FIXTURE_CASE ?? ""));
+    if (input.action === "run" && correctiveFixture && !input.round)
+      throw Error("Corrective Event fixture requires its checkpointed assignment round.");
+    if (input.round && (receipt.worker === "pi" || correctiveFixture) && receipt.assignmentKey && receipt.assignmentKey !== input.round.assignmentKey)
       throw Error("Event round belongs to another logical assignment.");
-    if (input.round && receipt.worker === "pi" && !receipt.assignmentKey) {
+    if (input.round && (receipt.worker === "pi" || correctiveFixture) && !receipt.assignmentKey) {
       if (receipt.phase !== "ready" || input.round.command.phase !== "invoke")
         throw Error("Event receipt lacks its original child assignment admission.");
       receipt.assignmentKey = input.round.assignmentKey;
@@ -906,7 +1002,7 @@ export async function runEventWorkItem(input: EventOptions) {
       .addNode("event_specialist", async ({ receipt }) => {
         if (receipt.phase === "authored") return { receipt };
         const continuing = receipt.phase === "writing";
-        if (continuing && (receipt.worker !== "pi" || !receipt.assignment ||
+        if (continuing && (receipt.worker !== "pi" && !correctiveFixture || !receipt.assignment ||
             !await inspectPendingEventInvocation(job, receipt.milestoneId, receipt.expectedHead)))
           throw Error("Interrupted Event specialist lacks its original invocation.");
         const resuming = receipt.phase === "awaiting-author" || continuing && !!receipt.invocationChoice;
@@ -939,7 +1035,8 @@ export async function runEventWorkItem(input: EventOptions) {
             receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
           if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
           receipt.assignment = assign;
-          if (receipt.worker === "pi") {
+          if (receipt.worker === "pi" || correctiveFixture) {
+            if (correctiveFixture) receipt.fixtureCorrectionCase = process.env.NT_EVENT_FIXTURE_CASE as "repair" | "failed-repair";
             receipt.invocationChoice = choice?.sessionSha256;
             receipt.invocationSource = eventInvocationSource(job, receipt);
             delete receipt.invocationProof;
@@ -1056,24 +1153,14 @@ export async function runEventWorkItem(input: EventOptions) {
           };
           let evidence: EventEvidence;
           if (receipt.worker === "fixture") {
-            evidence = await fixtureAuthor(job, assign, !!receipt.reroutedFrom,
+            if (correctiveFixture) {
+              const authored = await authorFixtureEventRound(job, receipt, receiptFile, assign,
+                input.round!.command, verifyDraft);
+              if ("round" in authored) return { receipt, round: authored.round };
+              evidence = authored;
+              receipt.invocationProof = evidence.invocationProof;
+            } else evidence = await fixtureAuthor(job, assign, !!receipt.reroutedFrom,
               !!arch.plan?.causalAmendment);
-            if (["failed-repair", "repair"].includes(process.env.NT_EVENT_FIXTURE_CASE ?? "")) {
-              // Exercise the same bounded, source-located feedback seam as Pi:
-              // one fixture corrects the contradiction; another refuses.
-              for (let attempt = 0; attempt < 3; attempt++) {
-                const errors = await verifyDraft(evidence);
-                if (!errors.length) break;
-                if (process.env.NT_EVENT_FIXTURE_CASE === "repair" && attempt === 0) {
-                  const target = join(job.worktreeStoryRoot, "events/disclose-ledger.md");
-                  await writeFile(target, (await readFile(target, "utf8"))
-                    .replace("completed: [event.inspect-ledger]\n      not_completed: [event.inspect-ledger]",
-                      "completed: []\n      not_completed: []"));
-                } else if (attempt === 2) {
-                  throw new Error("Event specialist exhausted bounded repair attempts: " + errors.join("; "));
-                }
-              }
-            }
           } else {
             const authored = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
               async (file, id) => { receipt.sessionFile = file; receipt.sessionId = id; await persist(receiptFile, receipt); }, verifyDraft,
@@ -1188,7 +1275,7 @@ export async function runEventWorkItem(input: EventOptions) {
             await contentDigest(job, receipt.paths) !== receipt.contentDigest) {
           throw new Error("Authored Event inventory changed or has architectural conflicts.");
         }
-        if (receipt.worker === "pi") {
+        if (receipt.worker === "pi" || receipt.fixtureCorrectionCase) {
           if (!receipt.invocationProof) throw Error("Authored Event lacks its settled invocation");
           await verifySettledAssignment({ ...eventInvocationOptions(job, receipt),
             proof: receipt.invocationProof, effect: receipt.contentDigest });

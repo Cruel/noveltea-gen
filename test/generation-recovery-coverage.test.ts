@@ -201,6 +201,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     readFileSync(resolve(root, "src/generation-assignment-lifecycle.ts"), "utf8"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const printer = ts.createPrinter({ removeComments: true });
+  const writer = ts.createSourceFile("generation-writer-round.ts", readFileSync(resolve(root, "src/generation-writer-round.ts"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const reviewed = [
     [file, "requireGenerationTurn", "4e2cba38f5a0211fef83a9ed6ef9765cb71e6b8aa2e640f13d67e81b5ea0b7f8"],
     [file, "dispatch", "b53b8a265586d2e0f1ea91cc012f550f07af447ee2ee3b2abe3cca92e5bd07ed"],
@@ -216,10 +217,10 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "runFocusedAssignmentChild", "e1dc74bee5785bfd58a557f035741fddd1baf596437a8d3fbadb059b472b2ec5"],
     [child, "createAssignmentLifecycleGraph", "5ea8e3f06e6bc4043d45182c853d93e761bae03fed84fd8a998f0ecd717da0bb"],
     [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
-    [file, "subunitRoundProof", "e96aea128cea5b5684c76de341552399255a2ed79329e8c161e4552a278a514a"],
-    [file, "subunitWriterResult", "f37d39dce1f50b1cb032b235712bd6e37ef55f1de8b7b3dc36b0b1ea0ab05e56"],
+    [writer, "subunitRoundProof", "e96aea128cea5b5684c76de341552399255a2ed79329e8c161e4552a278a514a"],
+    [writer, "subunitWriterResult", "f37d39dce1f50b1cb032b235712bd6e37ef55f1de8b7b3dc36b0b1ea0ab05e56"],
     [file, "subunitReviewTransitions", "34552a8f637d15a358c73c4b627cadea6460aa1a927d5ecb58c2c3514526b2c4"],
-    [file, "subunitReviewStop", "4416cbfcd99527aa44c9bd2d11f664bc7a446c5505830d51ffdaadaaffcb5fa3"],
+    [file, "subunitReviewStop", "715a0422597a2bd2b70c26baf5db85300ac0e66c7ff422e60da7c7e8b4c5cc1d"],
     [file, "runInteractiveAssignmentChildren", "57ad4e10462ee0c13a3e8ade3d0526a778355c62f98850306fe90c38d969c785"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
@@ -268,7 +269,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["generation-operation-strategy.ts", "originalAssignmentFailure", "9453b0f683a9c5fb398f91931c208a0675f5d31baf8f6cabb397ce14ff96d369"],
     ["generation.ts", "authenticateRecoveryOrigin", "54da6d1399ad76f89e3d85e990df26d4baa27ae5828c051aa55976b3c7906adf"],
     ["generation.ts", "recoverySourceHead", "fd6141d99953e6634ecb99c519817c4b211a563257d57e784d044a16a311d181"],
-    ["focused-work.ts", "inspectPendingFocusedCommit", "6b63fa58aeea50fe6cb880733991b32b5c928ef429a2f8772e49afc75803c538"],
+    ["focused-work.ts", "inspectPendingFocusedCommit", "8559cdf8665172eb9726a604c6fbf42ebb2b4251e32e54c895c807fb7743e6ff"],
     ["rejected-review-repair.ts", "executeReviewRound", "e2de72664aea492971f806c4ff88df5b3cffd97623ce34f6d9c7bcccadccd74c"],
     ["rejected-review-repair.ts", "reviewRoundGrant", "3d2bef4e0a67cec58e809af0190b4a117d8093263dc328e13044a6580d27d8a2"],
     ["rejected-review-repair.ts", "attestNegativeReviewRound", "2708c28d6dda4b162b85c033c6f3e4dbb29930f1dbbfd71dee3675e5f96a6807"],
@@ -284,13 +285,19 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["focused-work.ts", "inspectFocusedPrerequisite", "87d1343ce5730592beb5f99ee8023e10dcabbc2b711d587ea60ae417ba262b0d"],
     ["focused-work.ts", "focusedInvocationSource", "48438d7bf37a5f941dcb220c325c9961e949226de8b4c7a0c349e1a52d335d74"],
     ["focused-work.ts", "focusedInvocationOptions", "88f96819c1783655ed3b16231750a557c666c4018550423f41c303f3d154d488"],
-    ["focused-work.ts", "inspectPendingFocusedInvocation", "1e1dbb1af09fc2277464fd3754d0e557b84e806344230752e16ea390105fb41c"],
+    ["focused-work.ts", "inspectPendingFocusedInvocation", "a03f63a1f63ef2dfe4993614c5ff5a6a9fa472fb90ea3eeb37b5f90749a6e384"],
     ["focused-work.ts", "inspectFocusedFailure", "82e7bfdf27dcb67bdba4dc62796c4d04edb2f3d3e76ab4f8479b7493fee17f54"],
-    ["focused-work.ts", "runFocusedWorkItem", "50032dc66b5f195f87af714ef956527aaabff3230793589a83ace45ba5159bf1"],
-    ["event-work.ts", "runEventWorkItem", "3a16fdc3117c98388e766ec8b0c04bc8b6e76d1c442e5763a5ccdbfc48b99ec8"],
-    ["event-work.ts", "eventInvocationSource", "5eb4b654281addcb61b5b230c4d76b727e06fc37c2d6a5b66ef48dd69f86952b"],
+    ["focused-work.ts", "runFocusedWorkItem", "735741390228b5631f7e66fb27675d1e139744323cf9bdfbc75ecf1fad3d3957"],
+    ["event-work.ts", "runEventWorkItem", "6f6e2a63a01503e82706c11b9c1d6f6b24a323abd51049422d7f976363dcf50c"],
+    ["event-work.ts", "eventInvocationSource", "bb2d3f242c24494b33da772668c8764d92084256b5822f75b0123bb298ac9b47"],
+    ["dependency-work.ts", "supportingBoundary", "fad02bcf68074d368135eb54027b6dc7009185e49fbaccbe98469e26e936ea8e"],
+    ["dependency-work.ts", "supportingWriterRounds", "bcc599e80409ec613505db5f65364782e8164a78d6d8f4d2f9ec21f2b6553f1c"],
+    ["dependency-work.ts", "advanceFocusedDependency", "81fa2a835b5ab67d54731e23db186a522d355928ebb9dde82fd5486be4e9ed26"],
+    ["dependency-work.ts", "advanceReviewDependency", "b5c73f6e15e019d44eb8fbd105894017044b1fb87e746bd1b2047031958bdf0a"],
+    ["event-work.ts", "authorFixtureEventRound", "062748d5f179cf0861f6562f96c3484959259ff4a646a52bdb01d23a044f2bd0"],
+    ["event-work.ts", "eventInvocationOptions", "44b04492d8c1cbbcde375a03c04d63aa8506c4ef7e630f7f33423df84a173d8d"],
     ["dependency-state.ts", "finalizeReviewEventDependency", "ce044f10dc685c2008819df852d2b1428a463e7e8e852bb789e4423b10f8075c"],
-    ["event-work.ts", "inspectPendingEventInvocation", "aa572f432d559cb9a7e5274a662e87342416198df67580488611b79b31b0a324"],
+    ["event-work.ts", "inspectPendingEventInvocation", "ac31f4536bcba270673950f061ccb9bdf3016e0fad383345bfca9427b2658548"],
     ["composition-work.ts", "inspectPendingCompositionInvocation", "4ef9ee4c81a3da6c24a51545aa48daa1e75b2f7cdfcc34c298baa7a7671e17b9"],
     ["interactive-work.ts", "inspectPendingInteractiveInvocation", "b17f6e0277797c386c1bb436081c94a7b77058593530a2187367a042ae021067"],
   ] as const;

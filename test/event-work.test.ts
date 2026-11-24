@@ -484,6 +484,11 @@ A missing witness leaves a ledger and suspicion between two former collaborators
     return head as string;
   }
   function event(variant?: string, milestone = "milestone.disclosure") {
+    if (variant === "repair" || variant === "failed-repair") return spawnSync(process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e",
+        'import { runEventTestAssignment } from "./test/event-round-fixture.ts"; console.log(JSON.stringify(await runEventTestAssignment(JSON.parse(process.argv[1]))));',
+        JSON.stringify({ story, job: "draft", milestone, action: "run", fixture: true, skillsSource: source })],
+      { encoding: "utf8", timeout: 120_000, env: { ...env, NT_EVENT_FIXTURE_CASE: variant } });
     return cli(["event", "run", "--fixture", "--milestone", milestone, "--skills-source", source], variant);
   }
   return { repo, story, job, baseline, cli, prepare, event };
@@ -967,13 +972,13 @@ test("exhausted localized repair preserves contradictory draft without marking c
   const before = prepare();
   const result = event("failed-repair");
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /exhausted bounded repair attempts/);
+  assert.match(result.stderr, /nonconverg/i);
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), before);
   const inspected = cli(["event", "inspect", "--milestone", "milestone.disclosure"]);
   assert.equal(inspected.status, 0);
   const data = JSON.parse(inspected.stdout);
   assert.equal(data.status, "writing");
-  assert.match(data.failure, /exhausted bounded repair/);
+  assert.match(data.failure, /nonconverg/i);
   assert.equal(data.validation, undefined);
   assert.equal(data.completionEvidence.eventReachability, false);
   assert.ok(existsSync(join(job.worktreeStoryRoot, "events/disclose-ledger.md")));

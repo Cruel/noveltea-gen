@@ -5234,6 +5234,241 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
+for (const needsCharacter of [false, true]) test("R14D Event native correction and negative Review recover in the original SQLite assignment" + (needsCharacter ? " with Character support" : ""), {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("r14d-event-rounds" + (needsCharacter ? "-character" : ""));
+  f.env.NT_ARCHITECTURE_FIXTURE_CASE = "decision-choice";
+  f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  if (needsCharacter) f.start[3] += " Include Mara, the central night witness, in the disclosure Event.";
+  saveFixtureTurn(f.job, contract, f.start[3]!, [
+    "Release and withhold must produce independently evidenced Choice consequences.",
+    ...(needsCharacter ? ["Characters include Mara, a required night witness who participates in the disclosure Event."] : []),
+  ]);
+  if (needsCharacter) {
+    // The generic fixture Turn lacks a Character-creation owner. Use the
+    // real authority shape required for the full-Story support grant.
+    const file = join(f.job.stateDir, "turn-plan.json");
+    const { digest: _digest, ...body } = JSON.parse(readFileSync(file, "utf8"));
+    const foundations = body.assignments.find((a: { id: string }) => a.id === "foundations");
+    foundations.specialist = "nt-worldbuilding + nt-character-development";
+    foundations.authority.recordTypes = ["character", "world-entity"];
+    writeFileSync(file, JSON.stringify({ ...body, digest: createHash("sha256").update(JSON.stringify(body)).digest("hex") }, null, 2));
+  }
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false),
+    /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  const paused = f.cli(["generate", "resume", "--pause-after", "foundations"]);
+  assert.equal(paused.status, "paused", JSON.stringify(paused));
+  const saved = Object.fromEntries(["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR",
+    "NT_SANDBOX_SOCKET", "NT_SANDBOX_TOKEN_FILE",
+    "NT_ARCHITECTURE_FIXTURE_CASE"].map(key => [key, process.env[key]]));
+  Object.assign(process.env, {
+    NT_STATE_DIR: f.env.NT_STATE_DIR,
+    NT_CONFIG_FILE: f.env.NT_CONFIG_FILE,
+    NT_SKILL_CACHE_DIR: f.env.NT_SKILL_CACHE_DIR,
+    NT_ARCHITECTURE_FIXTURE_CASE: f.env.NT_ARCHITECTURE_FIXTURE_CASE,
+  });
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  let saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    const readSources = [...boundedPinnedSources("nt-event-design").map(p => "skill://" + p),
+      "milestones/disclosure.md"];
+    const plan = { schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.disclosure",
+      events: [{ id: "disclose-ledger", purpose: "The witness presents the concealed record",
+        dependsOn: [], participants: ["character.ada", "character.neri"],
+        evidence: [{ anchorPath: "milestones/disclosure.md",
+          source: "A transfer record Neri can physically present",
+          observation: "Ada sees the ledger and the prospective release decision",
+          access: "Neri has the preserved original, Ada is present",
+          establishes: "The witness knows where the evidence is kept",
+          limits: "The release and withhold consequences still need Choice authorship" }],
+        knowledge: "Ada sees the ledger; only a future player choice determines its release",
+        routes: [] }],
+      downstream: [{ owner: "interactive",
+        obligation: "Implement the release or withhold Choice and preserve both outcomes" },
+      { owner: "composition", obligation: "Present evidence and the implemented Choice consequences" }],
+    };
+    const authored = [
+      "---", "schema: '0.1'", "type: event", "id: event.disclose-ledger",
+      'title: "disclose-ledger"', "status: draft", "decisions: []",
+      "participants: [character.ada, character.neri]", "arcs: [arc.truth]",
+      'consequences: ["Neri presents a pending opportunity to release or withhold the ledger"]',
+      "after: []", "prerequisites:", "  any_of:", "    - completed: []",
+      "      not_completed: []", "      conditions:",
+      "        - kind: knowledge", "          character: character.neri",
+      "          fact: fact.evidence-concealed", "          value: knows",
+      "steps:", "  - id: decision-offered", "    branches:",
+      "      - id: protect", "        conditions: []", "        effects: []",
+      "      - id: challenge", "        conditions: []", "        effects: []",
+      "---", "", "Neri offers Ada the choice to protect him or challenge his concealment of the ledger. The player has not yet made that choice.", "",
+    ].join("\n");
+    const path = "events/disclose-ledger.md";
+    const quote = needsCharacter ? "Mara steps forward and identifies Neri's signature from the night shift." :
+      "Ada studies Neri's signature on the ledger before the player must decide.";
+    const requiredCorrection = needsCharacter ? "Create a missing Character record for Mara and add her to Event participants; deliver her required on-screen witness dialogue." : quote;
+    const supportPath = "characters/mara.md";
+    const character = "---\nschema: '0.1'\ntype: character\nid: character.mara\ntitle: Mara\nstatus: draft\ndecisions: []\nmotivation: Protect the witness and testify truthfully\ninitial_knowledge: []\n---\n\nMara is the archive night witness. She is willing to testify to preserve the ledger and protect the witness.\n";
+    const corrected = needsCharacter ? authored.replace("participants: [character.ada, character.neri]", "participants: [character.ada, character.neri, character.mara]") : authored;
+    const manifest = { modifiedRecords: [path], architecturalConflicts: [], laterObligations: [
+      "Formal Choice Point binding must enact the protect and challenge outcomes for this Milestone before fulfillment.",
+    ] };
+    const { runtime, observed } = await scriptedStoryRuntime((index, context) => {
+      if ([0, 2, 4].includes(index)) return { content: scriptedReadCalls(readSources, index), reason: "toolUse" };
+      if (index === 1) return { content: scriptedText(plan), reason: "stop" };
+      if (index === 3) return { content: scriptedText({ schema: "noveltea-milestone-blueprint-review/v5",
+        status: "pass", findings: [], prior: [] }), reason: "stop" };
+      const write = (content: string) => ({ content: [{ type: "toolCall" as const,
+        id: "r14d-event-" + index, name: "write", arguments: { path, content } }], reason: "toolUse" as const });
+      if (index === 5) return write(authored.replace("value: knows", "value: known"));
+      if (index === 6 || index === 8) return { content: scriptedText(manifest), reason: "stop" };
+      if (index === 7) {
+        assert.match(JSON.stringify(context.messages), /SOURCE-BOUND STORY CORRECTION/);
+        return write(authored);
+      }
+      if (index === 9) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+      if (needsCharacter && index >= 11 && index <= 17) {
+        if (index === 11) return { content: scriptedReadCalls([
+          "nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+          "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md",
+        ].map(p => "skill://" + p).concat(path, "characters/ada.md", "characters/neri.md"), index), reason: "toolUse" };
+        if (index === 12) return { content: scriptedText({ target: "character.mara", specialist: "nt-character-development",
+          title: "Mara", outcome: requiredCorrection, reason: "The original Turn explicitly requires this distinct night witness." }), reason: "stop" };
+        if (index === 13) return { content: scriptedReadCalls(["nt-character-development/SKILL.md", "nt-catalog/SKILL.md",
+          "nt-catalog/references/records.md"].map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 14) return { content: [{ type: "toolCall", id: "r14d-character", name: "write", arguments: { path: supportPath, content: character } }], reason: "toolUse" };
+        if (index === 15) return { content: scriptedText({ modifiedRecords: [supportPath], architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
+        const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+        const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
+        const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
+        if (index === 16) return { content: scriptedReadCalls(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths), index), reason: "toolUse" };
+        return { content: scriptedText({ verdict: "pass", findings: [], evidence: [supportPath + ":1: Mara has a source-grounded role as required."] }), reason: "stop" };
+      }
+      const correctionIndex = needsCharacter ? 18 : 11;
+      if (index === correctionIndex) return write(corrected + "\n" + quote + "\n");
+      if (index === correctionIndex + 1) return { content: scriptedText("Clarified the source-linked observation."), reason: "stop" };
+      if (index === 10 || index === correctionIndex + 2) {
+        const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+        const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+          .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+        assert.ok(prompt);
+        const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        const item = packet.items[0];
+        const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1 };
+        return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: index === 10 ? "fail" : "pass",
+          findings: index === 10 ? [{ ...ref, kind: "missing-requirement", message: "The visible evidence is insufficiently explicit.",
+            requiredCorrection, affectedPaths: [path] }] : [],
+          evidence: index !== 10 ? [{ ...ref, explanation: quote }] : [],
+          ...(index !== 10 ? { progressDiagnosis: { status: "material", reason: "Added visible observation.",
+            evidence: { path, quote, change: "added" } } } : {}),
+        }), reason: "stop" };
+      }
+      throw Error("Unexpected Event assignment call " + index);
+    });
+    let graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const initial = (await graph.getState(cfg)).values;
+    const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "event:milestone.disclosure");
+    assert.ok(item);
+    const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+    await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
+      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
+    }, "author_update_intake");
+    async function crashAtSubmission(status: string, calls: number, options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
+      const abort = new AbortController();
+      const put = saver.put.bind(saver);
+      const putWrites = saver.putWrites.bind(saver);
+      let crashed = false;
+      const error = Error("R14D injected SQLite loss after " + status);
+      saver.put = async (...args) => {
+        if (crashed) throw error;
+        return put(...args);
+      };
+      saver.putWrites = async (config, writes, task) => {
+        if (crashed) throw error;
+        const submission = writes.find(([channel]) => channel === "submission")?.[1] as { status?: string } | undefined;
+        if (config.configurable?.checkpoint_ns?.includes("assignment-") && submission?.status === status && observed.length === calls) {
+          crashed = true;
+          abort.abort(error);
+          throw error;
+        }
+        return putWrites(config, writes, task);
+      };
+      await assert.rejects(withJobModelRuntime(runtime, async () => {
+        const result = await graph.invoke(null, { ...cfg, ...options, signal: abort.signal, durability: "sync" });
+        throw Error("Missing intended checkpoint loss: " + JSON.stringify({ reason: result.reason,
+          status: result.status, recovery: result.recoveryLifecycle, calls: observed.length,
+          }));
+      }), err => { if (!crashed) throw err; return true; });
+      assert.ok(crashed);
+      assert.equal(observed.length, calls);
+      saver.db.close();
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      graph = createGenerationGraph(saver, "cli");
+    }
+    await crashAtSubmission("writer-round", 9, { interruptBefore: ["assess_recovery"] });
+    const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(failed.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({ reason: failed.reason, recovery: failed.recoveryLifecycle, calls: observed.length }));
+    assert.equal(observed.length, 11);
+    const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+    assert.equal(event.invocationProof.ordinal, 1);
+    const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(selected.recoveryLifecycle));
+    await assertSubunitReviewAuthority(f.job, selected, "event-disclosure", "interactive-choice-disclosure", event.assignmentKey);
+    if (needsCharacter) {
+      const suspended = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
+      assert.ok(suspended.reviewPrerequisite, JSON.stringify({ reason: suspended.reason, lifecycle: suspended.recoveryLifecycle, calls: observed.length }));
+      assert.equal(suspended.reviewPrerequisite.suspension.pendingPhase, "review");
+      assert.equal(suspended.reviewPrerequisite.suspension.owner, "nt-character-development");
+      assert.equal(suspended.reviewPrerequisite.suspension.assignmentKey, event.assignmentKey);
+      assert.equal(observed.length, 11);
+      await crashAtSubmission("focused-committed", 16, { interruptAfter: ["dependency_amendment"] });
+      const supportHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+      assert.equal(git(f.job.worktreeRoot, "diff", "--name-only", event.commitSha, supportHead), "story/" + supportPath);
+      const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+      assert.ok(supported.reviewPrerequisite?.supportRef, JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
+      assert.deepEqual(supported.reviewPrerequisite.identity, suspended.reviewPrerequisite.identity);
+      assert.equal(observed.length, 18);
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), supportHead);
+    }
+    await crashAtSubmission("repair-round", needsCharacter ? 20 : 13, { interruptAfter: ["independent_assignment_review"] });
+    const successor = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(successor, event.commitSha);
+    const passed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
+    assert.equal(passed.result?.headSha, successor, JSON.stringify({ reason: passed.reason, recovery: passed.recoveryLifecycle, calls: observed.length }));
+    assert.equal(observed.length, needsCharacter ? 21 : 14);
+    await assertSubunitReviewSessions(f.job, { commitSha: event.commitSha, piSessionFile: event.sessionFile }, successor);
+    if (needsCharacter) {
+      const { inspectDependencyPlan } = await import("../src/dependency-state.js");
+      const entry = (await inspectDependencyPlan(f.job))!.entries[0]!;
+      assert.equal(entry.phase, "verified");
+      assert.equal(entry.eventRepair?.commitSha, successor);
+      assert.equal(git(f.job.worktreeRoot, "diff", "--name-only", entry.commitSha!, successor), "story/" + path);
+    }
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+    assert.ok(readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(quote));
+    const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+    assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", JSON.stringify({ reason: next.reason, active: next.active, recovery: next.recoveryLifecycle }));
+    assert.equal(next.active?.stage, "interactive");
+    assert.equal(observed.length, needsCharacter ? 21 : 14);
+  } finally {
+    saver.db.close();
+    restoreSandbox();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test("R05 World and Character metadata and independent Review corrections resume the original Thread in order", { skip: !available, timeout: 120_000 }, async () => {
   const f = setup("r05-world-review");
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));

@@ -1,6 +1,7 @@
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { subunitRoundProof, subunitWriterResult } from "./generation-writer-round.js";
 import { createReviewRoundTransitions } from "./generation-review-round.js";
 import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, usesSharedAssignmentReview,
   type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
@@ -1332,27 +1333,6 @@ async function runArchitectureAssignmentChild(
       resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
 }
 
-/** Convert a bounded domain round into the common checkpoint submission.
- * The adapter's persisted invocation chain authenticates each proof/grant. */
-function subunitRoundProof(submission: AssignmentSubmission): AssignmentInvocationProof {
-  const [sourceDigest, ordinal, settlementDigest, extra] = submission.receiptRef.split(":");
-  if (submission.status !== "writer-round" || extra !== undefined ||
-      !/^[a-f0-9]{64}$/.test(sourceDigest ?? "") || !/^(0|[1-9][0-9]*)$/.test(ordinal ?? "") ||
-      !/^[a-f0-9]{64}$/.test(settlementDigest ?? "") || !Number.isSafeInteger(Number(ordinal)))
-    throw new ProtocolIntegrityBlockedError("Invalid checkpointed subunit writer round reference.");
-  return { sourceDigest: sourceDigest!, ordinal: Number(ordinal), settlementDigest: settlementDigest! };
-}
-
-function subunitWriterResult(result: { status: string; headSha?: string; round?: import("./assignment-metadata-recovery.js").AssignmentRoundResult },
-  ref: string): AssignmentSubmission | AssignmentCorrection {
-  if (!result.round) return { receiptRef: ref, status: result.status, headSha: result.headSha };
-  const { proof } = result.round;
-  const receiptRef = [proof.sourceDigest, proof.ordinal, proof.settlementDigest].join(":");
-  return result.round.status === "correction"
-    ? { correctionRef: result.round.grantDigest, rejectedReceiptRef: receiptRef }
-    : { receiptRef, status: "writer-round" };
-}
-
 function subunitReviewTransitions(s: State, job: JobStartResult, identity: AssignmentIdentity,
   ref: string, correction: State["recoveryLifecycle"]["active"],
   preflight: () => Promise<AssignmentOutcome | null>,
@@ -1401,6 +1381,11 @@ function subunitReviewTransitions(s: State, job: JobStartResult, identity: Assig
  * after a physical child checkpoint was restored without its local callbacks. */
 async function subunitReviewStop(s: State, job: JobStartResult, identity: AssignmentIdentity,
   correction: NonNullable<State["recoveryLifecycle"]["active"]>, outcome: AssignmentOutcome): Promise<Partial<State>> {
+  const originalReview = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.commitSha === correction.origin.sourceHeadSha && p.workItem === identity.assignmentId);
+  if (!originalReview?.assurance || originalReview.assurance.turnDigest !== identity.turnDigest)
+    throw new ProtocolIntegrityBlockedError("Subunit Review stop lacks its original sealed assignment.");
+  const originalAssignmentId = originalReview.assurance.assignmentId;
   if (outcome.status === "unresolved") {
     if (outcome.dispositionRef === "assess-review") {
       const boundary = await (await import("./rejected-review-repair.js")).inspectFoundationReviewBoundary(job, correction.origin.sourceHeadSha);
@@ -1420,7 +1405,7 @@ async function subunitReviewStop(s: State, job: JobStartResult, identity: Assign
     if (outcome.dispositionRef === "review-prerequisite") {
       const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
         r.digest === outcome.evidenceRef && r.turnDigest === identity.turnDigest &&
-        r.originalAssignmentId === s.active?.id && r.originalWorkItem === identity.assignmentId &&
+        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === identity.assignmentId &&
         r.action === "controller-amendment-required");
       if (!request) throw new ProtocolIntegrityBlockedError("Subunit Review prerequisite lost its original authority.");
       return { reviewDependencyRequest: request, result: s.result };
@@ -1433,7 +1418,7 @@ async function subunitReviewStop(s: State, job: JobStartResult, identity: Assign
     if (reason === "protected-approval") {
       const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
         r.digest === outcome.evidenceRef && r.turnDigest === identity.turnDigest &&
-        r.originalAssignmentId === s.active?.id && r.originalWorkItem === identity.assignmentId &&
+        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === identity.assignmentId &&
         r.action === "author-approval-required");
       if (!request) throw new ProtocolIntegrityBlockedError("Subunit protected approval lost its original source.");
       return { status: "blocked", reviewPauseReason: "protected-approval", result: s.result,
