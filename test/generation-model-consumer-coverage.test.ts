@@ -97,7 +97,7 @@ const reviewed: Record<string, string> = {
   "src/pinned-skill-reads.ts:requirePinnedSkillReads": "1:049ca497e7263fdf90c97429",
   "src/rejected-review-repair.ts:prepareRepairWriter": "1:dae6a0d866d97cc9a6a5c926",
   "src/rejected-review-repair.ts:runPiRejectedRepair": "1:df7d8b72fbfc0c8704d43a04",
-  "src/rejected-review-repair.ts:runNativeRepairRound": "2:4742c37f32187f1d5803fb1b",
+  "src/rejected-review-repair.ts:runNativeRepairRound": "2:b3ec9253814377867544b7d0",
   "src/response-contract-recovery.ts:recoverResponseContract": "1:6393a4841b024e58ff33f038",
   "src/response-contract-recovery.ts:startAdmittedFresh": "1:75a11ca06ff8cbd70fd71028",
   "src/response-contract-recovery.ts:recoverWithOneFreshSession": "1:ab3c3013d0f8727bd3291ac4",

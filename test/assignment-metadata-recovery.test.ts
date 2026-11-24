@@ -36,6 +36,16 @@ test("native metadata recovery carries exact owned locations but excludes untrus
   const tampered = rejected([{ code: "schema", path }]);
   (tampered.report!.protection as { changes: unknown[] }).changes.push({ decision: "protected" });
   assert.throws(() => nativeMetadataDefects(tampered, source), /unprotected/);
+  // The native validator alone determines protection. No diagnostic can
+  // authorize a local reinterpretation of a protected deletion or unknown record.
+  const deletion = rejected([{ code: "schema", path }]);
+  (deletion.report!.protection as { findings: unknown[] }).findings.push({
+    code: "protected-decision-change", category: "record-deleted", beforeLocation: { path },
+  });
+  assert.throws(() => nativeMetadataDefects(deletion, source), /unprotected/);
+  assert.throws(() => nativeMetadataDefects(rejected([{ code: "schema", path },
+    { code: "protected-record-unverified", path }]), source), /protected record/);
+
 });
 
 type Reply = { text: string; effect?: string; fail?: boolean };

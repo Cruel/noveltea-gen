@@ -45,7 +45,7 @@ import { foundationDiagnosticReason, postcommitDiagnosticReason, readPostcommitD
 import { assertReviewCycleSession } from "./review-cycle.js";
 import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
 import { ProtocolIntegrityBlockedError, inspectCompletedProtocolResponse, inspectCompletedProtocolReads } from "./response-contract-recovery.js";
-import { ASSIGNMENT_REPORT, assignmentDraftEffect, nativeRepairMetadataDefects, executeAssignmentRound,
+import { ASSIGNMENT_REPORT, assignmentDraftEffect, nativeMetadataDefects, executeAssignmentRound,
   verifySettledAssignment, inspectAssignmentFailure, AssignmentNonconvergenceError,
   type AssignmentDefect, type AssignmentRoundCommand, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { ProtocolExhaustedError } from "./response-contract-recovery.js";
@@ -846,8 +846,11 @@ export async function validateRejectedRepairDraft(job: JobStartResult, sha: stri
       report.protection.changes?.length || report.protection.warnings?.length)
     {
       if (!nativeAdmission) throw Error("Native validation/protected-canon gate rejected the repaired draft; preserve its bytes.");
-      const defects = await nativeRepairMetadataDefects(job, state.baselineHead, state.allowedPaths, result,
-        state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined);
+      const defects = nativeMetadataDefects(result, {
+        jobId: job.jobId, baseSha: state.baselineHead, worktreeStoryRoot: job.worktreeStoryRoot,
+        validatorVersion: job.validatorVersion, paths: state.allowedPaths,
+        derivedDiagnostics: state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined,
+      });
       const effect = await assignmentDraftEffect(job, state.baselineHead);
       const transcriptSha256 = state.submittedSessionSha256;
       if (!effect || !transcriptSha256 || hash(await readFile(state.origin.sessionFile)) !== transcriptSha256)
@@ -2037,8 +2040,11 @@ async function runNativeRepairRound(job: JobStartResult, state: RepairReceipt,
   };
   const verifyNative = async () => {
     const result = await validateStoryJob(job, undefined, { ...job, baseSha: state.baselineHead });
-    if (result.status === "rejected") return nativeRepairMetadataDefects(job, state.baselineHead, state.allowedPaths, result,
-      state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined);
+    if (result.status === "rejected") return nativeMetadataDefects(result, {
+      jobId: job.jobId, baseSha: state.baselineHead, worktreeStoryRoot: job.worktreeStoryRoot,
+      validatorVersion: job.validatorVersion, paths: state.allowedPaths,
+      derivedDiagnostics: state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined,
+    });
     if (result.status !== "passed") throw new ProtocolIntegrityBlockedError("Native repair validation is unavailable");
     return [];
   };

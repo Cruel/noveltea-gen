@@ -231,11 +231,10 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
 // clean-HEAD recovery authentication, never a new writer entitlement.
 test("R02 source-bound correction and terminal evidence retain reviewed proof gates", () => {
   const reviewed = [
-    ["assignment-metadata-recovery.ts", "nativeRepairMetadataDefects", "6091a2ac9adf172f3c62875382f00e75f7a39b35a7847092587add4803c9ade8"],
-    ["rejected-review-repair.ts", "runNativeRepairRound", "d066ca9e0f419a0f2f2f7c507437576bb14ace4d944907d043d843132cc1cae3"],
+    ["rejected-review-repair.ts", "runNativeRepairRound", "a2c6c71dc9178134421a03e54a9b8b3cd17c5592ebcf80620bd0850dc856c739"],
     ["rejected-review-repair.ts", "inspectNativeReviewFailure", "f74e6cb607c9b28de3fa4747dffe5bd7088e5ec131efaa62ad612bf8ee66fecc"],
     ["rejected-review-repair.ts", "nativeRepairSource", "8bf5f0b39fd163323756c8c41a6d44e4438ab8e2790bed3f0728a628881f8742"],
-    ["rejected-review-repair.ts", "validateRejectedRepairDraft", "a93816c5024a96651aa7f8b0bd6eda2a1f3633e615cc503730dd6a1b547af196"],
+    ["rejected-review-repair.ts", "validateRejectedRepairDraft", "571dad77419f569434a4627573d55723adb7159cb65c29d29eb591e3d423e95d"],
     ["rejected-review-repair.ts", "prepareRepairWriter", "be0d661474f79899c426dfa31583cfb89d9db3d50178cf6aa01a4d327f7d4415"],
     ["generation-assignment-lifecycle.ts", "usesCheckpointedReviewRounds", "d308228ee36cee8fe79bf50221c0dd132741ec3bd093bb8bbf0f1b0162f2c8e5"],
     ["generation-review-round.ts", "createReviewRoundTransitions", "f1896bd8831747b53e5d7a8139b3676b1947ba4cc56dc649393467f241283292"],
@@ -243,7 +242,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["generation-operation-strategy.ts", "executeOperationStrategy", "4507b2a0c3ff3335dccd4fac945598e1fbe18b9d83569b7db662caaa242fe832"],
     ["generation-recovery-inspection.ts", "inspectModernGenerationRecovery", "9c40354b3557271acdbcb12c10af8ae8d48aec49eaaaa69699feba992c9c1601"],
     ["assignment-metadata-recovery.ts", "materialProgress", "08a9ca895c443ecf15028004bd918c52d73769e9cbd39a95bc2def33acf740ea"],
-    ["assignment-metadata-recovery.ts", "nativeMetadataDefects", "dd73f8b2758b5b3369e65ae16eb8483747fd6239f52cd744732bfc9061068c74"],
+    ["assignment-metadata-recovery.ts", "nativeMetadataDefects", "a0660a5dec21e5c81a2bb8a8a3f39dd5d5d5317fdde3ad896d4e22689434e063"],
     ["assignment-metadata-recovery.ts", "inspectSettledChain", "69917422bd51372124c219ffb3fb8b5deb37c728920fac75f3d7e1e9cd60cfdf"],
     ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "d1c2b90f2dfe5e316eea32edae5590f6682391ec3fb5696c85e646cdda402024"],
     ["assignment-metadata-recovery.ts", "executeAssignmentRound", "5bf30230c0b323a25aa4e78454a8d135bbc7c9214c3e7b4ede556701f0a6f870"],

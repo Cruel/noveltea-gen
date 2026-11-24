@@ -9,8 +9,6 @@ import type { JobStartResult } from "./job.js";
 import { parseEventManifest } from "./event-manifest.js";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parseDocument } from "yaml";
-import { isDeepStrictEqual } from "node:util";
 import {
   beginProtocolInvocation, inspectCompletedProtocolResponse, recoverResponseContract,
   ProtocolIntegrityBlockedError, ProtocolExhaustedError, ProtocolVerifierRecheckRejectedError,
@@ -104,9 +102,6 @@ export function nativeMetadataDefects(
     paths: readonly string[];
     /** Explicit assignment-specific derived catalog consequences, never write grants. */
     derivedDiagnostics?: readonly string[];
-    /** Independently attested unchanged protected record metadata; the native
-     * catalog can omit a schema-invalid record and report a false deletion. */
-    verifiedCatalogOmissions?: readonly string[];
   },
 ): AssignmentDefect[] {
   if (result.status !== "rejected" || result.exitCode !== 1 ||
@@ -120,23 +115,14 @@ export function nativeMetadataDefects(
     protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[]; findings?: unknown[] };
   } | undefined;
   const protection = report?.protection;
-  const falseDeletion = (value: unknown) => {
-    if (!value || typeof value !== "object") return false;
-    const finding = value as { code?: string; category?: string; kind?: string; path?: string;
-      beforeLocation?: { path?: string }; afterLocation?: unknown; after?: unknown };
-    const path = finding.beforeLocation?.path ?? finding.path;
-    return finding.code === "protected-decision-change" &&
-      (finding.category ?? finding.kind) === "record-deleted" &&
-      !!path && source.verifiedCatalogOmissions?.includes(path) === true &&
-      (finding.afterLocation === undefined || finding.afterLocation === null) &&
-      (finding.after === undefined || finding.after === null);
-  };
   if (!protection || protection.status !== "checked" || protection.base !== source.baseSha ||
-      !Array.isArray(protection.changes) || !protection.changes.every(falseDeletion) ||
-      !Array.isArray(protection.warnings) || !protection.warnings.every(falseDeletion) ||
-      !Array.isArray(protection.findings) || !protection.findings.every(falseDeletion) ||
+      !Array.isArray(protection.changes) || protection.changes.length ||
+      !Array.isArray(protection.warnings) || protection.warnings.length ||
+      !Array.isArray(protection.findings) || protection.findings.length ||
       !Array.isArray(report?.diagnostics) || !report.diagnostics.length)
     throw new ProtocolIntegrityBlockedError("Native rejection is not an unprotected scoped metadata defect");
+  if (report.diagnostics.some(d => d.code === "protected-record-unverified"))
+    throw new ProtocolIntegrityBlockedError("Native validator cannot verify the rejected protected record");
   const position = (value: unknown): value is number =>
     typeof value === "number" && Number.isSafeInteger(value) && value > 0;
   const direct = report.diagnostics.filter(d => !(d.path === "." && typeof d.code === "string" &&
@@ -154,54 +140,6 @@ export function nativeMetadataDefects(
   });
 }
 
-/** The native catalog omits schema-invalid records, so even unchanged
- * protected decisions can appear deleted. Admit restoration of scoped metadata
- * only if exact record identity and every decision independently agree with
- * the committed baseline. This read-only parser is NOT a schema/approval
- * verifier; native validation and protection must pass before publication. */
-export async function nativeRepairMetadataDefects(job: JobStartResult, head: string,
-  paths: readonly string[], result: ValidationResult, derivedDiagnostics?: readonly string[]) {
-  const report = result.report as { diagnostics?: { code?: string; path?: string }[];
-    protection?: { findings?: { code?: string; category?: string; beforeLocation?: { path?: string } }[] } } | undefined;
-  const omissions = new Set<string>();
-  const parse = (record: string) => {
-    const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(record);
-    if (!header) throw new ProtocolIntegrityBlockedError("Invalid protected record frontmatter");
-    const document = parseDocument(header[1]!, { strict: true, uniqueKeys: true });
-    if (document.errors.length || document.warnings.length)
-      throw new ProtocolIntegrityBlockedError("Cannot attest protected metadata of a malformed record");
-    const data = document.toJS({ maxAliasCount: 0 }) as Record<string, unknown> | null;
-    if (!data || typeof data !== "object" || Array.isArray(data) ||
-        typeof data.id !== "string" || typeof data.type !== "string" || !Array.isArray(data.decisions))
-      throw new ProtocolIntegrityBlockedError("Cannot attest protected record identity and decisions");
-    return { id: data.id, type: data.type, schema: data.schema, decisions: data.decisions };
-  };
-  for (const finding of report?.protection?.findings ?? []) {
-    const path = finding.beforeLocation?.path;
-    if (finding.code !== "protected-decision-change" || finding.category !== "record-deleted" ||
-        !path || !paths.includes(path) || !report?.diagnostics?.some(d => d.path === path && d.code === "schema"))
-      continue;
-    if (omissions.has(path)) continue;
-    if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(path))
-      throw new ProtocolIntegrityBlockedError("Unsafe protected metadata source");
-    const target = join(job.worktreeStoryRoot, path);
-    if (await realpath(target) !== target || !(await lstat(target)).isFile())
-      throw new ProtocolIntegrityBlockedError("Protected record was actually removed or replaced");
-    const repoPath = job.storyRelativePath ? job.storyRelativePath + "/" + path : path;
-    const env = { ...process.env };
-    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"]) delete env[key];
-    const original = execFileSync("git", ["show", head + ":" + repoPath], {
-      cwd: job.worktreeRoot, env, encoding: "utf8", maxBuffer: 4 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    if (!isDeepStrictEqual(parse(original), parse(await readFile(target, "utf8"))))
-      throw new ProtocolIntegrityBlockedError("Rejected native repair changed protected record identity or decisions");
-    omissions.add(path);
-  }
-  return nativeMetadataDefects(result, { jobId: job.jobId, baseSha: head,
-    worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths,
-    derivedDiagnostics, verifiedCatalogOmissions: [...omissions] });
-}
 
 type Grant = Readonly<{
   version: 1; ordinal: number; source: string; sessionId: string; sessionFile: string;
