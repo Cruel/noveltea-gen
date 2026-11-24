@@ -61,7 +61,7 @@ export function logicalAssignmentKey(identity: LifecycleIdentity): string {
 /** Dynamic calls from one parent node must not accidentally inherit another
  * assignment's saved child state. The physical parent task namespace remains
  * the restart anchor; add the exact logical assignment and phase to it. */
-export function assignmentChildConfig(config: RunnableConfig, identity: AssignmentIdentity,
+export function assignmentChildConfig(config: RunnableConfig, identity: LifecycleIdentity,
   phase: "original" | "correction" = "original"): RunnableConfig {
   const parent = config.configurable?.checkpoint_ns;
   if (typeof parent !== "string" || !parent)

@@ -28,8 +28,14 @@ export class PlanningClarificationRequired extends Error {
 
 /** A syntactically valid proposal misattributes author authority. This is
  * substantive provenance failure, not a response-format error. */
+export type PlanningClaimCheck = Readonly<{
+  location: string
+  claim: string
+  code?: string
+}>
+
 export class PlanningProvenanceError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly checks: readonly PlanningClaimCheck[] = []) {
     super(message)
     this.name = 'PlanningProvenanceError'
   }
@@ -156,7 +162,7 @@ export function assertPlanningConsistency(planning: StoryPlanning, evidence: Pla
  * values from the exact StoryPlanning and verifies coverage, unique paths and actual answered
  * source identity before the proposal can enter an approval boundary. */
 export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanning,
-  evidence: PlanningEvidence[], fullBaseline: boolean): PlanningInterpretation[] {
+  evidence: PlanningEvidence[], fullBaseline: boolean, observe?: (check: PlanningClaimCheck) => void): PlanningInterpretation[] {
   if (!Array.isArray(raw) || raw.length > 24)
     throw Error('Missing or oversized source-bound planning interpretations.')
   assertPlanningConsistency(planning, evidence)
@@ -170,7 +176,8 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
       expectedPaths.join(', ') + '.')
   const values = new Map(dimensions.map(item => [item.path, item.value]))
   const seen = new Set<string>()
-  return raw.map(item => {
+  const failures: PlanningProvenanceError[] = []
+  const result = raw.flatMap(item => {
     if (!own(item)) throw Error('Invalid planning interpretation entry.')
     if (typeof item.path !== 'string' || !values.has(item.path) || seen.has(item.path)) {
       // Model-controlled strings are never echoed into correction prompts unless
@@ -189,57 +196,68 @@ export function parsePlanningInterpretations(raw: unknown, planning: StoryPlanni
         !own(item.source))
       throw Error('Invalid or unsupported planning interpretation.')
     seen.add(item.path)
-    const bound = resolvePlanningEvidence(item.source, evidence)
-    if ((item.basis === 'delegated') !== bound.delegated)
-      throw new PlanningProvenanceError('unmatched-authority', 'Planning interpretation has no matching submitted author evidence or delegation.')
-    const relevantClarification = item.path.startsWith('planning.branching.')
-      ? clarification(evidence, 'branch') : item.path.startsWith('planning.puzzle_')
-        ? clarification(evidence, 'puzzle') : undefined
-    if (relevantClarification && planningSourceKey(bound.source) !== planningSourceKey(relevantClarification.source))
-      throw new PlanningProvenanceError('superseded-source', 'A resolved planning conflict must cite its later author clarification.')
-    // Exact provenance and basis remain deterministic. Whether this source's
-    // meaning supports this dimension is assessed by the independent reviewer
-    // before discovery can enter the approval boundary.
-    // An arbitrary option label may contain the category while denying it
-    // (e.g. 'No deep branching'). Only a complete categorical label is a
-    // literally explicit value; all qualified wording needs inference.
     const value = values.get(item.path)
-    if (item.basis === 'explicit' &&
-        (!bound.selectedOption || typeof value !== 'string' ||
-          bound.authorText.trim().toLowerCase().replace(/-/g, ' ') !==
-          value.toLowerCase().replace(/-/g, ' ')))
-      throw new PlanningProvenanceError('invented-explicit-choice', 'Model-derived planning cannot impersonate an explicit author choice.')
-    if (item.basis === 'inferred' && bound.delegated)
-      throw new PlanningProvenanceError('delegation-as-inference', 'Delegation cannot masquerade as an author inference.')
-    if (typeof value === 'object' && value !== null && !bound.delegated) {
-      const numerals = bound.authorText.match(/\b\d+(?:\.\d+)?\b/g) ?? []
-      const numeric = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|dozen|couple|few|several|hour|minute)\b/i.test(bound.authorText)
-      if (!numerals.length && !numeric)
-        throw new PlanningProvenanceError('missing-quantitative-source', 'Numeric planning estimates need an explicit quantitative source or delegation.')
-      if (item.path.startsWith('planning.production.') && (value as { firmness?: string }).firmness === 'hard') {
-        if (!/\b(?:hard|strict|maximum|max|at most|no more than|limit|cap|cannot exceed|must not exceed)\b/i.test(bound.authorText))
-          throw new PlanningProvenanceError('invented-hard-limit', 'A model cannot fabricate a hard author production limit.')
-        const exactCap = /(?:at most|max(?:imum)?|limit(?:ed)? to|no more than|cap(?:ped)? at)\s+(\d+)\b/i.exec(bound.authorText)
-        const statedCap = exactCap ? Number(exactCap[1]) : numerals.length === 1 ? Number(numerals[0]) : undefined
-        if (statedCap !== undefined &&
-            (value as { count: { max: number } }).count.max !== statedCap)
-          throw new PlanningClarificationRequired('The proposed hard production cap differs from the author quantity; ask rather than changing a protected limit.')
-      }
-      if (item.path === 'planning.first_playthrough') {
-        const range = /(\d+)\s*(?:-|–|to)\s*(\d+)\s*(minutes?|mins?|hours?|hrs?)\b/i.exec(bound.authorText)
-        if (range) {
-          const factor = /^(?:hour|hr)/i.test(range[3]!) ? 60 : 1
-          const target = value as { min_minutes: number; max_minutes: number }
-          if (target.min_minutes !== Number(range[1]) * factor ||
-              target.max_minutes !== Number(range[2]) * factor)
-            throw new PlanningClarificationRequired('The proposed duration differs from the author-specified playthrough range; ask for clarification.')
+    const check = { location: item.path, claim: JSON.stringify(value) }
+    try {
+      const bound = resolvePlanningEvidence(item.source, evidence)
+      if ((item.basis === 'delegated') !== bound.delegated)
+        throw new PlanningProvenanceError('unmatched-authority', 'Planning interpretation has no matching submitted author evidence or delegation.')
+      const relevantClarification = item.path.startsWith('planning.branching.')
+        ? clarification(evidence, 'branch') : item.path.startsWith('planning.puzzle_')
+          ? clarification(evidence, 'puzzle') : undefined
+      if (relevantClarification && planningSourceKey(bound.source) !== planningSourceKey(relevantClarification.source))
+        throw new PlanningProvenanceError('superseded-source', 'A resolved planning conflict must cite its later author clarification.')
+      // Exact provenance and basis remain deterministic. Whether this source's
+      // meaning supports this dimension is assessed by the independent reviewer
+      // before discovery can enter the approval boundary.
+      // An arbitrary option label may contain the category while denying it
+      // (e.g. 'No deep branching'). Only a complete categorical label is a
+      // literally explicit value; all qualified wording needs inference.
+      if (item.basis === 'explicit' &&
+          (!bound.selectedOption || typeof value !== 'string' ||
+            bound.authorText.trim().toLowerCase().replace(/-/g, ' ') !==
+            value.toLowerCase().replace(/-/g, ' ')))
+        throw new PlanningProvenanceError('invented-explicit-choice', 'Model-derived planning cannot impersonate an explicit author choice.')
+      if (item.basis === 'inferred' && bound.delegated)
+        throw new PlanningProvenanceError('delegation-as-inference', 'Delegation cannot masquerade as an author inference.')
+      if (typeof value === 'object' && value !== null && !bound.delegated) {
+        const numerals = bound.authorText.match(/\b\d+(?:\.\d+)?\b/g) ?? []
+        const numeric = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|dozen|couple|few|several|hour|minute)\b/i.test(bound.authorText)
+        if (!numerals.length && !numeric)
+          throw new PlanningProvenanceError('missing-quantitative-source', 'Numeric planning estimates need an explicit quantitative source or delegation.')
+        if (item.path.startsWith('planning.production.') && (value as { firmness?: string }).firmness === 'hard') {
+          if (!/\b(?:hard|strict|maximum|max|at most|no more than|limit|cap|cannot exceed|must not exceed)\b/i.test(bound.authorText))
+            throw new PlanningProvenanceError('invented-hard-limit', 'A model cannot fabricate a hard author production limit.')
+          const exactCap = /(?:at most|max(?:imum)?|limit(?:ed)? to|no more than|cap(?:ped)? at)\s+(\d+)\b/i.exec(bound.authorText)
+          const statedCap = exactCap ? Number(exactCap[1]) : numerals.length === 1 ? Number(numerals[0]) : undefined
+          if (statedCap !== undefined &&
+              (value as { count: { max: number } }).count.max !== statedCap)
+            throw new PlanningClarificationRequired('The proposed hard production cap differs from the author quantity; ask rather than changing a protected limit.')
+        }
+        if (item.path === 'planning.first_playthrough') {
+          const range = /(\d+)\s*(?:-|–|to)\s*(\d+)\s*(minutes?|mins?|hours?|hrs?)\b/i.exec(bound.authorText)
+          if (range) {
+            const factor = /^(?:hour|hr)/i.test(range[3]!) ? 60 : 1
+            const target = value as { min_minutes: number; max_minutes: number }
+            if (target.min_minutes !== Number(range[1]) * factor ||
+                target.max_minutes !== Number(range[2]) * factor)
+              throw new PlanningClarificationRequired('The proposed duration differs from the author-specified playthrough range; ask for clarification.')
+          }
         }
       }
+      observe?.(check)
+      return [{ path: item.path as string, value: JSON.stringify(value),
+        source: bound.source, sourceDecisionId: bound.decisionId,
+        basis: item.basis as PlanningInterpretation['basis'], rationale: item.rationale as string }]
+    } catch (error) {
+      if (!(error instanceof PlanningProvenanceError) || !observe) throw error
+      observe({ ...check, code: error.code })
+      failures.push(error)
+      return []
     }
-    return { path: item.path as string, value: JSON.stringify(value),
-      source: bound.source, sourceDecisionId: bound.decisionId,
-      basis: item.basis as PlanningInterpretation['basis'], rationale: item.rationale as string }
   })
+  if (failures.length) throw failures[0]
+  return result
 }
 
 /** Hide the canonical appendix in the UI when the equivalent structured

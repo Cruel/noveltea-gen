@@ -136,7 +136,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const selected = (await availableUserPiModels(store, alice))[0]!
     const model = { provider: selected.provider, id: selected.id }
     await store.persistence.settings.putDefaultModel(alice, model, 'now')
-    const storyIds = Array.from({ length: 6 }, () => randomUUID())
+    const storyIds = Array.from({ length: 7 }, () => randomUUID())
     const sourceSha = 'b'.repeat(40)
     const hash = (value: string) => createHash('sha256').update(value).digest('hex')
     const cache = join(root, 'git-cache', hash(alice), hash('github:34'))
@@ -826,10 +826,16 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
         if (pathResponses === 1) {
           next.interpretations = next.interpretations.map((item: { path: string }) =>
             ({ ...item, path: item.path.slice('planning.'.length) }))
-        } else {
+        } else if (pathResponses === 2) {
           assert.match(instructions, /Invalid planning interpretation path "choice_frequency"/)
           assert.match(instructions, /Expected exactly: planning.choice_frequency, planning.choice_impact/)
           assert.match(instructions, /planning.production.illustrated_backgrounds/)
+        }
+        // Four distinct source defects are repaired one at a time. Every
+        // previously corrected planning claim retains its exact value.
+        if (pathResponses >= 2 && pathResponses <= 5) {
+          for (const item of next.interpretations.slice(pathResponses - 2, 4))
+            item.source = { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'not-submitted' }
         }
         return JSON.stringify(next)
       })
@@ -838,6 +844,47 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
         headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(body),
       }), url, storyIds[5]!, pathTurnId, pathTransport)
     const pathWorkspace = 'story-chat,' + storyIds[5] + ',' + pathTurnId
+    // Cut the actual SQLite checkpoint save after the first writer and
+    // first corrective response have settled. The next graph task must
+    // recover the original response rather than prompt a second time.
+    const interruptAfterSettlement = async (count: number, body: unknown) => {
+      let armed = false, checkpointLost = false
+      persistence.saveConversation = async (...args: Parameters<typeof originalSave>) => {
+        const state = args[2] === pathWorkspace ? JSON.parse(args[4]) : null
+        if (armed && (state || args[2].startsWith('story-discovery-graph,'))) {
+          if (!state) checkpointLost = true
+          throw Error('synthetic checkpoint loss after settled writer ' + count)
+        }
+        const written = await originalSave(...args)
+        if (written && state?.graphOperation?.status === 'claimed' &&
+            state.activeAttempts?.length === count && state.activeAttempts.at(-1)?.responseDigest)
+          armed = true
+        return written
+      }
+      try {
+        const interrupted = await pathRequest(body)
+        assert.equal(interrupted.status, 503)
+        assert.ok(armed && checkpointLost, 'a real graph checkpoint must be lost after settlement')
+        assert.equal(pathResponses, count)
+      } finally { persistence.saveConversation = originalSave }
+      const row = (await persistence.conversation(alice, repositoryId, pathWorkspace))!
+      const state = JSON.parse(row.state)
+      assert.equal(state.graphOperation.status, 'claimed')
+      assert.equal(state.activeAttempts.length, count)
+      assert.ok(state.activeAttempts.every((attempt: any) => attempt.responseDigest))
+      assert.equal(await originalSave(alice, repositoryId, pathWorkspace, row.revision + 1,
+        JSON.stringify({ ...state, revision: row.revision + 1, startedAt: Date.now() - 11 * 60_000 }),
+        row.revision, 'now'), true)
+      const reconciled = await pathRequest({ action: 'reconcile', revision: row.revision + 1 })
+      assert.equal(reconciled.status, 200, await reconciled.clone().text())
+      assert.equal(pathResponses, count, 'reconciliation never dispatches Pi')
+      return (await reconciled.json() as any).session
+    }
+    const firstLoss = await interruptAfterSettlement(1, { action: 'answer', revision: pathQuestions.revision,
+      setId: pathQuestions.questions.id, setRevision: pathQuestions.questions.revision,
+      responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
+    })
+    const correctionLoss = await interruptAfterSettlement(2, { action: 'retry', revision: firstLoss.revision })
     let childEnded = false
     // Lose the parent CAS after the corrected child and independent Review
     // have completed. Recovery must use the sealed responses, not call Pi.
@@ -849,18 +896,15 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       return originalSave(...args)
     }
     try {
-      const interrupted = await pathRequest({ action: 'answer', revision: pathQuestions.revision,
-        setId: pathQuestions.questions.id, setRevision: pathQuestions.questions.revision,
-        responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }],
-      })
+      const interrupted = await pathRequest({ action: 'retry', revision: correctionLoss.revision })
       assert.equal(interrupted.status, 503)
       assert.ok(childEnded)
-      assert.equal(pathResponses, 2)
+      assert.equal(pathResponses, 6)
     } finally { persistence.saveConversation = originalSave }
     const pathRow = (await persistence.conversation(alice, repositoryId, pathWorkspace))!
     const pathState = JSON.parse(pathRow.state)
     assert.equal(pathState.graphOperation.status, 'claimed')
-    assert.ok(pathState.activeAttempts.length >= 2)
+    assert.equal(pathState.activeAttempts.length, 7, 'one format repair and four source corrections need no diagnosis')
     assert.ok(pathState.activeAttempts.every((attempt: any) => attempt.responseDigest))
     assert.equal(await originalSave(alice, repositoryId, pathWorkspace, pathRow.revision + 1,
       JSON.stringify({ ...pathState, revision: pathRow.revision + 1, startedAt: Date.now() - 11 * 60_000 }),
@@ -870,12 +914,73 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const pathBlocked = (await pathReconciled.json() as any).session
     const repaired = await pathRequest({ action: 'retry', revision: pathBlocked.revision })
     assert.equal(repaired.status, 200, await repaired.clone().text())
-    assert.equal(pathResponses, 2, 'post-END recovery must not repeat either writer response')
+    assert.equal(pathResponses, 6, 'post-END recovery must not repeat any writer response')
     const repairedSession = (await repaired.json() as any).session
     assert.equal(repairedSession.phase, 'proposed')
     assert.ok(repairedSession.proposal.interpretations.every((item: { path: string }) =>
       item.path.startsWith('planning.')))
     assert.equal(await store.persistence.naturalStory.previousJob(alice, pathTurnId), null)
+    // Exercise resource admission, known provider refusal and independent
+    // replacement at the actual authenticated Story Chat entry.
+    const controlStory = storyIds[6]!, controlTurn = randomUUID()
+    await store.persistence.naturalStory.beginFirstTurn(alice, controlStory, controlTurn,
+      initial, new Date().toISOString(), 'autonomous')
+    let controlWriterCalls = 0, providerRefused = false
+    const controlReviewRoles: string[] = []
+    const controlTransport = withFixtureSemanticReview(async state => {
+      if (state.turns.length === 1) return questionsReply([{ id: 'baseline', kind: 'free-text',
+        question: 'May Studio decide the complete planning baseline?', allowStudioDecision: true }])
+      if (!providerRefused) {
+        providerRefused = true
+        throw new DiscoveryInvocationNotStarted('scripted provider refusal before dispatch')
+      }
+      controlWriterCalls++
+      return proposalFor(state)
+    }, (packet, role) => {
+      controlReviewRoles.push(role!)
+      return packet.claims.map((claim, index) => ({ claimId: claim.id,
+        verdict: controlReviewRoles.length === 1 && index === 0 ? 'unsupported' : 'supported',
+        reason: 'Assess the actual delegated planning baseline.' }))
+    }, packet => [{ claimId: packet.claims[0]!.id, claimQuote: packet.claims[0]!.statement,
+      sourceQuote: packet.claims[0]!.question }])
+    const controlRequest = (body: unknown, story = controlStory) =>
+      storyChatDiscoveryRequest(auth, store, new Request(url + '/api/story-chat-discovery', {
+        method: 'POST', headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(body),
+      }), url, story, controlTurn, controlTransport)
+    const controlStart = await controlRequest({ action: 'start', model, text: initial, limits: { modelCalls: 1 } })
+    assert.equal(controlStart.status, 200, await controlStart.clone().text())
+    const controlQuestions = (await controlStart.json() as any).session
+    const budgetPause = await controlRequest({ action: 'answer', revision: controlQuestions.revision,
+      setId: controlQuestions.questions.id, setRevision: controlQuestions.questions.revision,
+      responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }] })
+    assert.equal(budgetPause.status, 503)
+    const budgetState = (await req(controlStory, controlTurn, 'GET')).body.session
+    assert.equal(budgetState.recoveryReason, 'budget')
+    assert.equal(providerRefused, false, 'exhaustion must precede provider admission')
+    const providerPause = await controlRequest({ action: 'retry', revision: budgetState.revision,
+      limits: { modelCalls: 8 } })
+    assert.equal(providerPause.status, 503)
+    const providerState = (await req(controlStory, controlTurn, 'GET')).body.session
+    assert.equal(providerState.recoveryReason, 'not-started')
+    assert.equal(providerRefused, true)
+    const controlDone = await controlRequest({ action: 'retry', revision: providerState.revision })
+    assert.equal(controlDone.status, 200, await controlDone.clone().text())
+    const controlProposal = (await controlDone.json() as any).session
+    assert.equal(controlProposal.phase, 'proposed')
+    assert.equal(controlWriterCalls, 2)
+    assert.deepEqual(controlReviewRoles, ['semantic-review', 'semantic-review', 'semantic-diagnostic', 'semantic-replacement'])
+    const controlPrivate = JSON.parse((await store.persistence.onboarding.conversation(alice, repositoryId,
+      'story-chat,' + controlStory + ',' + controlTurn))!.state)
+    assert.equal(controlPrivate.settledAttempts.filter((attempt: any) => attempt.responseDigest).length, 7)
+    assert.equal(controlPrivate.settledAttempts.filter((attempt: any) => attempt.status === 'not-started').length, 1)
+    assert.equal((await controlRequest({ action: 'approve', revision: controlProposal.revision,
+      digest: controlProposal.digest }, storyIds[5]!)).status, 404)
+    assert.equal(await store.persistence.conversations.archiveThread(alice, 'root:' + controlTurn, true,
+      new Date().toISOString()), true)
+    assert.equal((await controlRequest({ action: 'approve', revision: controlProposal.revision,
+      digest: controlProposal.digest })).status, 409, 'archived author Thread cannot grant approval or queue work')
+    assert.equal(controlWriterCalls, 2)
+    assert.equal(await store.persistence.generation.jobs.identity(controlTurn), null)
   } finally {
     await reopened?.close()
     await fixture.close()

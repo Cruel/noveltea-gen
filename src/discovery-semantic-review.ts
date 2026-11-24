@@ -129,3 +129,32 @@ export function discoverySemanticCorrection(verdict: DiscoverySemanticVerdict): 
     'proposed decision to its exact delegated topic, or ask a new Author Question. ' +
     'Do not invent approval, cite an unrelated delegation or copy invalid claims.'
 }
+
+/** Diagnosis may identify a disputed negative only with exact current claim
+ * and submitted-source quotations. These are evidence, not a passing Review.
+ * The controller checks completeness against the immutable negative receipt. */
+export function parseDiscoverySemanticDiagnostic(raw: string, packet: DiscoverySemanticPacket) {
+  if (raw.length > 24_000) throw Error('Discovery diagnostic reply exceeds limit.')
+  const parsed: unknown = JSON.parse(clean(raw))
+  if (!plain(parsed) || Object.keys(parsed).sort().join(',') !== 'assessments,disputes' ||
+      !Array.isArray(parsed.disputes) || parsed.disputes.length > packet.claims.length)
+    throw Error('Invalid Discovery diagnostic contract.')
+  const verdict = parseDiscoverySemanticVerdict(JSON.stringify({ assessments: parsed.assessments }), packet)
+  const exactQuote = (source: string, quote: string) =>
+    quote.trim().length >= Math.min(12, source.trim().length) && source.includes(quote)
+  const disputed = new Set<string>()
+  for (const item of parsed.disputes) {
+    if (!plain(item) || Object.keys(item).sort().join(',') !== 'claimId,claimQuote,sourceQuote' ||
+        typeof item.claimId !== 'string' || disputed.has(item.claimId) ||
+        typeof item.claimQuote !== 'string' || !item.claimQuote.trim() ||
+        typeof item.sourceQuote !== 'string' || !item.sourceQuote.trim())
+      throw Error('Invalid Discovery diagnostic dispute.')
+    const claim = packet.claims.find(claim => claim.id === item.claimId)
+    if (!claim || !exactQuote(claim.statement, item.claimQuote) ||
+        ![claim.question, claim.submittedAnswer].some(source => exactQuote(source, item.sourceQuote as string)) ||
+        verdict.assessments.find(assessment => assessment.claimId === item.claimId)?.verdict !== 'supported')
+      throw Error('Discovery diagnostic dispute lacks exact source evidence.')
+    disputed.add(item.claimId)
+  }
+  return { verdict, disputed: [...disputed].sort() }
+}

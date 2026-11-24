@@ -247,10 +247,13 @@ function validAttempt(value: unknown): value is RecoveryAttempt {
  * does not grant a model invocation, invent a Job, or waive a failed check. */
 export function assessBoundedAssignmentFailure(
   observation: "protocol-exhausted" | "nonconverging" | "reviewer-drift",
-  diagnosis?: "continue" | "stop" | "disputed",
-): "exhausted" | "diagnostic" | "known-correction" | "integrity-fence" {
+  diagnosis?: "continue" | "stop" | "disputed" | "replace-reviewer",
+): "exhausted" | "diagnostic" | "known-correction" | "integrity-fence" | "replace-reviewer" {
   if (observation === "protocol-exhausted") return "exhausted";
   if (!diagnosis) return "diagnostic";
+  // Only a domain-authenticated dispute with an exact negative predecessor
+  // can request replacement. Admission is not a passing verdict.
+  if (diagnosis === "replace-reviewer") return "replace-reviewer";
   if (observation === "reviewer-drift" || diagnosis === "disputed") return "integrity-fence";
   return diagnosis === "continue" ? "known-correction" : "exhausted";
 }

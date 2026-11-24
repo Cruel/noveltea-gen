@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  discoverySemanticPacket, parseDiscoverySemanticVerdict,
+  discoverySemanticPacket, parseDiscoverySemanticVerdict, parseDiscoverySemanticDiagnostic,
   discoverySemanticFailures, discoverySemanticDigest, discoverySemanticCorrection,
 } from '../src/discovery-semantic-review'
 import { resolveDelegatedDecision } from '../src/planning-interpretation'
@@ -108,4 +108,24 @@ test('a planning citation has exact provenance but cannot self-certify semantic 
     reason: 'The cited question asks about endings, not illustrated backgrounds.',
   }] }), packet)
   assert.equal(discoverySemanticFailures(verdict).length, 1)
+})
+
+test('reviewer replacement diagnosis requires exact material quotes and cannot waive a negative', () => {
+  const packet = discoverySemanticPacket('A short mystery.', [
+    { statement: 'A bittersweet ending', authority: 'delegated', source: ending },
+  ], [], evidence, context)
+  const claim = packet.claims[0]!
+  const assessment = { claimId: claim.id, verdict: 'supported', reason: 'The exact question delegates the ending.' }
+  const dispute = { claimId: claim.id, claimQuote: claim.statement, sourceQuote: claim.question }
+  const parse = (disputes: unknown[], assessments = [assessment]) =>
+    parseDiscoverySemanticDiagnostic(JSON.stringify({ assessments, disputes }), packet)
+  assert.deepEqual(parse([dispute]).disputed, [claim.id])
+  for (const invalid of [
+    { ...dispute, claimId: 'invented' },
+    { ...dispute, claimQuote: 'A' },
+    { ...dispute, sourceQuote: 'A question about a different source' },
+    { ...dispute, sourceQuote: evidence[2]!.statement },
+  ]) assert.throws(() => parse([invalid]), /exact source evidence/)
+  assert.throws(() => parse([dispute, dispute]), /Invalid Discovery diagnostic (?:dispute|contract)/)
+  assert.throws(() => parse([dispute], [{ ...assessment, verdict: 'uncertain' }]), /exact source evidence/)
 })

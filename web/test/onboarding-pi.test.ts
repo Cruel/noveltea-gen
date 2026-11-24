@@ -108,13 +108,14 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     }
     const request = async (method: 'GET' | 'POST', value?: unknown, who = own, origin = url,
       inferStep = infer, workspace = 'projects/demo',
-      review?: Parameters<typeof withFixtureSemanticReview>[1]) => {
+      review?: Parameters<typeof withFixtureSemanticReview>[1],
+      disputes?: Parameters<typeof withFixtureSemanticReview>[2]) => {
       const response = await onboardingPiRequest(auth, store,
         new Request(url + '/api/onboarding/pi?' + new URLSearchParams({
           repositoryId: repo, workspace,
         }), { method, headers: {cookie: who, origin},
           ...(method === 'POST' ? {body: JSON.stringify(value)} : {}) }), url,
-        withFixtureSemanticReview(inferStep, review))
+        withFixtureSemanticReview(inferStep, review, disputes))
       return { status: response.status, body: await response.json() as any }
     }
     assert.equal((await request('GET', undefined, '')).status, 401)
@@ -290,8 +291,8 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       else process.env.NT_DISCOVERY_EVIDENCE_DIR = previousEvidenceRoot
     }
 
-    // Distinct rejected sources may need multiple diagnoses, but the same
-    // diagnosed source must not be probed forever or become an approval.
+    // The same diagnosed source cannot mint another diagnosis, even when
+    // the writer changes wording on every response.
     for (const repeated of [false, true]) {
       const workspace = repeated ? 'projects/provenance-repeated-source' : 'projects/provenance-assessment'
       let writers = 0, diagnoses = 0, reviews = 0
@@ -327,21 +328,13 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         setId: qs.id, setRevision: qs.revision,
         responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
       }, own, url, writer, workspace, review)
-      if (repeated) {
-        assert.equal(result.status, 503, JSON.stringify(result.body))
-        assert.equal(writers, 6)
-        assert.equal(diagnoses, 1, 'an unchanged diagnosed source cannot mint a new diagnostic')
-        assert.equal(reviews, 0)
-        const saved = JSON.parse((await store.persistence.onboarding.conversation(
-          alice.id, repo, workspace))!.state)
-        assert.equal(saved.recovery.reason, 'nonconverging')
-      } else {
-        assert.equal(result.status, 200, JSON.stringify(result.body))
-        assert.equal(result.body.session.phase, 'proposed')
-        assert.equal(writers, 9)
-        assert.equal(diagnoses, 3, 'new nonproductive source boundaries must be assessed rather than stopped by a local count')
-        assert.equal(reviews, 1)
-      }
+      assert.equal(result.status, 503, JSON.stringify(result.body))
+      assert.equal(writers, 6)
+      assert.equal(diagnoses, 1, 'changing wording cannot mint another diagnosis of the same source defect')
+      assert.equal(reviews, 0)
+      const saved = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(saved.recovery.reason, 'nonconverging')
     }
     // A reviewer flipping its verdict for unchanged source evidence cannot
     // manufacture a passing proposal, even if a diagnostic agrees with it.
@@ -384,6 +377,58 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       assert.equal((await request('POST', { action: 'retry', revision: saved.revision },
         own, url, writer, workspace, review)).status, 409)
       assert.equal(writers, 3)
+    }
+
+    // Exact source-backed disagreement permits a fresh replacement, not
+    // acceptance of the diagnostic verdict. An adverse replacement still fences.
+    for (const replacementPasses of [true, false]) {
+      const workspace = 'projects/reviewer-replacement-' + replacementPasses
+      let writers = 0
+      const roles: string[] = []
+      const writer: DiscoveryInference = async state => {
+        writers++
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'ending', kind: 'yes-no', question: 'Should the ending be hopeful?', allowStudioDecision: true },
+        ])
+        return JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          ...JSON.parse(proposed).foundation, decisions: [{
+            statement: 'A hopeful ending', authority: 'delegated',
+            source: { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'ending' },
+          }] } })
+      }
+      const review: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = (packet, role) => {
+        roles.push(role!)
+        return packet.claims.map(claim => ({
+          claimId: claim.id,
+          verdict: roles.length === 1 || role === 'semantic-replacement' && !replacementPasses
+            ? 'unsupported' : 'supported',
+          reason: 'The disputed claim concerns the exact delegated ending.',
+        }))
+      }
+      const disputes: NonNullable<Parameters<typeof withFixtureSemanticReview>[2]> = packet =>
+        packet.claims.map(claim => ({ claimId: claim.id, claimQuote: claim.statement, sourceQuote: claim.question }))
+      const start = await request('POST', { action: 'start', model, text: 'A short mystery' },
+        own, url, writer, workspace, review, disputes)
+      const qs = start.body.session.questions
+      const result = await request('POST', { action: 'answer', revision: start.body.session.revision,
+        setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, review, disputes)
+      assert.equal(result.status, replacementPasses ? 200 : 503, JSON.stringify(result.body))
+      assert.equal(writers, 3)
+      assert.deepEqual(roles, ['semantic-review', 'semantic-review', 'semantic-diagnostic', 'semantic-replacement'])
+      const saved = JSON.parse((await store.persistence.onboarding.conversation(alice.id, repo, workspace))!.state)
+      assert.equal(saved.phase, replacementPasses ? 'proposed' : 'blocked')
+      assert.equal(saved.approval, undefined)
+      const negative = saved.discoveryEvidencePaths.find((path: string) => path.includes('-semantic-review-'))
+      assert.equal(JSON.parse(readFileSync(join(negative, 'validation.json'), 'utf8')).status, 'rejected')
+      const replacement = saved.discoveryEvidencePaths.find((path: string) => path.includes('-semantic-replacement-'))
+      const requestReceipt = JSON.parse(readFileSync(join(replacement, 'request.json'), 'utf8'))
+      assert.match(requestReceipt.instructions, /Authenticated negative predecessor and assessment receipt/)
+      assert.equal(JSON.parse(readFileSync(join(replacement, 'validation.json'), 'utf8')).status,
+        replacementPasses ? 'accepted' : 'rejected')
+      assert.equal(!!saved.semanticReview, replacementPasses)
+      if (!replacementPasses) assert.equal(saved.recovery.reason, 'reviewer-drift')
     }
 
     // Structural correction must not consume subsequent independent semantic review.

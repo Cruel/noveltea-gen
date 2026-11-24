@@ -107,7 +107,7 @@ const reviewed: Record<string, string> = {
   "src/unknown-recovery-diagnostic.ts:diagnoseUnknownCompletion": "4:1480fcd299bc59528f25b2d9",
   "web/src/agent-runner.ts:runPersistedGeneration": "1:ef490eb86259ee5321202fce",
   "web/src/lib/onboarding-pi.server.ts:realInference": "4:92dca59908059c408287377c",
-  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:4452eb6b07c0aa5d21c3caa9",
+  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:5b7954ecd2be11a068ba010b",
   "web/src/lib/pi-credentials.server.ts:buildUserPiRuntime": "2:80bee0d946aa4633f94ea00e",
 };
 
