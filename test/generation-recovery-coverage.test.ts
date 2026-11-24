@@ -47,7 +47,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:19,status:1,blocked:1,operationFailure:5,throws:5",
+  specialist_dispatch: "returns:20,status:1,blocked:1,operationFailure:5,throws:5",
   dependency_amendment: "returns:5,blocked:1,operationFailure:1,authorBoundary:1,throws:6",
   independent_assignment_review: "returns:8,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:6",
@@ -207,6 +207,11 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "runArchitectureAssignmentChild", "de81c4f2d41329138a92e9d69ec13045b5add3e08edf017078a675143cdd4957"],
     [file, "runCharacterWorldAssignmentChild", "f1b3495c8dfa2f16ca8c55b027215455e1ccc8863c0ea565b36f0cfcb77ab5f8"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
+    [file, "runNarrativeAssignmentChild", "6f2a435a8f738baa4154e67b72ef71fbab0a43a2911974601c33493c254df8cc"],
+    [file, "runReviewPrerequisiteChild", "62cc631e406b5b80b84955896da317846bfe0443a7904649412fc9b10804ae33"],
+    [file, "pendingNarrativeForResume", "fe57cc8c551b080ec371617c0c99f2418d2b6270fd121a0a28aa3cfbc9b83509"],
+    [file, "inspectOriginalSpecialistCommitForResume", "784fb9f5936f0c6bfacf7732d56fd1e05e153076162cbf69469413c606f31070"],
+    [child, "usesSharedAssignmentReview", "7698acfab91148b916f81886f703eea2a19ca44cbe423c718dd4990e1a7ed850"],
     [file, "runFocusedAssignmentChild", "692eb56fd45ccc7ae2ad323c14876207b68817086db494098bc18ea7f421028b"],
     [child, "createAssignmentLifecycleGraph", "d190943cd002418ceefd8f158c99baecb2124f470354a4fd5d7950568d6c56cc"],
     [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
@@ -225,7 +230,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
 // clean-HEAD recovery authentication, never a new writer entitlement.
 test("R02 source-bound correction and terminal evidence retain reviewed proof gates", () => {
   const reviewed = [
-    ["assignment-metadata-recovery.ts", "materialProgress", "4e8f587da128adb223f8c9160f92b365f1e57bc1d0f52c0cb6c79f07fdf8fd15"],
+    ["assignment-metadata-recovery.ts", "materialProgress", "08a9ca895c443ecf15028004bd918c52d73769e9cbd39a95bc2def33acf740ea"],
     ["assignment-metadata-recovery.ts", "nativeMetadataDefects", "82ab3b20064ca15b238009c47632d07415d7e9b8cecae82d588ed04c90c9cc0e"],
     ["assignment-metadata-recovery.ts", "inspectSettledChain", "57e7ae8162a250d1cd98ba9245c07fa5970b20e7d033583fe7ee4de647ea26d1"],
     ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "b7ae344df102adc7dc9e8e4c8d465a00a054676c2e3627b4e918885b4e416cfe"],
@@ -234,10 +239,14 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["character-world.ts", "inspectRecoverableCharacterWorldCommit", "ff7d64d08ab609775cde44af310b0cfef840862325bfe5f1369f72c3ba52875a"],
     ["foundation.ts", "foundationSourceDigest", "f1520e850f14566097c03e9750c229d73f29b2874fc770d7d15027dad3ff53a0"],
     ["foundation.ts", "inspectFoundationFailure", "8ea7e6c1ac238a0bc742e7e344e4de30ca1f07a0d10c7ac7564ad4ff6394bf48"],
-    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "57b19cbb9c4fbd95c14d0a4288a6853c02e50f4c0c9987a6e63c85b89c1211dc"],
+    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "124fe9436268b6a44c48d3660a0f030a980968afa36b5e9764305a6360b9d20a"],
     ["generation-operation-strategy.ts", "originalAssignmentFailure", "f9586de113493b5804fa7e53219a0b7816c84280fc358eb3c708971275d1685d"],
     ["generation.ts", "authenticateRecoveryOrigin", "54da6d1399ad76f89e3d85e990df26d4baa27ae5828c051aa55976b3c7906adf"],
     ["generation.ts", "recoverySourceHead", "fd6141d99953e6634ecb99c519817c4b211a563257d57e784d044a16a311d181"],
+    ["focused-work.ts", "inspectPendingFocusedCommit", "c0d6f162f4c0d9b2302be846ca1c7aa45b07894808f3e9d10b6884b70f319d17"],
+    ["rejected-review-repair.ts", "foundationReviewBoundary", "6d542b8cb1679dc9b89024c845a35f399c39832b31731cf774dfdc2bc94b9907"],
+    ["event-work.ts", "inspectPendingEventInvocation", "aa572f432d559cb9a7e5274a662e87342416198df67580488611b79b31b0a324"],
+    ["composition-work.ts", "inspectPendingCompositionInvocation", "4ef9ee4c81a3da6c24a51545aa48daa1e75b2f7cdfcc34c298baa7a7671e17b9"],
     ["interactive-work.ts", "inspectPendingInteractiveInvocation", "b17f6e0277797c386c1bb436081c94a7b77058593530a2187367a042ae021067"],
   ] as const;
   const printer = ts.createPrinter({ removeComments: true });

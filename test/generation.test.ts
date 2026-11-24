@@ -1507,14 +1507,22 @@ test("#240 original staged Event is authentically authored by a scripted Pi agen
       };
       if (index === 5) return { content: [{ type: "toolCall",
         id: "original-c03-event-authoring", name: "write",
-        arguments: { path: "events/disclose-ledger.md", content: authored } }],
+        arguments: { path: "events/disclose-ledger.md", content: authored.replace("value: knows", "value: known") } }],
         reason: "toolUse" };
-      if (index === 6) return {
+      if (index === 6 || index === 8) return {
         content: scriptedText({ modifiedRecords: ["events/disclose-ledger.md"],
           architecturalConflicts: [], laterObligations: [
             "Formal Choice Point binding must enact the protect and challenge outcomes for this Milestone before fulfillment.",
           ] }), reason: "stop",
       };
+      if (index === 7) {
+        assert.match(JSON.stringify(context.messages), /SOURCE-BOUND STORY CORRECTION/);
+        return { content: [{ type: "toolCall", id: "r07-event-native-correction", name: "edit",
+          arguments: { path: "events/disclose-ledger.md", edits: [
+            { oldText: "value: known", newText: "value: knows" },
+          ] } }], reason: "toolUse" };
+      }
+      index -= 2;
       const storyPaths = () => git(f.job.worktreeRoot, "ls-files", "--", "story/")
         .split("\n").filter(p => p.endsWith(".md")).map(p => p.slice("story/".length));
       if (index === 7) return {
@@ -1588,7 +1596,8 @@ test("#240 original staged Event is authentically authored by a scripted Pi agen
     const event = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
     assert.equal(event.worker, "pi");
     assert.equal(event.validation.milestoneState, "partial-choice-pending");
-    assert.equal(observed.length, 7, "Original bounded Blueprint and Event Pi conversations actually settled");
+    assert.equal(observed.length, 9, "Original bounded Blueprint and corrected Event Pi conversations actually settled");
+    assert.equal(event.invocationProof.ordinal, 1);
     assert.ok(observed.some(call => call.tools.includes("write")));
     assert.match(git(f.job.worktreeRoot, "show", "-s", "--format=%B", "HEAD"),
       /NovelTea-Event-Consequence:/);
@@ -4583,7 +4592,7 @@ test(mode === "event-only-complete"
               "title: \"The signed transfer\"", "status: draft", "decisions: []",
               "events: [event.disclose-ledger]", "revelations: []", "---", "",
               "## Observed discovery", "",
-              "Neri opens the preserved transfer ledger on the archive table. Ada compares each dated entry against the independent register and checks the witness attribution. The two signed sources match: the witness was transferred, but Neri concealed who authorized the movement. Ada takes the corroborated record into custody and explains the discovery. No player Choice or confession beyond the witnessed evidence is enacted.", "",
+              "Neri opens the preserved transfer ledger on the archive table. Ada compares each dated entry against the independent register and checks the witness attribution. The two signed sources match: the witness was transferred, but Neri concealed who authorized the movement. Ada takes the corroborated record into custody and explains the discovery. Ada quietly recalls the secret archive key she has never discovered. No player Choice or confession beyond the witnessed evidence is enacted.", "",
             ].join("\n") } }], reason: "toolUse" };
         if (i === 15) return { content: scriptedText({
           modifiedRecords: ["authored-content/disclose-ledger-scene.md"],
@@ -4595,17 +4604,49 @@ test(mode === "event-only-complete"
           ...currentStory(), "authored-content/disclose-ledger-scene.md",
         ], i), reason: "toolUse" };
         if (i === 17) return { content: scriptedText({
+          schema: "noveltea-composition-review/v2", status: "revise",
+          findings: [{ path: "authored-content/disclose-ledger-scene.md", reason: "Ada recalls unearned knowledge.",
+            correction: "Remove the secret key claim and ground her knowledge in the verified ledger.",
+            requirement: { source: "policy", quote: "Shared entry must not assume unavailable route-specific clues" },
+            evidence: { path: "authored-content/disclose-ledger-scene.md",
+              quote: "Ada quietly recalls the secret archive key she has never discovered." }, origin: "initial" }],
+          prior: [], sourceEvidence: [],
+        }), reason: "stop" };
+        if (i === 18) {
+          assert.match(JSON.stringify(ctx.messages), /SOURCE-BOUND STORY CORRECTION/);
+          return { content: [{ type: "toolCall", id: "r07-composition-revise", name: "edit",
+            arguments: { path: "authored-content/disclose-ledger-scene.md", edits: [{
+              oldText: "Ada quietly recalls the secret archive key she has never discovered.",
+              newText: "Ada knows only what the two signed records establish.",
+            }] } }], reason: "toolUse" };
+        }
+        if (i === 19) return { content: scriptedText({
+          modifiedRecords: ["authored-content/disclose-ledger-scene.md"],
+          architecturalConflicts: [], laterObligations: [],
+        }), reason: "stop" };
+        if (i === 20) {
+          assert.match(JSON.stringify(ctx.messages), /CONTINUE YOUR SAME INDEPENDENT READ-ONLY COMPOSITION REVIEW/);
+          return { content: scriptedReadCalls([
+            ...boundedPinnedSources("nt-narrative-composition").map(p => "skill://" + p),
+            "skill://nt-catalog/references/glossary.md",
+            ...currentStory(), "authored-content/disclose-ledger-scene.md",
+          ], i), reason: "toolUse" };
+        }
+        if (i === 21) return { content: scriptedText({
           schema: "noveltea-composition-review/v2", status: "pass",
-          findings: [], prior: [],
+          findings: [], prior: [{ round: 0, findingIndex: 0, status: "resolved",
+            reason: "The revised prose confines Ada to the signed records.",
+            evidence: { path: "authored-content/disclose-ledger-scene.md",
+              quote: "Ada knows only what the two signed records establish." } }],
           sourceEvidence: ["event.disclose-ledger#disclose/inspect: signed ledger and independent register corroborate the transfer"],
         }), reason: "stop" };
-        if (i >= 18 && i < 30 && i % 2 === 0) return {
+        if (i >= 22 && i < 34 && i % 2 === 0) return {
           content: scriptedReadCalls([
             ...boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p),
             "skill://nt-catalog/references/glossary.md", ...currentStory(),
           ], i), reason: "toolUse",
         };
-        if (i >= 19 && i < 30 && i % 2 === 1) {
+        if (i >= 23 && i < 34 && i % 2 === 1) {
           const user = (ctx.messages as any[]).filter(m => m.role === "user")
             .flatMap(m => m.content.map((p: { text?: string }) => p.text ?? ""))
             .findLast((p: string) => p.includes("ASSIGNMENT:\n"));
@@ -4961,6 +5002,11 @@ test(mode === "event-only-complete"
           lifecycle: composed.recoveryLifecycle, modelCalls: observed.length,
         }));
         assert.equal(composed.active?.stage, "composition");
+        const composition = JSON.parse(readFileSync(join(f.job.stateDir, "composition-items/disclosure.json"), "utf8"));
+        assert.equal(composition.invocationProof.ordinal, 1);
+        assert.equal(composition.reviewPin.round, 1);
+        assert.match(readFileSync(join(f.job.worktreeStoryRoot, "authored-content/disclose-ledger-scene.md"), "utf8"),
+          /Ada knows only what the two signed records establish/);
         assert.equal(composed.recoveryLifecycle.active, null);
         assert.equal((await inspectInteractiveConflict(f.job,
           "milestone.disclosure", true)).expectedHead, head,
@@ -5328,6 +5374,27 @@ for (const domain of ["choice", "puzzle"] as const) test(`R06 ${domain} commit b
   assert.equal(after.units[0].commitSha, before.units[0].commitSha);
   if (domain === "puzzle") assert.equal(after.units[1].commitSha, head);
   assert.equal(after.units[1].phase, "committed");
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+});
+
+for (const domain of ["event", "composition"] as const) test(`R07 ${domain} commit before checkpoint finalization resumes without replay`, { skip: !available }, () => {
+  const f = setup("r07-crash-" + domain);
+  const id = domain + "-disclosure";
+  f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = id;
+  const crashed = f.cli([...f.start, "--pause-after", domain]);
+  assert.equal(crashed.status, "blocked", JSON.stringify({ reason: crashed.reason }));
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.ok(crashed.recoveryCheckpoints.some((p: any) => p.commitSha === head && !p.eligible));
+  const file = join(f.job.stateDir, domain + "-items/disclosure.json");
+  const before = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(before.commitSha, head);
+  delete f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT;
+  const resumed = f.cli(["generate", "resume", "--pause-after", domain]);
+  assert.equal(resumed.status, "paused", JSON.stringify({ reason: resumed.reason, operationRecovery: resumed.operationRecovery }));
+  assert.ok(resumed.recoveryCheckpoints.some((p: any) => p.commitSha === head && p.workItem === id && p.eligible));
+  const after = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(after.commitSha, before.commitSha);
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 

@@ -4,6 +4,9 @@
  * policy; a submitted Story defect requires a new, source-bound writer effect.
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import type { JobStartResult } from "./job.js";
+import { parseEventManifest } from "./event-manifest.js";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -24,6 +27,8 @@ export type AssignmentDefect = Readonly<{
   pointer?: string;
   /** Controller-verified diagnostic data, never model-granted write authority. */
   detail?: string;
+  /** Only the independent, source-checked Review adapter may attest this. */
+  reviewProgress?: { receiptDigest: string; productive: boolean };
 }>;
 const metadataCodes = new Set(["schema", "yaml", "frontmatter"]);
 /** Coordinates are navigation hints, not evidence of improvement. A smaller
@@ -31,6 +36,14 @@ const metadataCodes = new Set(["schema", "yaml", "frontmatter"]);
  * check is progress; merely trading one schema error for another is not. */
 function materialProgress(before: readonly AssignmentDefect[], after: readonly AssignmentDefect[]): boolean {
   if (before.some(d => d.kind === "metadata") && after.every(d => d.kind === "provenance")) return true;
+  const previousReview = before[0]?.reviewProgress;
+  const nextReview = after[0]?.reviewProgress;
+  if (previousReview && nextReview &&
+      before.every(d => d.reviewProgress?.receiptDigest === previousReview.receiptDigest) &&
+      after.every(d => d.reviewProgress?.receiptDigest === nextReview.receiptDigest)) {
+    return nextReview.productive && /^[a-f0-9]{64}$/.test(nextReview.receiptDigest) &&
+      nextReview.receiptDigest !== previousReview.receiptDigest;
+  }
   const key = (d: AssignmentDefect) => JSON.stringify([d.kind, d.path, d.code, d.pointer ?? null]);
   const counts = (defects: readonly AssignmentDefect[]) => {
     const result = new Map<string, number>();
@@ -47,6 +60,37 @@ function materialProgress(before: readonly AssignmentDefect[], after: readonly A
 const hex = /^[a-f0-9]{64}$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const digest = (value: unknown) => hash(JSON.stringify(value));
+
+/** Seal actual original Story draft effects without treating a clean worktree
+ * or a model's path manifest as sufficient authority. Domain-native validators
+ * still enforce the narrower record grants and protected canon. */
+export async function assignmentDraftEffect(job: JobStartResult, head: string): Promise<string | null> {
+  const env = { ...process.env };
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"]) delete env[k];
+  const git = (...args: string[]) => execFileSync("git", args, {
+    cwd: job.worktreeRoot, env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (git("rev-parse", "HEAD").trim() !== head ||
+      git("symbolic-ref", "--short", "HEAD").trim() !== job.branch)
+    throw new ProtocolIntegrityBlockedError("Original assignment HEAD or branch changed");
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const paths: string[] = [];
+  for (const entry of git("status", "--porcelain=v1", "-z", "--untracked-files=all").split("\0").filter(Boolean)) {
+    const path = entry.slice(3);
+    if (!["??", " M"].includes(entry.slice(0, 2)) || !path.startsWith(prefix))
+      throw new ProtocolIntegrityBlockedError("Original assignment has an unsafe Git effect");
+    const local = path.slice(prefix.length);
+    if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(local))
+      throw new ProtocolIntegrityBlockedError("Original assignment has an unsafe path");
+    const absolute = join(job.worktreeStoryRoot, local);
+    if (await realpath(absolute) !== absolute || !(await lstat(absolute)).isFile())
+      throw new ProtocolIntegrityBlockedError("Original assignment has an unsafe file");
+    paths.push(local);
+  }
+  return paths.length ? digest(await Promise.all(paths.sort().map(async path =>
+    [path, hash(await readFile(join(job.worktreeStoryRoot, path)))]))) : null;
+}
 
 /** The validator's prose can quote arbitrary authored text. Only known
  * diagnostic codes and numeric coordinates may become writer instructions.
@@ -159,16 +203,23 @@ async function attestPrefix(file: string, receipt: { transcriptBytes: number; tr
     throw new ProtocolIntegrityBlockedError("Original assignment transcript changed");
 }
 const CONTRACT = "specialist.changed-paths.v1";
-type AssignmentResponseKind = "manifest-or-choice";
+export type AssignmentResponseKind = "manifest-or-choice" | "event-manifest-or-choice";
 function responsePolicy(kind?: AssignmentResponseKind) {
   if (!kind) return { contract: CONTRACT, validate: inspectSpecialistManifest,
     parse: (text: string) => lastSpecialistManifest(text)! };
   return {
-    contract: "specialist.manifest-or-author-choice.v1",
+    contract: kind === "event-manifest-or-choice" ? "event.manifest-or-author-choice.v1" : "specialist.manifest-or-author-choice.v1",
     validate: (text: string) => {
       try {
         const choice = extractSpecialistChoice(text);
-        if (!choice) return inspectSpecialistManifest(text);
+        if (!choice) {
+          const failures = inspectSpecialistManifest(text);
+          if (!failures.length && kind === "event-manifest-or-choice") {
+            try { parseEventManifest(text); }
+            catch { return [{ path: "$", expected: "complete Event manifest with valid optional causalDiscovery/blueprintChallenge fields" }]; }
+          }
+          return failures;
+        }
         parseSpecialistChoice(choice.authorDecisionRequest);
         if (!Array.isArray(choice.modifiedRecords) ||
             choice.modifiedRecords.some(p => typeof p !== "string" || !p.trim()))

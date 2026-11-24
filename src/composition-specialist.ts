@@ -1,10 +1,13 @@
 import { createPiStatusTool } from "./pi-work-status.js";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { promptStorySpecialist } from "./story-interruption.js";
+import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
+import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { readJobControl } from "./job-control.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath, requirePinnedSkillReads } from "./pinned-skill-reads.js";
@@ -12,7 +15,7 @@ import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
-import { preparePiContext, guardPiBudget, piNarrativeGroup } from "./job-pi-policy.js";
+import { preparePiContext, guardPiBudget, piNarrativeGroup, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
 import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
@@ -71,6 +74,7 @@ export interface CompositionEvidence {
   skillReads: string[];
   piSessionFile?: string;
   piSessionId?: string;
+  invocationProof?: AssignmentInvocationProof;
 }
 export interface SemanticReview {
   verdict: "pass" | "block";
@@ -132,6 +136,7 @@ async function createSession(
   phase: "write" | "review" | "diagnostic",
   extraPaths: string[] = [],
   insideWriter = false,
+  original?: { file: string; id: string },
 ) {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = {
@@ -191,7 +196,8 @@ async function createSession(
     thinkingLevel: context.thinking,
     resourceLoader: loader,
     settingsManager,
-    sessionManager: context.manager,
+    sessionManager: original
+      ? SessionManager.open(original.file, dirname(original.file), project.root) : context.manager,
     customTools: [
       ...(sandboxTools ?? []),
       ...(phase === "write" ? [createStoryValidateTool(job)] : []),
@@ -204,6 +210,10 @@ async function createSession(
         ? [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"]
         : [...SANDBOX_READ_ONLY_TOOLS, "story_context", "report_status"],
   });
+  if (original && (session.sessionId !== original.id || session.sessionManager.getSessionFile() !== original.file)) {
+    session.dispose();
+    throw Error("Composition lost its original Pi session");
+  }
   if (context.thinking && session.thinkingLevel !== context.thinking) {
     session.dispose();
     throw new Error("Pi did not honor requested thinking effort.");
@@ -262,6 +272,11 @@ function toolPaths(
     })),
   ];
 }
+export function compositionInvocationDirectory(job: JobStartResult, workItem: string, sessionId: string, sourceDigest: string) {
+  if (!/^composition-[a-z][a-z0-9-]*$/.test(workItem) || !/^[a-zA-Z0-9-]+$/.test(sessionId) || !/^[a-f0-9]{64}$/.test(sourceDigest))
+    throw Error("Invalid Composition invocation identity");
+  return join(job.stateDir, "composition-invocations", workItem, sessionId, sourceDigest);
+}
 export async function authorComposition(
   job: JobStartResult,
   snapshot: SkillSnapshot,
@@ -270,7 +285,10 @@ export async function authorComposition(
   modelId: string,
   thinking: "low" | "high" | undefined,
   onSession: (file: string, id: string) => Promise<void>,
-  verifyDraft: (evidence: CompositionEvidence) => Promise<{ problems: string[]; stage: "pre-review" | "editorial" }>,
+  verifyDraft: (evidence: CompositionEvidence) => Promise<{ problems: string[]; stage: "pre-review" | "editorial";
+    reviewProgress?: { receiptDigest: string; productive: boolean } }>,
+  original: { sourceDigest: string; authorize: () => Promise<void>; effect: () => Promise<string | null>;
+    session?: { file: string; id: string } },
 ): Promise<CompositionEvidence> {
   const { session, project, pinned, context, sandboxed } = await createSession(
     job,
@@ -279,12 +297,12 @@ export async function authorComposition(
     provider,
     modelId,
     thinking,
-    "write",
+    "write", [], true, original.session,
   );
   try {
     const sessionFile = session.sessionManager.getSessionFile();
     if (sessionFile) await onSession(sessionFile, session.sessionId);
-    let prompt =
+    const prompt =
       "You are a pinned nt-narrative-composition author for one bounded composition milestone. " +
       "FIRST read ALL pinned guidance files below using read, then read sourcePaths including Event steps, " +
       "Character voices, Relationship, Facts, Revelations, any optional clue discovery, and existing content. " +
@@ -332,88 +350,51 @@ export async function authorComposition(
       "Graph will independently verify sources, actual Markdown, coverage and editorial review.\nASSIGNMENT:\n" +
       JSON.stringify(assignment, null, 2) +
       specialistAuthorInstruction(assignment.authorTask);
-    let consecutivePreReviewFailures = 0;
-    for (let attempt = 0; ; attempt++) {
-      const writerFile = session.sessionManager.getSessionFile() ?? undefined;
-      if (attempt === 0) await context.beforeTurn(writerFile);
-      else
-        await guardPiBudget(
-          job,
-          "composition:" + assignment.workItemId + ":write-correction:" + attempt,
-          writerFile,
-        );
-      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
-      await requirePinnedSkillReads(session, project.root, pinned, "Composition specialist");
-      let text = lastReply(session);
-      let parsed: Record<string, unknown> | undefined;
-      for (let formatAttempt = 0; formatAttempt < 3; formatAttempt++) {
-        try {
-          parsed = parseSpecialistJson(text);
-          break;
-        } catch (error) {
-          if (formatAttempt === 2) throw error;
-          await guardPiBudget(
-            job,
-            "composition:" + assignment.workItemId + ":write-correction:" + attempt,
-            session.sessionManager.getSessionFile() ?? undefined,
-          );
-          await promptStorySpecialist(
-            session,
-            "Reformat your LAST cumulative modifiedRecords, architecturalConflicts, " +
-              "and laterObligations report as a single valid JSON object. " +
-              "Preserve the already-authored files unchanged; only correct the response format.",
-          );
-          text = lastReply(session);
-        }
-      }
-      if (!parsed) throw new Error("Composition specialist manifest was not provided.");
-      const calls = toolPaths(session, project.root, snapshot.path);
-      if (assignment.mandatoryReads.some((p) => !calls.some((c) => c.tool === "read" && c.relative === p))) {
-        throw new Error("Composition specialist omitted pinned skill or essential source reads.");
-      }
-      if (
-        !calls.some((c) => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/"))
-      ) {
-        throw new Error("Composition specialist did not author canonical Authored Content.");
-      }
-      if (
-        !strings(parsed.modifiedRecords) ||
-        !parsed.modifiedRecords.length ||
-        !strings(parsed.architecturalConflicts) ||
-        !strings(parsed.laterObligations)
-      ) {
-        throw new Error(
-          "Composition specialist must report modifiedRecords, architecturalConflicts and laterObligations.",
-        );
-      }
-      const evidence: CompositionEvidence = {
-        modifiedRecords: parsed.modifiedRecords,
-        conflicts: parsed.architecturalConflicts,
-        obligations: parsed.laterObligations,
-        skillReads: pinned,
-        piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
-        piSessionId: session.sessionId,
-      };
-      const feedback = await verifyDraft(evidence);
-      if (!feedback.problems.length) {
-        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-        return evidence;
-      }
-      // Native diagnostics, malformed Git manifests and structural validation
-      // do not reach the independent reviewer. They must not gain unbounded
-      // semantic retries merely because the Pi policy has no configured limit.
-      if (feedback.stage === "pre-review") {
-        if (++consecutivePreReviewFailures > 2)
-          throw Error("Composition validation/manifest recovery exhausted before independent review.");
-      } else consecutivePreReviewFailures = 0;
-      // Only substantive editorial corrections use source-bound convergence.
-      prompt =
-        "The independent graph audit rejected the draft. In this SAME session, repair only the " +
-        "problems below, without changing Event/Choice/Milestone/Character/Fact/Relationship/author-protected canon. " +
-        "Read saved prose and replay ALL branches, including least-informed entry and optional clues. " +
-        "Re-run validation and report the FULL changed path manifest.\n" +
-        feedback.problems.join("\n");
-    }
+    if (!sessionFile) throw Error("Composition writer lacks an original session");
+    let accepted: CompositionEvidence | undefined;
+    const invocationProof = await recoverSubmittedAssignment({
+      session, directory: compositionInvocationDirectory(job, assignment.workItemId, session.sessionId, original.sourceDigest),
+      sourceDigest: original.sourceDigest,
+      sessionRoots: [join(job.stateDir, "composition-sessions", assignment.workItemId, "write")],
+      initialPrompt: context.contextNote + prompt,
+      authorize: original.authorize, effect: original.effect,
+      beforeTurn: async () => {
+        const control = await readJobControl(job);
+        if (control === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (control !== "running") throw new AssignmentAuthorPauseError();
+        await guardPiBudget(job, "composition:" + assignment.workItemId + ":write", sessionFile);
+        const after = await readJobControl(job);
+        if (after === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (after !== "running") throw new AssignmentAuthorPauseError();
+      },
+      prompt: async text => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, text);
+        await recordPiSession(job, sessionFile);
+      },
+      verify: async parsed => {
+        await requirePinnedSkillReads(session, project.root, pinned, "Composition specialist");
+        const calls = toolPaths(session, project.root, snapshot.path);
+        if (assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p)))
+          throw Error("Composition specialist omitted pinned skill or essential source reads.");
+        if (!calls.some(c => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/")))
+          throw Error("Composition specialist did not author canonical Authored Content.");
+        if (!strings(parsed.modifiedRecords) || !parsed.modifiedRecords.length ||
+            !strings(parsed.architecturalConflicts) || !strings(parsed.laterObligations))
+          throw Error("Composition specialist must report complete modifiedRecords, architecturalConflicts and laterObligations.");
+        const evidence: CompositionEvidence = { modifiedRecords: parsed.modifiedRecords,
+          conflicts: parsed.architecturalConflicts, obligations: parsed.laterObligations,
+          skillReads: pinned, piSessionFile: sessionFile, piSessionId: session.sessionId };
+        const feedback = await verifyDraft(evidence);
+        if (!feedback.problems.length) accepted = evidence;
+        return feedback.problems.map(detail => ({ kind: "semantic" as const,
+          path: assignment.milestoneId, code: createHash("sha256").update(feedback.stage + ":" + detail).digest("hex"), detail,
+          ...(feedback.reviewProgress ? { reviewProgress: feedback.reviewProgress } : {}) }));
+      },
+    });
+    if (!accepted) throw Error("Original Composition invocation has no independently checked result");
+    await context.completed(sessionFile, session.sessionId);
+    return { ...accepted, invocationProof };
   } finally {
     session.dispose();
   }
@@ -435,6 +416,7 @@ type CompositionReviewReceipt = {
   writer: SessionIdentity;
   reviewer: SessionIdentity;
   sources: Record<string, string>;
+  sourceText: Record<string, string>;
   verdict: CompositionReviewVerdict;
   transcriptBytes: number;
   transcriptDigest: string;
@@ -804,22 +786,24 @@ export async function createCompositionReviewCycle(
     planVersion,
     planDigest,
   );
+  let originalReviewer: SessionIdentity | undefined;
+  if (existsSync(admissionFile(job, cycleId))) {
+    const admission = JSON.parse(await readFile(admissionFile(job, cycleId), "utf8"));
+    if (admission.schema !== "noveltea-composition-review-admission/v1" ||
+        admission.cycleId !== cycleId || admission.writer.id !== writer.id || admission.writer.file !== writer.file)
+      throw Error("Original Composition Review admission changed");
+    originalReviewer = admission.reviewer;
+    if (!originalReviewer) throw Error("Original Composition Review lost reviewer");
+    await reviewerTranscript(job, originalReviewer);
+  }
   const { session, project, pinned, context } = await createSession(
-    job,
-    snapshot,
-    assignment,
-    provider,
-    modelId,
-    thinking,
-    "review",
-    [],
-    true,
+    job, snapshot, assignment, provider, modelId, thinking, "review", [], true, originalReviewer,
   );
   try {
     const reviewer = { id: session.sessionId, file: session.sessionManager.getSessionFile() ?? "" };
-    assertReviewCycleSession(writer, reviewer);
+    assertReviewCycleSession(writer, reviewer, originalReviewer);
     await mkdir(reviewDirectory(job, cycleId), { recursive: true });
-    await writeFile(
+    if (!originalReviewer) await writeFile(
       admissionFile(job, cycleId),
       JSON.stringify(
         {
@@ -838,10 +822,63 @@ export async function createCompositionReviewCycle(
     let stalled = 0;
     let previousDigest: string | null = null;
     let diagnosisCount = 0;
+    let lastReceipt: CompositionReviewReceipt | undefined;
+    let lastProductive = false;
+    const projection = (receipt: CompositionReviewReceipt) => ({
+      review: { verdict: receipt.verdict.status === "pass" ? "pass" as const : "block" as const,
+        sourceEvidence: receipt.verdict.sourceEvidence,
+        concerns: receipt.verdict.findings.map(f => f.path + ": " + f.reason + " Repair: " + f.correction),
+        sessionFile: reviewer.file },
+      pin: receipt.verdict.status === "pass" ? { cycleId, round: receipt.round,
+        receiptDigest: hash(JSON.stringify(receipt)) } : undefined,
+      reviewProgress: { receiptDigest: hash(JSON.stringify(receipt)), productive: lastProductive },
+    });
+    if (originalReviewer) {
+      const transcript = await reviewerTranscript(job, reviewer);
+      for (let round = 0; existsSync(reviewRoundFile(job, cycleId, round)); round++) {
+        const receipt = JSON.parse(await readFile(reviewRoundFile(job, cycleId, round), "utf8")) as CompositionReviewReceipt;
+        if (receipt.schema !== "noveltea-composition-review-round/v1" || receipt.cycleId !== cycleId ||
+            receipt.round !== round || receipt.previousDigest !== previousDigest ||
+            receipt.writer.id !== writer.id || receipt.writer.file !== writer.file ||
+            receipt.reviewer.id !== reviewer.id || receipt.reviewer.file !== reviewer.file ||
+            receipt.transcriptBytes > transcript.length ||
+            hash(transcript.subarray(0, receipt.transcriptBytes)) !== receipt.transcriptDigest ||
+            JSON.stringify(transcriptReviewVerdict(transcript.subarray(0, receipt.transcriptBytes))) !== JSON.stringify(receipt.verdict) ||
+            JSON.stringify(Object.fromEntries(Object.entries(receipt.sourceText).map(([p, v]) => [p, hash(v)]))) !== JSON.stringify(receipt.sources))
+          throw Error("Composition reviewer history changed");
+        const verified = parseCompositionReview(JSON.stringify(receipt.verdict), Object.keys(receipt.sourceText),
+          receipt.sourceText, { assignment: JSON.stringify(assignment), policy: compositionReviewRequirements }, history);
+        const convergence = compositionReviewConvergence(verified, receipt.sourceText, history, stalled);
+        stalled = convergence.stalled;
+        lastProductive = convergence.productive;
+        history.push({ sources: receipt.sourceText, verdict: verified });
+        previousDigest = hash(JSON.stringify(receipt));
+        lastReceipt = receipt;
+        const trigger = sourceReviewDiagnosticTrigger(history, stalled, diagnosisCount);
+        if (trigger && !(trigger === "review-depth" && history.length < 5 + diagnosisCount * 4)) {
+          const diagnosticPath = join(reviewDirectory(job, cycleId), "diagnostic-" + history.length + ".json");
+          if (!existsSync(diagnosticPath)) throw Error("Original Composition diagnostic requires reconciliation");
+          const saved = JSON.parse(await readFile(diagnosticPath, "utf8"));
+          const bytes = await reviewerTranscript(job, saved.diagnostic);
+          if (saved.schema !== "noveltea-composition-diagnostic-receipt/v1" || saved.cycleId !== cycleId ||
+              saved.trigger !== trigger || saved.writer.id !== writer.id || saved.reviewer.id !== reviewer.id ||
+              hash(bytes.subarray(0, saved.transcriptBytes)) !== saved.transcriptDigest ||
+              JSON.stringify(transcriptReviewVerdict(bytes.subarray(0, saved.transcriptBytes))) !== JSON.stringify(saved.diagnosis) ||
+              saved.diagnosis.action !== "continue")
+            throw Error("Original Composition diagnostic is not a settled continuation");
+          diagnosisCount++; stalled = 0;
+        }
+      }
+      if (lastReceipt && transcript.length !== lastReceipt.transcriptBytes ||
+          !lastReceipt && session.messages.some(m => m.role === "user" || m.role === "assistant"))
+        throw Error("Composition reviewer has an uncertain unsealed invocation; never replay");
+    }
     return {
       async review(paths: string[], requiredRoutes: string[]) {
         const sources = await compositionSource(project.root, paths);
         const prior = history.at(-1);
+        if (lastReceipt && prior && JSON.stringify(sources) === JSON.stringify(prior.sources))
+          return projection(lastReceipt);
         if (prior && JSON.stringify([...paths].sort()) !== JSON.stringify(Object.keys(prior.sources).sort()))
           throw Error("Composition review draft inventory changed mid-cycle; reconcile scope.");
         if (previousDigest) {
@@ -975,6 +1012,7 @@ export async function createCompositionReviewCycle(
           throw Error("Composition prose changed while the independent reviewer read it.");
         const convergence = compositionReviewConvergence(verdict, sources, history, stalled);
         stalled = convergence.stalled;
+        lastProductive = convergence.productive;
         await context.completed(reviewer.file, reviewer.id);
         const transcript = await reviewerTranscript(job, reviewer);
         const receipt: CompositionReviewReceipt = {
@@ -985,6 +1023,7 @@ export async function createCompositionReviewCycle(
           writer,
           reviewer,
           sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)])),
+          sourceText: sources,
           verdict,
           transcriptBytes: transcript.length,
           transcriptDigest: hash(transcript),
@@ -996,6 +1035,7 @@ export async function createCompositionReviewCycle(
         );
         previousDigest = hash(JSON.stringify(receipt));
         history.push({ sources, verdict });
+        lastReceipt = receipt;
         const candidate = sourceReviewDiagnosticTrigger(history, stalled, diagnosisCount);
         const trigger =
           candidate === "review-depth" && history.length < 5 + diagnosisCount * 4 ? null : candidate;
@@ -1039,6 +1079,7 @@ export async function createCompositionReviewCycle(
             concerns: verdict.findings.map((f) => f.path + ": " + f.reason + " Repair: " + f.correction),
             sessionFile: reviewer.file,
           },
+          reviewProgress: { receiptDigest: previousDigest, productive: lastProductive },
           pin:
             verdict.status === "pass"
               ? ({

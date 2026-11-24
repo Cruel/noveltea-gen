@@ -1619,8 +1619,14 @@ async function foundationReviewBoundary(job: JobStartResult, state: RepairReceip
       return make("author-revision", { id: choice.id, proposal: choice.proposalSha256, answer: choice.answer });
     if (choice.answer) throw Error("Foundation scope revision has a foreign author receipt");
   }
-  if (state.phase === "needs-plan" && state.outOfAuthority)
+  if (state.phase === "needs-plan" && state.outOfAuthority) {
+    // R07: these owners already have a source-bound cross-specialist
+    // prerequisite controller. Yield controller-replan to it; the parent
+    // checks exact Turn authority and protected decisions before granting
+    // any separately owned work. The shared scope stop must not mask it.
+    if (/^(?:event-|composition-|focus:)/.test(state.origin.workItem)) return null;
     return make("scope", state.outOfAuthority);
+  }
   return null;
 }
 

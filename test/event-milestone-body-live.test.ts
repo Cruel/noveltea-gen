@@ -13,7 +13,7 @@ import {
   milestoneBodyOnlyDrift,
   milestoneBaselineBody,
 } from "../src/milestone-field-scope.js";
-import { eventMilestoneBodyRestoreFeedback, eventEvidenceRetryAllowed } from "../src/event-specialist.js";
+import { eventMilestoneBodyRestoreFeedback } from "../src/event-specialist.js";
 
 test(
   "preserved Luna Milestone narrative drift has exact-original-source repair without bypassing protection",
@@ -66,8 +66,6 @@ test(
     assert.match(feedback, /EVENT_MILESTONE_BODY_RESTORE/);
     assert.match(feedback, /ORIGINAL NARRATIVE BODY/);
     assert.ok(feedback.includes(JSON.stringify(originalBody)));
-    assert.equal(eventEvidenceRetryAllowed(2, [feedback]), true);
-    assert.equal(eventEvidenceRetryAllowed(3, [feedback]), false);
     assert.equal(
       readFileSync(join(job.worktreeStoryRoot, relative), "utf8"),
       actual,

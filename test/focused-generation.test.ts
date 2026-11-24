@@ -400,6 +400,35 @@ test("public scoped generation revises Event, Character, Choice, Puzzle and bran
   assert.equal(git(combined.worktreeRoot, "rev-parse", "HEAD"), afterResume);
 });
 
+test("R07 focused commit before checkpoint finalization resumes without replay", {
+  skip: !available, timeout: 120_000,
+}, () => {
+  const f = fixture("r07-focus-crash");
+  f.cli("seed", ["start"]);
+  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
+  const seed = f.cli("seed", ["generate", "start", "--task", "Seed a mystery",
+    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
+  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
+  const job = f.cli("focused", ["start"]);
+  f.contract(["character.ada"], "architecture");
+  const env = f.env as NodeJS.ProcessEnv;
+  env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = "focus:character.ada";
+  const crashed = f.cli("focused", ["generate", "start", "--task", "Clarify Ada's motivation",
+    "--contract", f.contractPath, "--fixture", "--skills-source", source, "--pause-after", "focus"]);
+  assert.equal(crashed.status, "blocked", crashed.reason);
+  const head = git(job.worktreeRoot, "rev-parse", "HEAD");
+  delete env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT;
+  const resumed = f.cli("focused", ["generate", "resume"]);
+  // A resumed fixture may advance to the final editorial gate; the
+  // recovered focused assignment itself must be independently verified.
+  assert.ok(resumed.status === "paused" || resumed.reason === "editorial-unverified", resumed.reason);
+  assert.equal(resumed.inventory.items.find((i: any) => i.id === "focus:character.ada")?.status, "verified");
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+  assert.ok(resumed.recoveryCheckpoints.some((p: any) =>
+    p.workItem === "focus:character.ada" && p.commitSha === head && p.eligible));
+});
+
 test("focused revisions reject missing existing target IDs and unauthorized file expansion", {
   skip: !available, timeout: 180_000,
 }, () => {

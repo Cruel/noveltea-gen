@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentDefect } from "../src/assignment-metadata-recovery.js";
+import { nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentDefect, type AssignmentResponseKind } from "../src/assignment-metadata-recovery.js";
 import { ProtocolExhaustedError, type ResponseContractSession } from "../src/response-contract-recovery.js";
 import type { ValidationResult } from "../src/validator.js";
 
@@ -39,7 +39,7 @@ test("native metadata recovery carries exact owned locations but excludes untrus
 });
 
 type Reply = { text: string; effect?: string; fail?: boolean };
-async function harness(t: import("node:test").TestContext, replies: Reply[]) {
+async function harness(t: import("node:test").TestContext, replies: Reply[], responseKind?: AssignmentResponseKind) {
   const dir = await mkdtemp(join(tmpdir(), "nt-assignment-metadata-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const file = join(dir, "session.jsonl");
@@ -64,12 +64,15 @@ async function harness(t: import("node:test").TestContext, replies: Reply[]) {
     await appendFile(file, JSON.stringify({ type: "message", message }) + "\n");
   };
   const run = () => recoverSubmittedAssignment({
-    session, directory: receiptDir, sessionRoots: [dir], sourceDigest,
+    session, directory: receiptDir, sessionRoots: [dir], sourceDigest, responseKind,
     initialPrompt: "Original authorized assignment",
     authorize: async () => { if (!permission) throw Error("Permission changed"); },
     effect: async () => sha(effect),
     verify: async () => {
       verifyCalls++;
+      if (effect.startsWith("review:")) return [{ kind: "semantic", path: "authored-content/disclosure.md",
+        code: "knowledge-contradiction", detail: effect,
+        reviewProgress: { receiptDigest: sha(effect), productive: true } }];
       if (effect.startsWith("semantic:")) return Array.from({ length: Number(effect.slice(9)) }, (_, i) =>
         ({ kind: "semantic" as const, path: "events/disclosure.md", code: "missing-route-" + i }));
       return effect === "invalid metadata" ? [defect] :
@@ -147,6 +150,30 @@ test("R06 improving Interactive semantic corrections have no fixed attempt ceili
   assert.ok(h.calls.every(c => c.tools.includes("write")));
   await h.run();
   assert.equal(h.calls.length, 5);
+});
+
+test("R07 Event format and causal corrections preserve one original writer beyond three improving revisions", async t => {
+  const event = JSON.stringify({ modifiedRecords: ["events/disclosure.md"], architecturalConflicts: [], laterObligations: [] });
+  const h = await harness(t, [{ text: "malformed", effect: "semantic:4" }, { text: event },
+    ...[3, 2, 1, 0].map(n => ({ text: event, effect: "semantic:" + n }))], "event-manifest-or-choice");
+  h.pauseAt(4);
+  await assert.rejects(h.run(), /safe budget pause/);
+  const proof = await h.run();
+  assert.equal(proof.ordinal, 4);
+  assert.equal(h.calls.length, 6);
+  assert.deepEqual(h.calls[1]!.tools, []);
+  await h.run();
+  assert.equal(h.calls.length, 6);
+});
+
+test("R07 independently attested Composition improvement is not measured by blocker count alone", async t => {
+  const h = await harness(t, [...[1, 2, 3, 4, 5].map(n => ({ text: report, effect: "review:" + n })),
+    { text: report, effect: "valid" }]);
+  const proof = await h.run();
+  assert.equal(proof.ordinal, 5);
+  assert.equal(h.calls.length, 6);
+  await h.run();
+  assert.equal(h.calls.length, 6);
 });
 
 test("ambiguous initial and corrective effects cannot be replayed", async t => {

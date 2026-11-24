@@ -28,7 +28,9 @@ export type AssignmentIdentity = Readonly<{
 export function usesSharedAssignmentReview(workItem: string | undefined | null): boolean {
   return ["foundation", "foundations", "world-foundations", "character-foundations", "architecture", "global-architecture"].includes(workItem ?? "") ||
     /^interactive-(?:choice|puzzle)-[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
-    /^(?:interactive|choice|puzzle):milestone\.[a-z][a-z0-9-]*$/.test(workItem ?? "");
+    /^(?:interactive|choice|puzzle|event|composition):milestone\.[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
+    /^(?:event|composition)-[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
+    /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem ?? "");
 }
 /** Studio Discovery precedes any Generation job or Git write grant. */
 export type DiscoveryAssignmentIdentity = Readonly<{

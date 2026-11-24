@@ -106,12 +106,10 @@ function proofOf(id: string, receipt: Receipt, sha: string) {
       throw new Error("Committed specialist lacks passing validation evidence.");
     }
   }
-  // A controller may annotate an already committed Interactive unit with a
-  // diagnostic failure after checkpoint finalization (e.g. a later graph
-  // scheduling error). That mutable error does not change its pinned Git
-  // paths, validation or specialist evidence. Hash only the original
-  // committed unit bytes; leave every other field within the immutable proof.
-  if (id.startsWith("interactive-") && "failure" in item) {
+  // A publication failure can annotate an already committed work item
+  // after the recovery intent was sealed. This diagnostic is not part of
+  // the immutable Git/native/writer evidence; every other field remains so.
+  if (/^(interactive|event|composition)-/.test(id) && "failure" in item) {
     const { failure: _diagnostic, ...committed } = item;
     return committed;
   }

@@ -16,7 +16,7 @@ import { reviewedMilestoneHandoff, assertMilestoneInteractiveDisposition,
   assertMilestoneCanonicalClosure } from "../src/milestone-obligation-handoff.js";
 import {
   canonicalFrontmatterStructureError, parseEventManifest, scopedEventEvidenceConflict,
-  eventEvidenceRepairFeedback, eventEvidenceRetryAllowed, eventSpecialistPrompt,
+  eventEvidenceRepairFeedback, eventSpecialistPrompt,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
   scopedDecisionSetupConflict, eventDecisionSetupCorrection,
   observedNondecisionMilestone, eventMilestoneBodyRestoreFeedback,
@@ -233,23 +233,6 @@ test("non-Choice Event-only preflight recognizes observation, inference, and unc
   for (const change of invalid) assert.equal(observedNondecisionMilestone(change), false, change);
 });
 
-test("only one additional evidence-only correction fits the bounded Event retry budget", () => {
-  const local = "EVENT_LOCAL_EVIDENCE: Missing player-observed access during the interval.";
-  assert.equal(eventEvidenceRetryAllowed(0, ["ordinary native diagnostic"]), true);
-  assert.equal(eventEvidenceRetryAllowed(1, ["ordinary native diagnostic"]), true);
-  assert.equal(eventEvidenceRetryAllowed(2, [local]), true);
-  assert.equal(eventEvidenceRetryAllowed(2, [
-    "EVENT_MILESTONE_BODY_RESTORE: Restore the exact original Milestone body.",
-  ]), true);
-  assert.equal(eventEvidenceRetryAllowed(2, [local, local]), true);
-  assert.equal(eventEvidenceRetryAllowed(2, ["Selected Milestone lacks a route"]), false);
-  assert.equal(eventEvidenceRetryAllowed(2, [local, "Unauthorized protected author change"]), false);
-  assert.equal(eventEvidenceRetryAllowed(2, []), false);
-  assert.equal(eventEvidenceRetryAllowed(3, [local]), false);
-  assert.equal(eventEvidenceRetryAllowed(4, [local]), false);
-  assert.equal(eventEvidenceRetryAllowed(-1, [local]), false);
-});
-
 test("nondecision Milestone authority metadata does not require a formal Choice Point", () => {
   const conflict = "The opening Event is reachable and provides the investigation setup, but " +
     "the independent validator reports that an unbound Choice obligation cannot certify a completed " +
@@ -319,8 +302,6 @@ test("a real Choice Milestone can commit an Event setup without falsely claiming
   assert.match(correction, /laterObligations/);
   assert.match(correction, /SAME Pi session/);
   assert.doesNotMatch(correction, /mark .*complete.*now/i);
-  assert.equal(eventEvidenceRetryAllowed(2, [correction]), true);
-  assert.equal(eventEvidenceRetryAllowed(3, [correction]), false);
   assert.equal(scopedDecisionSetupConflict(assigned,
     "The player observes clues and identifies a missing passenger.", [exact]), false);
   for (const bad of [

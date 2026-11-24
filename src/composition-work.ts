@@ -6,7 +6,8 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { authorComposition, createCompositionReviewCycle, verifyCompositionReviewPin,
+import { assignmentDraftEffect, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { authorComposition, compositionInvocationDirectory, createCompositionReviewCycle, verifyCompositionReviewPin,
   type CompositionReviewPin, type CompositionAssignment,
   type CompositionEvidence, type SemanticReview } from "./composition-specialist.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
@@ -73,6 +74,8 @@ interface Receipt {
   beforeHead?: string; paths?: string[]; claimedPaths?: string[]; digest?: string;
   commitSha?: string; sessionFile?: string; writerSessionId?: string; reviewSessionFile?: string;
   reviewedDigest?: string; reviewedEvidence?: SemanticReview; reviewPin?: CompositionReviewPin;
+  invocationSource?: string; invocationAssignment?: CompositionAssignment; invocationProof?: AssignmentInvocationProof;
+  invocationBaseline?: Report;
   authorTask?: string;
   skillReads?: string[]; obligations?: string[]; conflicts?: string[]; failure?: string;
   validation?: { protectionBase: string; validatorVersion: string; branchReview: ReviewEvidence;
@@ -85,6 +88,67 @@ export interface CompositionOptions {
 }
 const milestonePattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+function compositionInvocationSource(job: JobStartResult, receipt: Receipt) {
+  return hash(JSON.stringify({ job: job.jobId, thread: job.threadId, base: receipt.baseSha,
+    workItem: receipt.workItemId, head: receipt.beforeHead, interactiveHead: receipt.interactiveHead,
+    planVersion: receipt.planVersion, plan: receipt.planDigest, assignment: receipt.invocationAssignment,
+    baseline: receipt.invocationBaseline,
+    snapshot: receipt.snapshot?.id, provider: receipt.provider, model: receipt.model, thinking: receipt.thinking }));
+}
+function compositionInvocationOptions(job: JobStartResult, receipt: Receipt) {
+  if (!receipt.invocationSource || receipt.invocationSource !== compositionInvocationSource(job, receipt) ||
+      !receipt.sessionFile || !receipt.writerSessionId)
+    throw Error("Composition invocation receipt lost its original source or session");
+  return { directory: compositionInvocationDirectory(job, receipt.workItemId, receipt.writerSessionId, receipt.invocationSource),
+    sourceDigest: receipt.invocationSource, sessionId: receipt.writerSessionId, sessionFile: receipt.sessionFile,
+    sessionRoots: [join(job.stateDir, "composition-sessions", receipt.workItemId, "write")] };
+}
+export async function inspectPendingCompositionInvocation(job: JobStartResult, milestone: string, sourceHead?: string) {
+  if (!milestonePattern.test(milestone)) return null;
+  const path = join(job.stateDir, "composition-items", milestone.slice(10) + ".json");
+  if (!existsSync(path)) return null;
+  const r = JSON.parse(await readFile(path, "utf8")) as Receipt;
+  if (!["writing", "authored", "committed"].includes(r.phase) || !r.beforeHead ||
+      sourceHead && r.beforeHead !== sourceHead) return null;
+  if (r.jobId !== job.jobId || r.baseSha !== job.baseSha || r.milestoneId !== milestone ||
+      r.workItemId !== "composition-" + milestone.slice(10)) throw Error("Composition pending receipt identity changed");
+  if (r.worker === "pi") {
+    if (!r.invocationAssignment || !r.invocationBaseline || !r.snapshot ||
+        r.invocationSource !== compositionInvocationSource(job, r) ||
+        await openSkillSnapshot(r.snapshot.id) !== r.snapshot.path)
+      throw Error("Original Composition invocation source changed");
+    if (r.sessionFile || r.writerSessionId) {
+      const options = compositionInvocationOptions(job, r);
+      if (!options.sessionFile.startsWith(options.sessionRoots[0]! + "/") ||
+          await realpath(options.sessionFile) !== options.sessionFile ||
+          !(await lstat(options.sessionFile)).isFile())
+        throw Error("Original Composition session is unsafe");
+    } else if (changes(job).length || r.phase !== "writing") throw Error("Original Composition draft lacks a session");
+  }
+  const head = git(job, "rev-parse", "HEAD");
+  if (head === r.beforeHead) await assignmentDraftEffect(job, head);
+  else {
+    if (!["authored", "committed"].includes(r.phase) || changes(job).length ||
+        !r.paths || await fileDigest(job, r.paths) !== r.digest)
+      return null;
+    verifyCommit(job, r, head);
+    if (r.worker === "pi") {
+      if (!r.invocationProof) throw Error("Original Composition commit lacks settled writer proof");
+      await verifySettledAssignment({ ...compositionInvocationOptions(job, r), proof: r.invocationProof, effect: r.digest! });
+    }
+  }
+  return r;
+}
+export async function inspectCompositionFailure(job: JobStartResult, milestone: string, sourceHead: string) {
+  if (!milestonePattern.test(milestone)) return null;
+  const receipt = JSON.parse(await readFile(join(job.stateDir, "composition-items", milestone.slice(10) + ".json"), "utf8")) as Receipt;
+  if (receipt.jobId !== job.jobId || receipt.milestoneId !== milestone ||
+      receipt.workItemId !== "composition-" + milestone.slice(10) || receipt.beforeHead !== sourceHead ||
+      receipt.phase !== "writing" || receipt.worker !== "pi") return null;
+  const options = compositionInvocationOptions(job, receipt);
+  const terminal = await inspectAssignmentFailure({ ...options, effect: await assignmentDraftEffect(job, sourceHead) });
+  return terminal && { ...terminal, ref: options.directory + "/terminal.json" };
+}
 /** The publication gate compares sealed semantic fields, not JSON key insertion order. */
 export function assertCompositionReviewerMatch(verified: SemanticReview,
   copied: SemanticReview | undefined): void {
@@ -464,6 +528,7 @@ function output(job: JobStartResult, state: Receipt) {
   return { status: state.phase === "committed" ? "composition-committed" : "in-progress",
     phase: state.phase, jobId: job.jobId, milestoneId: state.milestoneId,
     workItemId: state.workItemId, interactiveHead: state.interactiveHead,
+    expectedHead: state.beforeHead ?? state.interactiveHead, planVersion: state.planVersion,
     headSha: state.commitSha ?? state.interactiveHead, worktreeStoryRoot: job.worktreeStoryRoot,
     paths: state.paths ?? [], validation: state.validation, failure: state.failure,
     obligations: state.obligations ?? [], skillSnapshot: state.snapshot?.id,
@@ -567,7 +632,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
   const file = join(root, "composition-items", input.milestone.slice(10) + ".json");
   if (input.action === "inspect" && !existsSync(file)) throw new Error("No composition work item receipt.");
   return withStoryJobLock(job, "composition-" + input.milestone.slice(10), async () => {
-    if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
+    if (input.action === "run" && !await inspectPendingCompositionInvocation(job, input.milestone))
+      await processAuthorUpdatesAtBoundary(job);
     const sourceFile = join(root, "interactive-items", input.milestone.slice(10) + ".json");
     const eventFile = join(root, "event-items", input.milestone.slice(10) + ".json");
     if (!existsSync(sourceFile) || !existsSync(eventFile) || !existsSync(join(root, "architecture.json")))
@@ -662,7 +728,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         throw new Error("Composition rejected stale, mismatched or unsealed optional Puzzle evidence.");
       // Re-evaluate the original promise and actual scoped canonical Story, not
       // just the specialist's stored claim that a Puzzle was not needed.
-      const sourceReport = verified(await validateStoryJob(
+      const pending = await inspectPendingCompositionInvocation(job, input.milestone);
+      const sourceReport = pending?.invocationBaseline ?? verified(await validateStoryJob(
         await startStoryJob({ story: input.story, job: input.job }, false),
         input.validatorSource ?? input.skillsSource, { ...job, baseSha: interactiveHead }), interactiveHead);
       const related = sourceReport.records.filter(record => record.metadata.type === "event" &&
@@ -735,8 +802,10 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         else await publishHead(job, base, s.commitSha, s.workItemId);
         return;
       }
-      if (s.phase === "writing")
-        throw new Error("Interrupted composition writer: inspect preserved Story and transcript, no blind retry.");
+      const continuing = s.phase === "writing";
+      if (continuing && (s.worker !== "pi" ||
+          !await inspectPendingCompositionInvocation(job, s.milestoneId, base)))
+        throw Error("Interrupted Composition writer lacks its original invocation.");
       const current = git(job, "rev-parse", "HEAD");
       const recovering = s.phase === "authored" && current !== base;
       if (recovering && (!s.digest || !s.paths || changes(job).length ||
@@ -748,14 +817,22 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         if (s.phase === "pending" && changes(job).length)
           throw new Error("Composition writer requires clean Story boundary.");
       }
-      const baseline = verified(await validate(base), base);
-      const assign = { ...selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone,
+      const baseline = s.invocationBaseline ?? verified(await validate(base), base);
+      const assign = s.invocationAssignment ?? { ...selectAssignment(architecture.plan!, baseline, source, eventSource, input.milestone,
         milestoneBlueprint),
         ...(s.authorTask ? { authorTask: s.authorTask } : {}) };
-      if (s.phase === "pending") {
-        await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
-          ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);
-        s.phase = "writing"; s.beforeHead = base; await save(file, s);
+      if (s.phase === "pending" || continuing) {
+        if (!continuing) {
+          await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
+            ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);
+          s.phase = "writing"; s.beforeHead = base;
+          if (s.worker === "pi") {
+            s.invocationAssignment = assign;
+            s.invocationBaseline = baseline;
+            s.invocationSource = compositionInvocationSource(job, s);
+          }
+          await save(file, s);
+        }
         let cycle: Awaited<ReturnType<typeof createCompositionReviewCycle>> | undefined;
         try {
           const verifyDraft = async (evidence: CompositionEvidence) => {
@@ -803,7 +880,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
               const result = await cycle.review(paths!, [...structural.outcomes, ...structural.solutions]);
               const review = result.review;
               if (review.verdict !== "pass" || review.concerns.length)
-                return { stage: "editorial" as const,
+                return { stage: "editorial" as const, reviewProgress: result.reviewProgress,
                   problems: review.concerns.length ? review.concerns : ["Independent editorial review blocked without correction details."] };
               if (!result.pin) throw new Error("Composition editorial pass lacks sealed review lineage.");
               s.reviewedDigest = await fileDigest(job, paths!);
@@ -815,9 +892,24 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           };
           const evidence = s.worker === "fixture" ? await fixtureAuthor(job, assign)
             : await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
-              s.thinking, async (session, id) => { s.sessionFile = session;
-                s.writerSessionId = id; await save(file, s); },
-              verifyDraft);
+              s.thinking, async (session, id) => {
+                if (s.sessionFile && (s.sessionFile !== session || s.writerSessionId !== id))
+                  throw Error("Original Composition writer session changed");
+                s.sessionFile = session; s.writerSessionId = id; await save(file, s); },
+              verifyDraft, { sourceDigest: s.invocationSource!,
+                session: s.sessionFile && s.writerSessionId ? { file: s.sessionFile, id: s.writerSessionId } : undefined,
+                authorize: async () => {
+                  assertHead(job, base);
+                  if (s.invocationSource !== compositionInvocationSource(job, s))
+                    throw Error("Composition assignment source changed before original invocation");
+                },
+                effect: () => assignmentDraftEffect(job, base) });
+          if (s.worker === "pi") {
+            if (!evidence.invocationProof) throw Error("Composition writer did not settle its original invocation");
+            s.invocationProof = evidence.invocationProof;
+            await verifySettledAssignment({ ...compositionInvocationOptions(job, s),
+              proof: s.invocationProof, effect: await assignmentDraftEffect(job, base) });
+          }
           s.claimedPaths = evidence.modifiedRecords;
           if (evidence.piSessionId) s.writerSessionId = evidence.piSessionId;
           s.paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
@@ -832,6 +924,11 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         if (!s.paths || !s.claimedPaths || !s.digest || s.conflicts?.length ||
             await fileDigest(job, s.paths) !== s.digest)
           throw new Error("Composition draft bytes/manifest differ from verified receipt.");
+        if (s.worker === "pi") {
+          if (!s.invocationProof) throw Error("Authored Composition lacks its settled invocation");
+          await verifySettledAssignment({ ...compositionInvocationOptions(job, s),
+            proof: s.invocationProof, effect: s.digest });
+        }
         const result = await validate(base), report = verified(result, base);
         for (const prev of baseline.coverage.eventProgress.filter(e => e.status === "reachable")) {
           if (report.coverage.eventProgress.find(e => e.id === prev.id)?.status !== "reachable")

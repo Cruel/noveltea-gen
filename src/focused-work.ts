@@ -113,6 +113,54 @@ function changes(job: JobStartResult) {
   return git(job, "status", "--porcelain=v1", "-z", "--untracked-files=all").toString()
     .split("\0").filter(Boolean);
 }
+/** Only an exact committed focused effect can cross the publication gap. */
+export async function inspectPendingFocusedCommit(job: JobStartResult, target: string, sourceHead?: string) {
+  if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
+  const file = receiptPath(job, { workItemId: "focus:" + target, target });
+  if (!existsSync(file)) return null;
+  const receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  if (!["authored", "committed"].includes(receipt.phase) ||
+      sourceHead && receipt.expectedHead !== sourceHead) return null;
+  const head = git(job, "rev-parse", "HEAD").trim();
+  if (head === receipt.expectedHead || receipt.commitSha && receipt.commitSha !== head) return null;
+  if (receipt.jobId !== job.jobId || receipt.workItemId !== "focus:" + target || receipt.target !== target ||
+      !receipt.sha256 || changes(job).length ||
+      git(job, "symbolic-ref", "--short", "HEAD").trim() !== job.branch ||
+      git(job, "rev-parse", head + "^").trim() !== receipt.expectedHead)
+    throw Error("Focused commit reconciliation lost its original assignment or Git source.");
+  const trailers = git(job, "log", "-1", "--format=%B", head).split("\n");
+  if (!["NovelTea-Job: " + job.jobId, "NovelTea-Work-Item: " + receipt.workItemId,
+    "NovelTea-Plan-Version: " + receipt.planVersion, "NovelTea-Focused-Digest: " + receipt.sha256]
+    .every(line => trailers.includes(line))) throw Error("Focused commit provenance changed.");
+  const committedPaths = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", head).trim().split("\n").sort();
+  if (JSON.stringify(committedPaths) !== JSON.stringify(receipt.paths.map(p => repoPath(job, p)).sort()))
+    throw Error("Focused committed path inventory changed.");
+  const actualDigest = digest(JSON.stringify(await Promise.all(receipt.paths.map(async p => {
+    if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(p)) throw Error("Unsafe focused commit path.");
+    const full = join(job.worktreeStoryRoot, p);
+    if (await realpath(full) !== full || !(await lstat(full)).isFile()) throw Error("Unsafe focused commit file.");
+    return [p, digest(await readFile(full, "utf8"))];
+  }))));
+  if (actualDigest !== receipt.sha256) throw Error("Focused committed content changed.");
+  return { ...receipt, commitSha: head };
+}
+async function publishFocusedHead(job: JobStartResult, receipt: Receipt) {
+  const headFile = join(job.stateDir, "revisions", "verified-head.json");
+  const previous = existsSync(headFile) ? JSON.parse(await readFile(headFile, "utf8")) as {
+    jobId: string; headSha: string; version: number } : undefined;
+  if (previous && (previous.jobId !== job.jobId ||
+      ![receipt.expectedHead, receipt.commitSha].includes(previous.headSha)))
+    throw Error("Verified HEAD changed during focused commit; manual reconciliation required.");
+  if (previous?.headSha !== receipt.commitSha) {
+    await mkdir(dirname(headFile), { recursive: true });
+    const headTemp = headFile + "." + randomUUID() + ".tmp";
+    await writeFile(headTemp, JSON.stringify({ version: 1, jobId: job.jobId, headSha: receipt.commitSha,
+      workItemId: receipt.workItemId }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    await rename(headTemp, headFile);
+  }
+  if (!receipt.workItemId.startsWith("dependency:"))
+    await finalizeRecoveryCheckpoint(job, receipt.workItemId, receipt.expectedHead, receipt.commitSha!);
+}
 function reportOf(result: ValidationResult, head: string) {
   const report = result.report as { records?: CanonicalScopeRecord[]; diagnostics?: unknown[];
     protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;
@@ -503,6 +551,31 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       throw new Error("Focused target is outside the explicit completion contract.");
     const workItemId = input.dependencyAssignmentId ?? "focus:" + input.target;
     const file = receiptPath(job, { workItemId, target: input.target });
+    const pendingCommit = !dependency && await inspectPendingFocusedCommit(job, input.target);
+    if (pendingCommit) {
+      const receipt = pendingCommit;
+      const turn = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
+      if (receipt.planVersion !== plan.version || receipt.contractDigest !== digest(JSON.stringify(plan.contract)) ||
+          receipt.worker !== (input.fixture ? "fixture" : "pi") || receipt.assignmentDigest !== turn?.digest ||
+          receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined) ||
+          (!input.fixture && !turn))
+        throw Error("Focused committed receipt no longer matches original Turn authority.");
+      const records = reportOf(await validateStoryJob(job, input.validatorSource ?? input.skillsSource,
+        { ...job, baseSha: receipt.expectedHead }), receipt.expectedHead);
+      const ownedIds = [input.target, ...(input.target === input.contract.scope.targets[0] ?
+        input.contract.scope.supportingTargets ?? [] : [])];
+      const owned = records.filter(record => ownedIds.includes(record.metadata.id));
+      if (JSON.stringify(owned.map(r => r.path).sort()) !== JSON.stringify(receipt.paths) ||
+          owned.length !== ownedIds.length) throw Error("Focused committed paths differ from authorized targets.");
+      if (turn) assertFocusedTurnAssignment(turn, input.target, receipt.paths,
+        [...new Set(owned.map(r => r.metadata.type))].sort());
+      receipt.phase = "committed";
+      await save(file, receipt);
+      if (receipt.authorChoiceId && (await inspectSpecialistChoice(job, receipt.authorChoiceId)).phase === "resuming")
+        await completeSpecialistChoice(job, receipt.authorChoiceId);
+      await publishFocusedHead(job, receipt);
+      return { status: "focused-committed", headSha: receipt.commitSha, paths: receipt.paths };
+    }
     const current = await trustedHead(job);
     const actual = git(job, "rev-parse", "HEAD").toString().trim();
     if (changes(job).length || actual !== current) throw new Error("Focused worktree has changes requiring explicit reconciliation.");
@@ -784,19 +857,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     receipt.commitSha = git(job, "rev-parse", "HEAD").toString().trim();
     receipt.phase = "committed"; await save(file, receipt);
     if (resuming) await completeSpecialistChoice(job, receipt.authorChoiceId!);
-    const headFile = join(job.stateDir, "revisions", "verified-head.json");
-    const previous = existsSync(headFile) ? JSON.parse(await readFile(headFile, "utf8")) as {
-      jobId: string; headSha: string; version: number } : undefined;
-    if (previous && (previous.jobId !== job.jobId || previous.headSha !== current))
-      throw new Error("Verified HEAD changed during focused commit; manual reconciliation required.");
-    await mkdir(dirname(headFile), { recursive: true });
-    const headTemp = headFile + "." + randomUUID() + ".tmp";
-    await writeFile(headTemp, JSON.stringify({ version: 1, jobId: job.jobId, headSha: receipt.commitSha,
-      workItemId: receipt.workItemId }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-    await rename(headTemp, headFile);
     // Supporting commits retain their own source-bound native/work/review receipts.
-    // They are not advertised as independently forkable generation checkpoints.
-    if (!dependency) await finalizeRecoveryCheckpoint(job, receipt.workItemId, current, receipt.commitSha!);
+    await publishFocusedHead(job, receipt);
     return { status: "focused-committed", headSha: receipt.commitSha, paths };
   });
 }

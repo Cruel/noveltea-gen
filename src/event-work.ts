@@ -8,7 +8,8 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
-import { authorEventCluster, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
+import { assignmentDraftEffect, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { authorEventCluster, eventInvocationDirectory, scopedEventEvidenceConflict, eventEvidenceRepairFeedback,
   scopedNondecisionChoiceDeferral, eventNondecisionChoiceCorrection,
   scopedDecisionSetupConflict, eventDecisionSetupCorrection,
   observedNondecisionMilestone,
@@ -35,7 +36,7 @@ import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint,
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import { recordSpecialistChoice, verifySpecialistChoice, claimSpecialistChoice,
-  completeSpecialistChoice, SpecialistChoiceRequiredError } from "./specialist-choice.js";
+  completeSpecialistChoice, SpecialistChoiceRequiredError, inspectSpecialistChoice } from "./specialist-choice.js";
 
 type Phase = "ready" | "writing" | "awaiting-author" | "authored" | "committed" | "prerequisite-reported";
 interface EventReceipt {
@@ -44,6 +45,7 @@ interface EventReceipt {
   expectedHead: string; phase: Phase; worker: "fixture" | "pi";
   provider: string; model: string; snapshot?: SkillSnapshot;
   sessionFile?: string; sessionId?: string; authorChoiceId?: string;
+  invocationSource?: string; invocationChoice?: string; invocationProof?: AssignmentInvocationProof;
   /** Older Event items predate the local Blueprint gate; new items require it. */
   blueprintRequired?: boolean; blueprintTask?: string; blueprintPin?: MilestoneBlueprintPin;
   assignment?: EventAssignment;
@@ -108,6 +110,72 @@ export function eventCompletionDigest(value: {
       !["complete", "partial-choice-pending"].includes(value.milestoneState))
     throw Error("Event completion evidence is not bound to a verified source.");
   return hash(JSON.stringify(value));
+}
+function eventInvocationSource(job: JobStartResult, receipt: EventReceipt) {
+  return hash(JSON.stringify({ job: job.jobId, thread: job.threadId, base: receipt.baseSha,
+    workItem: receipt.workItemId, head: receipt.expectedHead, planVersion: receipt.planVersion,
+    plan: receipt.planDigest, assignment: receipt.assignment, snapshot: receipt.snapshot?.id,
+    provider: receipt.provider, model: receipt.model, reroutedFrom: receipt.reroutedFrom,
+    choice: receipt.invocationChoice ?? null }));
+}
+function eventInvocationOptions(job: JobStartResult, receipt: EventReceipt) {
+  if (!receipt.invocationSource || receipt.invocationSource !== eventInvocationSource(job, receipt) ||
+      !receipt.sessionFile || !receipt.sessionId)
+    throw Error("Event invocation receipt lost its original source or session");
+  return { directory: eventInvocationDirectory(job, receipt.workItemId, receipt.sessionId, receipt.invocationSource),
+    sourceDigest: receipt.invocationSource, sessionId: receipt.sessionId, sessionFile: receipt.sessionFile,
+    sessionRoots: [join(job.stateDir, "event-sessions", receipt.workItemId,
+      ...(receipt.reroutedFrom ? ["rerouted-" + receipt.reroutedFrom] : []))],
+    responseKind: "event-manifest-or-choice" as const };
+}
+export async function inspectPendingEventInvocation(job: JobStartResult, milestone: string, sourceHead?: string) {
+  if (!idPattern.test(milestone)) return null;
+  const path = join(job.stateDir, "event-items", milestone.slice(10) + ".json");
+  if (!existsSync(path)) return null;
+  const r = JSON.parse(await readFile(path, "utf8")) as EventReceipt;
+  if (!["writing", "authored", "committed", "awaiting-author"].includes(r.phase) ||
+      sourceHead && r.expectedHead !== sourceHead) return null;
+  if (r.jobId !== job.jobId || r.baseSha !== job.baseSha || r.milestoneId !== milestone ||
+      r.workItemId !== "event-" + milestone.slice(10)) throw Error("Event pending receipt identity changed");
+  if (r.worker === "pi") {
+    if (!r.assignment || !r.snapshot || r.invocationSource !== eventInvocationSource(job, r) ||
+        await openSkillSnapshot(r.snapshot.id) !== r.snapshot.path)
+      throw Error("Original Event invocation source changed");
+    if (r.sessionFile || r.sessionId) {
+      const options = eventInvocationOptions(job, r);
+      if (!options.sessionFile.startsWith(options.sessionRoots[0]! + "/") ||
+          await realpath(options.sessionFile) !== options.sessionFile ||
+          !(await lstat(options.sessionFile)).isFile())
+        throw Error("Original Event session is unsafe");
+    } else if (dirty(job).length || r.phase !== "writing") throw Error("Original Event draft lacks a session");
+  }
+  const head = git(job, "rev-parse", "HEAD");
+  if (head === r.expectedHead) await assignmentDraftEffect(job, head);
+  else {
+    if (!["authored", "committed"].includes(r.phase) || dirty(job).length ||
+        !r.paths || await contentDigest(job, r.paths) !== r.contentDigest)
+      return null;
+    // Pre-publication Git effects may not have their final native proof yet.
+    if (git(job, "rev-parse", head + "^") !== r.expectedHead ||
+        !git(job, "log", "-1", "--format=%B", head).includes("NovelTea-Event-Design: " + r.contentDigest))
+      return null;
+    if (r.phase === "committed") verifyCommit(job, r, head);
+    if (r.worker === "pi") {
+      if (!r.invocationProof) throw Error("Original Event commit lacks settled writer proof");
+      await verifySettledAssignment({ ...eventInvocationOptions(job, r), proof: r.invocationProof, effect: r.contentDigest! });
+    }
+  }
+  return r;
+}
+export async function inspectEventFailure(job: JobStartResult, milestone: string, sourceHead: string) {
+  if (!idPattern.test(milestone)) return null;
+  const receipt = JSON.parse(await readFile(join(job.stateDir, "event-items", milestone.slice(10) + ".json"), "utf8")) as EventReceipt;
+  if (receipt.jobId !== job.jobId || receipt.milestoneId !== milestone ||
+      receipt.workItemId !== "event-" + milestone.slice(10) || receipt.expectedHead !== sourceHead ||
+      receipt.phase !== "writing" || receipt.worker !== "pi") return null;
+  const options = eventInvocationOptions(job, receipt);
+  const terminal = await inspectAssignmentFailure({ ...options, effect: await assignmentDraftEffect(job, sourceHead) });
+  return terminal && { ...terminal, ref: options.directory + "/terminal.json" };
 }
 const gitEnv = () => {
   const env = { ...process.env };
@@ -596,7 +664,8 @@ export async function runEventWorkItem(input: EventOptions) {
   const receiptFile = join(root, "event-items", input.milestone.slice(10) + ".json");
   if (input.action === "inspect" && !existsSync(receiptFile)) throw new Error("No Event work item receipt to inspect.");
   return withStoryJobLock(job, "event-" + input.milestone.slice(10), async () => {
-    if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
+    if (input.action === "run" && !await inspectPendingEventInvocation(job, input.milestone))
+      await processAuthorUpdatesAtBoundary(job);
     if (!existsSync(join(root, "architecture.json")) || !existsSync(join(root, "character-world.json"))) {
       throw new Error("Event design requires committed architecture and Character/World foundations.");
     }
@@ -821,19 +890,25 @@ export async function runEventWorkItem(input: EventOptions) {
     const graph = new StateGraph(Channels)
       .addNode("event_specialist", async ({ receipt }) => {
         if (receipt.phase === "authored") return { receipt };
-        if (receipt.phase === "writing") {
-          throw new Error("Interrupted Event specialist writing; inspect preserved worktree and session before retry.");
-        }
-        const resuming = receipt.phase === "awaiting-author";
-        const choice = resuming && receipt.authorChoiceId
-          ? await verifySpecialistChoice(job, receipt.authorChoiceId, "answered") : null;
+        const continuing = receipt.phase === "writing";
+        if (continuing && (receipt.worker !== "pi" || !receipt.assignment ||
+            !await inspectPendingEventInvocation(job, receipt.milestoneId, receipt.expectedHead)))
+          throw Error("Interrupted Event specialist lacks its original invocation.");
+        const resuming = receipt.phase === "awaiting-author" || continuing && !!receipt.invocationChoice;
+        const savedChoice = resuming && receipt.authorChoiceId
+          ? await inspectSpecialistChoice(job, receipt.authorChoiceId) : null;
+        if (savedChoice?.phase === "awaiting-author") throw new SpecialistChoiceRequiredError();
+        const choice = savedChoice && !continuing
+          ? await verifySpecialistChoice(job, savedChoice.id, "answered") : savedChoice;
+        if (continuing && choice && (choice.phase !== "resuming" || choice.sessionSha256 !== receipt.invocationChoice))
+          throw Error("Interrupted Event author continuation lost its original answer.");
         if (resuming && (!choice || choice.workItem !== receipt.workItemId || !receipt.assignment))
           throw new Error("Event choice has no exact answered work-item assignment.");
         assertHead(job, receipt.expectedHead);
-        if (!resuming && dirty(job).length)
+        if (!resuming && !continuing && dirty(job).length)
           throw new Error("Event specialist requires a clean work-item boundary.");
-        const prior = resuming ? null : reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
-        const assign: EventAssignment = resuming ? receipt.assignment! : {
+        const prior = resuming || continuing ? null : reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
+        const assign: EventAssignment = resuming || continuing ? receipt.assignment! : {
           ...selectedAssignment(job, arch.plan!, prior!, receipt.milestoneId, receipt.workItemId),
           ...(receipt.reroutedTask ? { authorTask: receipt.reroutedTask } :
             (receipt.blueprintTask || input.task) ? { authorTask: receipt.blueprintTask ?? input.task } : {}),
@@ -844,12 +919,19 @@ export async function runEventWorkItem(input: EventOptions) {
           const design = await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, assign);
           assign.milestoneBlueprint = { digest: receipt.blueprintPin.digest, design };
         }
-        await preflightPiAssignment(job, "event:" + receipt.workItemId,
-          receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
-        if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
-        receipt.assignment = assign;
-        receipt.phase = "writing";
-        await persist(receiptFile, receipt);
+        if (!continuing) {
+          await preflightPiAssignment(job, "event:" + receipt.workItemId,
+            receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
+          if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
+          receipt.assignment = assign;
+          if (receipt.worker === "pi") {
+            receipt.invocationChoice = choice?.sessionSha256;
+            receipt.invocationSource = eventInvocationSource(job, receipt);
+            delete receipt.invocationProof;
+          }
+          receipt.phase = "writing";
+          await persist(receiptFile, receipt);
+        }
         try {
           const verifyDraft = async (candidate: EventEvidence) => {
             let paths: string[] | undefined;
@@ -979,8 +1061,19 @@ export async function runEventWorkItem(input: EventOptions) {
             }
           } else {
             evidence = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
-              async file => { receipt.sessionFile = file; await persist(receiptFile, receipt); }, verifyDraft,
+              async (file, id) => { receipt.sessionFile = file; receipt.sessionId = id; await persist(receiptFile, receipt); }, verifyDraft,
+              { sourceDigest: receipt.invocationSource!, sessionFile: receipt.sessionFile, sessionId: receipt.sessionId,
+                authorize: async () => {
+                  assertHead(job, receipt.expectedHead);
+                  if (receipt.invocationSource !== eventInvocationSource(job, receipt))
+                    throw Error("Event assignment source changed before original invocation");
+                },
+                effect: () => assignmentDraftEffect(job, receipt.expectedHead) },
               choice ?? undefined, receipt.reroutedFrom);
+            if (!evidence.invocationProof) throw Error("Event writer did not settle its original invocation");
+            receipt.invocationProof = evidence.invocationProof;
+            await verifySettledAssignment({ ...eventInvocationOptions(job, receipt),
+              proof: evidence.invocationProof, effect: await assignmentDraftEffect(job, receipt.expectedHead) });
           }
           if (evidence.authorQuestion) {
             await changedPaths(job, assign, evidence.claimedPaths, true);
@@ -1077,6 +1170,11 @@ export async function runEventWorkItem(input: EventOptions) {
         if (!receipt.paths || !receipt.contentDigest || receipt.conflicts?.length ||
             await contentDigest(job, receipt.paths) !== receipt.contentDigest) {
           throw new Error("Authored Event inventory changed or has architectural conflicts.");
+        }
+        if (receipt.worker === "pi") {
+          if (!receipt.invocationProof) throw Error("Authored Event lacks its settled invocation");
+          await verifySettledAssignment({ ...eventInvocationOptions(job, receipt),
+            proof: receipt.invocationProof, effect: receipt.contentDigest });
         }
         const proof = acceptance(report, assign, receipt.paths, receipt.obligations ?? []);
         const typedProof = await consequenceProof(job, report, assign, receipt.paths,

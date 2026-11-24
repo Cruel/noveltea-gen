@@ -45,7 +45,7 @@ import { runFoundationJob, inspectPendingFoundationInvocation, inspectFoundation
 import { AssignmentNonconvergenceError, AssignmentAuthorPauseError } from "./assignment-metadata-recovery.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob, inspectCharacterWorldFailure, inspectPendingCharacterWorldInvocation, inspectRecoverableCharacterWorldCommit } from "./character-world.js";
-import { runEventWorkItem } from "./event-work.js";
+import { runEventWorkItem, inspectEventFailure, inspectPendingEventInvocation } from "./event-work.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { inspectCausalAmendment } from "./causal-amendment-controller.js";
 import type { CausalAmendment, CausalDiscovery } from "./causal-amendment.js";
@@ -53,10 +53,10 @@ import { runInteractiveWorkItem, inspectInteractiveUnit, inspectPendingInteracti
   inspectInteractiveFailure } from "./interactive-work.js";
 import type { InteractiveDomain } from "./interactive-specialist.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
-import { runCompositionWorkItem } from "./composition-work.js";
+import { runCompositionWorkItem, inspectCompositionFailure, inspectPendingCompositionInvocation } from "./composition-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { runNarrativeReview } from "./narrative-review.js";
-import { inspectFocusedPrerequisite, runFocusedWorkItem } from "./focused-work.js";
+import { inspectFocusedPrerequisite, inspectPendingFocusedCommit, runFocusedWorkItem } from "./focused-work.js";
 import { advanceFocusedDependency } from "./dependency-work.js";
 import { reconcilePendingWork } from "./pending-work.js";
 import { canonicalPreviousAdaptiveInventory, reconcileAdaptiveWork } from "./adaptive-work.js";
@@ -740,6 +740,19 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
         const pending = await inspectPendingInteractiveInvocation(job, s.active.milestone, interactiveUnit);
         if (pending) return steeringForAssignment(job, turnDigest, s.active.id, pending.unit.beforeHead!);
       }
+      if (s.active?.stage === "focus" && s.active.milestone) {
+        const pending = await inspectPendingFocusedCommit(job, s.active.milestone);
+        if (pending) return steeringForAssignment(job, turnDigest, s.active.id, pending.expectedHead);
+      }
+      if (s.active?.milestone && ["event", "composition"].includes(s.active.stage)) {
+        const pending = s.active.stage === "event"
+          ? await inspectPendingEventInvocation(job, s.active.milestone)
+          : await inspectPendingCompositionInvocation(job, s.active.milestone);
+        if (pending) {
+          const sourceHead = "expectedHead" in pending ? pending.expectedHead : pending.beforeHead!;
+          return steeringForAssignment(job, turnDigest, s.active.id, sourceHead);
+        }
+      }
       const head = await trustedHead(job).catch(async error => {
         if (s.active?.stage !== "foundations" || !await inspectRecoverableCharacterWorldCommit(job)) throw error;
         return jobGit(job, "rev-parse", "HEAD^");
@@ -1418,6 +1431,167 @@ async function runCharacterWorldAssignmentChild(
   throw Error("World/Character child returned an unsupported disposition.");
 }
 
+/** Event and Composition use the existing native work-item receipts as their
+ * effect authorities. The child is entered before dispatch; it never grants
+ * a new owner or substitutes a successful checkpoint for independent Review. */
+async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
+  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+  correctionSelected = false,
+  reroute?: { reportDigest: string; sourceSha: string; task: string }): Promise<Partial<State>> {
+  const job = await openJob(s);
+  const active = s.active;
+  const graphThreadId = config.configurable?.thread_id;
+  if (!active?.milestone || !s.inventory ||
+      !["event", "composition", "focus"].includes(active.stage) ||
+      reroute && (active.stage !== "event" || reroute.sourceSha !== s.inventory.headSha || correctionSelected) ||
+      typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId ||
+      s.planVersion === null || !s.request.turnPlanDigest && !s.request.fixture)
+    throw Error("Narrative child lacks its admitted Turn, assignment and plan.");
+  const turnDigest = s.request.turnPlanDigest ?? fixtureTurnIdentity({
+    jobId: job.jobId, jobThreadId: job.threadId, graphThreadId, turnDigest: null,
+    fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
+  });
+  const correction = correctionSelected ? s.recoveryLifecycle.active : null;
+  const points = await inspectRecoveryCheckpoints(job);
+  const root = correction && points.find(p => p.eligible &&
+    p.commitSha === correction.origin.sourceHeadSha && executionId(p.workItem) === active.id);
+  if (correctionSelected && (!correction || !root || !s.result ||
+      correction.origin.assignmentId !== active.id))
+    throw Error("Narrative correction lacks its original native and Review receipts.");
+  const focusSource = active.stage === "focus" && s.request.turnPlanDigest
+    ? await inspectFocusedPrerequisite(job, active.milestone, s.request.turnPlanDigest, s.request.fixture, s.planVersion) : null;
+  const sourceHead = focusSource?.report.sourceSha ?? (root ? root.parentSha : s.inventory.headSha);
+  const workItem = active.stage === "focus" ? active.id : active.stage + "-" + active.milestone.slice(10);
+  const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+    graphThreadId, turnDigest, assignmentId: workItem, planVersion: s.planVersion,
+    sourceHeadSha: sourceHead, scopeDigest: dependencyDigest({ scope, task: s.request.task, contract: s.request.contract,
+      ...(reroute ? { reroute } : {}) }),
+  };
+  const key = logicalAssignmentKey(identity);
+  const ref = active.stage === "focus" ? "focused-items/" + active.milestone + ".json" :
+    active.stage + "-items/" + active.milestone.slice(10) + ".json";
+  const milestone = active.milestone;
+  const inspect = async () => active.stage === "event"
+    ? runEventWorkItem({ ...s.request, milestone, action: "inspect" })
+    : active.stage === "composition"
+      ? runCompositionWorkItem({ ...s.request, milestone, action: "inspect" }) : null;
+  const inspectTerminal = () => active.stage === "event" ? inspectEventFailure(job, milestone, sourceHead)
+    : active.stage === "composition" ? inspectCompositionFailure(job, milestone, sourceHead) : null;
+  const authenticateCorrection = async () => !!correction && !!s.recoveryLifecycle.decision &&
+    await (await import("./generation-operation-strategy.js")).authenticateOperationReviewProof(
+      job, s, correction, s.recoveryLifecycle.decision);
+  let result: Awaited<ReturnType<typeof dispatch>> | undefined;
+  let patch: Partial<State> | undefined;
+  const disposition = (status: "unresolved" | "paused", evidence: string): AssignmentOutcome =>
+    status === "unresolved" ? { status, assignmentKey: key, evidenceRef: ref, dispositionRef: evidence } :
+      { status, assignmentKey: key, evidenceRef: ref, controlRef: evidence };
+  const child = createAssignmentLifecycleGraph({
+    authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+    preflight: async () => {
+      await checkPlan(job, s.request, s.planVersion);
+      const control = await readJobControl(job);
+      if (control === "cancelled") {
+        const error = Error("Original narrative assignment cancelled");
+        error.name = "StoryCancelledError"; throw error;
+      }
+      if (control !== "running") return disposition("paused", "job-control");
+      if (correction && !await authenticateCorrection())
+        throw Error("Narrative correction lost its authenticated original Review case.");
+      // The native adapters reconcile commit-before-receipt and interrupted
+      // writes. The initial child cannot authorize a second writer.
+      return null;
+    },
+    invoke: async () => {
+      try {
+        result = reroute ? await runEventWorkItem({ ...s.request, action: "run", milestone,
+          task: reroute.task, reroute }) : await dispatch(s);
+        return { receiptRef: ref, status: result.status, headSha: result.headSha };
+      } catch (error) {
+        if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
+        const terminal = await inspectTerminal();
+        if (!terminal) throw error;
+        patch = await operationFailure(s, job, "specialist-result", error,
+          { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
+            assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } }, "returned-failure");
+        return disposition("unresolved", terminal.proof.receiptDigest);
+      }
+    },
+    verify: async state => {
+      const submission = state.submission!;
+      if (submission.receiptRef !== ref) throw Error("Narrative submission belongs to another work item.");
+      if (!correction && !accepted[active.stage].includes(submission.status)) {
+        // Preserve the full original negative report for the existing parent
+        // prerequisite/assessment boundary, without certifying it as success.
+        return disposition("unresolved", submission.status);
+      }
+      const native = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+        p.workItem === workItem && p.commitSha === (root ? root.commitSha : submission.headSha) &&
+        p.parentSha === (root ? root.parentSha : sourceHead) && p.validation.status === "passed" &&
+        p.planVersion === s.planVersion &&
+        (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+      if (!native) throw Error("Narrative child lacks its original native-validated checkpoint.");
+      const candidate = correction ? s.result! : { status: submission.status, headSha: submission.headSha };
+      patch = await reviewBoundary({ ...s, result: candidate }, correctionSelected);
+      if (patch.status === "paused") return disposition("paused", "review-checkpoints");
+      if (patch.status || patch.operationRecovery || patch.reviewAssessmentRequested ||
+          patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest)
+        return disposition("unresolved", "review-checkpoints:" + native.commitSha);
+      const head = await trustedHead(job);
+      const refreshed = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const reviews = await resolvedCheckpointReviews(job, refreshed);
+      const current = refreshed.find(p => p.commitSha === native.commitSha);
+      if (current && s.request.fixture && current.assurance &&
+          !["passed", "not-required"].includes(reviews.get(current.commitSha) ?? current.semanticReview))
+        return disposition("unresolved", "review-checkpoints:" + current.commitSha);
+      if (!current || !(s.request.fixture && !current.assurance) &&
+          !["passed", "not-required"].includes(reviews.get(current.commitSha) ?? current.semanticReview))
+        throw Error("Narrative child did not settle its mandatory independent Review.");
+      return { status: "verified", assignmentKey: key, evidenceRef: ref,
+        reviewRef: "review-checkpoints:" + native.commitSha, headSha: head };
+    },
+  });
+  const finished = await child.invoke({ identity,
+    submission: correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
+    submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null },
+    assignmentChildConfig(config, identity, correction ? "correction" : "original"));
+  if (!finished.outcome || finished.outcome.assignmentKey !== key)
+    throw Error("Narrative child returned without an authenticated disposition.");
+  const submission = finished.submission;
+  const candidate = correction ? s.result : submission &&
+    { status: submission.status, headSha: submission.headSha };
+  if (patch && (patch.status || patch.operationRecovery || patch.reviewAssessmentRequested ||
+      patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest))
+    return { ...patch, result: candidate ?? null };
+  if (finished.outcome.status === "paused") return { status: "paused",
+    reason: "Original narrative assignment suspended at a safe boundary.", result: candidate ?? null };
+  if (!submission && finished.outcome.status === "unresolved") {
+    const terminal = await inspectTerminal();
+    if (terminal && terminal.proof.receiptDigest === finished.outcome.dispositionRef)
+      return operationFailure(s, job, "specialist-result", Error("Original narrative assignment " + terminal.proof.kind),
+        { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
+          assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } }, "returned-failure");
+  }
+  if (!submission || !candidate) throw Error("Narrative child lost its original work item receipt.");
+  if (finished.outcome.status === "unresolved") {
+    if (!correction && !accepted[active.stage].includes(submission.status)) {
+      const saved = result ?? await inspect();
+      if (!saved || saved.status !== submission.status || saved.headSha !== submission.headSha)
+        throw Error("Original narrative failure no longer matches its work-item receipt.");
+      return { result: saved };
+    }
+    // The checkpoint can outlive the callback-local projection. Reopen the
+    // original Review and reconstruct its parent-owned disposition.
+    return { ...await reviewBoundary({ ...s, result: candidate }, correctionSelected), result: candidate };
+  }
+  if (finished.outcome.status !== "verified") throw Error("Narrative child has no verified result.");
+  const head = await trustedHead(job);
+  if (head !== finished.outcome.headSha)
+    throw Error("Narrative child result no longer matches verified HEAD.");
+  return { ...patch, result: { ...candidate, headSha: head } };
+}
+
 /** A focused assignment returns a settled prerequisite to its parent at END.
  * Neither this child nor the suspended writer can authorize supporting work. */
 async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
@@ -1592,6 +1766,7 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
   const key = logicalAssignmentKey(initial.identity);
   const { inspectReviewSupport, continueReviewDependency } = await import("./dependency-work.js");
   let paused: string | null = null;
+  let reassessment = false;
   const authenticate = async () => {
     const verified = await reviewPrerequisiteIdentity(s, config, request);
     if (!isDeepStrictEqual({ ...initial, supportRef: null }, verified)) return false;
@@ -1617,7 +1792,13 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
         const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
         const repair = await advanceRejectedRepair(job, request.sourceSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider, model: s.request.model,
+          sharedAssessment: true,
         });
+        if (repair.next === "assess-review") {
+          reassessment = true;
+          return { status: "unresolved", assignmentKey: key, evidenceRef: request.digest,
+            dispositionRef: "review-reassessment:" + request.sourceSha };
+        }
         if (repair.next === "author-choice") {
           paused = "Original Event correction awaits an authenticated Author Choice.";
           return { status: "paused", assignmentKey: key, evidenceRef: request.digest,
@@ -1655,6 +1836,9 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
     suspension: initial.supportRef ? initial.suspension : null }, config);
   if (finished.outcome?.status === "needs-prerequisite")
     return { reviewPrerequisite: initial };
+  if (finished.outcome?.status === "unresolved" &&
+      (reassessment || finished.outcome.dispositionRef === "review-reassessment:" + request.sourceSha))
+    return { reviewAssessmentRequested: true, reason: "Assessing the sealed Event Review continuation." };
   if (finished.outcome?.status === "paused")
     return { status: "paused", reason: paused ?? "Original Review awaits its saved Author Choice." };
   if (finished.outcome?.status !== "verified" || !initial.supportRef ||
@@ -2191,6 +2375,15 @@ async function pendingInteractiveForResume(s: State, job: JobStartResult) {
   return null;
 }
 
+async function pendingNarrativeForResume(s: State, job: JobStartResult) {
+  if (!s.active?.milestone || s.result || !s.inventory) return null;
+  return s.active.stage === "event"
+    ? inspectPendingEventInvocation(job, s.active.milestone, s.inventory.headSha)
+    : s.active.stage === "composition"
+      ? inspectPendingCompositionInvocation(job, s.active.milestone, s.inventory.headSha)
+      : s.active.stage === "focus" ? inspectPendingFocusedCommit(job, s.active.milestone) : null;
+}
+
 async function inspectOriginalSpecialistCommitForResume(
   s: State, job: JobStartResult,
 ): Promise<boolean> {
@@ -2208,6 +2401,15 @@ async function inspectOriginalSpecialistCommitForResume(
     const domains = s.active.stage === "interactive" ? ["choice", "puzzle"] : [s.active.stage];
     return points.some(p => p.eligible && p.commitSha === head && p.validation.status === "passed" &&
       p.planVersion === s.planVersion && domains.some(d => p.workItem === "interactive-" + d + "-" + s.active!.milestone!.slice(10)));
+  }
+  if (["event", "composition", "focus"].includes(s.active.stage)) {
+    const pending = await pendingNarrativeForResume(s, job);
+    if (pending?.phase === "authored") return true;
+    const head = await trustedHead(job);
+    const id = s.active.stage === "focus" ? s.active.id : s.active.stage + "-" + s.active.milestone!.slice(10);
+    return !!pending && pending.phase === "committed" &&
+      (await inspectRecoveryCheckpoints(job)).some(p => p.eligible &&
+        p.workItem === id && p.commitSha === head && p.planVersion === s.planVersion);
   }
   if (s.active.stage !== "foundations") return false;
   return inspectRecoverableCharacterWorldCommit(job);
@@ -2754,7 +2956,7 @@ export function createGenerationGraph(
           (op.operation === "scheduling" || op.operation === "author-update-intake") ?
           { status: "running" as const, operationRecovery: { ...op, phase: "assessment" as const } } :
           op.operation === "specialist-dispatch" && op.outcome === "exception" && s.active &&
-            (["foundation", "foundations", "interactive", "choice", "puzzle"].includes(s.active.stage)) &&
+            (["foundation", "foundations", "interactive", "choice", "puzzle", "event", "composition", "focus"].includes(s.active.stage)) &&
             !s.result ?
           await (async () => {
             const job = await openJob(s);
@@ -3045,7 +3247,8 @@ export function createGenerationGraph(
               await inspectPendingFoundationInvocation(job, s.inventory.headSha) ||
               s.active?.stage === "foundations" &&
               (await inspectPendingCharacterWorldInvocation(job, s.inventory.headSha) ||
-               await inspectRecoverableCharacterWorldCommit(job) && !await trustedHead(job).catch(() => null)) || await pendingInteractiveForResume(s, job))) {
+               await inspectRecoverableCharacterWorldCommit(job) && !await trustedHead(job).catch(() => null)) ||
+               await pendingInteractiveForResume(s, job) || await pendingNarrativeForResume(s, job))) {
             await checkPlan(job, s.request, s.planVersion);
             const control = await readJobControl(job);
             if (control !== "running") return { status: control === "cancelled" ? "cancelled" : "paused",
@@ -3122,7 +3325,7 @@ export function createGenerationGraph(
             // trustedHead deliberately refuses incomplete receipts, so do
             // not misclassify this narrow crash window as an untrusted source
             // or start a replacement writer.
-            if (["foundation", "interactive", "choice", "puzzle"].includes(s.active.stage) &&
+            if (["foundation", "interactive", "choice", "puzzle", "event", "composition", "focus"].includes(s.active.stage) &&
                 await inspectOriginalSpecialistCommitForResume(s, job))
               return { status: "running" as const, reason: null };
             try { clean(job); await trustedHead(job); }
@@ -3371,6 +3574,11 @@ export function createGenerationGraph(
           if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
               child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest || child.result.status === "review-handoff") return child;
           result = child.result;
+        } else if (s.active && ["event", "composition", "focus"].includes(s.active.stage)) {
+          const child = await runNarrativeAssignmentChild(s, config, reviewBoundary);
+          if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
+              child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest) return child;
+          result = child.result;
         } else result = await dispatch(s);
         if (result.status === "interactive-conflict-reported") {
           const evidence = result as typeof result & { prerequisite?: {
@@ -3435,11 +3643,13 @@ export function createGenerationGraph(
             // Same authorized Event assignment, one new task and a fresh
             // settled Pi session. The original source receipt is archived;
             // no Choice/ending grant or dependency inversion is introduced.
-            result = await runEventWorkItem({ ...s.request, action: "run",
-              milestone: s.active!.milestone!, task: route.task,
-              reroute: { reportDigest: route.reportDigest,
-                sourceSha: evidence.prerequisite.expectedHead, task: route.task } });
-            if (result.status !== "event-prerequisite-reported") return { result };
+            const child = await runNarrativeAssignmentChild(s, config, reviewBoundary, false,
+              { reportDigest: route.reportDigest,
+                sourceSha: evidence.prerequisite.expectedHead, task: route.task });
+            if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
+                child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest ||
+                child.result.status !== "event-prerequisite-reported") return child;
+            result = child.result;
             evidence = result as typeof evidence;
           }
           const failure = "Clean no-write Event prerequisite report " +
@@ -3510,7 +3720,7 @@ export function createGenerationGraph(
           return await withStoryJobLock(job, "generation-failed-specialist-inventory", async () => {
             clean(job); await trustedHead(job);
             const sameHead = s.inventory?.headSha === await trustedHead(job);
-            if (!sameHead && ["foundation", "foundations", "interactive", "choice", "puzzle"].includes(s.active?.stage ?? ""))
+            if (!sameHead && ["foundation", "foundations", "interactive", "choice", "puzzle", "event", "composition", "focus"].includes(s.active?.stage ?? ""))
               return assessment; // Original commit can be reconciled only by its pinned specialist.
             const safeAction = sameHead ? "continue-independent" as const : undefined;
             const assessed = safeAction ? await operationFailure(s, job,
@@ -3608,7 +3818,9 @@ export function createGenerationGraph(
               ? await runCharacterWorldAssignmentChild(s, config, reviewBoundary, true)
               : correction && s.active && ["interactive", "choice", "puzzle"].includes(s.active.stage)
                 ? await runInteractiveAssignmentChildren(s, config, reviewBoundary, true)
-                : await reviewBoundary(s, correction);
+                : correction && s.active && ["event", "composition", "focus"].includes(s.active.stage)
+                  ? await runNarrativeAssignmentChild(s, config, reviewBoundary, true)
+                  : await reviewBoundary(s, correction);
         if (reviewed.reviewDependencyRequest) {
           const request = reviewed.reviewDependencyRequest;
           return runReviewPrerequisiteChild(s, config, request,

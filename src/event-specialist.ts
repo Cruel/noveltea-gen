@@ -9,7 +9,11 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { promptStorySpecialist } from "./story-interruption.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
-import { lastSpecialistManifest, requireSpecialistManifest } from "./specialist-manifest.js";
+import { parseEventManifest } from "./event-manifest.js";
+import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { createHash } from "node:crypto";
+import { readJobControl } from "./job-control.js";
+import { StoryCancelledError } from "./story-interruption.js";
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import type { CausalDiscovery } from "./causal-amendment.js";
@@ -17,7 +21,7 @@ import { specialistAuthorInstruction } from "./specialist-author-instruction.js"
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
-import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
+import { preparePiContext, piNarrativeGroup, guardPiBudget, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 
@@ -56,6 +60,7 @@ export interface EventEvidence {
   sessionFile?: string;
   piSessionId?: string;
   authorQuestion?: SpecialistChoiceQuestion;
+  invocationProof?: AssignmentInvocationProof;
   /** No-write source-bound claim only; does not authorize an Architecture edit. */
   causalDiscovery?: CausalDiscovery;
   /** Source-backed challenge to the provisional approved plan; no write grant. */
@@ -63,54 +68,7 @@ export interface EventEvidence {
   skillReads: string[];
 }
 
-export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[];
-  laterObligations: string[]; causalDiscovery?: CausalDiscovery;
-  blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge } {
-  const obj = lastSpecialistManifest(text);
-  const strings = (value: unknown): value is string[] =>
-    Array.isArray(value) && value.every(x => typeof x === "string" && x.trim().length > 0);
-  if (!obj || !strings(obj.modifiedRecords) ||
-      !strings(obj.architecturalConflicts) || !strings(obj.laterObligations) ||
-      (!obj.modifiedRecords.length && !obj.architecturalConflicts.length &&
-        !obj.laterObligations.length)) {
-    throw new Error("Event specialist must return a JSON manifest with modifiedRecords, architecturalConflicts and laterObligations.");
-  }
-  let causalDiscovery: CausalDiscovery | undefined;
-  if (obj.causalDiscovery !== undefined) {
-    const claim = obj.causalDiscovery as Partial<CausalDiscovery> | null;
-    const keys = ["sourcePath", "sourceQuote", "violatedObligation", "proposedCorrection"];
-    if (!claim || typeof claim !== "object" || Array.isArray(claim) ||
-        Object.keys(claim).sort().join("|") !== keys.sort().join("|") ||
-        obj.modifiedRecords.length || !obj.architecturalConflicts.length ||
-        keys.some(key => typeof claim[key as keyof CausalDiscovery] !== "string" ||
-          !(claim[key as keyof CausalDiscovery] as string).trim() ||
-          (claim[key as keyof CausalDiscovery] as string).length > 1000))
-      throw Error("Causal discovery must be an exact no-write source-bound prerequisite claim.");
-    causalDiscovery = claim as CausalDiscovery;
-  }
-  let blueprintChallenge: import("./blueprint-challenge.js").SpecialistBlueprintChallenge | undefined;
-  if (obj.blueprintChallenge !== undefined) {
-    const challenge = obj.blueprintChallenge as Record<string, unknown> | null;
-    if (!challenge || typeof challenge !== "object" || Array.isArray(challenge) ||
-        Object.keys(challenge).some(key => ![
-          "path", "line", "pinDigest", "field", "before", "proposed", "sourceQuote", "violatedObligation",
-        ].includes(key)) ||
-        !obj.modifiedRecords.length || !challenge.path ||
-        typeof challenge.path !== "string" || !obj.modifiedRecords.includes(challenge.path) ||
-        !Number.isSafeInteger(challenge.line) || (challenge.line as number) < 1 ||
-        !/^[0-9a-f]{64}$/.test(String(challenge.pinDigest)) ||
-        typeof challenge.field !== "string" || !/^(events|downstream)\/[0-9]+\/[a-zA-Z]+$/.test(challenge.field) ||
-        typeof challenge.sourceQuote !== "string" || challenge.sourceQuote.length < 8 ||
-        typeof challenge.violatedObligation !== "string" ||
-        challenge.violatedObligation.length < 8 ||
-        challenge.before === undefined || challenge.proposed === undefined)
-      throw Error("Event specialist Blueprint challenge must cite one changed Event source and approved field.");
-    blueprintChallenge = challenge as unknown as import("./blueprint-challenge.js").SpecialistBlueprintChallenge;
-  }
-  return { modifiedRecords: obj.modifiedRecords, architecturalConflicts: obj.architecturalConflicts,
-    laterObligations: obj.laterObligations, ...(causalDiscovery ? { causalDiscovery } : {}),
-    ...(blueprintChallenge ? { blueprintChallenge } : {}) };
-}
+export { parseEventManifest } from "./event-manifest.js";
 
 /** The actual selected Milestone must positively describe player-visible
  * investigation/observation rather than executable choice. A model-generated
@@ -335,17 +293,6 @@ export function eventMilestoneBodyRestoreFeedback(
     JSON.stringify(originalBody);
 }
 
-/** Exactly one extra turn is permitted ONLY for a controller-identified,
- * source-local evidence gap or the original Milestone-body restoration.
- * No other error category gains a retry and a fourth failure is terminal. */
-export function eventEvidenceRetryAllowed(attempt: number, diagnostics: readonly string[]): boolean {
-  return Number.isInteger(attempt) && (attempt === 0 || attempt === 1 ||
-    attempt === 2 && diagnostics.length > 0 &&
-    diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:") ||
-      message.startsWith("EVENT_MILESTONE_BODY_RESTORE:") ||
-      message.startsWith("EVENT_LOCAL_CHOICE_SETUP:")));
-}
-
 /** Pure production prompt for fixture comparison and controller-contract tests. */
 export function eventSpecialistPrompt(
   snapshot: SkillSnapshot,
@@ -512,10 +459,18 @@ export function eventQuestionCorrectionFeedback(error: unknown): string {
     "the SAME Pi session, not a writer replay or new authority.";
 }
 
+export function eventInvocationDirectory(job: JobStartResult, workItem: string, sessionId: string, sourceDigest: string) {
+  if (!/^event-[a-z][a-z0-9-]*$/.test(workItem) || !/^[a-zA-Z0-9-]+$/.test(sessionId) || !/^[a-f0-9]{64}$/.test(sourceDigest))
+    throw Error("Invalid Event invocation identity");
+  return join(job.stateDir, "event-invocations", workItem, sessionId, sourceDigest);
+}
+
 export async function authorEventCluster(
   job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
-  provider: string, modelId: string, onSession: (file: string) => Promise<void>,
+  provider: string, modelId: string, onSession: (file: string, id: string) => Promise<void>,
   verifyDraft: (evidence: EventEvidence) => Promise<string[]>,
+  original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
+    authorize: () => Promise<void>; effect: () => Promise<string | null> },
   resume?: SpecialistChoiceReceipt, reroutedFrom?: string,
 ): Promise<EventEvidence> {
   const project = await openStoryProject(job.worktreeStoryRoot);
@@ -540,13 +495,16 @@ export async function authorEventCluster(
     step: "event:" + assignment.workItemId + (reroutedFrom ? ":rerouted-" + reroutedFrom : ""),
     paths: assignment.sourcePaths, snapshot: snapshot.id,
     task: { kind: "event", ids: [assignment.milestoneId], scope: "related" },
-    provider, model: modelId, directory: sessionDir,
+    provider, model: modelId, directory: sessionDir, insideWriter: true,
   }, runtime);
+  const existing = resume?.sessionFile ?? original.sessionFile;
+  if (existing && (await realpath(existing) !== existing || !existing.startsWith(sessionDir + sep) || !(await lstat(existing)).isFile()))
+    throw Error("Original Event session is outside its assignment");
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: resume
-      ? SessionManager.open(resume.sessionFile, dirname(resume.sessionFile), project.root)
+    sessionManager: existing
+      ? SessionManager.open(existing, dirname(existing), project.root)
       : context.manager,
     customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
     noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
@@ -556,154 +514,68 @@ export async function authorEventCluster(
       throw new Error("Pi Event specialist did not honor pinned thinking effort.");
     }
     const file = session.sessionManager.getSessionFile();
-    if (file) await onSession(file);
+    if (!file || (resume?.sessionId ?? original.sessionId) && (resume?.sessionId ?? original.sessionId) !== session.sessionId)
+      throw Error("Event writer lost its original persisted session");
+    await onSession(file, session.sessionId);
     const required = REQUIRED.map(name => join(snapshot.path, "skills", name));
-    let prompt = eventSpecialistPrompt(snapshot, assignment, Boolean(sandboxTools));
-    // The normal budget is three bounded turns. A final local-evidence
-    // diagnostic may earn ONE additional correction turn, under the SAME
-    // assignment and original Pi session. This is not writer replay or an
-    // automatic grant for an upstream/protected dependency.
-    let extraEvidenceCorrection = false;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (attempt === 3 && !extraEvidenceCorrection)
-        throw new Error("Event specialist correction exceeded its original bounded budget.");
-      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      const direction = resume?.answer
-        ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true) +
-          "\nContinue in this exact session without changing protected decisions.\n" : "";
-      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + direction + prompt : prompt);
-      const last = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
-        throw new Error("Event specialist Pi turn failed: " + (last?.role === "assistant"
-          ? last.stopReason + ": " + (last.errorMessage ?? "") : "no assistant response"));
-      }
-      const skillReads = await requirePinnedSkillReads(session, project.root, required, "Event specialist");
-      const finalAssistant = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!finalAssistant || finalAssistant.role !== "assistant") throw new Error("Event specialist reply is missing.");
-      const text = finalAssistant.content.filter(c => c.type === "text").map(c => c.text).join("\n");
-      const proposed = extractSpecialistChoice(text);
-      if (proposed) {
-        let question: SpecialistChoiceQuestion;
-        try {
-          question = parseSpecialistChoice(proposed.authorDecisionRequest);
-        } catch (error) {
-          if (attempt === 2) throw error;
-          // #158: A new Story can have no existing Event. A malformed model
-          // question never creates a new grant or a synthetic author answer.
-          // Correct it in the original bounded specialist session.
-          prompt = eventQuestionCorrectionFeedback(error);
-          continue;
+    let accepted: EventEvidence | undefined;
+    const direction = resume?.answer
+      ? "AUTHENTICATED AUTHOR ANSWER: " + authorChoiceDirection(resume.question, resume.answer, resume.delegationAllowed === true) +
+        "\nContinue in this exact session without changing protected decisions.\n" : "";
+    const invocationProof = await recoverSubmittedAssignment({
+      session, directory: eventInvocationDirectory(job, assignment.workItemId, session.sessionId, original.sourceDigest),
+      sourceDigest: original.sourceDigest, sessionRoots: [sessionDir], responseKind: "event-manifest-or-choice",
+      initialTranscriptSha256: resume?.sessionSha256,
+      initialPrompt: context.contextNote + direction + eventSpecialistPrompt(snapshot, assignment, Boolean(sandboxTools)),
+      authorize: original.authorize, effect: original.effect,
+      beforeTurn: async () => {
+        const control = await readJobControl(job);
+        if (control === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (control !== "running") throw new AssignmentAuthorPauseError();
+        await guardPiBudget(job, "event:" + assignment.workItemId, file);
+        const after = await readJobControl(job);
+        if (after === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (after !== "running") throw new AssignmentAuthorPauseError();
+      },
+      prompt: async prompt => {
+        await registerPendingPiSession(job, file);
+        await promptStorySpecialist(session, prompt);
+        await recordPiSession(job, file);
+      },
+      verify: async manifest => {
+        const skillReads = await requirePinnedSkillReads(session, project.root, required, "Event specialist");
+        const common = { skillReads, sessionFile: file, piSessionId: session.sessionId };
+        if ("authorDecisionRequest" in manifest) {
+          accepted = { ...common, claimedPaths: manifest.modifiedRecords as string[], conflicts: [], obligations: [],
+            authorQuestion: parseSpecialistChoice(manifest.authorDecisionRequest) };
+          return [];
         }
-        if (!Array.isArray(proposed.modifiedRecords) ||
-            !proposed.modifiedRecords.every(p => typeof p === "string"))
-          throw Error("Event author question lacks an exact modifiedRecords manifest.");
-        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-        return { claimedPaths: proposed.modifiedRecords as string[], conflicts: [], obligations: [],
-          skillReads, sessionFile: session.sessionManager.getSessionFile() ?? undefined,
-          piSessionId: session.sessionId, authorQuestion: question };
-      }
-      const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-        m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-      const calls = session.messages.flatMap(m => m.role === "assistant"
-        ? m.content.filter(c => c.type === "toolCall") : []);
-
-      const summary = await requireSpecialistManifest(session, parseEventManifest, "Event",
-        join(job.stateDir, "protocol-recovery", "event-" + encodeURIComponent(assignment.workItemId) +
-          "-" + attempt + ".json"),
-        () => context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined));
-      if (!summary.modifiedRecords.length) {
-        // Only a genuinely no-write, settled model turn may report missing
-        // prerequisites. A modified/reverted or interrupted writer has no
-        // authority to claim a clean plan-reconciliation boundary.
-        if (resume || calls.some(c => ["write", "edit"].includes(c.name)))
-          throw new Error("Event no-write prerequisite report follows a writer tool or author-choice resume.");
-        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-        return { claimedPaths: [], conflicts: summary.architecturalConflicts,
-          obligations: summary.laterObligations, causalDiscovery: summary.causalDiscovery,
-          skillReads, sessionFile: session.sessionManager.getSessionFile() ?? undefined,
-          piSessionId: session.sessionId };
-      }
-      if (!calls.some(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
-          typeof c.arguments?.path === "string" &&
-          relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/").startsWith("events/"))) {
-        throw new Error("Event specialist did not author canonical Event Markdown with an editing tool.");
-      }
-      const structural: string[] = [];
-      for (const path of summary.modifiedRecords) {
-        if (!/^(?:events|facts|revelations|relationships|arcs|milestones)\/[a-z][a-z0-9-]*\.md$/.test(path))
-          continue; // The controller's exact scope/diff validator owns invalid paths.
-        const full = join(job.worktreeStoryRoot, path);
-        try {
-          const info = await lstat(full);
-          if (!info.isFile() || info.isSymbolicLink() || await realpath(full) !== full)
-            throw new Error("Unsafe or redirected record path");
-          const issue = canonicalFrontmatterStructureError(await readFile(full, "utf8"));
-          if (issue) structural.push(path + ": " + issue);
-        } catch {
-          structural.push(path + ": Missing or unsafe canonical record file.");
+        const summary = parseEventManifest(JSON.stringify(manifest));
+        const completed = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
+          m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
+        const calls = session.messages.flatMap(m => m.role === "assistant"
+          ? m.content.filter(c => c.type === "toolCall") : []);
+        const evidence: EventEvidence = { ...common, claimedPaths: summary.modifiedRecords,
+          conflicts: summary.architecturalConflicts, obligations: summary.laterObligations,
+          causalDiscovery: summary.causalDiscovery, blueprintChallenge: summary.blueprintChallenge };
+        if (!summary.modifiedRecords.length) {
+          if (resume || calls.some(c => ["write", "edit"].includes(c.name)) || await original.effect() !== null)
+            throw Error("Event no-write prerequisite report follows a writer tool or author-choice resume.");
+          accepted = evidence;
+          return [];
         }
-      }
-      if (structural.length) {
-        if (attempt >= 2)
-          throw new Error("Event specialist left structurally incomplete Markdown after bounded repairs: " +
-            structural.join("; "));
-        prompt = "The files you just wrote have an OBJECTIVE source formatting error, " +
-          "NOT an architectural conflict or native-validator bug. You may edit " +
-          "only your already authorized paths, in this SAME session. Read the " +
-          "complete files and repair each one: every canonical .md record must " +
-          "start with a standalone --- line, close the YAML with a SECOND " +
-          "standalone --- line, and contain substantive narrative Markdown " +
-          "AFTER that closing line. A single opening --- is insufficient. " +
-          "Then run story_validate and return the complete cumulative JSON " +
-          "manifest; remove any false architectural-conflict claim caused only " +
-          "by these truncated files. EXACT ERRORS:\n" + structural.join("\n");
-        continue;
-      }
-      const evidence: EventEvidence = { claimedPaths: summary.modifiedRecords,
-        conflicts: summary.architecturalConflicts, obligations: summary.laterObligations,
-        blueprintChallenge: summary.blueprintChallenge,
-        sessionFile: session.sessionManager.getSessionFile() ?? undefined,
-        skillReads };
-      const diagnostics = await verifyDraft(evidence);
-      if (!diagnostics.length) {
-        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-        return evidence;
-      }
-      const localEvidence = diagnostics.length > 0 &&
-        diagnostics.every(message => message.startsWith("EVENT_LOCAL_EVIDENCE:") ||
-          message.startsWith("EVENT_MILESTONE_BODY_RESTORE:"));
-      const choiceSetup = diagnostics.length > 0 &&
-        diagnostics.every(message => message.startsWith("EVENT_LOCAL_CHOICE_SETUP:"));
-      if (!eventEvidenceRetryAllowed(attempt, diagnostics))
-        throw new Error("Event specialist exhausted bounded repair attempts: " + JSON.stringify(diagnostics));
-      if (attempt === 2) extraEvidenceCorrection = true;
-      prompt = choiceSetup
-        ? "IN-SCOPE CHOICE-DEPENDENT EVENT SETUP ONLY. This original Event " +
-          "assignment owns reachable pre-decision setup, NOT enacted Choice " +
-          "outcomes. The selected decision Milestone MUST remain partial " +
-          "until its later Choice specialist has verified enactment. " +
-          "Do not change protected decisions or other-owner records; no " +
-          "new writing scope has been authorized. Correct your false " +
-          "architecturalConflict in this SAME Pi session while preserving " +
-          "actual downstream obligations and complete modifiedRecords. " +
-          "Run story_validate and return the full cumulative manifest. " +
-          "Controller findings:\n" + diagnostics.join("\n")
-        : localEvidence
-        ? "IN-SCOPE EVENT EVIDENCE OR MILESTONE-BODY RESTORATION ONLY. Keep the original " +
-          "Milestone, approved cast, protected facts and event-scope permissions. " +
-          "Do not convert this evidence deficit into an upstream approval request, " +
-          "nor claim partial fulfillment is a pass for a nondecision Milestone. " +
-          "Read the selected source and revise only the already-authorized Event " +
-          "cluster in this SAME Pi session. After editing, run story_validate and " +
-          "return a complete cumulative manifest. Exact controller findings:\n" +
-          diagnostics.join("\n")
-        : "The independent canonical validator rejected your UNCOMMITTED Event cluster. " +
-          "You may repair only files already within the authorized assignment. " +
-          "Re-read nt-catalog progression as needed; check all Event prerequisites, branch state, and typed references. " +
-          "Do not change protected author decisions, add speculative Event IDs, or stage files. " +
-          "At the end return the COMPLETE modifiedRecords/architecturalConflicts/laterObligations manifest again. " +
-          "Localized diagnostics:\n" + diagnostics.join("\n");
-    }
-    throw new Error("Unexpected Event repair termination.");
+        if (!calls.some(c => ["write", "edit"].includes(c.name) && completed.has(c.id) &&
+            typeof c.arguments?.path === "string" &&
+            relative(project.root, resolve(project.root, c.arguments.path as string)).split(sep).join("/").startsWith("events/")))
+          throw Error("Event specialist did not author canonical Event Markdown with an editing tool.");
+        const diagnostics = await verifyDraft(evidence);
+        if (!diagnostics.length) accepted = evidence;
+        return diagnostics.map(detail => ({ kind: "semantic" as const, path: assignment.milestoneId,
+          code: createHash("sha256").update(detail).digest("hex"), detail }));
+      },
+    });
+    if (!accepted) throw Error("Original Event invocation has no independently checked result");
+    await context.completed(file, session.sessionId);
+    return { ...accepted, invocationProof };
   } finally { session.dispose(); }
 }

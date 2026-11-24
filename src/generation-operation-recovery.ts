@@ -130,6 +130,12 @@ export async function authenticateAssignmentFailure(job: JobStartResult,
   const original = ["foundation", "foundations"].includes(assignment ?? "") && !evidence.interactiveDomain
     ? await (assignment === "foundation" ? (await import("./foundation.js")).inspectFoundationFailure : (await import("./character-world.js")).inspectCharacterWorldFailure)(job, sourceHead).catch(() => null)
     : await (async () => {
+      const event = /^event:(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
+      if (event && !evidence.interactiveDomain)
+        return (await import("./event-work.js")).inspectEventFailure(job, event[1]!, sourceHead).catch(() => null);
+      const composition = /^composition:(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
+      if (composition && !evidence.interactiveDomain)
+        return (await import("./composition-work.js")).inspectCompositionFailure(job, composition[1]!, sourceHead).catch(() => null);
       const match = /^(interactive|choice|puzzle):(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
       const domain = evidence.interactiveDomain;
       if (!match || !domain || match[1] !== "interactive" && match[1] !== domain) return null;
