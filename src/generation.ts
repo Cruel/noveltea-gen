@@ -13,7 +13,7 @@ import { runIdeaPlacement, scheduleIdeasAtBoundary } from "./idea-placement.js";
 import { AdaptiveRecoveryRequired, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import { inspectUnknownRecoveryStatus, inspectOriginalUnknownDiagnosis,
   type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
-import { assessGenerationOperation, isRepeatedUnchangedOperation, nodeFailureSource, operationChecks, type GenerationOperationRecovery,
+import { assessGenerationOperation, authenticateAssignmentFailure, isRepeatedUnchangedOperation, nodeFailureSource, operationChecks, type GenerationOperationRecovery,
   type Operation } from "./generation-operation-recovery.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { projectRecoveryInspection, authenticateOriginalFailure,
@@ -39,7 +39,8 @@ import { Annotation, END, START, StateGraph, isGraphBubbleUp } from "@langchain/
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
-import { runFoundationJob, inspectPendingFoundationInvocation } from "./foundation.js";
+import { runFoundationJob, inspectPendingFoundationInvocation, inspectFoundationFailure } from "./foundation.js";
+import { AssignmentNonconvergenceError, AssignmentAuthorPauseError } from "./assignment-metadata-recovery.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob } from "./character-world.js";
 import { runEventWorkItem } from "./event-work.js";
@@ -811,10 +812,22 @@ async function runFoundationAssignmentChild(
     invoke: async () => {
       // Foundation's own started/settled Pi and Git receipt reconciliation
       // prevents duplicate model turns, charges and commits after a crash.
-      const result = await dispatch(s);
-      if (!result.status)
-        throw Error("Foundation returned no settled specialist status.");
-      return { receiptRef: "foundation.json", status: result.status, headSha: result.headSha };
+      try {
+        const result = await dispatch(s);
+        if (!result.status)
+          throw Error("Foundation returned no settled specialist status.");
+        return { receiptRef: "foundation.json", status: result.status, headSha: result.headSha };
+      } catch (error) {
+        if (error instanceof AssignmentAuthorPauseError)
+          return outcome("paused", "job-control", { controlRef: "job-control" });
+        if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError))
+          throw error;
+        const terminal = await inspectFoundationFailure(job, sourceHead);
+        const kind = error instanceof ProtocolExhaustedError ? "protocol-exhausted" : "nonconverging";
+        if (!terminal || terminal.proof.kind !== kind)
+          throw Error("Original assignment terminal receipt does not match its typed failure.");
+        return outcome("unresolved", terminal.proof.receiptDigest, { dispositionRef: kind });
+      }
     },
     verify: async state => {
       const submission = state.submission!;
@@ -903,6 +916,19 @@ async function runFoundationAssignmentChild(
     return reviewedState;
   if (finished.outcome.status === "paused")
     return { status: "paused", reason: "Original Foundation child is suspended; inspect controller-owned control and review receipts." };
+  if (finished.outcome.status === "unresolved" &&
+      ["protocol-exhausted", "nonconverging"].includes(finished.outcome.dispositionRef)) {
+    const terminal = await inspectFoundationFailure(job, sourceHead);
+    if (!terminal || terminal.proof.kind !== finished.outcome.dispositionRef ||
+        terminal.proof.receiptDigest !== finished.outcome.evidenceRef)
+      throw Error("Original child terminal failure no longer matches its independently verified source.");
+    return operationFailure(s, job, "specialist-result",
+      terminal.proof.kind === "protocol-exhausted" ? "Original specialist report protocol exhausted." :
+        "Original scoped Story metadata/provenance corrections did not converge; independent diagnosis required.",
+      { reference: "specialist-receipt", assignmentId: identity.assignmentId,
+        resultStatus: terminal.proof.kind, assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } },
+      "returned-failure");
+  }
   return operationFailure(s, job, "specialist-result",
     "Original Foundation child returned a nonverified result; inspect the exact native/review receipt.",
     { reference: "specialist-receipt", assignmentId: s.active.id,
@@ -1368,6 +1394,7 @@ async function authenticateRecoveryOrigin(
   job: JobStartResult, request: GenerationRequest, graphThreadId: string,
   origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[],
   historicalSource = false,
+  assignmentEvidence?: GenerationOperationRecovery["evidence"],
 ): Promise<boolean> {
   if (origin.jobId !== job.jobId || origin.graphThreadId !== graphThreadId ||
       origin.jobThreadId !== job.threadId) return false;
@@ -1384,7 +1411,26 @@ async function authenticateRecoveryOrigin(
         catch { return false; }
       })();
   }
+  if (assignmentEvidence?.assignmentFailure) {
+    if (historicalSource || origin.operation !== "specialist-result" ||
+        origin.assignmentId !== "foundation" ||
+        !await authenticateAssignmentFailure(job, assignmentEvidence, origin.sourceHeadSha)) return false;
+    return authenticateOriginalFailure(job, request, graphThreadId, origin, evidence, true);
+  }
   return authenticateOriginalFailure(job, request, graphThreadId, origin, evidence);
+}
+function assignmentFailureEvidence(state: RecoveryState, origin: RecoveryOrigin) {
+  const source = state.recoverySources.find(x => x.caseId === state.recoveryLifecycle.active?.id &&
+    x.channel === "operationRecovery");
+  const op = source?.input as GenerationOperationRecovery | undefined;
+  return op?.operation === origin.operation && op.evidence.assignmentId === origin.assignmentId
+    ? op.evidence : undefined;
+}
+async function recoverySourceHead(job: JobStartResult, state: RecoveryState, origin: RecoveryOrigin) {
+  const evidence = assignmentFailureEvidence(state, origin);
+  return evidence?.assignmentFailure
+    ? await authenticateAssignmentFailure(job, evidence, origin.sourceHeadSha) ? origin.sourceHeadSha : null
+    : trustedHead(job);
 }
 type GenerationNode = keyof typeof nodeFailureSource | "assess_recovery";
 
@@ -1456,18 +1502,22 @@ export function recoveryNode(
     }
     if (prior.recoveryLifecycle.inspectionFences.length)
       return { status: "blocked", reason: state.reason ?? "Original recovery requires inspection.", recoveryLifecycle: prior.recoveryLifecycle };
-    if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop") {
+    if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
+        prior.recoveryLifecycle.decision?.action === "exhausted" &&
+        !!prior.recoveryLifecycle.active && assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure) {
       const active = prior.recoveryLifecycle.active;
       try {
         const job = await openJob(state);
         const thread = config.configurable?.thread_id;
         if (!active || typeof thread !== "string" ||
-            await trustedHead(job) !== active.origin.sourceHeadSha ||
+            await recoverySourceHead(job, prior, active.origin) !== active.origin.sourceHeadSha ||
             !await authenticateRecoveryOrigin(job, state.request, thread,
-              active.origin, active.evidence) ||
-            !await authenticateSealedDiagnosticStop(job, state as State, prior.recoveryLifecycle))
+              active.origin, active.evidence, false, assignmentFailureEvidence(prior, active.origin)) ||
+            !(prior.recoveryLifecycle.decision?.action === "exhausted"
+              ? isDeepStrictEqual(prior.recoveryLifecycle.decision, await selectOperationStrategy(job, state as State, active))
+              : await authenticateSealedDiagnosticStop(job, state as State, prior.recoveryLifecycle)))
           throw Error("Original diagnostic or invocation receipt is no longer authenticated.");
-        return { status: "blocked", reason: state.reason ?? "Original read-only diagnosis requires operator intervention.",
+        return { status: "blocked", reason: state.reason ?? "Original authenticated recovery remains unresolved; inspect its terminal receipt.",
           recoveryLifecycle: prior.recoveryLifecycle };
       } catch {
         return { status: "blocked", reason: "Sealed original diagnostic or its invocation cannot be authenticated.",
@@ -1500,9 +1550,9 @@ export function recoveryNode(
         const graphThreadId = config.configurable?.thread_id as string | undefined;
         const active = prior.recoveryLifecycle.active;
         if (graphThreadId && await readJobControl(job) === "running" &&
-            await trustedHead(job) === active.origin.sourceHeadSha &&
+            await recoverySourceHead(job, prior, active.origin) === active.origin.sourceHeadSha &&
             await authenticateRecoveryOrigin(job, state.request, graphThreadId,
-              active.origin, active.evidence)) {
+              active.origin, active.evidence, false, assignmentFailureEvidence(prior, active.origin))) {
           return { status: "running", reason: null,
             recoveryLifecycle: resumePausedRecovery(prior.recoveryLifecycle, true) };
         }
@@ -1555,14 +1605,16 @@ export function recoveryNode(
         const active = prior.recoveryLifecycle.active;
         const job = await openJob(state);
         const graphThread = config.configurable?.thread_id;
-        if (typeof graphThread !== "string" || await trustedHead(job) !== active.origin.sourceHeadSha ||
-            !await authenticateRecoveryOrigin(job, state.request, graphThread, active.origin, active.evidence))
+        if (typeof graphThread !== "string" || await recoverySourceHead(job, prior, active.origin) !== active.origin.sourceHeadSha ||
+            !await authenticateRecoveryOrigin(job, state.request, graphThread, active.origin, active.evidence,
+              false, assignmentFailureEvidence(prior, active.origin)))
           throw Error("Original failure source no longer matches the selected Turn and current HEAD.");
-        const strategy = prior.recoverySources.some(x => x.caseId === active.id && x.channel === "operationRecovery") &&
-          await withStoryJobLock(job, "assess-source-bound-operation", () => selectOperationStrategy(job, state, active));
+        const strategy = prior.recoverySources.some(x => x.caseId === active.id && x.channel === "operationRecovery")
+          ? await withStoryJobLock(job, "assess-source-bound-operation", () => selectOperationStrategy(job, state, active)) : null;
         const selected = strategy ? decideRecovery(prior.recoveryLifecycle, strategy) : decideExistingRecovery(prior);
-        return { recoveryLifecycle: { ...selected, assessorPending: true },
-          status: "running" };
+        return { recoveryLifecycle: { ...selected, assessorPending: strategy?.action !== "exhausted" },
+          status: strategy?.action === "exhausted" ? "blocked" : "running",
+          ...(strategy?.action === "exhausted" ? { reason: "Original specialist report protocol exhausted; its submitted draft is preserved." } : {}) };
       } catch {
         return { status: "blocked", reason: "The original failure cannot admit a recovery decision.",
           recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
@@ -1613,7 +1665,9 @@ export function recoveryNode(
       turnDigest: local.request.turnPlanDigest ?? null,
       fixture: local.request.fixture, task: local.request.task, contract: local.request.contract };
     const authenticate = (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) =>
-      authenticateRecoveryOrigin(job, local.request, graphThreadId, origin, evidence);
+      authenticateRecoveryOrigin(job, local.request, graphThreadId, origin, evidence, false,
+        domain.operationRecovery?.operation === origin.operation && domain.operationRecovery.evidence.assignmentId === origin.assignmentId
+          ? domain.operationRecovery.evidence : assignmentFailureEvidence(prior, origin));
     const current = prior.recoveryLifecycle.active;
     const assurance: { originalEffect?: RecoveryEvidence;
       verifiedHead?: string; verifiedReceipt?: RecoveryEvidence;

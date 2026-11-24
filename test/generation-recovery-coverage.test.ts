@@ -203,7 +203,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const reviewed = [
     [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
-    [file, "runFoundationAssignmentChild", "570895ae2e57fb71092bca9ccefa41beeef633f2ccac6d5024027290f993ce9a"],
+    [file, "runFoundationAssignmentChild", "eea22554255045b960130bd4b7186f57de39eb7da1a7613140b06013c8c4559e"],
     [child, "createAssignmentLifecycleGraph", "9fa13f1f13a3729ec1fd9253f553483222c06492c7d1b490c59ccf5f225d7701"],
     [child, "authenticateAssignmentReentry", "5b24030609f9d19c2cd5c001a29dbcb865388377cfd865ee6c176b4996a2e135"],
   ] as const;
@@ -213,6 +213,34 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     const actual = createHash("sha256")
       .update(printer.printNode(ts.EmitHint.Unspecified, body, source)).digest("hex");
     assert.equal(actual, expected, name + " changed: review R01 proof gates and contract");
+  }
+});
+
+// R02: settled effect/protocol evidence is a narrow exception to ordinary
+// clean-HEAD recovery authentication, never a new writer entitlement.
+test("R02 source-bound correction and terminal evidence retain reviewed proof gates", () => {
+  const reviewed = [
+    ["assignment-metadata-recovery.ts", "materialProgress", "4e8f587da128adb223f8c9160f92b365f1e57bc1d0f52c0cb6c79f07fdf8fd15"],
+    ["assignment-metadata-recovery.ts", "nativeMetadataDefects", "82ab3b20064ca15b238009c47632d07415d7e9b8cecae82d588ed04c90c9cc0e"],
+    ["assignment-metadata-recovery.ts", "inspectSettledChain", "a5c669483503867eb0294a3019716fd3fe8d3813831bccfdd33506b5e9ce5732"],
+    ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "5aff6609778cab8b2a3a4454f70ce89b387551fcf7a96133ccb2c2b070591dc9"],
+    ["assignment-metadata-recovery.ts", "recoverSubmittedAssignment", "c89c6fa4789c11116944ff68583d71946e6b28391913e7a136a2d15f228b8f98"],
+    ["foundation.ts", "foundationSourceDigest", "f1520e850f14566097c03e9750c229d73f29b2874fc770d7d15027dad3ff53a0"],
+    ["foundation.ts", "inspectFoundationFailure", "8ea7e6c1ac238a0bc742e7e344e4de30ca1f07a0d10c7ac7564ad4ff6394bf48"],
+    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "bb892a67ef0eb4e86df44369763cb56d9dd159b00eaaae4ebd926e7bb49dc35b"],
+    ["generation-operation-strategy.ts", "originalAssignmentFailure", "9c6670e50947297267867f372f38c27beb62c107c235d0ff90da0ec9b7a31fe7"],
+    ["generation.ts", "authenticateRecoveryOrigin", "b65569bb1936afe4551d9059ba17653368b74e7de41ba3101481e4e20e689c3b"],
+    ["generation.ts", "recoverySourceHead", "3eb183b685c6693ea4aaa938f6fe20e901c675c87f32cf88854118790c5e0b05"],
+  ] as const;
+  const printer = ts.createPrinter({ removeComments: true });
+  for (const [path, name, expected] of reviewed) {
+    const source = ts.createSourceFile(path, readFileSync(resolve(root, "src", path), "utf8"),
+      ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const body = helpers(source).get(name);
+    assert.ok(body, name + " must remain source-linked");
+    const actual = createHash("sha256")
+      .update(printer.printNode(ts.EmitHint.Unspecified, body, source)).digest("hex");
+    assert.equal(actual, expected, name + " changed: review R02 proof gates and contract");
   }
 });
 

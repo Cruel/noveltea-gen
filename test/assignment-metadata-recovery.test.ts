@@ -71,6 +71,8 @@ async function harness(t: import("node:test").TestContext, replies: Reply[]) {
     verify: async () => {
       verifyCalls++;
       return effect === "invalid metadata" ? [defect] :
+        effect === "shifted metadata" ? [{ ...defect, line: 8 }] :
+        effect === "different metadata" ? [{ ...defect, pointer: "/other" }] :
         effect === "invalid provenance" ? [provenance] : [];
     },
     beforeTurn: async () => {
@@ -174,6 +176,41 @@ test("format exhaustion is finite and never starts a substantive correction", as
   assert.deepEqual(h.calls.slice(1).map(c => c.tools), [[], []]);
   assert.equal(h.verifyCalls(), 0);
   await assert.rejects(h.run(), ProtocolExhaustedError);
+  assert.equal(h.calls.length, 3);
+});
+
+test("later corrective protocol exhaustion preserves the preceding accepted response and effect", async t => {
+  const h = await harness(t, [
+    { text: report, effect: "invalid metadata" },
+    { text: "malformed", effect: "invalid provenance" },
+    { text: "still malformed" }, { text: "invalid" },
+  ]);
+  await assert.rejects(h.run(), ProtocolExhaustedError);
+  assert.equal(h.calls.length, 4);
+  assert.equal(h.verifyCalls(), 2, "Only original native rejection and its corrective-grant recheck");
+  assert.deepEqual(h.calls.slice(-2).map(c => c.tools), [[], []]);
+  await assert.rejects(h.run(), ProtocolExhaustedError);
+  assert.equal(h.calls.length, 4);
+  const terminal = JSON.parse(await readFile(join(h.receiptDir, "terminal.json"), "utf8"));
+  assert.equal(terminal.ordinal, 1);
+  assert.equal(terminal.kind, "protocol-exhausted");
+  assert.deepEqual(terminal.defects, []);
+  const file = join(h.receiptDir, "0.settled.json");
+  const previous = JSON.parse(await readFile(file, "utf8"));
+  await writeFile(file, JSON.stringify({ ...previous, effect: sha("different") }));
+  await assert.rejects(h.run(), /proof changed|differs/);
+  assert.equal(h.calls.length, 4);
+});
+
+test("moving a diagnostic line or exchanging unresolved schema fields does not demonstrate progress", async t => {
+  const h = await harness(t, [
+    { text: report, effect: "invalid metadata" },
+    { text: report, effect: "shifted metadata" },
+    { text: report, effect: "different metadata" },
+  ]);
+  await assert.rejects(h.run(), /did not make verified progress/);
+  assert.equal(h.calls.length, 3);
+  await assert.rejects(h.run(), /did not make verified progress/);
   assert.equal(h.calls.length, 3);
 });
 

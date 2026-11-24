@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { authenticateAssignmentFailure, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 import type { GenerationGraphState } from "./generation.js";
 import type { JobStartResult } from "./job.js";
 import { git } from "./ideas.js";
@@ -36,10 +36,25 @@ const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
   schema: "noveltea-generation-recovery-decision/v1" as const, caseId: c.id,
   checkedSourceHeadSha: c.origin.sourceHeadSha, evidence: proof ? [...c.evidence, proof] : c.evidence,
 });
+async function originalAssignmentFailure(job: JobStartResult, s: State, c: RecoveryCase) {
+  const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
+    GenerationOperationRecovery | undefined;
+  if (!op?.evidence.assignmentFailure) return null;
+  if (c.origin.operation !== "specialist-result" || c.origin.assignmentId !== "foundation" ||
+      c.observation !== "returned-failure" || s.active?.id !== "foundation" || s.result ||
+      s.inventory?.headSha !== c.origin.sourceHeadSha || s.request.fixture ||
+      s.request.turnPlanDigest !== c.origin.turnDigest || s.planVersion !== c.origin.planVersion ||
+      s.request.job !== job.jobId || c.origin.jobThreadId !== job.threadId)
+    throw Error("Original settled assignment failure is not the admitted active child.");
+  const failure = await authenticateAssignmentFailure(job, op.evidence, c.origin.sourceHeadSha);
+  if (!failure) throw Error("Original settled assignment failure proof changed.");
+  return failure;
+}
 async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
   if (s.request.turnPlanDigest !== c.origin.turnDigest || s.planVersion !== c.origin.planVersion ||
       s.request.job !== c.origin.jobId || job.threadId !== c.origin.jobThreadId ||
-      await trustedHead(job) !== c.origin.sourceHeadSha || git(job, "status", "--porcelain=v1", "--untracked-files=all").trim())
+      !await originalAssignmentFailure(job, s, c) &&
+        (await trustedHead(job) !== c.origin.sourceHeadSha || git(job, "status", "--porcelain=v1", "--untracked-files=all").trim()))
     throw Error("Original Turn, plan, HEAD or writer effects changed before recovery");
 }
 /** A clean worktree alone doesn't settle a writer. Require the original
@@ -47,6 +62,10 @@ async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
 async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryEvidence | null> {
   const { operation, sourceHeadSha: head, turnDigest, planVersion } = c.origin;
   if (s.request.fixture || !s.request.turnPlanDigest || s.escalation?.requiresTrustedApproval) return null;
+  const assignmentFailure = await originalAssignmentFailure(job, s, c);
+  if (assignmentFailure?.proof.kind === "nonconverging")
+    return { store: "specialist-receipt", ref: assignmentFailure.ref,
+      digest: assignmentFailure.proof.receiptDigest };
   // The scheduler may fail AFTER a read-only source inspection with no
   // selected writer. A genuine original task/Turn checkpoint is already
   // authenticated by the production graph; bind the diagnostic to the exact
@@ -352,6 +371,12 @@ export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonN
 }
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  const assignmentFailure = await originalAssignmentFailure(job, s, c);
+  if (assignmentFailure?.proof.kind === "protocol-exhausted") {
+    const proof = { store: "response-contract" as const, ref: assignmentFailure.ref,
+      digest: assignmentFailure.proof.receiptDigest };
+    return { ...base(c, proof), action: "exhausted", reason: "protocol-exhausted", attemptRefs: [proof] };
+  }
   const owner = await originalNoWriteOwnerProof(job, s, c);
   if (owner) {
     await assertSource(job, s, c);
@@ -455,10 +480,19 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   try {
     const control = await readJobControl(job);
     if (control !== "running") return stop({ ...base(c), action: "pause", reason: control === "paused" ? "author-pause" : "cancelled" }, "Author control precedes corrective work.", control);
-    const author = await withStoryJobLock(job, "recovery-author-intake", () => processAuthorUpdatesAfterWork(job));
-    if ("error" in author) throw Error("Author receipts could not be authenticated");
-    if (author.status !== "ready") return stop({ ...base(c), action: "pause", reason: author.status === "cancelled" ? "cancelled" :
-      author.status === "paused" ? "author-pause" : "author-choice" }, "Author boundary precedes corrective work.", author.status === "cancelled" ? "cancelled" : "paused");
+    const originalDraft = await originalAssignmentFailure(job, s, c);
+    // No author-update mutation may run against an uncommitted rejected
+    // draft. A settled original failure permits ONLY a tool-free diagnostic;
+    // ordinary author intake remains mandatory before any successor writer.
+    if (originalDraft) {
+      if (d.action !== "diagnostic" || originalDraft.proof.kind !== "nonconverging")
+        throw Error("Unfinished assignment permits only independent read-only diagnosis.");
+    } else {
+      const author = await withStoryJobLock(job, "recovery-author-intake", () => processAuthorUpdatesAfterWork(job));
+      if ("error" in author) throw Error("Author receipts could not be authenticated");
+      if (author.status !== "ready") return stop({ ...base(c), action: "pause", reason: author.status === "cancelled" ? "cancelled" :
+        author.status === "paused" ? "author-pause" : "author-choice" }, "Author boundary precedes corrective work.", author.status === "cancelled" ? "cancelled" : "paused");
+    }
     if (d.action === "plan-amendment" && d.adapter === "dependency-work") {
       await assertSource(job, s, c);
       if (!await authenticateOperationOwnerProof(job, s, c, d))
@@ -557,8 +591,13 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       if (!isDeepStrictEqual(await selectOperationStrategy(job, s, c), d)) throw Error("Original diagnosis source changed");
       const target = diagnosticCaseForDecision(c, d);
       const { policy } = await inspectPiPolicy(job);
+      const packet = diagnosticPacket(s, c, target);
+      if (originalDraft) packet.existingFindings = {
+        original: packet.existingFindings, assignmentDefects: originalDraft.defects,
+        observation: "Repeated source-bound native/provenance correction did not converge; draft remains uncommitted.",
+      };
       await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider,
-        s.request.model ?? policy.profile.model, diagnosticPacket(s, c, target));
+        s.request.model ?? policy.profile.model, packet);
       await assertSource(job, s, c);
       // Reinspect the original completed Pi conversation rather than accept
       // a model's in-memory return as a strategy or invocation receipt.

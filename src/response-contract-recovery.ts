@@ -354,6 +354,9 @@ export async function inspectCompletedProtocolResponse<T>(options: {
 export async function recheckExhaustedProtocolResponse<T>(options: {
   receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
   expectedSession: { id: string; file: string };
+  /** A writer may create its JSONL lazily; the independent submitted
+   * effect receipt authenticates its original completed response boundary. */
+  submittedPrefix?: SealedTranscriptPrefix;
   validate: (text: string) => ResponseContractFailure[];
   parse: (text: string) => T;
 }): Promise<T> {
@@ -373,11 +376,20 @@ export async function recheckExhaustedProtocolResponse<T>(options: {
     throw new ProtocolIntegrityBlockedError("Verifier fix lacks an exact exhausted original invocation");
   checkedReceipt(initial, sourceDigest, contract, started, null);
   const proof = await transcriptResponses(initial.sessionFile, options.sessionRoots, initial.sessionId);
-  if (!hex64.test(started.transcriptSha256BeforePrompt ?? "") ||
-      started.transcriptBytesBeforePrompt === undefined ||
-      proof.bytes.length < started.transcriptBytesBeforePrompt ||
-      createHash("sha256").update(proof.bytes.subarray(0, started.transcriptBytesBeforePrompt)).digest("hex") !==
-        started.transcriptSha256BeforePrompt ||
+  const submitted = options.submittedPrefix
+    ? await transcriptResponses(initial.sessionFile, options.sessionRoots, initial.sessionId, options.submittedPrefix)
+    : null;
+  const boundaryValid = started.transcriptBytesBeforePrompt !== undefined
+    ? hex64.test(started.transcriptSha256BeforePrompt ?? "") &&
+      proof.bytes.length >= started.transcriptBytesBeforePrompt &&
+      createHash("sha256").update(proof.bytes.subarray(0, started.transcriptBytesBeforePrompt)).digest("hex") ===
+        started.transcriptSha256BeforePrompt
+    : !!submitted;
+  if (!boundaryValid ||
+      submitted && (submitted.complete.length !== initial.responseOrdinal - 2 ||
+        submitted.messages.at(-1)?.stopReason !== "stop" ||
+        proof.messages.slice(submitted.messages.length).filter(m => m?.role === "user").length !== 2 ||
+        proof.complete.slice(-3).some(answer => !options.validate(answer).length)) ||
       proof.complete.length !== initial.responseOrdinal ||
       createHash("sha256").update(proof.complete.at(-1) ?? "").digest("hex") !== initial.responseHash)
     throw new ProtocolIntegrityBlockedError("Original exhausted response or transcript changed");

@@ -12,15 +12,16 @@ import { hasUserProtectedDecision } from "./foundation-record.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { promptStorySpecialist } from "./story-interruption.js";
+import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
+import { readJobControl } from "./job-control.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { FoundationAuthorRequiredError, authorizedFoundationException, consumeFoundationRetry, foundationExceptionContext, recordFoundationConflict } from "./foundation-conflict.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { createProjectResourceLoader } from "./pi.js";
-import { preparePiContext, preflightPiAssignment, guardPiBudget, recordPiSession, registerPendingPiSession } from "./job-pi-policy.js";
-import { ASSIGNMENT_REPORT, nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { preparePiContext, preflightPiAssignment, guardPiBudget, recordPiSession, registerPendingPiSession, inspectPiPolicy } from "./job-pi-policy.js";
+import { ASSIGNMENT_REPORT, nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -218,17 +219,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     // Admission is checked below only before an actual prompt.
     insideWriter: true,
   }, runtime);
-  const scope = async () => createHash("sha256").update(JSON.stringify({
-    job: job.jobId, thread: job.threadId, base: job.baseSha, head: workHead(state),
-    target, snapshot: state.snapshot.id, provider, modelId, task: state.task,
-    selectedModel: context.model.provider + "/" + context.model.id, thinking: context.thinking,
-    mode: state.mode, authorInput: state.authorInput, envelope: state.envelope,
-    validator: job.validatorVersion, exception: await foundationExceptionContext(job),
-    turn: await readFile(join(job.stateDir, "turn-plan.json"), "utf8").catch(error => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    }),
-  })).digest("hex");
+  const scope = () => foundationSourceDigest(job, state, target);
   const sourceDigest = await scope();
   const authorize = async () => {
     assertHead(job, workHead(state));
@@ -278,7 +269,16 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       session, directory: foundationInvocationDirectory(job, session.sessionId),
       sourceDigest, sessionRoots: [sessionDir], authorize,
       effect: async () => existsSync(authoredFile) ? foundationDigest(job, target) : null,
-      beforeTurn: () => guardPiBudget(job, "foundation:write", sessionFile),
+      beforeTurn: async () => {
+        const checkControl = async () => {
+          const control = await readJobControl(job);
+          if (control === "cancelled") throw new StoryCancelledError(WORK_ITEM);
+          if (control !== "running") throw new AssignmentAuthorPauseError();
+        };
+        await checkControl();
+        await guardPiBudget(job, "foundation:write", sessionFile);
+        await checkControl();
+      },
       prompt: async text => {
         await registerPendingPiSession(job, sessionFile);
         await promptStorySpecialist(session, text);
@@ -442,6 +442,23 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
   }
 }
 
+async function foundationSourceDigest(job: JobStartResult, state: FoundationState, target: string) {
+  const { resolved, policy } = await inspectPiPolicy(job);
+  if (!resolved || policy.profile.thinking !== resolved.thinking)
+    throw Error("Foundation source lacks its original pinned model resolution.");
+  return createHash("sha256").update(JSON.stringify({
+    job: job.jobId, thread: job.threadId, base: job.baseSha, head: workHead(state),
+    target, snapshot: state.snapshot.id, provider: state.provider, modelId: state.model, task: state.task,
+    selectedModel: resolved.selected.provider + "/" + resolved.selected.model, thinking: resolved.thinking,
+    mode: state.mode, authorInput: state.authorInput, envelope: state.envelope,
+    validator: job.validatorVersion, exception: await foundationExceptionContext(job),
+    turn: await readFile(join(job.stateDir, "turn-plan.json"), "utf8").catch(error => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }),
+  })).digest("hex");
+}
+
 function stateFile(job: JobStartResult) { return join(job.stateDir, "foundation.json"); }
 function foundationInvocationDirectory(job: JobStartResult, sessionId: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(sessionId)) throw Error("Invalid Foundation invocation session identity.");
@@ -543,6 +560,24 @@ export async function inspectPendingFoundationInvocation(job: JobStartResult, so
   else if (changedPaths(job).length)
     throw Error("Unstarted Foundation invocation has unexpected effects.");
   return true;
+}
+
+/** Only the exact unfinished Foundation may present a settled failure at
+ * its pinned Git predecessor. This is not a trusted HEAD for scheduling. */
+export async function inspectFoundationFailure(job: JobStartResult, sourceHead: string) {
+  if (!await inspectPendingFoundationInvocation(job, sourceHead)) return null;
+  const state = (await existingState(job))!;
+  if (!state.piSessionId || !state.piSessionFile || !hasStartedFoundationInvocation(job, state) ||
+      state.authoredSha256) return null;
+  const target = state.target!;
+  const terminal = await inspectAssignmentFailure({
+    directory: foundationInvocationDirectory(job, state.piSessionId),
+    sourceDigest: await foundationSourceDigest(job, state, target),
+    sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+    sessionRoots: [join(job.stateDir, "foundation-sessions")],
+    effect: existsSync(join(job.worktreeStoryRoot, target)) ? await foundationDigest(job, target) : null,
+  });
+  return terminal && { ...terminal, ref: "foundation-invocations/" + state.piSessionId + "/terminal.json" };
 }
 
 /** Read-only proof of an original commit published before its receipt. */

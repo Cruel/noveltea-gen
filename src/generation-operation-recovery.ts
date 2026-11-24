@@ -4,6 +4,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
+import type { AssignmentFailureProof } from "./assignment-metadata-recovery.js";
 
 export type Operation = "scheduling" | "adaptive-admission" | "author-update-intake" |
   "idea-integration" | "idea-verification" | "specialist-dispatch" |
@@ -38,6 +39,8 @@ export interface GenerationOperationRecovery {
       "specialist-receipt" | "dependency-plan" | "review-checkpoints" |
       "completion-report" | "generation-checkpoints";
     assignmentId?: string; resultStatus?: string;
+    /** Settled original child failure at its unpublished draft source. */
+    assignmentFailure?: { sourceHeadSha: string; proof: AssignmentFailureProof };
     closeout?: { milestoneId: string; proposalDigest: string; repairId: string };
     /** Original settled Event no-write report, never a replacement Event writer lease. */
     eventNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string };
@@ -108,6 +111,19 @@ export function independentObligation(op: Pick<GenerationOperationRecovery, "ope
   return null;
 }
 
+/** This authenticates only the original unfinished Foundation, not a clean
+ * verified revision, plan amendment, or permission to dispatch a writer. */
+export async function authenticateAssignmentFailure(job: JobStartResult,
+  evidence: GenerationOperationRecovery["evidence"], sourceHead: string) {
+  const failure = evidence.assignmentFailure;
+  if (!failure || failure.sourceHeadSha !== sourceHead ||
+      evidence.assignmentId !== "foundation" || evidence.reference !== "specialist-receipt" ||
+      evidence.resultStatus !== failure.proof.kind) return null;
+  const { inspectFoundationFailure } = await import("./foundation.js");
+  const original = await inspectFoundationFailure(job, sourceHead).catch(() => null);
+  return original && isDeepStrictEqual(original.proof, failure.proof) ? original : null;
+}
+
 export async function assessGenerationOperation(input: {
   job: JobStartResult; threadId: string; turnDigest?: string;
   planVersion?: number | null; operation: Operation;
@@ -116,7 +132,12 @@ export async function assessGenerationOperation(input: {
   safeAction?: GenerationOperationRecovery["safeAction"];
 }): Promise<GenerationOperationRecovery> {
   // An unsafe Git head is evidence to fence, not an excuse to invent a base.
-  const headSha = await trustedHead(input.job).catch(() => null);
+  const assignmentFailure = input.evidence.assignmentFailure;
+  const headSha = assignmentFailure && input.operation === "specialist-result" &&
+      input.outcome === "returned-failure"
+    ? await authenticateAssignmentFailure(input.job, input.evidence, assignmentFailure.sourceHeadSha)
+      ? assignmentFailure.sourceHeadSha : null
+    : await trustedHead(input.job).catch(() => null);
   const safeAction = input.safeAction === "continue-independent" && independentObligation(input, headSha)
     ? "continue-independent" : "reconcile-original-operation";
   return {

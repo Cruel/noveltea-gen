@@ -33,7 +33,7 @@ import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
 import { originalInventorySnapshotDigest } from "./selective-revalidation.js";
-import { independentObligation, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { independentObligation, authenticateAssignmentFailure, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 
 const object = (x: unknown): x is Record<string, unknown> =>
   !!x && typeof x === "object" && !Array.isArray(x);
@@ -114,10 +114,10 @@ export async function authenticateOriginalFailure(
     // A source that is neither HEAD nor an ancestor cannot be silently
     // reinterpreted as the pinned failed operation. This proves lineage only,
     // not that an uncertain child writer settled.
-    // Only the selected cross-domain adapter may present an authenticated
-    // unpublished commit. A source-bound original writer/commit proof must
-    // be checked separately BEFORE passing true here; no other recovery may
-    // bypass trustedHead's independent-review publication requirement.
+    // Only the selected cross-domain adapter or the exact settled original
+    // Foundation failure may present an authenticated unpublished source.
+    // The original writer/effect proof must be checked separately BEFORE
+    // passing true here. This never makes a dirty draft a trusted revision.
     const current = authenticatedUnpublishedHead
       ? jobGit(job, "rev-parse", "HEAD") : await trustedHead(job);
     execFileSync("git", ["merge-base", "--is-ancestor", origin.sourceHeadSha, current], {
@@ -269,6 +269,13 @@ export async function inspectModernGenerationRecovery(
       }
       return head === origin.sourceHeadSha;
     }
+    const operation = source.channel === "operationRecovery" ? source.input as unknown as GenerationOperationRecovery : null;
+    if (operation?.evidence.assignmentFailure) {
+      if (origin.operation !== "specialist-result" || origin.assignmentId !== "foundation" ||
+          operation.outcome !== "returned-failure" ||
+          !await authenticateAssignmentFailure(job, operation.evidence, origin.sourceHeadSha)) return false;
+      return authenticateOriginalFailure(job, request, threadId, origin, evidence, true);
+    }
     if (await authenticateOriginalFailure(job, request, threadId, origin, evidence))
       return true;
     const selected = original.active?.id === caseFile.id && original.assessorPending &&
@@ -351,7 +358,7 @@ export async function inspectModernGenerationRecovery(
         }
         case "diagnostic":
           if (source.channel === "operationRecovery") return isDeepStrictEqual(d,
-            await selectOperationStrategy(job, values as GenerationGraphState, active));
+            await selectOperationStrategy(job, values as GenerationGraphState, active).catch(() => null));
           return source.channel === "unknownRecovery" && d.mode === "read-only" && d.attemptRef === null;
         case "diagnostic-stop":
           if (source.channel === "operationRecovery") {
@@ -382,7 +389,10 @@ export async function inspectModernGenerationRecovery(
         case "pause":
           return true; // Never a write permission.
         case "exhausted":
-          return source.channel === "recovery";
+          return source.channel === "recovery" ||
+            source.channel === "operationRecovery" &&
+            !!(source.input as unknown as GenerationOperationRecovery).evidence.assignmentFailure &&
+            isDeepStrictEqual(d, await selectOperationStrategy(job, values as GenerationGraphState, active).catch(() => null));
         default:
           return false; // Unsupported active writer scope from a saved claim.
       }

@@ -45,7 +45,7 @@ export const reviewedReturnExits = {
     "589f7702572b5ea2:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B b00891ce57d109ec:V",
   observeNodeOutcome: "cafa5b26a70d2f15:S 457eb16703d85c3e:R 791c12224fd3d55c:F",
   recoveryNode:
-    "48769bfd0f6d9231:G 91923d53221cfb1b:F 1b2bfd3978e6627c:F d62792531537fa8b:F a510809dc74cc215:F 0edadc4c8151f4c0:F 533e9704b50c7d64:G 45f4af1e86ee7162:U 1e00488edc815471:G 7e5396dcc912a986:U b30aaa267d235346:G 4d083c13dcc1e236:G 54818287e8077341:G 48472d6f8dc29579:F 0e0f7e47153d103a:R ae4b8b3ed4e09466:F ac12745831f57568:G e42edb38568b51ce:S 952bd06592f1d376:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
+    "a55e6ae10ac00c21:G 91923d53221cfb1b:F 1b2bfd3978e6627c:F d62792531537fa8b:F 7078555ef957e21c:F 0edadc4c8151f4c0:F 533e9704b50c7d64:G 45f4af1e86ee7162:U 1e00488edc815471:G 7e5396dcc912a986:U b30aaa267d235346:G 4d083c13dcc1e236:G 54818287e8077341:G 48472d6f8dc29579:F 9d04d061aec53c17:S ae4b8b3ed4e09466:F ac12745831f57568:G e42edb38568b51ce:S 952bd06592f1d376:F 42a0c0736aa55303:V ecfd452d8e6a489a:V",
 } as const;
 
 export const reviewedThrowExits = {
@@ -100,7 +100,7 @@ export const reviewedStatusExits = {
   runStoryGeneration:
     "4b91bbe4dcd1d136:G 28b465f0a9b56ebd:U 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F aa0aa6c25fa8d276:S",
   observeNodeOutcome: "4409d48b659f1cfc:S 4b91bbe4dcd1d136:G",
-  recoveryNode: "2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G b3c3a129ee36d4e4:U 4b91bbe4dcd1d136:G 088baada343b4451:U 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F",
+  recoveryNode: "2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G b3c3a129ee36d4e4:U 4b91bbe4dcd1d136:G 088baada343b4451:U 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F 7574bb0576c3462b:S 2b78ad3f49b1ead6:F 4b91bbe4dcd1d136:G 2b78ad3f49b1ead6:F",
 } as const;
 
 export const reviewedSharedRouteHelper = "60b40846ce5140327811c382ee2200cbe42dab869e5d0104ab2b7fc6b42cb9ea";
