@@ -54,7 +54,7 @@ import type { RecoveryDecision, RecoveryEvidence } from "./generation-recovery-c
 import { isDeepStrictEqual } from "node:util";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { steeringForAssignment } from "./steering-amendments.js";
-import { driveRejectedRepairCycle, type RepairCycleOps } from "./rejected-repair-controller.js";
+import { type RepairCycleOps } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
@@ -1552,8 +1552,6 @@ export interface RejectedRepairOptions {
   /** The parent Graph owns the safe, native-verified steering admission
    * boundary. Without an eligible inventory, corrections cannot yield. */
   canYieldForSteering?: () => Promise<boolean>;
-  /** Only the migrated assignment child delegates nonlocal strategy to its parent. */
-  sharedAssessment?: boolean;
 }
 async function reviewerFor(job: JobStartResult, sha: string, options: RejectedRepairOptions) {
   const state = await inspectRejectedRepair(job, sha);
@@ -1868,10 +1866,10 @@ export async function acceptGuidedRepairContinuation(job: JobStartResult,
   return state;
 }
 
-/** Existing receipt/effect operations, shared by the remaining unmigrated
- * controller and the checkpointed Foundation child. No scheduling here. */
+/** Source-bound receipt/effect adapters for the checkpointed Review child.
+ * No scheduling or standalone admission is available here. */
 async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
-  options: RejectedRepairOptions, childWorkItem?: string): Promise<RepairCycleOps<RepairReceipt>> {
+  options: RejectedRepairOptions, childWorkItem: string): Promise<Pick<RepairCycleOps<RepairReceipt>, "begin" | "inspect" | "correct" | "validate" | "commit" | "reviewStatus" | "rereview" | "finishReview" | "shouldYieldForSteering">> {
   if (!SHA.test(sourceSha)) throw Error("Repair requires one exact reviewed commit.");
   await withStoryJobLock(job, "reconcile-published-repair", async () => {
     await reconcileUnpublishedRepairCommit(job, sourceSha);
@@ -1888,12 +1886,8 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
   const originWorkItem = point.workItem.startsWith("repair-") ?
     (await readRejectedRepairOrigin(job, point)).workItem : point.workItem;
-  if (childWorkItem ? childWorkItem !== originWorkItem || !usesCheckpointedReviewRounds(originWorkItem)
-      : usesCheckpointedReviewRounds(originWorkItem))
-    throw Error("Migrated Review correction requires its checkpointed assignment child.");
-  if (!options.sharedAssessment && (usesSharedAssignmentReview(point.workItem) ||
-      point.workItem.startsWith("repair-") && usesSharedAssignmentReview((await readRejectedRepairOrigin(job, point)).workItem)))
-    throw Error("Shared assignment Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
+  if (childWorkItem !== originWorkItem || !usesCheckpointedReviewRounds(originWorkItem))
+    throw Error("Review correction requires its checkpointed assignment child.");
   return {
     begin: async () => {
       const state = await beginRejectedRepair(job, point);
@@ -1908,13 +1902,8 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
       });
       return inspectRejectedRepair(job, sha);
     },
-    requiresAssessment: options.sharedAssessment ? async state =>
-      !!await foundationReviewBoundary(job, state) : undefined,
     correct: sha => withStoryJobLock(job, "rejected-review-writer", () =>
       runPiRejectedRepair(job, sha)),
-    choice: id => inspectSpecialistChoice(job, id),
-    consume: sha => withStoryJobLock(job, "rejected-review-author", () =>
-      consumeRejectedRepairChoice(job, sha)),
     validate: sha => withStoryJobLock(job, "rejected-review-validation", () =>
       validateRejectedRepairDraft(job, sha)),
     commit: sha => withStoryJobLock(job, "rejected-review-commit", () =>
@@ -1974,25 +1963,7 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
     },
     finishReview: sha => withStoryJobLock(job, "rejected-review-seal", () =>
       finishRejectedRepairReview(job, sha)),
-    adjudicate: state => withStoryJobLock(job, "independent-review-dispute", () =>
-      adjudicateRejectedRepair(job, state.sourceCommitSha)),
-    nextFailure: async state => {
-      if (!state.repairedCommitSha)
-        throw Error("Rejected correction lacks its source-linked successor.");
-      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
-        p.eligible && p.commitSha === state.repairedCommitSha);
-      if (!point) throw Error("Failed correction checkpoint was lost.");
-      return withStoryJobLock(job, "rejected-review-next-attempt", () =>
-        beginRejectedRepair(job, point));
-    },
   };
-}
-
-/** Temporary whole-cycle adapter for the explicitly unmigrated lanes.
- * A Foundation assignment may only enter the bounded round API below. */
-export async function advanceRejectedRepair(job: JobStartResult, sourceSha: string,
-  options: RejectedRepairOptions = {}) {
-  return driveRejectedRepairCycle(await rejectedRepairOperations(job, sourceSha, options));
 }
 
 export type ReviewRoundCommand =
@@ -2212,7 +2183,7 @@ export async function executeReviewRound(job: JobStartResult,
         previous.repairedCommitSha !== sourceSha || previous.phase !== "failed")
       throw new ProtocolIntegrityBlockedError("Repair successor lacks its rejected predecessor");
   }
-  const ops = await rejectedRepairOperations(job, sourceSha, { ...options, sharedAssessment: true }, workItem);
+  const ops = await rejectedRepairOperations(job, sourceSha, options, workItem);
   let state = command.phase === "admit" ? await ops.begin() : await ops.inspect(sourceSha);
   const authenticate = () => {
     if (state.rootFailureSha !== rootSha || state.origin.workItem !== workItem ||

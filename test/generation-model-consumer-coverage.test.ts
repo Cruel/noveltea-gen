@@ -78,7 +78,6 @@ const reviewed: Record<string, string> = {
   "src/event-work.ts:authorFixtureEventRound": "1:9f12bc92cfaa88e782e41118",
   "src/focused-work.ts:writeWithPi": "3:3c796a38c1559932daaaffeb",
   "src/foundation.ts:piAuthor": "3:9e5ed08fab9b974df4cfca50",
-  "src/foundation.ts:discoverQuestions": "2:682a8e7748244e04ea525e6e",
   "src/idea-placement.ts:piWork": "4:c54673be05cced07b95826e1",
   "src/interactive-specialist.ts:authorInteractive": "3:2b1a97828469bbe007a5a73e",
   "src/milestone-blueprint.ts:runMilestoneDiagnosis": "2:8721be40a6fc38955324cbd2",

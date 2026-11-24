@@ -194,9 +194,7 @@ Job foundation:
   --inspect                Inspect saved writer/crash state without running the specialist
   --reconcile-digest <sha256>  Explicitly accept inspected unfinished bytes for validation (no replay)
   --task <brief>            Required when starting foundation discovery
-  --mode <mode>            autonomous (default) or collaborative
   --envelope <text>        Author's narrative/presentation constraints
-  --author-input <text>    Respond to the collaborative discovery handoff
   --skills-source <path>   NovelTea skills checkout to pin (or configured checkout)
   --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
   --fixture                Deterministic test adapter, not live Pi evidence
@@ -332,7 +330,7 @@ function refuseObsoleteStageCommand(args: string[]): void {
   const direct = stage === "foundation" ? !args.includes("--inspect") :
     ["architecture", "foundations", "event", "interactive", "composition", "review", "repair"].includes(stage!) ? action === "run" :
     stage === "ideas" ? ["place", "relocate"].includes(action!) || action === "reassess" && args.includes("--record") : false;
-  if (direct && !fixture)
+  if (direct && (!fixture || stage === "repair"))
     throw Error("Standalone Story execution is retired; use authenticated Generation start/resume or inspect historical evidence.");
 }
 
@@ -378,27 +376,16 @@ async function main(): Promise<void> {
     const args = process.argv.slice(4);
     const action = args.shift();
     if (args.includes("--help") || args.includes("-h")) { process.stdout.write(USAGE); return; }
-    if (!["run", "inspect"].includes(action ?? ""))
-      throw Error("Expected job repair run|inspect.");
-    const values = parseJobOptions(args, "repair", ["--story", "--job", "--commit",
-      "--skills-source", "--provider", "--model", "--thinking"]);
+    if (action !== "inspect") throw Error("Expected job repair inspect.");
+    const values = parseJobOptions(args, "repair", ["--story", "--job", "--commit"]);
     const story = values.get("--story"), jobId = values.get("--job"), sha = values.get("--commit");
     if (!story || !jobId || !sha || !/^[a-f0-9]{40}$/.test(sha))
       throw Error("Repair requires --story, --job and the exact rejected --commit SHA.");
-    if (action === "inspect" && values.size !== 3)
-      throw Error("Repair inspect accepts only --story, --job and --commit.");
-    const thinking = values.get("--thinking");
-    if (thinking && !["low", "high"].includes(thinking))
-      throw Error("Repair thinking must be low or high.");
     disableJobCloudTracing();
     const { startStoryJob } = await import("./job.js");
-    const { inspectRejectedRepair, advanceRejectedRepair } = await import("./rejected-review-repair.js");
+    const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
     const job = await startStoryJob({ story, job: jobId }, false);
-    const result = action === "inspect"
-      ? await inspectRejectedRepair(job, sha)
-      : await advanceRejectedRepair(job, sha, {
-        skillsSource: values.get("--skills-source"), provider: values.get("--provider"),
-        model: values.get("--model"), thinking: thinking as "low" | "high" | undefined });
+    const result = await inspectRejectedRepair(job, sha);
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return;
   }

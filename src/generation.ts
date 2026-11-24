@@ -2833,7 +2833,6 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
       throw Error("Recovered real-Pi Story lost its original independent-review Turn; " +
         "no downstream specialist may start until a new verified continuation is prepared.");
     const { runPiAssignmentReview } = await import("./semantic-assignment-review.js");
-    const { advanceRejectedRepair } = await import("./rejected-review-repair.js");
     const { createSkillSnapshot } = await import("./snapshot.js");
     const { loadSkillConfig } = await import("./skills.js");
     const { inspectPiPolicy } = await import("./job-pi-policy.js");
@@ -2885,106 +2884,10 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
             { reference: "review-checkpoints", assignmentId: s.active.id },
             "returned-failure");
         }
-        if (s.active.stage === "foundation")
-          throw new ProtocolIntegrityBlockedError("Foundation corrections must use the checkpointed assignment child.");
-        const progress = await advanceRejectedRepair(job, point.commitSha, {
-          skillsSource: s.request.skillsSource, provider: s.request.provider,
-          model: s.request.model,
-          sharedAssessment: usesSharedAssignmentReview(s.active.id),
-          canYieldForSteering: async () => !!s.request.turnPlanDigest &&
-            !!s.inventory?.items.some(item => item.stage === "architecture" &&
-              item.status === "verified") && !!s.active && !!s.result &&
-            (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion,
-        });
-        if (progress.next === "completed") {
-          const { finalizeReviewEventDependency } = await import("./dependency-state.js");
-          await withStoryJobLock(job, "event-dependency-review-completion", () =>
-            finalizeReviewEventDependency(job, point.commitSha));
-        }
-        if (progress.next === "assess-review")
-          return { reviewAssessmentRequested: true, reason: "Assessing the sealed Foundation Review boundary." };
-        if (progress.next === "steering-boundary")
-          return { reviewSteeringHandoff: true, reason: REPAIR_STEERING_BOUNDARY };
-        if (progress.next === "controller-replan" && progress.state.outOfAuthority) {
-          try {
-            const source = await (await import("./checkpoint-assurance.js")).inspectCheckpointReview(job, point);
-            const turn = await readTurnEvidence(job, s.request.contract, s.request.task,
-              s.request.turnPlanDigest);
-            const original = turn?.assignments.find(a => a.id === point.assurance?.assignmentId);
-            if (source?.status !== "failed" || !source.result || !point.assurance ||
-                !original || !turn || !s.request.turnPlanDigest)
-              throw Error("Cross-owner correction lacks the original reviewed Turn and assignment.");
-            // A later reviewed Event is a descendant, not necessarily the
-            // immediate child, of this Turn's original source. Verify its
-            // ancestry from Git before admitting the cross-owner source.
-            dependencyGit(job, "merge-base", "--is-ancestor",
-              turn.source.verifiedSha, point.commitSha);
-            const { deriveReviewDependencyRequest } = await import("./review-repair-amendment.js");
-            const request = deriveReviewDependencyRequest({
-              assurance: point.assurance, review: source.result, original, turn,
-              planVersion: point.planVersion!, originWorkItem: point.workItem,
-              otherOwnerPath: progress.state.outOfAuthority.path,
-            });
-            if (request.action !== "controller-amendment-required" ||
-                request.classification !== "other-owner")
-              return { nonsemanticStop: "author-boundary" as const,
-                status: "blocked", reason: "Protected or unapproved prerequisite requires " +
-                "an explicit author-approved source-bound amendment; no unrelated writer may dispatch.",
-                escalation: {
-                  kind: "protected-approval" as const, requiresTrustedApproval: true,
-                  sources: request.findings.map(f => ({ source: f.path,
-                    message: f.defect, repair: f.requiredCorrection })),
-                  action: "Obtain explicit author authority for the protected objective or scope change.",
-                } };
-            const { recordReviewDependency } = await import("./dependency-state.js");
-            await withStoryJobLock(job, "other-owner-prerequisite-evidence", () =>
-              recordReviewDependency(job, request));
-            // No owner approval or support work inside the original Review.
-            return { reviewDependencyRequest: request };
-          } catch (error) {
-            if (error instanceof Error && error.name === "SpecialistChoiceRequiredError")
-              return { status: "paused", escalation: null,
-                reason: "The separately authorized supporting specialist is awaiting an authenticated Author Choice; the original negative review remains sealed." };
-            const { ProtectedCrossOwnerPrerequisiteError } = await import("./dependency-state.js");
-            const protectedChange = error instanceof ProtectedCrossOwnerPrerequisiteError;
-            return { status: "blocked",
-              reason: "Cross-owner prerequisite remains unresolved: " +
-                (error instanceof Error ? error.message : String(error)),
-              escalation: { kind: protectedChange ? "protected-approval" as const : "dependency-replan" as const,
-                requiresTrustedApproval: protectedChange,
-                sources: [{ source: progress.state.outOfAuthority.path,
-                  message: progress.state.failure ?? "Other-owner supporting work needed",
-                  repair: "controller-amendment" }],
-                action: protectedChange
-                  ? "Obtain the author\'s explicit approval of this exact protected decision before another specialist writes."
-                  : "Inspect the existing source-bound plan, specialist receipt and independent " +
-                    "review; reconcile interrupted effects without replaying a claimed writer.",
-              } };
-          }
-        }
-        if (progress.next !== "completed") return {
-          ...(progress.next === "controller-replan" ? { escalation: {
-            kind: "dependency-replan" as const, requiresTrustedApproval: false,
-            sources: progress.state.outOfAuthority ? [{
-              source: progress.state.outOfAuthority.path,
-              message: progress.state.failure ?? "A supporting record is outside the original writer lease.",
-              repair: "controller-amendment",
-            }] : [],
-            action: "Assess the source-linked other-owner dependency against the original Turn " +
-              "and propose a separately controller-authorized bounded assignment; " +
-              "do not replay the original writer or expand its file permissions.",
-          } } : {}),
-          ...(usesSharedAssignmentReview(s.active.id) && progress.next === "author-choice" ?
-            { reviewPauseReason: "author-choice" as const } : {}),
-          status: progress.next === "author-choice" ? "paused" : "blocked",
-          reason: progress.next === "author-choice"
-            ? "Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending."
-            : progress.next === "author-escalation"
-              ? progress.state.failure ?? "Bounded original-session corrections did not pass independent rereview. Author-led scope review is required."
-              : progress.next === "controller-replan"
-                ? progress.state.failure ?? "Another specialist must provide a separately authorized prerequisite."
-                : "Interrupted original-session correction is preserved for manual recovery.",
-        };
+        // Every current assignment correction belongs to its checkpointed
+        // child. The parent can observe a negative verdict but cannot execute
+        // an old whole-cycle repair, even for an unrecognized work item.
+        throw new ProtocolIntegrityBlockedError("Review correction requires the original checkpointed assignment child.");
       }
     }
     if (s.result.status === "review-handoff") {

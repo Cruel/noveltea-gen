@@ -164,7 +164,7 @@ async function selectTarget(job: JobStartResult): Promise<string> {
   }
   return files[0] || "creative-direction/foundation.md";
 }
-function freshDraft(task: string, envelope: string, authorInput?: string): FoundationDraft {
+function freshDraft(task: string, envelope: string): FoundationDraft {
   return {
     id: "foundation", title: "The Unwritten Mystery",
     premise: "A missing librarian's final message draws an archivist into a town where memories are traded.",
@@ -175,7 +175,6 @@ function freshDraft(task: string, envelope: string, authorInput?: string): Found
     decisions: [
       { id: "author-brief", statement: `Author brief: ${task}`, origin: "user", authority: "user-protected" },
       ...(envelope ? [{ id: "presentation-envelope", statement: envelope, origin: "user" as const, authority: "user-protected" as const }] : []),
-      ...(authorInput ? [{ id: "author-discovery", statement: authorInput, origin: "user" as const, authority: "user-protected" as const }] : []),
       { id: "story-hook", statement: "The mystery centers on an archive of exchanged memories.", origin: "agent", authority: "delegated" },
     ],
     body: "# Foundation\n\nThe player follows the archivist into a small community united by a secret. Every interview reveals both a clue and a reason to preserve the lie. The climax tests whether knowledge is always worth its human cost.",
@@ -189,7 +188,7 @@ async function fixtureAuthor(job: JobStartResult, state: FoundationState, target
     await writeFile(path, (await readFile(path, "utf8")).trimEnd() +
       "\n\n## Foundation development\n\nThe central conflict will be realized through dialogue, stakes, and meaningful player choice.\n");
   } else {
-    await writeFile(path, renderFoundation(freshDraft(state.task, state.envelope, state.authorInput)), { flag: "wx" });
+    await writeFile(path, renderFoundation(freshDraft(state.task, state.envelope)), { flag: "wx" });
   }
   return { skillReads: REQUIRED.map(path => join(state.snapshot.path, "skills", path)),
     piSessionId: undefined, piSessionFile: undefined };
@@ -374,76 +373,6 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     return { skillReads: reads.filter(path => requiredPaths.includes(path)), invocationProof,
       piSessionId: session.sessionId,
       piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
-  } finally {
-    session.dispose();
-  }
-}
-
-/** Read-only Pi discovery pass, distinct from the subsequent writing specialist.
- * No write or shell tools are exposed at this author-input boundary. */
-async function discoverQuestions(job: JobStartResult, state: FoundationState,
-  provider: string, modelId: string, fixture: boolean) {
-  if (fixture) return {
-    questions: "Which central conflict, theme and protagonist details must be fixed by you? " +
-      "What branching, production, or presentation constraints are binding? " +
-      "You can answer partially and delegate any remaining creative decisions.\n" +
-      "Original brief: " + state.task,
-    discoverySessionId: undefined, discoverySessionFile: undefined,
-  };
-  const project = await openStoryProject(job.worktreeStoryRoot);
-  const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: state.snapshot.path,
-    skillDirs: [], requiredSkills: ["nt-story-discovery", "nt-catalog"] };
-  const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, config);
-  await loader.reload();
-  for (const diag of loader.getSkills().diagnostics) {
-    if (diag.type === "error") throw new Error(`Pi discovery skill error: ${diag.message}`);
-  }
-  const runtime = await createJobModelRuntime();
-  const sessions = join(job.stateDir, "foundation-discovery-sessions");
-  const context = await preparePiContext(job, project, {
-    group: "foundation:discovery", step: "foundation:discovery",
-    paths: [], snapshot: state.snapshot.id, provider, model: modelId, directory: sessions,
-  }, runtime);
-  const sandboxTools = await selectSandboxPiTools(job, state.snapshot, loader.getSkills().skills);
-  const { session } = await createAgentSession({
-    cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader,
-    settingsManager, sessionManager: context.manager,
-    customTools: (sandboxTools ?? []).filter(tool => ["read", "grep", "find", "ls"].includes(tool.name)),
-    noTools: "all", tools: ["read", "grep", "find", "ls"],
-  });
-  try {
-    if (context.thinking && session.thinkingLevel !== context.thinking) {
-      throw new Error("Pi foundation discovery did not honor pinned thinking effort.");
-    }
-    await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-    await promptStorySpecialist(session, context.contextNote + "Collaborative foundation discovery only: DO NOT edit any file. " +
-      "Actually read the pinned nt-story-discovery and nt-catalog guidance and references using read:\n" +
-      REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
-      "\nInspect the existing Creative Direction if relevant. Following the discovery guidance, " +
-      "Do not read/search .story-inbox/ideas: deferred narrative ideas are author-only until a separate placement stage. " +
-      "ask the author all currently answerable consequential creative, branching and production questions " +
-      "in one concise round. State that partial answers and delegation of remaining choices are allowed. " +
-      "Do not falsely treat a question or proposed decision as approved. " +
-      `Brief: ${state.task}\nEnvelope: ${state.envelope || "(not specified)"}`);
-    const assistant = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!assistant || assistant.role !== "assistant" ||
-        ["aborted", "error"].includes(assistant.stopReason)) {
-      throw new Error("Pi discovery did not complete.");
-    }
-    const questions = session.getLastAssistantText();
-    if (!questions?.trim()) throw new Error("Pi discovery returned no author questions.");
-    const completedCalls = new Set(session.messages.filter((m): m is Extract<typeof m, { role: "toolResult" }> =>
-      m.role === "toolResult" && !m.isError).map(m => m.toolCallId));
-    const reads = session.messages.flatMap(m => m.role === "assistant"
-      ? m.content.filter((c): c is Extract<typeof c, {type: "toolCall"}> => c.type === "toolCall")
-      : []).filter(c => completedCalls.has(c.id) && c.name === "read" && typeof c.arguments?.path === "string")
-      .map(c => canonicalPinnedReadPath(c.arguments.path as string, project.root, state.snapshot.path));
-    if (REQUIRED.some(name => !reads.includes(join(state.snapshot.path, "skills", name)))) {
-      throw new Error("Pi collaborative discovery did not read the pinned narrative skill guidance.");
-    }
-    await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-    return { questions, discoverySessionId: session.sessionId,
-      discoverySessionFile: session.sessionManager.getSessionFile() ?? undefined };
   } finally {
     session.dispose();
   }
@@ -680,7 +609,7 @@ function output(job: JobStartResult, state: FoundationState) {
     piSessionId: state.piSessionId, piSessionFile: state.piSessionFile,
     skillReads: state.skillReads ?? [],
     ...(state.stage === "awaiting-author" ? {
-      handoff: "Provide author decisions, constraints, or delegate remaining choices via --author-input; no Story files have been modified.",
+      handoff: "Historical discovery evidence only. Begin authenticated Discovery and Generation to supply author decisions.",
       questions: state.questions,
       discoverySessionId: state.discoverySessionId,
       discoverySessionFile: state.discoverySessionFile,
@@ -689,9 +618,17 @@ function output(job: JobStartResult, state: FoundationState) {
 }
 
 export async function runFoundationJob(input: FoundationJobOptions) {
+  if (!input.inspect && (input.mode === "collaborative" || input.authorInput !== undefined))
+    throw new ProtocolIntegrityBlockedError("Standalone collaborative Foundation is retired; use authenticated Discovery and Generation.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
+    // Keep the historical receipt readable, but never interpret old free-text
+    // discovery as a new author approval or writer grant.
+    if (!input.inspect && state && (state.stage === "awaiting-author" ||
+        state.authorInput !== undefined || state.questions !== undefined ||
+        state.discoverySessionId !== undefined || state.discoverySessionFile !== undefined))
+      throw new ProtocolIntegrityBlockedError("Historical standalone Foundation discovery is retired; inspect its receipt or begin a current Turn.");
     if (input.round && state?.assignmentKey && input.round.assignmentKey !== state.assignmentKey)
       throw new ProtocolIntegrityBlockedError("Foundation round belongs to a different logical assignment.");
     if (!input.round && !input.fixture && !input.inspect && !input.recoveryDigest &&
@@ -710,14 +647,12 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         await saveState(stateFile(job), state);
       }
     }
-    if (!input.inspect && !input.recoveryDigest && (!state || state.stage === "committed" ||
-        state.stage === "awaiting-author" && !state.writerStarted)) {
+    if (!input.inspect && !input.recoveryDigest && (!state || state.stage === "committed")) {
       await processAuthorUpdatesAtBoundary(job);
     }
     if (!state) {
       if (input.inspect || input.recoveryDigest) throw new Error("Foundation has no saved work item to inspect or reconcile.");
       if (!input.task?.trim()) throw new Error("New foundation work item requires --task.");
-      if (input.authorInput) throw new Error("Start collaborative discovery before supplying --author-input.");
       const verified = await trustedHead(job);
       assertHead(job, verified);
       if (changedPaths(job).length) throw new Error("Job worktree contains unexpected preexisting changes.");
@@ -737,7 +672,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         mode: approved?.creativeMode ?? input.mode ?? "autonomous", snapshot,
         workerMode: input.fixture ? "fixture" : "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
-        stage: approved ? "writing" : input.mode === "collaborative" ? "awaiting-author" : "writing",
+        stage: "writing",
         writerStarted: false,
         ...(approved ? { chatApprovalDigest: approved.proposalDigest } : {}),
       };
@@ -788,23 +723,6 @@ export async function runFoundationJob(input: FoundationJobOptions) {
           state.stage === "committed" ? "committed" : "awaiting-author",
         recovery: { actualHead, changes, candidate, reason: blockedReason },
       };
-    }
-    if (state.stage === "awaiting-author") {
-      if (!state.questions) {
-        const discovery = await discoverQuestions(job, state,
-          state.provider, state.model, state.workerMode === "fixture");
-        assertHead(job, workHead(state));
-        if (changedPaths(job).length) throw new Error("Discovery unexpectedly modified the job worktree.");
-        Object.assign(state, discovery);
-        await saveState(stateFile(job), state);
-      }
-      if (!input.authorInput?.trim()) return output(job, state);
-      if (state.authorInput) throw new Error("Author discovery response has already been recorded.");
-      state.authorInput = input.authorInput;
-      state.stage = "writing";
-      await saveState(stateFile(job), state);
-    } else if (input.authorInput) {
-      throw new Error("An author response can only be provided at a collaborative discovery handoff.");
     }
     if (!state.target) {
       state.target = await selectTarget(job);

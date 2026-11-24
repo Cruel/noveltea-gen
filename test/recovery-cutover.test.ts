@@ -58,6 +58,14 @@ test("obsolete direct live stage commands refuse before opening a Story job", ()
   }
 });
 
+test("standalone repair cannot dispatch through the fixture flag", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts",
+    "job", "repair", "run", "--fixture", "--story", "/nonexistent-story",
+    "--job", "obsolete", "--commit", "a".repeat(40)], { encoding: "utf8", timeout: 30_000 });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /retired.*Generation/i);
+});
+
 test("obsolete production server resume refuses before opening the writer lock", async () => {
   const job = { storyRoot: "/nonexistent-story", jobId: "obsolete",
     stateDir: "/nonexistent-state" } as JobStartResult;

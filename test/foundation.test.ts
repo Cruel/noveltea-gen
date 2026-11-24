@@ -169,8 +169,8 @@ nativeTest("R14A unadmitted standalone Pi Foundation fails before creating write
     "--task", "An uncertain mystery", "--provider", "not-a-provider",
     "--model", "unavailable-model"], "model-unavailable");
   assert.notEqual(attempt.status, 0);
-  assert.match(attempt.stderr, /requires the admitted Generation assignment child/);
-  assert.equal(existsSync(join(job.worktreeRoot, "../foundation.json")), false);
+  assert.match(attempt.stderr, /retired.*Generation/i);
+  assert.equal(existsSync(join(job.stateDir, "foundation.json")), false);
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), baseline);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 });
@@ -225,33 +225,46 @@ nativeTest("existing protected foundation is preserved and validated against the
     "story/creative-direction/foundation.md");
 });
 
-nativeTest("collaborative discovery pauses without writes and preserves author response as user-protected", () => {
+nativeTest("retired collaborative Foundation cannot start or accept standalone author text", () => {
   const { story } = repository("collaboration");
   const job = start(story, "collab");
-  const initial = foundation(story, "collab", "--mode", "collaborative",
-    "--task", "An unsettling disappearance", "--envelope", "Single-location visual novel");
-  assert.equal(initial.result.status, 0, initial.result.stderr);
-  assert.equal(initial.data.status, "awaiting-author");
+  for (const args of [
+    ["--mode", "collaborative", "--task", "An unsettling disappearance"],
+    ["--author-input", "The detective's sibling must be the antagonist"],
+  ]) {
+    const attempt = foundation(story, "collab", ...args);
+    assert.notEqual(attempt.result.status, 0);
+    assert.match(attempt.result.stderr, /retired.*Generation/i);
+    assert.equal(existsSync(join(job.stateDir, "foundation.json")), false);
+    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
+    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), job.baseSha);
+  }
+});
+
+nativeTest("historical collaborative receipt remains inspectable but cannot resume a writer", () => {
+  const { story, baseline } = repository("historical-discovery");
+  const job = start(story, "historical-discovery");
+  const configured = launch(["pi", "configure", "--story", story, "--job", "first",
+    "--max-steps", "0"], "historical-discovery");
+  assert.equal(configured.status, 0, configured.stderr);
+  const paused = foundation(story, "historical-discovery", "--task", "A historical mystery");
+  assert.equal(paused.data.status, "paused-budget");
+  const path = join(job.stateDir, "foundation.json");
+  const receipt = { ...JSON.parse(readFileSync(path, "utf8")),
+    stage: "awaiting-author", mode: "collaborative",
+    questions: "Which decision should be protected?" };
+  const historical = JSON.stringify(receipt);
+  writeFileSync(path, historical);
+  const inspected = foundation(story, "historical-discovery", "--inspect");
+  assert.equal(inspected.result.status, 0, inspected.result.stderr);
+  assert.equal(inspected.data.questions, receipt.questions);
+  assert.match(inspected.data.handoff, /Historical discovery evidence only/);
+  const resumed = foundation(story, "historical-discovery");
+  assert.notEqual(resumed.result.status, 0);
+  assert.match(resumed.result.stderr, /Historical standalone Foundation discovery is retired/);
+  assert.equal(readFileSync(path, "utf8"), historical);
+  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), baseline);
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
-  assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), job.baseSha);
-  const switchedMode = launch(["foundation", "--story", story, "--job", "first",
-    "--author-input", "Change the protagonist"], "collab");
-  assert.notEqual(switchedMode.status, 0);
-  assert.match(switchedMode.stderr, /inputs differ/);
-  const switchedModel = foundation(story, "collab", "--model", "another-model");
-  assert.notEqual(switchedModel.result.status, 0);
-  assert.match(switchedModel.result.stderr, /inputs differ/);
-  assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
-  const completed = foundation(story, "collab",
-    "--author-input", "The detective's sibling must be the antagonist");
-  assert.equal(completed.result.status, 0, completed.result.stderr);
-  assert.equal(completed.data.status, "committed");
-  const record = readFileSync(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8");
-  assert.match(record, /detective's sibling must be the antagonist/);
-  assert.match(record, /origin: user\n    authority: user-protected/);
-  const changedBrief = foundation(story, "collab", "--task", "A totally different request");
-  assert.notEqual(changedBrief.result.status, 0);
-  assert.match(changedBrief.result.stderr, /inputs differ/);
 });
 
 nativeTest("unexpected staged or out-of-scope files block the commit and preserve job files", () => {
@@ -261,13 +274,11 @@ nativeTest("unexpected staged or out-of-scope files block the commit and preserv
   ] as const) {
     const { story } = repository(name);
     const job = start(story, name);
-    const initial = foundation(story, name, "--mode", "collaborative", "--task", "A story");
-    assert.equal(initial.result.status, 0, initial.result.stderr);
     const full = join(job.worktreeStoryRoot, path);
     if (path.includes("/")) mkdirSync(join(job.worktreeStoryRoot, "creative-direction"), { recursive: true });
     writeFileSync(full, "Unexpected data");
     if (stage) git(job.worktreeRoot, "add", "--", "story/creative-direction/foundation.md");
-    const attempt = foundation(story, name, "--author-input", "Choose a small cast");
+    const attempt = foundation(story, name, "--task", "A story");
     assert.notEqual(attempt.result.status, 0);
     assert.match(attempt.result.stderr, /unexpected|Unfinished|staged|outside/i);
     assert.equal(readFileSync(full, "utf8"), "Unexpected data");

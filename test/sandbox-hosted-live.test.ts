@@ -5,8 +5,8 @@
  * Studio job with the exact catalog/worktree identity checked by #51.
  *
  * NT_LIVE_HOSTED_SANDBOX=1: real Pi calls (paid; requires configured Pi auth)
- * NT_LIVE_REVIEW_REPAIR=1: actual independent semantic rejection, original-session
- * Foundation correction, native validation, immutable Git receipt and Pi rereview
+ * NT_LIVE_REVIEW_REPAIR=1: resume a preserved current-format CLI Generation
+ * with an independently rejected Foundation (requires NT_TEST_HOSTED_RESUME_DIR)
  * NT_TEST_HOSTED_FIXTURE=1: same Docker/controller plumbing, fixture authors
  * NT_TEST_HOSTED_STAGES=1: extend either mode through Character/World and Event
  * NT_TEST_HOSTED_RESUME_DIR=/tmp/preserved-fixture: recover interrupted live
@@ -32,16 +32,11 @@ import { inspectTrustedApproval, requestTrustedApproval } from "../src/trusted-a
 import { runCharacterWorldJob } from "../src/character-world.js";
 import { runEventTestAssignment as runEventWorkItem } from "./event-round-fixture.js";
 import { hasUserProtectedDecision } from "../src/foundation-record.js";
-import { planWholeStory } from "../web/src/lib/turn-plan.js";
-import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
-import { createSkillSnapshot } from "../src/snapshot.js";
 import { readIndependentReview } from "../src/checkpoint-assurance.js";
-import type { RecoveryCheckpoint } from "../src/recovery-checkpoints.js";
-import { runPiAssignmentReview } from "../src/semantic-assignment-review.js";
-import { withStoryJobLock } from "../src/job-lock.js";
-import { advanceRejectedRepair, inspectRejectedRepair } from "../src/rejected-review-repair.js";
+import { inspectRejectedRepair } from "../src/rejected-review-repair.js";
 import { removeTestTree } from "./helpers.js";
+import { runStoryGeneration } from "../src/generation.js";
 
 const repair = process.env.NT_LIVE_REVIEW_REPAIR === "1";
 const live = process.env.NT_LIVE_HOSTED_SANDBOX === "1" || repair;
@@ -75,6 +70,7 @@ test(repair
     { encoding: "utf8" }).trim(), /^sha256:[a-f0-9]{64}$/);
 
   const resumeDir = process.env.NT_TEST_HOSTED_RESUME_DIR;
+  if (repair) assert.ok(resumeDir, "Supply a preserved current-format Generation with a failed Foundation Review.");
   const temporary = resumeDir ? resolve(resumeDir) : mkdtempSync(join(tmpdir(), "nt-hosted-pi-live-"));
   const app = join(temporary, "app"), state = join(temporary, "state"), cache = join(temporary, "cache");
   const socketDir = join(temporary, "controller");
@@ -160,26 +156,34 @@ test(repair
     assert.equal(code, 0);
     assert.equal(emitted.join("").trim(), "/story");
 
-    if (repair && !resumeDir) {
-      const contract = {
-        scope: { kind: "full-story" as const, depth: "composition" as const,
-          targets: [], branches: [] }, constraints: [],
-        envelope: { presentation: "Dialogue-led visual novel", hardLimits: [], preferences: [] },
-      };
-      // The writer deliberately omits one binding author requirement below.
-      // The real reviewer must detect the defect from the committed diff.
-      const request = "Write a midnight train mystery. The archivist must learn from a green ticket " +
-        "that the missing passenger departed at 11:47 PM; preserve this causal clue in Creative Direction.";
-      const plan = planWholeStory(request, contract, job.baseSha, job.jobId);
-      plan.assignments[0]!.outcome = "Establish a coherent Creative Direction in which the archivist " +
-        "learns from a green ticket that the missing passenger departed at exactly 11:47 PM. " +
-        "Preserve user-protected decisions and include this specific causal clue in the prose.";
-      const { digest: _old, ...planBody } = plan;
-      plan.digest = hash(JSON.stringify(planBody));
-      await saveJobTurnPlan(job, plan);
+    if (repair) {
+      // Do not synthesize a new writer, Turn, or negative Review for this
+      // historical job. Resume only the original authenticated CLI graph.
+      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+        p.eligible && p.workItem === "foundation" && p.semanticReview === "failed");
+      assert.ok(point?.assurance, "Preserved source must have an independently rejected Foundation");
+      const savedReview = await readIndependentReview(job, point.assurance);
+      assert.equal(savedReview.status, "failed");
+      assert.ok(savedReview.result?.findings.some(f => f.requiredCorrection &&
+        f.affectedPaths?.includes("creative-direction/foundation.md")));
+      const before = await runStoryGeneration({ story, job: id, action: "inspect" });
+      assert.ok(before.recoveryInspection?.active, "Original failed Generation case is required");
+      assert.equal(before.operationRecovery?.source.headSha, point.commitSha);
+      const result = await runStoryGeneration({ story, job: id, action: "resume" });
+      assert.ok(["paused", "completed"].includes(result.status), JSON.stringify(result));
+      const receipt = await inspectRejectedRepair(job, point.commitSha);
+      assert.equal(receipt.phase, "passed");
+      const foundation = JSON.parse(readFileSync(join(job.stateDir, "foundation.json"), "utf8"));
+      assert.equal(receipt.origin.sessionFile, foundation.piSessionFile);
+      assert.ok(receipt.repairedCommitSha && receipt.repairedCommitSha !== point.commitSha);
+      const completed = (await inspectRecoveryCheckpoints(job)).find(p => p.commitSha === receipt.repairedCommitSha);
+      assert.equal(completed?.semanticReview, "passed");
+      const repairedText = readFileSync(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8");
+      assert.match(repairedText, /green ticket/i);
+      assert.match(repairedText, /11:47/);
+      assert.ok(hasUserProtectedDecision(repairedText));
     }
-
-    if (!resumeDir || repair) {
+    if (!resumeDir && !repair) {
       const foundation = resumeDir
         ? JSON.parse(readFileSync(join(job.stateDir, "foundation.json"), "utf8")) as {
           stage: string; piSessionFile: string; skillReads: string[]; commitSha: string;
@@ -195,62 +199,6 @@ test(repair
       const foundationFile = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
       assert.ok(hasUserProtectedDecision(readFileSync(foundationFile, "utf8")));
 
-      if (repair) {
-        const point = resumeDir
-          ? JSON.parse(readFileSync(join(job.stateDir, "recovery-checkpoints",
-            foundation.commitSha + ".json"), "utf8")) as RecoveryCheckpoint
-          : (await inspectRecoveryCheckpoints(job)).find(point =>
-            point.eligible && point.workItem === "foundation")!;
-        assert.equal(point.assurance?.reviewSelection.status, "required-pending");
-        let findings: Array<{ requiredCorrection?: string; affectedPaths?: string[] }>;
-        if (resumeDir) {
-          const savedReview = await readIndependentReview(job, point.assurance!);
-          assert.equal(savedReview.status, "failed");
-          findings = savedReview.result!.findings;
-        } else {
-          const reviewerSnapshot = await createSkillSnapshot({
-            discovery: "explicit-only", novelteaSkills: source,
-            skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"],
-          });
-          assert.ok(reviewerSnapshot);
-          const firstReview = await withStoryJobLock(job, "independent-assignment-review", () =>
-            runPiAssignmentReview(job, [point], {
-              snapshot: reviewerSnapshot, provider: process.env.NT_PROVIDER ?? "openai",
-              model: process.env.NT_MODEL ?? "gpt-6-luna",
-              reviewer: "independent-pi-assignment-review", onSession: async () => {},
-            }));
-          assert.equal(firstReview.verdict.verdict, "fail",
-            JSON.stringify({ reason: "Reviewer should catch omitted 11:47 green-ticket clue",
-              verdict: firstReview.verdict }));
-          findings = firstReview.verdict.findings;
-        }
-        assert.ok(findings.some(f => f.requiredCorrection &&
-          f.affectedPaths?.includes("creative-direction/foundation.md")));
-        const result = await advanceRejectedRepair(job, point!.commitSha, {
-          skillsSource: source, provider: process.env.NT_PROVIDER ?? "openai",
-          model: process.env.NT_MODEL ?? "gpt-6-luna",
-        });
-        assert.equal(result.next, "completed", JSON.stringify(result));
-        const receipt = await inspectRejectedRepair(job, point!.commitSha);
-        assert.equal(receipt.phase, "passed");
-        assert.equal(receipt.origin.sessionFile, foundation.piSessionFile,
-          "Correction must reopen the original Foundation writer session");
-        assert.ok(receipt.repairedCommitSha && receipt.repairedCommitSha !== point!.commitSha);
-        const completed = (await inspectRecoveryCheckpoints(job)).find(p =>
-          p.commitSha === receipt.repairedCommitSha);
-        assert.equal(completed?.semanticReview, "passed");
-        assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), receipt.repairedCommitSha);
-        const repairedText = readFileSync(foundationFile, "utf8");
-        assert.match(repairedText, /green ticket/i);
-        assert.match(repairedText, /11:47/);
-        assert.ok(hasUserProtectedDecision(repairedText));
-        console.error("LIVE_REPAIR_CERTIFICATION " + JSON.stringify({
-          firstReview: "fail", findings,
-          originalCommit: point!.commitSha, repairedCommit: receipt.repairedCommitSha,
-          amendmentDigest: receipt.planAmendment.digest,
-          reviewerSessions: receipt.reviewer?.sessionFiles.length,
-        }));
-      } else {
       const architecture = await runArchitectureJob({
         story, job: id, action: "run", fixture: !live,
         provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL,
@@ -270,7 +218,6 @@ test(repair
       assert.ok(existsSync(join(job.worktreeStoryRoot, "milestones")));
       assert.ok((architecture as { skillReads?: unknown[] }).skillReads?.length === 6 || !live,
         "Real Architecture Pi must read all pinned skill references");
-      }
     }
     if (includeStages && !repair) {
       const foundations = await runCharacterWorldJob({ story, job: id, action: "run", fixture: !live,

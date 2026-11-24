@@ -38,7 +38,7 @@ export const reviewedReturnExits = {
     "5c2dc0f716c2e00c:U 10e0fa08a73f0cd1:G 762eb69f256bc89b:G b8299320cfab471a:G 8a9325c99c0c6e77:G dcaa1003311bc401:G 12d1365c8abe492a:F a50fde7ff0ca158a:G 7ebc05b087226ab6:F d50ceb7ab7d09978:F 5bb2c217c856ce98:G 25babe207591ae89:R c466c41573ac9b2b:G",
   authorBoundary: "134790b58185ccb6:B f3d245fe979f76f5:R 4ad2292cb6c5c2d3:G 06748905e0dd39db:S",
   independentAssignmentBoundary:
-    "e4b08665b2511bc8:G 1a607abb82d66b8b:R b4c5cd26581f3f0a:R ede50e860b01d548:G c322025b59aa4a61:U 52996ea9e6d7d0cd:G ad04cd9e6f4a2e84:U c1e2b51230f953d6:F 0d42977979bf2191:O 96abdde40833c509:G ebbaf6e315bb4cf8:G 07ed60be3598169c:U 52996ea9e6d7d0cd:G 386f961b881b5212:B 5d687f16a5596c4f:R",
+    "e4b08665b2511bc8:G 1a607abb82d66b8b:R 96abdde40833c509:G ebbaf6e315bb4cf8:G 07ed60be3598169c:U 52996ea9e6d7d0cd:G 386f961b881b5212:B 5d687f16a5596c4f:R",
   operationFailure: "d7c8939bedacfd7d:B 6f8e137a514dd144:F d44d809a12edfc48:R",
   blocked: "7951930ab4e30f72:B",
   runStoryGeneration:
@@ -65,7 +65,7 @@ export const reviewedThrowExits = {
     "ade1624015af836b e5408683d3fb1dd8 576cff1c194705a5 38db02fe8a6067ea 910345f2baa6e195 c592b6404d524e14 c2b63cf0a6d3c52b ae7ecf07a7181d6c 0d380425d6ace20e",
   authorBoundary: "",
   independentAssignmentBoundary:
-    "c8cd7cc55c502826 521ef08533941ab1 e43799344fba1777 9fc14ab700558944 8a9b1302e0f92e00 f57e0474552b2af2 f1cd3392368b9b1c e74d51185e69d5c5",
+    "c8cd7cc55c502826 521ef08533941ab1 e43799344fba1777 9fc14ab700558944 8a9b1302e0f92e00 78fac4e66a6f4303 e74d51185e69d5c5",
   operationFailure: "",
   blocked: "",
   runStoryGeneration:
@@ -94,7 +94,7 @@ export const reviewedStatusExits = {
     "0937e2eb0b6e647d:U 418047bd610d6bd7:G 418047bd610d6bd7:G 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F 2b78ad3f49b1ead6:F",
   authorBoundary: "02da4da9c1ae1e2e:S",
   independentAssignmentBoundary:
-    "2b78ad3f49b1ead6:F 0937e2eb0b6e647d:U 2b78ad3f49b1ead6:F 55e387190d8251b9:S 0bb8edf28121a935:U 2b78ad3f49b1ead6:F",
+    "0bb8edf28121a935:U 2b78ad3f49b1ead6:F",
   operationFailure: "2b78ad3f49b1ead6:F",
   blocked: "2143ea9951284798:B",
   runStoryGeneration:
