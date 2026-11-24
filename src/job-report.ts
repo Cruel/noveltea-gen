@@ -156,8 +156,10 @@ function statusOf(review: Json | undefined, audit: ScopeAudit | undefined, plan:
 /** The report may inherit an authenticated original Turn solely for final
  * review. Rebinding criteria is not an authoring or protected-canon grant. */
 export async function readReportTurnEvidence(job: JobStartResult) {
-  const local = await receipt(join(job.stateDir, "turn-plan.json"), job);
-  return local ?? (job.recoveryFork ? readReviewTurnEvidence(job) : null);
+  // Inspecting a historical receipt is not authentication. Use the same
+  // digest/base/assignment reader as independent Turn fulfillment.
+  await receipt(join(job.stateDir, "turn-plan.json"), job);
+  return readReviewTurnEvidence(job);
 }
 
 /** Author-facing read-only view. Never copy the private author inbox or raw message payloads. */
@@ -224,17 +226,25 @@ export async function inspectJobReport(input: JobReportOptions) {
   // The narrative scope reviewer and native validator are not a verdict on
   // whether the original author request and the approved overall plan were met.
   // A source-bound Turn plan requires its own independent final decision.
-  const turn = await readReportTurnEvidence(job);
+  let turn: Awaited<ReturnType<typeof readReportTurnEvidence>> = null;
+  try { turn = await readReportTurnEvidence(job); }
+  catch { blockers.push("Turn: original receipt failed source authentication."); }
+  const currentTurn = turn?.objective ? turn : null;
+  // Preserve the historical scope result, but never promote it to completion
+  // of an author Turn for which no current objective can be authenticated.
+  const missingCompletionTurn = !currentTurn && scopeFulfillment === "complete-in-scope";
+  if (missingCompletionTurn)
+    blockers.push("Turn: final completion requires an authenticated current-format Turn objective.");
   const planFulfillment: {
     policy: "turn-completeness/v1"; status: "not-applicable" | "required" | "reviewing" | "passed" | "incomplete";
     headSha: string | null; planVersion: number | null;
     findings: Array<{ objectiveId: string; message: string; followUp: {
       assignmentId: string; outcome: string; targets: string[] } | null }>;
     assurance: "unverified" | "semantic";
-  } = { policy: "turn-completeness/v1", status: turn && turn.kind !== "protected-amendment"
+  } = { policy: "turn-completeness/v1", status: missingCompletionTurn || currentTurn && currentTurn.kind !== "protected-amendment"
     ? "required" : "not-applicable",
     headSha: null, planVersion: null, findings: [], assurance: "unverified" };
-  if (turn && turn.kind !== "protected-amendment" && plan && scopeFulfillment === "complete-in-scope") {
+  if (currentTurn && currentTurn.kind !== "protected-amendment" && plan && scopeFulfillment === "complete-in-scope") {
     try {
       const packet = await prepareTurnFulfillment(job, {
         headSha: head, baseSha: job.baseSha, planVersion: plan.version, contract: plan.contract,
@@ -256,7 +266,7 @@ export async function inspectJobReport(input: JobReportOptions) {
       blockers.push("Turn: " + String((error as Error).message));
     }
   }
-  if (turn && turn.kind !== "protected-amendment") {
+  if (currentTurn && currentTurn.kind !== "protected-amendment") {
     if (planFulfillment.status === "incomplete") {
       for (const finding of planFulfillment.findings)
         blockers.push("Turn objective " + finding.objectiveId + ": " + finding.message);

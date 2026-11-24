@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requireGenerationTurn } from "../src/generation.js";
+import { requireGenerationTurn, createGenerationGraph } from "../src/generation.js";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { selectOperationStrategy } from "../src/generation-operation-strategy.js";
+import type { GenerationGraphState } from "../src/generation.js";
+import type { RecoveryCase } from "../src/generation-recovery-contract.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { prepareTurnFulfillment } from "../src/turn-fulfillment.js";
+import { createHash } from "node:crypto";
 import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
 import { verifiedResumeAdmission } from "../web/src/lib/generation-controls.server.js";
 import { preflightCompositionBoundary } from "../src/cross-domain-prerequisite-controller.js";
@@ -126,4 +132,113 @@ test("obsolete CLI Generation start does not claim SQLite ownership or mutate Gi
     assert.equal(git("rev-parse", "HEAD"), head);
     assert.equal(git("status", "--porcelain"), "");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("historical Turn receipts cannot grant final fulfillment or current execution", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "nt-r14k-fulfillment-"));
+  try {
+    const job = { jobId: "historical", storyRoot: "/isolated/story", stateDir,
+      baseSha: "a".repeat(40), headSha: "b".repeat(40) } as JobStartResult;
+    const contract = {
+      scope: { kind: "full-story" as const, depth: "composition" as const, targets: [], branches: [] },
+      constraints: [], envelope: { presentation: "Interactive Story", hardLimits: [], preferences: [] },
+    };
+    const context = { headSha: job.headSha, baseSha: job.baseSha, planVersion: 1, contract,
+      scopeCurrent: true, scopeComplete: true, editorialPass: true, scopedPaths: [] };
+    await assert.rejects(prepareTurnFulfillment(job, context), /authenticated current-format Turn/);
+    const { objective: _old, digest: _digest, ...body } = planWholeStory("Original Story", contract, job.baseSha);
+    const digest = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+    writeFileSync(join(stateDir, "turn-plan.json"), JSON.stringify({ ...body, digest }));
+    await assert.rejects(prepareTurnFulfillment(job, context), /authenticated current-format Turn/);
+    for (const fixture of [true, false])
+      await assert.rejects(requireGenerationTurn(job, { story: job.storyRoot, job: job.jobId,
+        task: body.originalRequest, contract, fixture, turnPlanDigest: digest }), /current-format Turn objective/);
+    assert.deepEqual(readdirSync(stateDir), ["turn-plan.json"]);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("current-format SQLite resume refuses a missing or foreign server owner before pending effects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nt-r14k-owner-"));
+  const previous = process.env.NT_STATE_DIR;
+  process.env.NT_STATE_DIR = join(root, "state");
+  let saver: SqliteSaver | undefined;
+  try {
+    const story = join(root, "story");
+    mkdirSync(story);
+    writeFileSync(join(story, ".gitkeep"), "");
+    const git = (...args: string[]) => {
+      const r = spawnSync("git", ["-C", story, ...args], { encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("config", "user.name", "Author");
+    git("config", "user.email", "author@example.test");
+    git("add", ".");
+    git("commit", "-qm", "Initial Story");
+    const started = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts",
+      "job", "start", "--story", story, "--job", "current"], { encoding: "utf8" });
+    assert.equal(started.status, 0, started.stderr);
+    const job = JSON.parse(started.stdout) as JobStartResult;
+    const contract = {
+      scope: { kind: "full-story" as const, depth: "composition" as const, targets: [], branches: [] },
+      constraints: [], envelope: { presentation: "Interactive Story", hardLimits: [], preferences: [] },
+    };
+    const task = "An isolated Story";
+    const plan = planWholeStory(task, contract, job.baseSha);
+    await saveJobTurnPlan(job, plan);
+    const request = { story: job.storyRoot, job: job.jobId, task, contract,
+      fixture: true, turnPlanDigest: plan.digest, orchestrationPolicy: "fixture-test" as const };
+    const thread = job.threadId + ":generation:web";
+    const config = { configurable: { thread_id: thread }, recursionLimit: 100 };
+    const db = join(job.stateDir, "web-generation.sqlite");
+    saver = SqliteSaver.fromConnString(db);
+    let graph = createGenerationGraph(saver, "server");
+    await graph.invoke({ request }, { ...config, interruptAfter: ["schedule"] });
+    const snapshot = await graph.getState(config);
+    assert.equal(snapshot.values.status, "running", snapshot.values.reason ?? "");
+    assert.deepEqual(snapshot.next, ["author_update_intake"]);
+    const ownerFile = join(job.stateDir, "generation-server-owner.json");
+    const owner = readFileSync(ownerFile, "utf8");
+    const before = git("rev-parse", "HEAD");
+    // Resume through the real pending SQLite task rather than through START.
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(db);
+    graph = createGenerationGraph(saver, "server");
+    unlinkSync(ownerFile);
+    const stopped = await graph.invoke(null, config);
+    assert.equal(stopped.status, "blocked", stopped.reason ?? "");
+    assert.match(stopped.reason ?? "", /lost its original owner receipt/);
+    assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 1);
+    assert.equal(git("rev-parse", "HEAD"), before);
+    assert.equal(git("status", "--porcelain"), "");
+    assert.ok(!readdirSync(job.stateDir).includes("foundation.json"));
+    // The original claim is historical evidence, not a grant to another owner.
+    writeFileSync(ownerFile, owner);
+    const other = createGenerationGraph(saver, "cli");
+    const refused = await other.invoke({ request }, {
+      configurable: { thread_id: thread + ":foreign" }, recursionLimit: 100 });
+    assert.equal(refused.status, "blocked", refused.reason ?? "");
+    assert.match(refused.reason ?? "", /server-owned/);
+    assert.equal(readFileSync(ownerFile, "utf8"), owner);
+    assert.equal(git("rev-parse", "HEAD"), before);
+    assert.ok(!readdirSync(job.stateDir).includes("foundation.json"));
+  } finally {
+    saver?.db.close();
+    if (previous === undefined) delete process.env.NT_STATE_DIR; else process.env.NT_STATE_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("integrity assessment cannot be skipped by changing current Turn transport", async () => {
+  const turnDigest = "a".repeat(64);
+  const c = { id: "case", origin: { sourceHeadSha: "b".repeat(40), turnDigest },
+    evidence: [] } as unknown as RecoveryCase;
+  for (const fixture of [false, true]) {
+    const state = { request: { fixture, turnPlanDigest: turnDigest },
+      recoverySources: [{ caseId: c.id, channel: "operationRecovery",
+        input: { evidence: { failureKind: "integrity" } } }] } as unknown as GenerationGraphState;
+    const decision = await selectOperationStrategy({} as JobStartResult, state, c);
+    assert.equal(decision?.action, "integrity-fence");
+  }
 });

@@ -699,3 +699,29 @@ Idea fixture into live Pi execution is removed.
 
 This is an incremental cutover, not a waiver of the remaining R14K criteria.
 See the [source-linked R14K entrypoint audit](recovery-exit-inventory.md#r14k-271--initial-entrypoint-audit).
+
+#### R14K authenticated pending tasks and final fulfillment
+
+All ten registered Generation nodes pass their execution owner to the shared
+recovery boundary. Current Turn tasks recheck the saved owner and graph Thread
+before executing, including an already-pending SQLite task. A resumed server
+task cannot recreate a lost owner receipt. The server worker checks for CLI or
+foreign server ownership before acquiring a provider/runtime/sandbox, and
+again under its admission lock. The immutable Turn contract, rather than a
+later effective work-plan contract, remains the owner request pin. CLI resume
+rejects obsolete inventory before reconciliation, not after a specialist effect.
+
+Final Turn fulfillment requires a current objective even for deterministic
+transport. Reports authenticate the Turn through the independent review reader,
+preserve inspectable historical scope evidence, and block completion without
+current author-goal criteria. Studio input preparation also requires the exact
+existing current Turn, and emits its digest without creating a new receipt.
+The opt-in paid Generation and Idea certifications use the production whole-
+Story planner and real transport rather than a fixture flag that changes model
+authority.
+
+For a current Turn, integrity and sealed protocol exhaustion decisions precede
+the remaining fixture transport stop in the assessor. The shared policy cannot
+be skipped by toggling a fixture flag. This does not yet remove the fixture-only
+effect and Review bypasses or authenticate the historical no-Turn fixture lane;
+those remain R14K cutover work, not supported final execution semantics.

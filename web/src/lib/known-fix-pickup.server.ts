@@ -1,3 +1,4 @@
+import { requireGenerationTurn } from '../../../src/generation'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -79,6 +80,7 @@ export async function pickupKnownVerifierFixes(store: StudioStore): Promise<numb
           if (await readJobControl(job) !== 'running') return
           const request = pinnedRequest(row, job)
           if (!request || request.fixture || request.turnPlanDigest !== stop.turnDigest) return
+          await requireGenerationTurn(job, request, true)
           await assertServerClaimPermitted(job, stop.threadId, request)
           const env = { ...process.env }
           for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',

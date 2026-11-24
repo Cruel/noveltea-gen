@@ -58,7 +58,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   independentAssignmentBoundary: "returns:15,status:6,operationFailure:2,throws:8",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
-  runStoryGeneration: "returns:5,status:10,blocked:6,reconcile:1,throws:18",
+  runStoryGeneration: "returns:5,status:10,blocked:6,reconcile:1,throws:19",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
   recoveryNode: "returns:28,status:21,throws:16",
 };
@@ -100,7 +100,8 @@ function graphNodes(source: ts.SourceFile = file): Map<string, ts.Node> {
         ts.isCallExpression(callback) &&
           ts.isIdentifier(callback.expression) &&
           callback.expression.text === "recoveryNode" &&
-          callback.arguments.length === 2 &&
+          callback.arguments.length === 3 &&
+          callback.arguments[2]!.getText(source) === "executionOwner" &&
           ts.isStringLiteral(callback.arguments[0]!) &&
           (callback.arguments[0] as ts.StringLiteral).text === (node.arguments[0] as ts.StringLiteral).text,
         "Every production node must use the shared single-authority recovery boundary.",
@@ -203,7 +204,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const writer = ts.createSourceFile("generation-writer-round.ts", readFileSync(resolve(root, "src/generation-writer-round.ts"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const reviewed = [
-    [file, "requireGenerationTurn", "a89e7a29cd0459fc64b0bd2cfcbdce540cddd99b19f8374b7de24adf75bda086"],
+    [file, "requireGenerationTurn", "6659df361f454e0df2946268bcb5b14eae21c85711ed16b0859195aced5c8a65"],
     [file, "dispatch", "1405fcbbacbf4ce2dc8ee8be2a0fd75aaf3bcbdfca5b67f4d687a19281f326ad"],
     [file, "runFoundationAssignmentChild", "09eceae0c76ac0f082fc2eb896625a6c89bb4d9f0e741e0bbdfdc0f44d153bfa"],
     [file, "runArchitectureAssignmentChild", "3a202a428fc66d7eebec3b36525a0abb4c6829efeeda4fabbeb26d626b8270ec"],
@@ -255,7 +256,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["rejected-review-repair.ts", "prepareRepairWriter", "df9dca808f9799ebe386cc26f539f0a1c8c48f1e363c5016234a3342d243397d"],
     ["generation-assignment-lifecycle.ts", "usesCheckpointedReviewRounds", "1908bdf08a97c846c028c5003e3d44a28efe2dd875114b6eb5c1d6a75ba74862"],
     ["generation-review-round.ts", "createReviewRoundTransitions", "f1896bd8831747b53e5d7a8139b3676b1947ba4cc56dc649393467f241283292"],
-    ["generation-operation-strategy.ts", "selectOperationStrategy", "6616ef17d096344f923b7ceba53afb0bf29b3a3a69a4431b70c416b79553638b"],
+    ["generation-operation-strategy.ts", "selectOperationStrategy", "ed43de8fc04458729c42edf49c3644af603620f031bb6a1d22af458cbfc8ad6b"],
     ["generation-operation-strategy.ts", "executeOperationStrategy", "6bc435c2f722491aaac2dddc48a90da67f943f97d7d85f832f689b77dae7d9d6"],
     ["generation-recovery-inspection.ts", "inspectModernGenerationRecovery", "d44b7a9c5f7446c8948b8ed690fd2aba854aa57851890bb0cbf594534cc23e45"],
     ["assignment-metadata-recovery.ts", "materialProgress", "2357f7530030b88d019879e4f74c7b8dcaf5f7f93e70a682059395bc07da3869"],
@@ -335,7 +336,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["composition-specialist.ts", "createCompositionReviewCycle", "8fcb737e4b394b94f9a1336a413d26be4ef2f582a479f61b807c8423496cf903"],
     ["composition-specialist.ts", "verifyCompositionRoundAuthority", "c08f29c90eec919aa5cdee7eac1c33e61fc6b37bfb040bc9fc315e0edf7ba5b2"],
     ["composition-specialist.ts", "verifyCompositionReviewPin", "79e6da2606964bba251bc358f886c6c92e7527a8dc46b2a89e7b73adb05b5ea2"],
-    ["turn-fulfillment.ts", "prepareTurnFulfillment", "7d42d738287cc879e3870d5ccf75134bf2b6a53b10c888434927b724ebc7f523"],
+    ["turn-fulfillment.ts", "prepareTurnFulfillment", "5152b5e8f22cfa479e391b9d038b7058579f0caef4a17387a3e6a4a5e4b5156e"],
     ["turn-fulfillment.ts", "assertMilestoneStageClosure", "0ff93e9f876f5223ab9b9a298b2f5f0106d2e0e3c3325cd6b40ff87659cef67e"],
     ["composition-work.ts", "inspectPendingCompositionInvocation", "b5a6a35ffbfebe02e3c432a047aa616cd50a0af8f093d9e0e3b16a49ab181162"],
     ["interactive-work.ts", "inspectPendingInteractiveInvocation", "b17f6e0277797c386c1bb436081c94a7b77058593530a2187367a042ae021067"],
@@ -832,7 +833,7 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/agent-runner.ts",
       "runPersistedGeneration",
-      "327334a9e804bfbcc4c14c1b34eaf26c8b568095ef765795d641938d157a424f"
+      "46da81b37712a60655f72f2a1a8ff5bf7548b2eb223763b7cc44b6dc25f3b30c"
     ],
     [
       "web/src/lib/generation-controls.server.ts",

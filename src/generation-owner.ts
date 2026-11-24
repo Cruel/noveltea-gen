@@ -88,3 +88,22 @@ export function ensureNotServerOwned(job: JobStartResult): void {
   if (existsSync(file(job)))
     throw new Error("This Story job belongs to a server-owned generation thread; CLI checkpoint takeover is forbidden.");
 }
+
+
+/** Pending graph tasks can be resumed without visiting schedule. The owner
+ * and original graph Thread must therefore be rechecked at every effect
+ * boundary. An already admitted server task must have an existing claim;
+ * this read-only check never creates or replaces it. */
+export async function assertGenerationNodeOwner(job: JobStartResult,
+  executionOwner: "server" | "cli", graphThreadId: string | undefined,
+  admittedThreadId: string | null | undefined, request: GenerationRequest): Promise<void> {
+  if (!graphThreadId || admittedThreadId && graphThreadId !== admittedThreadId)
+    throw Error("Generation node belongs to a different graph Thread.");
+  if (executionOwner === "cli") {
+    ensureNotServerOwned(job);
+    return;
+  }
+  await assertServerClaimPermitted(job, graphThreadId, request);
+  if (admittedThreadId && !existsSync(file(job)))
+    throw Error("Admitted server Generation has lost its original owner receipt.");
+}

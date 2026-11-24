@@ -78,7 +78,7 @@ import { isFocusedScope } from "./focused-scope.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryGenerationLock, withStoryJobLock } from "./job-lock.js";
-import { claimServerGeneration, ensureNotServerOwned } from "./generation-owner.js";
+import { assertGenerationNodeOwner, claimServerGeneration, ensureNotServerOwned } from "./generation-owner.js";
 import { readJobControl } from "./job-control.js";
 import { inspectJobReport, type JobReport } from "./job-report.js";
 import { isTrustedFinalVerdictAnomaly } from "./generation-final-verdict.js";
@@ -336,7 +336,7 @@ export async function requireGenerationTurn(job: JobStartResult, request: Genera
     : request.contract;
   const turn = await readTurnEvidence(job, contract, request.task, digest);
   if (!turn) throw Error("Generation requires the original authenticated Turn receipt.");
-  if (!request.fixture && !turn.objective)
+  if (!turn.objective)
     throw Error("Generation requires a current-format Turn objective; obsolete execution is refused.");
   return turn;
 }
@@ -3234,6 +3234,7 @@ async function observeNodeOutcome(node: GenerationNode, s: State, config: Runnab
 export function recoveryNode(
   node: GenerationNode,
   execute: (s: State, config: RunnableConfig) => Promise<Partial<State>>,
+  executionOwner?: "server" | "cli",
 ) {
   return async (state: CoreState, config: RunnableConfig): Promise<Partial<CoreState>> => {
     let prior: RecoveryState = {
@@ -3248,8 +3249,13 @@ export function recoveryNode(
         throw Error("Obsolete Generation inventory cannot authorize execution.");
       if (state.request.fixture !== true || state.request.turnPlanDigest !== undefined ||
           state.request.orchestrationPolicy !== undefined &&
-          state.request.orchestrationPolicy !== "explicit" && state.request.orchestrationPolicy !== "fixture-test")
-        await requireGenerationTurn(await openJob(state), state.request, !!state.graphThreadId);
+          state.request.orchestrationPolicy !== "explicit" && state.request.orchestrationPolicy !== "fixture-test") {
+        const job = await openJob(state);
+        const turn = await requireGenerationTurn(job, state.request, !!state.graphThreadId);
+        if (executionOwner) await assertGenerationNodeOwner(job, executionOwner,
+          config.configurable?.thread_id as string | undefined, state.graphThreadId,
+          turn ? { ...state.request, contract: turn.contract } : state.request);
+      }
     } catch (error) {
       return { status: "blocked", reason: error instanceof Error ? error.message : String(error),
         recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
@@ -3727,7 +3733,10 @@ export function createGenerationGraph(
         const graphThreadId = config.configurable?.thread_id as string | undefined;
         if (!graphThreadId?.trim()) throw new Error("Generation requires a durable graph Thread identity.");
         if (executionOwner === "cli") ensureNotServerOwned(job);
-        else await claimServerGeneration(job, graphThreadId, request);
+        else {
+          const turn = await requireGenerationTurn(job, request, !!s.graphThreadId);
+          await claimServerGeneration(job, graphThreadId, turn ? { ...request, contract: turn.contract } : request);
+        }
         // The first handoff checkpoint is also an author boundary: don't
         // dispatch an objective planner before durable author controls and
         // pending protected updates have been reconciled on the same job.
@@ -3795,7 +3804,7 @@ export function createGenerationGraph(
           config.configurable?.thread_id as string | undefined); }
         catch { return blocked(error); }
       }
-    }))
+    }, executionOwner))
     .addNode("assess_recovery", recoveryNode("assess_recovery", async (s, config) => {
       if (s.recoveryLifecycle.decision?.action === "known-correction" &&
           s.recoveryLifecycle.decision.adapter === "assignment-diagnostic")
@@ -4005,7 +4014,7 @@ export function createGenerationGraph(
       // This checkpoint records intent, not authority to reuse a session. Intake
       // rechecks author controls and the adapter authenticates source and proof.
       return { recovery: { ...r, phase: "authorized" as const }, reason: "Correcting the original adaptive planner response." };
-    }))
+    }, executionOwner))
     .addNode("author_update_intake", recoveryNode("author_update_intake", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-boundary", async () => {
@@ -4205,7 +4214,7 @@ export function createGenerationGraph(
         } catch (error) { return operationFailure(s, job, "scheduling", error,
           { reference: "generation-checkpoint" }); }
       });
-    }))
+    }, executionOwner))
     .addNode("idea_integration", recoveryNode("idea_integration", async s => {
       if (s.ideaResult) return {};
       const task = s.ideaTask!;
@@ -4280,7 +4289,7 @@ export function createGenerationGraph(
           { reference: "generation-idea-dispatch", ideaId: task.id, action: task.action,
             signature: task.signature, priorHead: task.priorHead });
       }
-    }))
+    }, executionOwner))
     .addNode("verify_idea_integration", recoveryNode("verify_idea_integration", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-idea-verification", async () => {
@@ -4335,7 +4344,7 @@ export function createGenerationGraph(
             action: s.ideaTask?.action, signature: s.ideaTask?.signature,
             priorHead: s.ideaTask?.priorHead, resultStatus: s.ideaResult?.status }); }
       });
-    }))
+    }, executionOwner))
     .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async (s, config) => {
       if (s.crossDomainCloseout || s.reviewPrerequisite || s.focusedPrerequisite &&
           (s.active?.stage !== "focus" || s.active.id !== s.focusedPrerequisite.identity.assignmentId))
@@ -4531,7 +4540,7 @@ export function createGenerationGraph(
           });
         } catch { return assessment; }
       }
-    }))
+    }, executionOwner))
     .addNode("dependency_amendment", recoveryNode("dependency_amendment", async (s, config) => {
       try {
         const job = await openJob(s);
@@ -4583,7 +4592,7 @@ export function createGenerationGraph(
         return operationFailure(s, await openJob(s), "dependency-amendment", error,
           { reference: "dependency-plan", assignmentId: s.active?.id });
       }
-    }))
+    }, executionOwner))
     .addNode("independent_assignment_review", recoveryNode("independent_assignment_review", async (s, config) => {
       const selected = s.recoveryLifecycle;
       const correction = selected.phase === "correcting" &&
@@ -4652,7 +4661,7 @@ export function createGenerationGraph(
         return { ...reviewed, ...assessed };
       }
       return reviewed;
-    }))
+    }, executionOwner))
     .addNode("verify_committed_work", recoveryNode("verify_committed_work", async s => {
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-verification", async () => {
@@ -4776,7 +4785,7 @@ export function createGenerationGraph(
               ...(verifier ? { verifier } : {}) });
         }
       });
-    }))
+    }, executionOwner))
     .addNode("completion_decision", recoveryNode("completion_decision", async s => {
       const job = await openJob(s);
       try {
@@ -4877,7 +4886,7 @@ export function createGenerationGraph(
         return operationFailure(s, job, "completion-verification", error,
           { reference: "completion-report" });
       }
-    }))
+    }, executionOwner))
     .addEdge(START, "schedule")
     .addConditionalEdges("schedule", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
@@ -4995,8 +5004,11 @@ export async function runStoryGeneration(options: GenerationOptions) {
       let preflightStopped = untrustedModern;
       let answerBudgetPause: string | null = null;
       if (options.action !== "inspect") {
-        try { await requireGenerationTurn(job, state.request, !!state.graphThreadId); }
-        catch (error) { state = { ...state, ...blocked(error) }; preflightStopped = true; }
+        try {
+          await requireGenerationTurn(job, state.request, !!state.graphThreadId);
+          if (state.inventory && state.inventory.invalidationVersion !== 1)
+            throw Error("Obsolete Generation inventory cannot authorize execution.");
+        } catch (error) { state = { ...state, ...blocked(error) }; preflightStopped = true; }
       }
       if (untrustedModern) {
         state = { ...state, status: "blocked", reason:

@@ -534,7 +534,9 @@ Studio requires `request.story`, `request.job`, `request.task`, and the nested
 `request.contract` (`scope`, `constraints`, `envelope`); `fixture`, provider/model,
 and source overrides are optional. Specify `scope.depth` or `scope.preset`.
 Generate a validated payload with `pnpm studio:input` rather than submitting an
-empty request. LangGraph's API serializes its top-level graph input as a partial
+empty request. The Job must already have its immutable, authenticated current Turn
+plan (from approved Story Discovery or continuation); the helper verifies the
+exact task, contract, source SHA and digest before emitting the request. LangGraph's API serializes its top-level graph input as a partial
 state update, so Studio may still label the outer `Request` group **Optional**;
 its nested mandatory fields are accurately marked required and the runtime
 rejects a missing request before any specialist is dispatched. The external
@@ -2554,16 +2556,17 @@ pnpm studio
 
 Open the Studio URL printed by the server (typically `https://smith.langchain.com/studio?baseUrl=http://localhost:2024`). The server exposes the production **`story_generation`** graph from `src/studio.ts`, not the old note/tagline prototype. You can inspect scheduling, author intake, specialist dispatch, verification and completion nodes locally **without a LangSmith API key**. Studio's browser UI is hosted on LangSmith, but graph execution and checkpoint data are local; opening the UI does not opt in to hosted trace uploads.
 
-Prepare an existing Git-backed job and generate input for a fresh Studio thread:
+Use an existing Git-backed Job with a prepared authenticated Turn and generate
+input for its original Studio thread. Starting an empty Job alone is not a
+Turn authorization.
 
 ```sh
-pnpm dev job start --story /path/to/story --job studio-draft
 pnpm studio:input --story /path/to/story --job studio-draft \
   --task "Develop the selected Story scope" --contract ./scope.json \
   --skills-source /path/to/noveltea-skills --fixture
 ```
 
-The helper validates the full-Story or partial Arc/Milestone contract and existing job identity, and emits the production `request` object. It does not create a job, invoke a model or edit Story files. Omit `--fixture` to opt into real Pi; optional `--provider` and `--model` override defaults. Specialists pin their own skills and transcripts through the same work-item APIs used by CLI generation.
+The helper validates the saved Turn against the supplied contract and existing Job identity, and emits the production `request` object including the Turn digest. It does not create a job, invoke a model or edit Story files. Omit `--fixture` to opt into real Pi; optional `--provider` and `--model` override defaults. Specialists pin their own skills and transcripts through the same work-item APIs used by CLI generation.
 
 **Studio limits:** Use only one execution surface/thread per job. Studio owns its development-server checkpoints, separate from CLI `generation.sqlite`; use `job generate` for tested durable CLI restart/reconciliation. The generator now also binds a server-run job to its original thread/request and refuses CLI takeover. Never start a fresh thread to overwrite interrupted specialist work. See the production generation section for safe-boundary controls, resume and preserved crash evidence. Legacy `run`/`demo-story` CLI commands remain available, but are not Studio's registered graph.
 

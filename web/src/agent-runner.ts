@@ -12,7 +12,7 @@ import type { StudioStore as StudioDatabase } from './persistence/store'
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
 import { requireGenerationTurn, type GenerationEvidence } from '../../src/generation'
 import { readJobControl } from '../../src/job-control'
-import { claimServerGeneration } from '../../src/generation-owner'
+import { assertServerClaimPermitted, claimServerGeneration } from '../../src/generation-owner'
 import { withStoryJobLock } from '../../src/job-lock'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { inspectModernGenerationRecovery } from '../../src/generation-recovery-inspection'
@@ -68,6 +68,9 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   await verifyTrustedRevision(job)
   if (await readJobControl(job) !== 'running') throw new Error('Generation is not authorized to run.')
   const threadId = row.threadId!
+  // Ownership must be authenticated before acquiring a provider runtime or
+  // sandbox, not merely after those external effects.
+  await assertServerClaimPermitted(job, threadId, pinned)
   const questionAtDispatch = async () => {
     if (item.intent !== 'resume') return null
     const { saver, graph } = openWebGenerationGraph(join(job.stateDir, 'web-generation.sqlite'))
@@ -145,6 +148,7 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
         await readJobControl(job) !== 'running')
       throw new Error('Conflicting generation admission.')
     await requireGenerationTurn(job, pinned)
+    await assertServerClaimPermitted(job, threadId, pinned)
     if (pendingAtDispatch && !await questionAtDispatch()) throw Error('Pending author interrupt changed before claim.')
     if (fix && indexedStop) await verifyKnownFixProof(job, pinned, indexedStop)
     let sandbox: SandboxClient | null = null

@@ -473,10 +473,10 @@ async function originalBlueprintAssessment(job: JobStartResult, s: State, c: Rec
 }
 
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
-  if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  if (!s.request.turnPlanDigest || s.request.turnPlanDigest !== c.origin.turnDigest) return null;
   const originalOperation = s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
-  const blueprint = await originalBlueprintAssessment(job, s, c);
+  const blueprint = s.request.fixture ? null : await originalBlueprintAssessment(job, s, c);
   if (blueprint)
     return { ...base(c, blueprint.evidence), action: "known-correction",
       adapter: "review-cycle", receipt: blueprint.evidence };
@@ -488,6 +488,9 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   if (originalOperation?.evidence.failureKind === "integrity")
     return { ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
       requiredInspection: "Authenticate the original source and invocation; no replacement model call is authorized." };
+  // A fixture transport cannot waive a terminal integrity/protocol decision.
+  // The remaining effectful adapters still require their original Pi receipts.
+  if (s.request.fixture) return null;
   const assignmentFailure = await originalAssignmentFailure(job, s, c);
   if (assignmentFailure && assessBoundedAssignmentFailure(assignmentFailure.proof.kind) === "exhausted") {
     const proof = { store: "response-contract" as const, ref: assignmentFailure.ref,

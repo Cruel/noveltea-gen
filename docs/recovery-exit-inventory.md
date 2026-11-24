@@ -250,3 +250,22 @@ are individually updated for the Job/Turn check, Foundation inspect retry guard,
 and Studio resume preflight/inventory gate. No blanket snapshot regeneration.
 
 `runStoryGeneration/throw#1` (`aee3a3f31877864a`) refuses a missing start task before SQLite ownership. The CLI regression asserts that an unplanned start leaves the Job state directory and Git unchanged.
+
+#### R14K pending-node and fulfillment audit
+
+| Source / entrypoint | Disposition and evidence |
+| --- | --- |
+| [Generation node owner gate](../src/generation.ts), [owner receipt](../src/generation-owner.ts) | All registered nodes pass the actual execution owner. Current Turn pending tasks recheck the immutable original request and graph Thread. Missing claim on admitted server execution and CLI/server conflicts fence before node effects. Real SQLite restart negative control in `recovery-cutover.test.ts`. |
+| [Worker admission](../web/src/agent-runner.ts), [known-fix pickup](../web/src/lib/known-fix-pickup.server.ts) | Verify existing owner before runtime/sandbox acquisition and again before worker claim. Authenticate current Turn before enqueuing a known-fix pickup. |
+| [CLI resume](../src/generation.ts) | Obsolete inventory rejection before generic reconciliation. New `runStoryGeneration/throw#11` (`f7ec8691c6e8a121`) is a caught preflight refusal, with no specialist dispatch or Git continuation. |
+| [Final fulfillment](../src/turn-fulfillment.ts), [report projection](../src/job-report.ts) | Remove missing-Turn final fulfillment return. Retain scope and historical receipt inspection without claiming full completion. Require current objective for fixtures with an explicit Turn. |
+| [Studio input](../src/studio-input.ts) | Validate existing current-format Turn and emit digest; never manufacture a Turn for a CLI or Studio user. Missing plan negative and existing-plan positive tests in `generation.test.ts`. |
+| [Operation strategy](../src/generation-operation-strategy.ts) | Require matching Turn digest; integrity and authenticated protocol exhaustion cannot be waived by transport selection. Effectful fixture stop and other fixture proof branches remain to be migrated. |
+| [Paid Generation/Idea test setup](../test/generation.test.ts) | Produce original whole-Story Turn using the actual planner and receipt writer; remove the old fixture-to-live override from certification invocation. Paid model calls not executed in offline verification. |
+
+The AST changes are limited to the reviewed owner argument at each node,
+`recoveryNode/return#1`, `runStoryGeneration/return#1` and the single new
+inventory throw, and the changed source-proof functions (Turn admission,
+operation selection, fulfillment and Studio worker). The worker retains one
+model consumer; its fingerprint changes only because admission now precedes
+runtime acquisition. No blanket rebaseline.

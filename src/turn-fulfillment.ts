@@ -270,11 +270,9 @@ async function regular(path: string) {
 export async function prepareTurnFulfillment(job: JobStartResult,
   input: TurnFulfillmentContext): Promise<TurnFulfillmentPacket | null> {
   const turn = await readReviewTurnEvidence(job);
-  if (!turn) {
-    if (job.recoveryFork)
-      throw Error("Recovered Story cannot claim full-Turn fulfillment without inherited review evidence.");
-    return null; // Explicit legacy CLI contracts are not per-Turn plans.
-  }
+  if (!turn?.objective)
+    throw Error("Final fulfillment requires an authenticated current-format Turn objective.");
+
   if (git(job, "rev-parse", "HEAD").trim() !== job.headSha)
     throw new Error("Story HEAD changed since the controller verified the Turn.");
   if (git(job, "status", "--porcelain=v1", "--untracked-files=all").trim())

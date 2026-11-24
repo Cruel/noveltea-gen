@@ -104,7 +104,7 @@ const reviewed: Record<string, string> = {
   "src/specialist-manifest.ts:requireSpecialistManifest": "2:070158f8e794500669be0588",
   "src/story-interruption.ts:promptStorySpecialist": "1:467b2eeea2bda68e76803149",
   "src/unknown-recovery-diagnostic.ts:diagnoseUnknownCompletion": "4:1480fcd299bc59528f25b2d9",
-  "web/src/agent-runner.ts:runPersistedGeneration": "1:d403a299affdb43578a7e795",
+  "web/src/agent-runner.ts:runPersistedGeneration": "1:1244b8de5293ac290440fc0c",
   "web/src/lib/onboarding-pi.server.ts:realInference": "4:d8e7bdacf0d34ddacb7fb378",
   "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
   "web/src/lib/pi-credentials.server.ts:buildUserPiRuntime": "2:80bee0d946aa4633f94ea00e",

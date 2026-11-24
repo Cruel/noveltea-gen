@@ -191,7 +191,10 @@ test("bounded Arc and small full-Story fixture reports retain true unverified li
   reviewedFull.editorial = { verdict: "pass", findings: [],
     evidence: ["authored-content/disclosure-scene.md:12"] };
   writeFileSync(fullReceiptPath, JSON.stringify(reviewedFull));
-  assert.equal(x.ok(["report"], "full").generation.status, "completed");
+  const historicalFull = x.ok(["report"], "full");
+  assert.equal(historicalFull.generation.status, "blocked");
+  assert.equal(historicalFull.generation.planFulfillment.status, "required");
+  assert.ok(historicalFull.generation.blockers.some((b: string) => /current-format Turn/.test(b)));
   x.ok(["author", "control", "--state", "paused"], "full");
   const pausedCompleted = x.ok(["report"], "full");
   assert.equal(pausedCompleted.generation.status, "paused");
@@ -265,7 +268,8 @@ test("completed evidence and unresolved textual integration remain independently
   ], findings: [] };
   writeFileSync(receiptPath, JSON.stringify(prior));
   const complete = x.ok(["report"]);
-  assert.equal(complete.generation.status, "completed", JSON.stringify({ generation: complete.generation, review: complete.evidence.scope, ideas: complete.evidence.deferredIdeas, workItems: complete.workItems }));
+  assert.equal(complete.generation.status, "blocked", JSON.stringify({ generation: complete.generation, review: complete.evidence.scope, ideas: complete.evidence.deferredIdeas, workItems: complete.workItems }));
+  assert.equal(complete.generation.planFulfillment.status, "required");
   assert.equal(complete.generation.scopeFulfillment, "complete-in-scope");
   assert.equal(complete.integration.status, "not assessed");
   // The target creates a competing record absent from its baseline, while the
@@ -274,7 +278,7 @@ test("completed evidence and unresolved textual integration remain independently
   writeFileSync(join(x.story, "arcs/truth.md"), "---\\nid: arc.truth\\n---\\nConflicting author Arc.\\n");
   git(x.repo, "add", "."); git(x.repo, "commit", "-qm", "Competing Arc");
   const conflict = x.ok(["report", "--preview", "--fixture"]);
-  assert.equal(conflict.generation.status, "completed");
+  assert.equal(conflict.generation.status, "blocked");
   assert.equal(conflict.integration.status, "conflicts");
   assert.equal(conflict.integration.preview.candidate.status, "text-conflicts");
   assert.equal(conflict.integration.preview.validation.status, "not-run");

@@ -10,6 +10,7 @@ import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
 import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
 import { fixtureSandboxClient, scriptedModel, scriptedReadCalls,
   scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
@@ -7996,9 +7997,15 @@ test("opt-in real Pi generation semantically chooses and reviews a deferred idea
   skip: process.env.NT_LIVE_GENERATION_IDEA !== "1"
     ? "set NT_LIVE_GENERATION_IDEA=1 for paid semantic placement evaluation" : false,
   timeout: 3_600_000,
-}, () => {
+}, async () => {
   assert.ok(available);
   const f = setup("live-idea-parent");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { ...contract.scope, kind: "full-story", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  f.start[3] = "Create a small archive mystery with character Ada (character.ada), " +
+    "arc.truth and one milestone.disclosure; preserve the protect/challenge choice.";
+  await saveJobTurnPlan(f.job, planWholeStory(f.start[3]!, contract, f.job.baseSha));
   const file = join(root, "live-idea-parent.json");
   const original = "The missing witness heard the archive bell after midnight.";
   writeFileSync(file, JSON.stringify({
@@ -8012,7 +8019,7 @@ test("opt-in real Pi generation semantically chooses and reviews a deferred idea
     upstreamConstraints: [],
   }));
   f.cli(["ideas", "capture", "--file", file]);
-  const args = [...f.start];
+  const args = f.start.filter(x => x !== "--fixture");
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
   const result = f.cli(args);
@@ -8042,9 +8049,15 @@ test("opt-in real Pi generation semantically chooses and reviews a deferred idea
 test("opt-in real Pi single-Milestone generation uses pinned skills and reports honest completion", {
   skip: process.env.NT_LIVE_GENERATION !== "1" ? "set NT_LIVE_GENERATION=1 for paid Pi verification" : false,
   timeout: 3_600_000,
-}, () => {
+}, async () => {
   assert.ok(available);
   const f = setup("live");
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { ...contract.scope, kind: "full-story", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  f.start[3] = "Create a complete small archive mystery with exactly one Milestone; " +
+    "let the player protect or challenge the missing witness.";
+  await saveJobTurnPlan(f.job, planWholeStory(f.start[3]!, contract, f.job.baseSha));
   const args = f.start.filter(x => x !== "--fixture");
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
@@ -8071,14 +8084,26 @@ test("Studio exposes production scheduling rather than the retired prototype", a
   const f = setup("studio-input");
   const studioEntry = process.env.NT_GENERATION_TEST_SOURCE_CLI === "1"
     ? ["--import", "tsx", resolve("src/studio-input.ts")] : [resolve("dist/studio-input.js")];
-  const prepared = spawnSync(process.execPath, [...studioEntry,
-    "--story", f.story, "--job", "single", "--task", "A scoped mystery", "--contract", f.contract, "--fixture"],
-  { encoding: "utf8", env: f.env, timeout: 30_000 });
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { ...contract.scope, kind: "full-story", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  const args = [...studioEntry, "--story", f.story, "--job", "single",
+    "--task", "A scoped mystery", "--contract", f.contract, "--fixture"];
+  const runInput = () => spawnSync(process.execPath, args,
+    { encoding: "utf8", env: f.env, timeout: 30_000 });
+  const unplanned = runInput();
+  assert.notEqual(unplanned.status, 0);
+  assert.match(unplanned.stderr, /authenticated current-format Turn/);
+  const turn = planWholeStory("A scoped mystery", contract, f.job.baseSha);
+  await saveJobTurnPlan(f.job, turn);
+  const prepared = runInput();
   assert.equal(prepared.status, 0, prepared.stderr);
   const input = JSON.parse(prepared.stdout);
   assert.equal(input.request.story, f.story);
   assert.equal(input.request.fixture, true);
-  assert.equal(input.request.contract.scope.targets[1], "milestone.disclosure");
+  assert.deepEqual(input.request.contract, contract);
+  assert.equal(input.request.turnPlanDigest, turn.digest);
+  assert.equal(input.request.orchestrationPolicy, "explicit");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), f.initial);
   assert.equal(git(f.repo, "status", "--porcelain"), "");
   const topology = await createGenerationGraph().getGraphAsync();

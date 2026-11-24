@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { startStoryJob } from "./job.js";
-import { parseGenerationContract } from "./generation.js";
+import { readTurnEvidence } from "./turn-plan-evidence.js";
+import { parseGenerationContract, requireGenerationTurn, type GenerationRequest } from "./generation.js";
 
 /** Prepare production Studio input without invoking a writer or creating a job. */
 async function main(args: string[]) {
@@ -21,9 +22,15 @@ async function main(args: string[]) {
   if (!story || !job || !task?.trim() || !file) throw new Error("Studio input requires --story, --job, --task and --contract.");
   const selected = await startStoryJob({ story, job }, false);
   const contract = parseGenerationContract(JSON.parse(await readFile(file, "utf8")));
-  process.stdout.write(JSON.stringify({ request: { story: selected.storyRoot, job, task, contract,
+  const turn = await readTurnEvidence(selected, contract, task);
+  if (!turn?.objective)
+    throw Error("Studio input requires an authenticated current-format Turn plan already prepared for this Job.");
+  const request: GenerationRequest = { story: selected.storyRoot, job, task, contract,
     fixture: values.has("--fixture"), provider: values.get("--provider"), model: values.get("--model"),
-    skillsSource: values.get("--skills-source") } }, null, 2) + "\n");
+    skillsSource: values.get("--skills-source"), turnPlanDigest: turn.digest,
+    orchestrationPolicy: "explicit" };
+  await requireGenerationTurn(selected, request);
+  process.stdout.write(JSON.stringify({ request }, null, 2) + "\n");
 }
 main(process.argv.slice(2)).catch(error => {
   process.stderr.write(`noveltea-gen studio input: ${error instanceof Error ? error.message : "error"}\n`);
