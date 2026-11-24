@@ -44,7 +44,7 @@ const siteNames = [
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:10",
   assess_recovery: "returns:18,status:7,blocked:1,throws:9",
-  author_update_intake: "returns:20,status:2,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
+  author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
   specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:6,throws:7",

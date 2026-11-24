@@ -153,7 +153,8 @@ async function regularJson<T>(file: string): Promise<T | null> {
   try { return JSON.parse(await readFile(file, "utf8")) as T; }
   catch { throw new ProtocolIntegrityBlockedError("Unreadable protocol receipt"); }
 }
-async function transcriptResponses(file: string, roots: readonly string[], id: string) {
+type SealedTranscriptPrefix = Readonly<{ transcriptBytes: number; transcriptSha256: string }>;
+async function transcriptResponses(file: string, roots: readonly string[], id: string, prefix?: SealedTranscriptPrefix) {
   if (!roots.length || !file || !resolve(file).startsWith(sep))
     throw new ProtocolIntegrityBlockedError("Missing original transcript path");
   const canonical = await realpath(file).catch(() => null);
@@ -165,7 +166,12 @@ async function transcriptResponses(file: string, roots: readonly string[], id: s
   const stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024)
     throw new ProtocolIntegrityBlockedError("Unsafe Pi transcript file");
-  const bytes = await readFile(file);
+  const full = await readFile(file);
+  if (prefix && (!Number.isSafeInteger(prefix.transcriptBytes) || prefix.transcriptBytes < 1 ||
+      prefix.transcriptBytes > full.length ||
+      createHash("sha256").update(full.subarray(0, prefix.transcriptBytes)).digest("hex") !== prefix.transcriptSha256))
+    throw new ProtocolIntegrityBlockedError("Sealed protocol transcript prefix changed");
+  const bytes = prefix ? full.subarray(0, prefix.transcriptBytes) : full;
   let records: Array<Record<string, unknown>>;
   try { records = bytes.toString("utf8").trim().split("\n").map(line =>
     JSON.parse(line) as Record<string, unknown>); }
@@ -204,6 +210,8 @@ export async function inspectCompletedProtocolResponse<T>(options: {
   sourceDigest: string;
   contract: string;
   sessionRoots: string[];
+  /** Inspect an independently sealed historical response in an append-only writer conversation. */
+  sealedPrefix?: SealedTranscriptPrefix;
   validate: (text: string) => ResponseContractFailure[];
   parse: (text: string) => T;
 }): Promise<T> {
@@ -242,7 +250,9 @@ export async function inspectCompletedProtocolResponse<T>(options: {
     throw new ProtocolIntegrityBlockedError("No original protocol invocation exists");
   const sessionFile = selected?.sessionFile ?? first?.sessionFile ?? started!.sessionFile;
   const sessionId = selected?.sessionId ?? first?.sessionId ?? started!.sessionId;
-  const evidence = await transcriptResponses(sessionFile, sessionRoots, sessionId);
+  if (options.sealedPrefix && (!started || !first || first.status !== "accepted" || second || allowance))
+    throw new ProtocolIntegrityBlockedError("Historical protocol inspection requires an accepted original invocation");
+  const evidence = await transcriptResponses(sessionFile, sessionRoots, sessionId, options.sealedPrefix);
   const original = second && first
     ? await transcriptResponses(first.sessionFile, sessionRoots, first.sessionId)
     : evidence;

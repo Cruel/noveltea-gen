@@ -5360,14 +5360,23 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           reason: "Perform the source-bound author objective in causal order." })) }), reason: "stop" };
       const i = index - 2;
       if (i === 0) return { content: scriptedReadCalls(reads, 0), reason: "toolUse" };
+      const target = "creative-direction/foundation.md";
+      const report = { modifiedRecords: [target], architecturalConflicts: [], laterObligations: [] };
       if (i === 1) return { content: [{
         type: "toolCall", name: "write", id: "r01-real-foundation-write",
-        arguments: { path: "creative-direction/foundation.md", content: authored },
+        arguments: { path: target, content: authored.replace("central_conflict:", "unsupported_field: true\ncentral_conflict:") },
       }], reason: "toolUse" };
       if (i === 2) return { content: [{
         type: "toolCall", name: "story_validate", id: "r01-foundation-validate", arguments: {},
       }], reason: "toolUse" };
-      if (i === 3) return { content: scriptedText("Original Creative Direction authored and validated."), reason: "stop" };
+      if (i === 3) return { content: scriptedText("Malformed report"), reason: "stop" };
+      if (i === 4) return { content: scriptedText(report), reason: "stop" };
+      if (i === 5 || i === 7) return { content: [{
+        type: "toolCall", name: "write", id: "r02-corrective-write-" + i,
+        arguments: { path: target, content: i === 5 ? authored.replace("origin: user\n    authority: user-protected", "origin: agent\n    authority: delegated") : authored },
+      }, ...(i === 5 ? [{ type: "toolCall" as const, name: "write", id: "r02-foreign-write",
+        arguments: { path: "events/foreign.md", content: "Unauthorized" } }] : [])], reason: "toolUse" };
+      if (i === 6 || i === 8) return { content: scriptedText(report), reason: "stop" };
       throw Error("R01 writer replayed or called another model unexpectedly: " + i);
     });
     const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "r01-generation.sqlite"));
@@ -5404,8 +5413,27 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         provider: scriptedModel.provider, model: scriptedModel.id,
         orchestrationPolicy: "explicit" as const,
       } };
-      const first = await withJobModelRuntime(runtime, () =>
+      const { configurePiPolicy } = await import("../src/job-pi-policy.js");
+      if (owner === "server") await configurePiPolicy(f.job, {
+        version: 1, profile: { provider: scriptedModel.provider, model: scriptedModel.id },
+        limits: { modelCalls: 7 },
+      });
+      let first = await withJobModelRuntime(runtime, () =>
         graph.invoke(input, { ...config, interruptAfter: ["specialist_dispatch"] }));
+      if (owner === "server") {
+        assert.equal(first.status, "paused", JSON.stringify({ reason: first.reason, calls: observed.length }));
+        assert.equal(observed.length, 7, "Budget pauses after the submitted malformed metadata and format recovery");
+        const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+        const sessionId = receipt.piSessionId;
+        await configurePiPolicy(f.job, {
+          version: 1, profile: { provider: scriptedModel.provider, model: scriptedModel.id },
+          limits: { modelCalls: 50 },
+        });
+        first = await withJobModelRuntime(runtime, () =>
+          graph.invoke({ ...first, status: "running" }, { ...config, interruptAfter: ["specialist_dispatch"] }));
+        assert.equal(JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8")).piSessionId, sessionId,
+          "Resume must reopen the original writer session");
+      }
       assert.equal(first.active?.stage, "foundation", JSON.stringify({
         status: first.status, reason: first.reason, operationRecovery: first.operationRecovery,
         active: first.active, result: first.result }));
@@ -5423,7 +5451,12 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       assert.notEqual(head, f.initial, "The child must commit real Story bytes to Git");
       assert.equal(first.result.headSha, head);
       assert.equal(reviewCalls, 1);
-      assert.equal(observed.length, 6, "One pinned planning session and one original writer session settled");
+      assert.equal(observed.length, 11, "One pinned planning session and one original writer session with distinct corrections settled");
+      assert.deepEqual(observed[6]!.tools, [], "Format-only correction must not have tools");
+      assert.ok(observed[7]!.tools.includes("write"));
+      assert.ok(observed[9]!.tools.includes("write"));
+      assert.ok(!observed[7]!.tools.includes("bash"), "Corrective writer has no unscoped shell");
+      assert.ok(!existsSync(join(f.job.worktreeStoryRoot, "events/foreign.md")), "Foreign-path write is refused before effect");
       assert.ok(observed[0]!.tools.includes("read"));
       assert.ok(!observed[0]!.tools.includes("write"));
       assert.ok(observed[3]!.tools.includes("write"));
@@ -5446,13 +5479,13 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         ...pendingDispatch!.config, recursionLimit: 10000, interruptAfter: ["specialist_dispatch"],
       }));
       assert.equal(replay.result?.headSha, head);
-      assert.equal(observed.length, 6, "Child END before parent publication cannot replay Pi");
+      assert.equal(observed.length, 11, "Child END before parent publication cannot replay Pi");
       assert.equal(reviewCalls, 1);
       assert.equal(git(f.job.worktreeRoot, "rev-list", "--count", f.initial + "..HEAD"), "1");
       // Only the controller's original next edges may accept the child result.
       const next = await withJobModelRuntime(runtime, () =>
         graph.invoke(null, { ...config, interruptAfter: ["verify_committed_work"] }));
-      assert.equal(observed.length, 6, "Parent verification cannot repeat the Foundation writer");
+      assert.equal(observed.length, 11, "Parent verification cannot repeat the Foundation writer");
       assert.equal(reviewCalls, 1, "Already-sealed review must not require another reviewer");
       assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
       assert.ok(next.completedStages.some((item: { stage: string }) => item.stage === "foundation"),

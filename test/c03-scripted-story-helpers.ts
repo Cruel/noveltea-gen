@@ -35,7 +35,7 @@ export async function scriptedStoryRuntime(
     const tools = new Set<string>();
     for (const m of context.messages) if (m.role === "system") {
       for (const t of m.toolsAdded ?? []) tools.add(t.name);
-      for (const name of m.toolsRemoved ?? []) tools.delete(name);
+      for (const tool of m.toolsRemoved ?? []) tools.delete(tool.name);
     }
     observed.push({ tools: [...tools], messages: context.messages });
     const { content, reason } = reply(index++, context);

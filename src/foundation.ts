@@ -15,11 +15,12 @@ import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { verifyJobPiSession } from "./job-session.js";
-import { FoundationAuthorRequiredError, authorizedFoundationException, consumeFoundationRetry, recordFoundationConflict } from "./foundation-conflict.js";
+import { FoundationAuthorRequiredError, authorizedFoundationException, consumeFoundationRetry, foundationExceptionContext, recordFoundationConflict } from "./foundation-conflict.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { createProjectResourceLoader } from "./pi.js";
-import { preparePiContext, preflightPiAssignment } from "./job-pi-policy.js";
+import { preparePiContext, preflightPiAssignment, guardPiBudget, recordPiSession, registerPendingPiSession } from "./job-pi-policy.js";
+import { ASSIGNMENT_REPORT, nativeMetadataDefects, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { openStoryProject } from "./project.js";
 import { loadSkillConfig, type SkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -60,6 +61,9 @@ interface FoundationState {
   stage: Stage;
   /** Persisted before giving the writer tools; never restart it blindly after a crash. */
   writerStarted?: boolean;
+  /** Current-format original writer invocation receipts. */
+  invocationVersion?: 1;
+  invocationProof?: AssignmentInvocationProof;
   /** Exact authored bytes pinned before validation/commit, for safe commit recovery. */
   authoredSha256?: string;
   reviewedRecoverySha256?: string;
@@ -210,16 +214,53 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     // target in the Context Manifest leads Pi to fail before it ever writes.
     paths: existsSync(authoredFile) ? [target] : [],
     snapshot: state.snapshot.id, provider, model: modelId, directory: sessionDir,
+    // Reconciliation and native verification do not spend a model call.
+    // Admission is checked below only before an actual prompt.
+    insideWriter: true,
   }, runtime);
-  const sandboxTools = await selectSandboxPiTools(job, state.snapshot, skills);
+  const scope = async () => createHash("sha256").update(JSON.stringify({
+    job: job.jobId, thread: job.threadId, base: job.baseSha, head: workHead(state),
+    target, snapshot: state.snapshot.id, provider, modelId, task: state.task,
+    selectedModel: context.model.provider + "/" + context.model.id, thinking: context.thinking,
+    mode: state.mode, authorInput: state.authorInput, envelope: state.envelope,
+    validator: job.validatorVersion, exception: await foundationExceptionContext(job),
+    turn: await readFile(join(job.stateDir, "turn-plan.json"), "utf8").catch(error => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }),
+  })).digest("hex");
+  const sourceDigest = await scope();
+  const authorize = async () => {
+    assertHead(job, workHead(state));
+    if (await scope() !== sourceDigest || await openSkillSnapshot(state.snapshot.id) !== state.snapshot.path)
+      throw Error("Foundation assignment source or permission changed.");
+    const paths = changedPaths(job);
+    if (paths.some(path => path !== storyPath(job, target)))
+      throw Error("Foundation corrective writer cannot touch a different Story path.");
+    if (existsSync(authoredFile)) await assertSafeTarget(job, target);
+  };
+  const sandboxTools = (await selectSandboxPiTools(job, state.snapshot, skills))!
+    .filter(tool => tool.name !== "bash")
+    .map(tool => {
+      if (tool.name !== "write" && tool.name !== "edit") return tool;
+      return { ...tool, async execute(...args: Parameters<typeof tool.execute>) {
+        const input = args[1] as { path?: unknown };
+        await authorize();
+        if (typeof input.path !== "string" || resolve(project.root, input.path) !== authoredFile)
+          throw Error("Foundation writer has no permission to edit that Story path.");
+        return tool.execute(...args);
+      } };
+    });
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: context.manager,
-    customTools: [...(sandboxTools ?? []), createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
-    // All Pi file/search/shell tools use the isolated controller adapter,
+    sessionManager: state.piSessionFile && existsSync(state.piSessionFile)
+      ? SessionManager.open(state.piSessionFile, dirname(state.piSessionFile), project.root)
+      : context.manager,
+    customTools: [...sandboxTools, createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
+    // All Pi file/search tools use the isolated controller adapter,
     // including standalone CLI jobs. No local host-tool fallback is permitted.
     // Neither a structured-record writer nor a Git commit tool is exposed.
-    noTools: "all", tools: [...SANDBOX_TOOLS, "story_context", "story_validate", "report_status"],
+    noTools: "all", tools: [...SANDBOX_TOOLS.filter(name => name !== "bash"), "story_context", "story_validate", "report_status"],
   });
   let reads: string[] = [];
   let wrote = false;
@@ -229,11 +270,21 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
     }
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Foundation Pi transcript cannot be persisted; writer will not start.");
+    if (state.piSessionId && state.piSessionId !== session.sessionId)
+      throw Error("Foundation recovery opened a different Pi session.");
     await onSession(session.sessionId, sessionFile);
-    await context.beforeTurn(sessionFile);
     const granted = await authorizedFoundationException(job);
-    await promptStorySpecialist(session,
-      context.contextNote + "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
+    const invocationProof = await recoverSubmittedAssignment({
+      session, directory: foundationInvocationDirectory(job, session.sessionId),
+      sourceDigest, sessionRoots: [sessionDir], authorize,
+      effect: async () => existsSync(authoredFile) ? foundationDigest(job, target) : null,
+      beforeTurn: () => guardPiBudget(job, "foundation:write", sessionFile),
+      prompt: async text => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, text);
+        await recordPiSession(job, sessionFile);
+      },
+      initialPrompt: context.contextNote + "You are the NovelTea foundation writing specialist in an isolated Git Story worktree. " +
       (granted?.retryUsed && granted.authorization
         ? "The authenticated author explicitly granted this exact job a one-time exception to the following existing protected discovery-only restriction. Preserve its existing statement verbatim; the exception authorizes continued composition for this pinned job only, NOT changing, deleting or weakening the decision. Original: " +
           "SHA-256 " + granted.fileSha256 +
@@ -248,7 +299,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       "That reserved Git-tracked directory is noncanonical and author-only; avoid it even with rg --hidden, git grep, git show or broad filesystem scans. " +
       "Use only narrowly scoped author constraints supplied explicitly for this assignment. " +
       "Never run git add, commit, reset, checkout, or alter Git history. Do not touch other files or any NovelTea engine records. " +
-      "The shell runs only in the isolated /story sandbox; Git, host paths, credentials and network are unavailable. Use read for pinned skills and story_validate for native validation. " +
+      "No shell tool is available for this single-record assignment. Use read for pinned skills and story_validate for native validation. " +
       "Preserve every existing user-protected decision verbatim; do not invent author approvals. " +
       "Attribute actual author constraints individually as origin:user/authority:user-protected; " +
       "agent-chosen decisions as origin:agent/authority:delegated. " +
@@ -270,46 +321,28 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       `Collaboration mode: ${state.mode}.\nAuthor brief: ${state.task}\n` +
       `Presentation/narrative envelope: ${state.envelope || "(unspecified)"}\n` +
       `Author's explicit discovery response: ${state.authorInput || "(none; autonomous choice of unspecified matters authorized)"}\n` +
-      "Produce a substantive foundation, then briefly describe what you wrote.",
-    );
-    const lastAssistant = () => [...session.messages].reverse().find(m => m.role === "assistant");
-    const succeeded = () => {
-      const assistant = lastAssistant();
-      return assistant?.role === "assistant" && assistant.stopReason !== "error" && assistant.stopReason !== "aborted";
-    };
-    if (!succeeded()) throw new Error("Pi foundation specialist failed to finish a successful turn.");
-
-    if (!existsSync(authoredFile)) {
-      // Pi occasionally treats an unavailable initial context read or mistyped
-      // pinned skill path as a reason to stop without writing. Give the same
-      // isolated session one explicit recovery opportunity, never a host fallback.
-      await promptStorySpecialist(session,
-        `No Story file was created at ${target}. This is a new record, so do NOT call story_context on it before writing. ` +
-        "Use the sandbox write tool to create the canonical Markdown file. " +
-        "If a pinned skill read failed, retry its FULL exact absolute path from the earlier list (do not shorten the snapshot hash):\n" +
-        REQUIRED.map(name => join(state.snapshot.path, "skills", name)).join("\n") +
-        "\nValidate the new file with story_validate before finishing.");
-      if (!succeeded()) throw new Error("Pi foundation creation recovery failed to finish.");
-    }
-    if (!existsSync(authoredFile)) {
-      throw new Error("Pi foundation specialist did not create the required Story Markdown after one in-session recovery attempt; preserve the Pi transcript for review.");
-    }
-    // The canonical validator checks structural correctness, not whether Pi
-    // misattributes the author's explicit constraints to itself. Give one
-    // bounded in-session correction opportunity before accepting the writer.
-    if (!hasUserProtectedDecision(await readFile(authoredFile, "utf8"))) {
-      await promptStorySpecialist(session,
-        `The Creative Direction you wrote at ${target} has NO user-origin/user-protected Creative Decision. ` +
-        "This misattributes the author's explicit brief and presentation constraints to the agent. " +
-        "Read the existing file and edit its decisions to preserve the actual author-specified constraints as " +
-        "origin: user / authority: user-protected, while keeping independently invented details as " +
-        "origin: agent / authority: delegated. Do not invent additional author instructions or claim approval. " +
-        "Keep the existing Story prose and schema intact. Run story_validate again after editing.");
-      if (!succeeded()) throw new Error("Pi foundation provenance correction failed to finish.");
-    }
-    if (!hasUserProtectedDecision(await readFile(authoredFile, "utf8"))) {
-      throw new Error("Pi foundation misattributed all Creative Decisions to the agent; explicit author constraints must be recorded as user-protected before commit. Preserve the draft for review.");
-    }
+      "Produce a substantive foundation. " + ASSIGNMENT_REPORT,
+      verify: async manifest => {
+        if (!existsSync(authoredFile) || changedPaths(job).length === 0) {
+          if (await recordFoundationConflict(job)) throw new FoundationAuthorRequiredError();
+          throw Error("Foundation specialist submitted no Story changes; preserve the original invocation.");
+        }
+        assertOnlyTarget(job, target);
+        const paths = manifest.modifiedRecords as string[];
+        if (paths.length !== 1 || paths[0] !== target || (manifest.architecturalConflicts as string[]).length)
+          throw Error("Foundation final report does not match its independently observed Story scope or reports a conflict.");
+        const validation = await validateStoryJob(job, validatorSource);
+        if (validation.status === "rejected") return nativeMetadataDefects(validation, {
+          jobId: job.jobId, baseSha: job.baseSha, worktreeStoryRoot: job.worktreeStoryRoot,
+          validatorVersion: job.validatorVersion, paths: [target],
+          derivedDiagnostics: ["creative-direction-count"],
+        });
+        assertValidation(job, validation);
+        if (!hasUserProtectedDecision(await readFile(authoredFile, "utf8")))
+          return [{ kind: "provenance", path: target, code: "missing-author-provenance" }];
+        return [];
+      },
+    });
     const calls = session.messages.flatMap(message => message.role === "assistant"
       ? message.content.filter((item): item is Extract<typeof item, { type: "toolCall" }> => item.type === "toolCall")
       : []);
@@ -331,7 +364,7 @@ async function piAuthor(job: JobStartResult, state: FoundationState, target: str
       throw new Error("Pi did not actually read every required pinned NovelTea skill reference.");
     }
     await context.completed(sessionFile, session.sessionId);
-    return { skillReads: reads.filter(path => requiredPaths.includes(path)),
+    return { skillReads: reads.filter(path => requiredPaths.includes(path)), invocationProof,
       piSessionId: session.sessionId,
       piSessionFile: session.sessionManager.getSessionFile() ?? undefined };
   } finally {
@@ -410,6 +443,27 @@ async function discoverQuestions(job: JobStartResult, state: FoundationState,
 }
 
 function stateFile(job: JobStartResult) { return join(job.stateDir, "foundation.json"); }
+function foundationInvocationDirectory(job: JobStartResult, sessionId: string) {
+  if (!/^[a-zA-Z0-9-]+$/.test(sessionId)) throw Error("Invalid Foundation invocation session identity.");
+  return join(job.stateDir, "foundation-invocations", sessionId);
+}
+function hasStartedFoundationInvocation(job: JobStartResult, state: FoundationState) {
+  return !!state.piSessionId && existsSync(join(foundationInvocationDirectory(job, state.piSessionId), "0.started.json"));
+}
+async function verifyFoundationInvocation(job: JobStartResult, state: FoundationState): Promise<void> {
+  if (state.workerMode !== "pi" || state.chatApprovalDigest) return;
+  if (!state.invocationVersion || !state.piSessionId || !state.piSessionFile || !state.authoredSha256)
+    throw Error("Obsolete or incomplete original Foundation invocation; inspect its evidence, not replay.");
+  await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
+  // Explicit operator reconciliation remains a separate, reviewed effect;
+  // it never grants another Pi invocation or fabricates a model settlement.
+  if (state.reviewedRecoverySha256 === state.authoredSha256) return;
+  if (!state.invocationProof) throw Error("Foundation authored effect lacks its original invocation proof.");
+  await verifySettledAssignment({ proof: state.invocationProof,
+    directory: foundationInvocationDirectory(job, state.piSessionId),
+    sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+    sessionRoots: [join(job.stateDir, "foundation-sessions")], effect: state.authoredSha256 });
+}
 async function saveState(file: string, state: FoundationState) {
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { flag: "wx", mode: 0o600 });
@@ -470,9 +524,28 @@ function recoveryCommit(job: JobStartResult, state: FoundationState): string | u
   }
   return head;
 }
-/** Read-only proof for resuming an interrupted *original* Foundation that
- * already committed its exact authored bytes before publishing its receipt.
- * This never grants a replacement writer or accepts an unrelated Git commit. */
+/** Read-only routing proof for the original child, not a new write grant. */
+export async function inspectPendingFoundationInvocation(job: JobStartResult, sourceHead: string): Promise<boolean> {
+  const state = await existingState(job);
+  if (!state || state.stage !== "writing" || state.workerMode !== "pi" ||
+      state.invocationVersion !== 1 || !state.writerStarted || state.chatApprovalDigest ||
+      !state.target || workHead(state) !== sourceHead)
+    return false;
+  // This is only a routing gate for the original child to inspect its
+  // invocation chain. It neither certifies the dirty draft nor admits a
+  // corrective model call. Other specialists still require trustedHead.
+  assertHead(job, sourceHead);
+  if (changedPaths(job).some(path => path !== storyPath(job, state.target!)))
+    throw Error("Pending Foundation invocation contains out-of-scope edits.");
+  if (existsSync(join(job.worktreeStoryRoot, state.target))) await assertSafeTarget(job, state.target);
+  if (hasStartedFoundationInvocation(job, state))
+    await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
+  else if (changedPaths(job).length)
+    throw Error("Unstarted Foundation invocation has unexpected effects.");
+  return true;
+}
+
+/** Read-only proof of an original commit published before its receipt. */
 export async function inspectRecoverableFoundationCommit(job: JobStartResult): Promise<boolean> {
   const state = await existingState(job);
   if (!state || state.stage !== "writing" || !state.writerStarted ||
@@ -481,8 +554,7 @@ export async function inspectRecoverableFoundationCommit(job: JobStartResult): P
   const recovered = recoveryCommit(job, state);
   if (!recovered || await foundationDigest(job, state.target) !== state.authoredSha256)
     return false;
-  if (state.workerMode === "pi" && !state.chatApprovalDigest)
-    await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
+  await verifyFoundationInvocation(job, state);
   return true;
 }
 
@@ -684,11 +756,13 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         (!state.authoredSha256 || await foundationDigest(job, target) !== state.authoredSha256)) {
       throw new Error("Recovered foundation commit lacks exact recorded authored bytes; preserve it for reconciliation.");
     }
-    if (state.writerStarted && state.stage !== "committed" && state.workerMode === "pi" && !state.chatApprovalDigest) {
+    if (state.writerStarted && state.stage !== "committed" && state.workerMode === "pi" && !state.chatApprovalDigest &&
+        (!state.invocationVersion || hasStartedFoundationInvocation(job, state) || state.authoredSha256)) {
       await verifyJobPiSession(job, "foundation", state.piSessionFile, state.piSessionId);
     }
     if (state.stage === "committed") {
       if (recovered !== state.commitSha) throw new Error("Saved foundation commit differs from job HEAD.");
+      await verifyFoundationInvocation(job, state);
       await advanceInboxVerifiedHead(job, state, state.commitSha!);
       await finalizeRecoveryCheckpoint(job, WORK_ITEM, workHead(state), state.commitSha!);
       return output(job, state);
@@ -714,6 +788,26 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       if (recovered) return {};
       const target = foundation.target!;
       assertHead(job, workHead(foundation));
+      if (foundation.writerStarted && !foundation.authoredSha256 && foundation.workerMode === "pi" &&
+          foundation.invocationVersion === 1 && !foundation.chatApprovalDigest) {
+        if (!hasStartedFoundationInvocation(job, foundation)) {
+          if (changedPaths(job).length) throw Error("Unstarted Foundation invocation has unexpected effects.");
+          // No external prompt was admitted. A lazy Pi transcript may not exist.
+          if (foundation.piSessionFile && !existsSync(foundation.piSessionFile)) {
+            foundation.piSessionFile = undefined;
+            foundation.piSessionId = undefined;
+          }
+        }
+        const authored = await piAuthor(job, foundation, target, foundation.provider, foundation.model,
+          async (id, path) => {
+            foundation.piSessionId = id;
+            foundation.piSessionFile = path;
+            await saveState(stateFile(job), foundation);
+          }, input.validatorSource ?? input.skillsSource);
+        const next = { ...foundation, ...authored, authoredSha256: await foundationDigest(job, target) };
+        await saveState(stateFile(job), next);
+        return { foundation: next };
+      }
       if (foundation.writerStarted) {
         if (!foundation.authoredSha256) {
           throw new Error("Interrupted foundation writer; preserve unfinished files and original Pi session. Never replay writer tools.");
@@ -723,9 +817,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
         if (await foundationDigest(job, target) !== foundation.authoredSha256) {
           throw new Error("Authored foundation bytes changed after interruption; manual reconciliation is required.");
         }
-        if (foundation.workerMode === "pi" && !foundation.chatApprovalDigest) {
-          await verifyJobPiSession(job, "foundation", foundation.piSessionFile, foundation.piSessionId);
-        }
+        await verifyFoundationInvocation(job, foundation);
         return {};
       }
       if (changedPaths(job).length) {
@@ -773,6 +865,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       await preflightPiAssignment(job, "foundation:write", foundation.workerMode === "pi"
         ? { provider: foundation.provider, model: foundation.model } : undefined);
       foundation.writerStarted = true;
+      if (foundation.workerMode === "pi") foundation.invocationVersion = 1;
       await saveState(stateFile(job), foundation);
       const authored = foundation.workerMode === "fixture"
         ? await fixtureAuthor(job, foundation, target)
@@ -794,6 +887,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       const config = await loadSkillConfig(undefined, false);
       const validation = await validateStoryJob(job, input.validatorSource ?? input.skillsSource ?? config.novelteaSkills);
       const verified = assertValidation(job, validation);
+      await verifyFoundationInvocation(job, foundation);
       assertOnlyTargetForCommit(job, target, recovered);
       if (!foundation.authoredSha256 || await foundationDigest(job, target) !== foundation.authoredSha256) {
         throw new Error("Foundation bytes differ from the exact authored work item; commit refused.");

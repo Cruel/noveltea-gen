@@ -20,7 +20,7 @@ export const reviewedReturnExits = {
   assess_recovery:
     "c55d721037529090:F 847377c251391777:F 4b1fc97521b4c16b:S bb65f63e263b2fe8:F 68b0e7e4cbc2f04d:G 0d98a4d66450cb87:G 128687fb2b296bcd:F 68b0e7e4cbc2f04d:G e1ecdca5abae0cf6:F 0d98a4d66450cb87:G c6a6c70112e77cf8:F 27fe5712f50f7abb:F 0a1d512a1ea80f42:F 709ddcba4378d1e8:G 709ddcba4378d1e8:G 170918fa99798bda:F 5d2896d748d553b3:B 591823c6f3985766:G",
   author_update_intake:
-    "da64e9326ac96ae9:G cfba761fff836f54:S e4b08665b2511bc8:G 5d687f16a5596c4f:R e4b08665b2511bc8:G e4b08665b2511bc8:G fdbf39f3b7061801:R a260befd39f85294:S 747b91dd0e6c2dc8:G 73bc16b555ae8f07:G f49f72da98546066:R 4d083c13dcc1e236:G 42867d567e1d95c1:G fceab62ae26516ee:R 5567ab42da73df08:U 9e0f30ee86075453:R 63a353783d128fb6:R e4840f27212ca310:R 3ea9cb6dd42763ac:G fe3e9d5287d5503f:R",
+    "70bfceed28951928:G c54bc20d022453f0:U 73bc16b555ae8f07:G cfba761fff836f54:S e4b08665b2511bc8:G 5d687f16a5596c4f:R e4b08665b2511bc8:G e4b08665b2511bc8:G fdbf39f3b7061801:R a260befd39f85294:S 747b91dd0e6c2dc8:G 73bc16b555ae8f07:G f49f72da98546066:R 4d083c13dcc1e236:G 42867d567e1d95c1:G fceab62ae26516ee:R 5567ab42da73df08:U 9e0f30ee86075453:R 63a353783d128fb6:R e4840f27212ca310:R 3ea9cb6dd42763ac:G fe3e9d5287d5503f:R",
   idea_integration:
     "e4b08665b2511bc8:G 20f588fb0567918e:G 525b4f362005f993:G 525b4f362005f993:G 6d21786f048a0f8f:R",
   verify_idea_integration:
@@ -81,7 +81,7 @@ export const reviewedStatusExits = {
     "f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G e0394fa2f3847b80:F f309314d6c8adbdd:G f309314d6c8adbdd:G",
   assess_recovery:
     "e0394fa2f3847b80:F 2b78ad3f49b1ead6:F 088baada343b4451:S f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G",
-  author_update_intake: "f309314d6c8adbdd:G 64104e1034916182:U",
+  author_update_intake: "f15f39eb577eed93:U f309314d6c8adbdd:G f309314d6c8adbdd:G 64104e1034916182:U",
   idea_integration: "b2a1ee45d94f53be:G",
   verify_idea_integration: "1ef03b815a1070ca:G",
   specialist_dispatch: "fb8dc871bfe4bc06:G",

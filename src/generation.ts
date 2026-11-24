@@ -39,7 +39,7 @@ import { Annotation, END, START, StateGraph, isGraphBubbleUp } from "@langchain/
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { z } from "zod";
 import { parseContract, runArchitectureJob, verifyPlanHistory, type CompletionContract } from "./architecture.js";
-import { runFoundationJob } from "./foundation.js";
+import { runFoundationJob, inspectPendingFoundationInvocation } from "./foundation.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob } from "./character-world.js";
 import { runEventWorkItem } from "./event-work.js";
@@ -696,6 +696,9 @@ async function dispatch(s: Pick<State, "request" | "active">) {
     ? await (async () => {
       const job = await openJob(s);
       await assertSteeringReceipts(job, turnDigest);
+      // Foundation has its own pinned objective; no new steering authority
+      // can be derived from its unfinished draft or a moving worktree.
+      if (s.active?.stage === "foundation") return "";
       return steeringForAssignment(job, turnDigest, s.active!.id, await trustedHead(job));
     })()
     : "";
@@ -2040,6 +2043,17 @@ export function createGenerationGraph(
       const job = await openJob(s);
       return withStoryJobLock(job, "generation-boundary", async () => {
         try {
+          // A pending original Foundation invocation may have a dirty,
+          // unverified draft. Only its existing child is allowed to reconcile
+          // that effect; no author edits or new assignment can run here.
+          if (s.active?.stage === "foundation" && !s.result && s.inventory &&
+              await inspectPendingFoundationInvocation(job, s.inventory.headSha)) {
+            await checkPlan(job, s.request, s.planVersion);
+            const control = await readJobControl(job);
+            if (control !== "running") return { status: control === "cancelled" ? "cancelled" : "paused",
+              reason: "Author control precedes original Foundation reconciliation." };
+            return { status: "running" as const, reason: null };
+          }
           const stopped = await authorBoundary(job, s);
           if (stopped) return stopped;
           // The completed result was authenticated by both Studio and graph
