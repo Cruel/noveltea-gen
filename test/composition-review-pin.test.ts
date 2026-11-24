@@ -163,6 +163,10 @@ test("Composition approval binds original independent transcript, actual prose, 
     writeFileSync(join(directory, "round-0.json"), JSON.stringify(fabricated));
     await assert.rejects(verify(), /does not match the Pi review response/);
     writeFileSync(join(directory, "round-0.json"), JSON.stringify(receipt));
+    await assert.rejects(verifyCompositionReviewPin(job, snapshot, assignment, "openai", "test",
+      original, version + 1, planDigest, writer, [path], pin), /authorized assignment/);
+    await assert.rejects(verifyCompositionReviewPin(job, snapshot, assignment, "openai", "test",
+      original, version, "f".repeat(64), writer, [path], pin), /authorized assignment/);
     await assert.rejects(
       verifyCompositionReviewPin(
         job,
