@@ -21,6 +21,7 @@ const slowCases: Record<string, number> = {
   "#240 original staged Event is authentically authored by a scripted Pi agent": 20,
   "production resume assesses failed scheduling without repeating completed work": 19,
   "#244 C07 original-Thread Event-only correction reaches reviewed Composition and completed Turn": 19,
+  "R13 verified original-Thread corrections cannot waive a negative final Turn objective": 29,
   "multi-Milestone generation develops every selected cluster across process restarts": 18,
 };
 

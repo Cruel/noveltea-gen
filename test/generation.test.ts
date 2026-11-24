@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test as nodeTest } from "node:test";
@@ -4422,14 +4422,18 @@ test("C04 Review strategy demands the original sealed failed Pi cycle before any
 });
 
 
-for (const mode of ["event-only", "required-interactive", "story-wide-required", "event-only-complete"] as const)
+for (const mode of ["event-only", "required-interactive", "story-wide-required", "event-only-complete", "event-only-incomplete"] as const)
 test(mode === "event-only-complete"
   ? "#244 C07 original-Thread Event-only correction reaches reviewed Composition and completed Turn"
-  : "#243 C06 original-Thread historical Choice " + mode + " uses independently authenticated owner correction", {
+  : mode === "event-only-incomplete"
+    ? "R13 verified original-Thread corrections cannot waive a negative final Turn objective"
+    : "#243 C06 original-Thread historical Choice " + mode + " uses independently authenticated owner correction", {
   skip: !available, timeout: 180_000,
 }, async () => {
   const mandatory = mode === "required-interactive";
   const storyWide = mode === "story-wide-required";
+  const incomplete = mode === "event-only-incomplete";
+  const closeout = mode === "event-only-complete" || incomplete;
   const f = setup("c06-original-negative-choice-" + mode, story => {
     mkdirSync(join(story, "creative-direction"), { recursive: true });
     writeFileSync(join(story, "creative-direction/foundation.md"), [
@@ -4459,7 +4463,7 @@ test(mode === "event-only-complete"
     : storyWide ? ["The Story must include consequential player Choices; the only Interactive Milestone cannot be dropped without another approved owner."]
     : ["A later consequential disclosure Choice remains possible, without requiring one at every Milestone."];
   writeFileSync(f.contract, JSON.stringify(contract));
-  const task = mode === "event-only-complete"
+  const task = closeout
     ? "Verify the falsified transfer credit from the signed primary ledger; show the corroborated discovery without inventing a player choice."
     : "First verify a falsified transfer credit from signed records, then allow later player decisions.";
   f.start[3] = task;
@@ -4530,6 +4534,21 @@ test(mode === "event-only-complete"
     const reads = [...boundedPinnedSources("nt-event-design").map(p => "skill://" + p),
       "milestones/disclosure.md"];
     const { runtime, observed } = await scriptedStoryRuntime((i, ctx) => {
+      if (incomplete && i >= 22) {
+        const text = JSON.stringify(ctx.messages);
+        const signature = text.match(/signature=([0-9a-f]{64})/)?.[1];
+        const sourceRef = text.match(/sourceRef=([^;]+); category=/)?.[1];
+        if (signature && sourceRef) {
+          assert.match(text, /original evidence objective lacks a sufficient payoff/);
+          return { content: scriptedText({
+            schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+            category: "invalid-assignment", diagnosis: "The final independent reviewer retained the unmet original goal.",
+            strategy: "unsafe", owner: null, scopeRef: null,
+            prerequisites: ["Obtain a separately authorized source-bound follow-up assignment"],
+            uncertainty: "No approved follow-up assignment currently exists.",
+          }), reason: "stop" };
+        }
+      }
       if ([0, 2, 4].includes(i))
         return { content: scriptedReadCalls(reads, i), reason: "toolUse" };
       if (i === 1) return { content: scriptedText(blueprint), reason: "stop" };
@@ -4579,7 +4598,7 @@ test(mode === "event-only-complete"
         schema: "noveltea-milestone-blueprint-review/v5",
         status: "pass", findings: [], prior: [],
       }), reason: "stop" };
-      if (mode === "event-only-complete") {
+      if (closeout) {
         const currentStory = () => git(f.job.worktreeRoot, "ls-files", "--", "story/")
           .split("\n").filter(p => p.endsWith(".md")).map(p => p.slice(6));
         if (i === 13) return { content: scriptedReadCalls([
@@ -4672,14 +4691,18 @@ test(mode === "event-only-complete"
                 return "events/disclose-ledger.md";
               return "authored-content/disclose-ledger-scene.md";
             };
-            return { content: scriptedText({ digest: packet.digest, verdict: "complete",
+            const missing = incomplete ? packet.objectives.find(objective => objective.id === "goal") : undefined;
+            if (incomplete) assert.ok(missing, "Final Review must check the original Turn goal");
+            return { content: scriptedText({ digest: packet.digest, verdict: incomplete ? "incomplete" : "complete",
               checks: packet.objectives.map(objective => ({ objectiveId: objective.id,
-                fulfilled: true, evidence: [{
+                fulfilled: objective.id !== missing?.id, evidence: objective.id === missing?.id ? [] : [{
                   path: packet.canonical.some(path => path.path === objectivePath(objective.id))
                     ? objectivePath(objective.id) : packet.canonical[0]!.path,
                   line: 1, explanation: "Original source satisfies " + objective.text,
                 }],
-              })), findings: [] }), reason: "stop" };
+              })), findings: missing ? [{ objectiveId: missing.id,
+                message: "The original evidence objective lacks a sufficient payoff in the final Story.",
+                followUp: null }] : [] }), reason: "stop" };
           }
           assert.ok(user, "The independent reviewer must receive its original source-bound assignment");
           const assignment = JSON.parse(user.slice(user.lastIndexOf("ASSIGNMENT:\n") +
@@ -4995,7 +5018,7 @@ test(mode === "event-only-complete"
         i.id === "interactive:milestone.disclosure")?.status, "verified");
       assert.equal(observed.length, 13,
         "retrying the original graph must not start another Choice/Blueprint/reviewer Pi call");
-      if (mode === "event-only-complete") {
+      if (closeout) {
         const composed = await withJobModelRuntime(runtime, () => graph.invoke(null,
           { ...cfg, interruptBefore: ["independent_assignment_review"] }));
         assert.equal(composed.result?.status, "composition-committed", JSON.stringify({
@@ -5025,7 +5048,52 @@ test(mode === "event-only-complete"
           })), calls: observed.length,
         }));
         assert.equal(finalGate.recoveryLifecycle.active, null);
-        const final = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+        const final = await withJobModelRuntime(runtime, () => graph.invoke(null,
+          incomplete ? { ...cfg, interruptBefore: ["assess_recovery"] } : cfg));
+        if (incomplete) {
+          const report = await (await import("../src/job-report.js")).inspectJobReport(final.request);
+          assert.equal(report.generation.planFulfillment.status, "incomplete");
+          assert.equal(report.generation.planFulfillment.findings[0]?.objectiveId, "goal");
+          assert.notEqual(final.status, "completed");
+          assert.equal(final.recoveryLifecycle.active?.origin.operation, "completion-verification");
+          assert.ok(final.inventory?.items.every((item: any) => item.status === "verified"));
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), finalGate.inventory?.headSha);
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
+            cfg.configurable.thread_id), final.recoveryLifecycle);
+          const caseId = final.recoveryLifecycle.active?.id;
+          const beforeDiagnostic = observed.length;
+          const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+          assert.equal(stopped.status, "blocked");
+          assert.equal(stopped.recoveryLifecycle.active?.id, caseId);
+          assert.equal(stopped.recoveryLifecycle.decision?.action, "diagnostic-stop",
+            JSON.stringify({ reason: stopped.reason, recovery: stopped.recoveryLifecycle }));
+          assert.equal(stopped.recoveryLifecycle.attempt?.phase, "settled");
+          assert.equal(observed.length, beforeDiagnostic + 1);
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
+            cfg.configurable.thread_id), stopped.recoveryLifecycle);
+          const restarted = await withJobModelRuntime(runtime, () => graph.invoke({ request: stopped.request }, cfg));
+          assert.equal(restarted.status, "blocked");
+          assert.equal(restarted.recoveryLifecycle.active?.id, caseId);
+          assert.equal(observed.length, beforeDiagnostic + 1, "The negative objective cannot replay Review or diagnosis");
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), finalGate.inventory?.headSha);
+          const folder = join(f.job.stateDir, "turn-fulfillment");
+          const receipt = readdirSync(folder).map(name => join(folder, name)).find(path => {
+            const saved = JSON.parse(readFileSync(path, "utf8"));
+            return saved.verdict?.verdict === "incomplete";
+          });
+          assert.ok(receipt);
+          const original = readFileSync(receipt, "utf8");
+          try {
+            const altered = JSON.parse(original);
+            altered.verdict.findings[0].message = "A different finding";
+            writeFileSync(receipt, JSON.stringify(altered));
+            const fenced = await inspectModernGenerationRecovery(f.job, saver, cfg.configurable.thread_id);
+            assert.equal(fenced?.phase, "fenced");
+            assert.ok(fenced?.inspectionFences.length, "Altered final finding invalidates the sealed diagnosis");
+            assert.equal(observed.length, beforeDiagnostic + 1);
+          } finally { writeFileSync(receipt, original); }
+          return;
+        }
         assert.equal(final.status, "completed", JSON.stringify({
           status: final.status, reason: final.reason,
           recovery: final.recoveryLifecycle, calls: observed.length,

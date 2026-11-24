@@ -72,7 +72,41 @@ async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
  * operation's verified effect, not a reason string or a model's diagnosis. */
 async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryEvidence | null> {
   const { operation, sourceHeadSha: head, turnDigest, planVersion } = c.origin;
-  if (s.request.fixture || !s.request.turnPlanDigest || s.escalation?.requiresTrustedApproval) return null;
+  if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  // A negative final objective is an authenticated semantic obligation, not
+  // an ambiguous writer effect. Even when new author authority is required,
+  // a read-only diagnosis may establish that no authorized remedy exists.
+  // Bind the diagnosis to the actual independent final finding, not merely
+  // a positive specialist checkpoint or the saved escalation prose.
+  if (operation === "completion-verification" && c.observation === "returned-failure" &&
+      !s.active && !s.result && !s.ideaTask && !s.causalAmendment && s.escalation &&
+      s.inventory?.headSha === head && s.inventory.planVersion === planVersion &&
+      authorizedInventoryComplete(s.inventory)) {
+    const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")
+      ?.input as GenerationOperationRecovery | undefined;
+    const report = await inspectJobReport(s.request);
+    const fulfillment = report.generation.planFulfillment;
+    if (fulfillment.status === "incomplete") {
+      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+        p.eligible && p.commitSha === head && p.validation.status === "passed" &&
+        (p.semanticReview === "passed" || p.semanticReview === "not-required"));
+      if (op?.evidence.reference !== "completion-report" || op.source.headSha !== head ||
+          op.source.planVersion !== planVersion || op.source.turnDigest !== turnDigest ||
+          report.identity.headSha !== head || !report.identity.clean ||
+          report.generation.scopeFulfillment !== "complete-in-scope" ||
+          fulfillment.headSha !== head || fulfillment.planVersion !== planVersion ||
+          fulfillment.assurance !== "semantic" || !fulfillment.findings.length || !point ||
+          !fulfillment.findings.every(f => s.escalation!.sources.some(source =>
+            source.source === f.objectiveId && source.message === f.message &&
+            source.repair === (f.followUp ? "turn-follow-up" : "architecture"))))
+        return null;
+      return { store: "completion-report", ref: c.origin.failureAnchor.ref,
+        digest: createHash("sha256").update(JSON.stringify({ original: op,
+          inventory: s.inventory, source: head, fulfillment,
+          checkpoint: point.proofDigest })).digest("hex") };
+    }
+  }
+  if (s.escalation?.requiresTrustedApproval) return null;
   const assignmentFailure = await originalAssignmentFailure(job, s, c);
   if (assignmentFailure?.proof.kind === "nonconverging")
     return { store: "specialist-receipt", ref: assignmentFailure.ref,
