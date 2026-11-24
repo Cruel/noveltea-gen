@@ -48,7 +48,7 @@ export function parseRecoveryDiagnosticProposal(raw: string, bound: {
       !strategies.includes(v.strategy as DiagnosticStrategy) ||
       !bounded(v.diagnosis) || !bounded(v.uncertainty, 300) ||
       !(v.owner === null || bounded(v.owner, 120)) ||
-      !(v.scopeRef === null || bounded(v.scopeRef, 160)) ||
+      !(v.scopeRef === null || bounded(v.scopeRef, 1024)) ||
       !Array.isArray(v.prerequisites) || v.prerequisites.length > 5 ||
       !v.prerequisites.every((p: unknown) => bounded(p, 160)))
     throw Error("Diagnostic proposal failed its typed, source-bound contract");

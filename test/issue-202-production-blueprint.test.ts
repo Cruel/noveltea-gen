@@ -226,7 +226,7 @@ function promptText(messages: readonly unknown[]): string {
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
 function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-pass" | "continue" | "repeat" = "productive",
-  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean; architectureRecovery?: boolean; architectureStall?: boolean; parentPlan?: ReturnType<typeof planWholeStory> }): Provider {
+  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean; architectureRecovery?: boolean; architectureStall?: boolean; postcommitRepair?: boolean; parentPlan?: ReturnType<typeof planWholeStory> }): Provider {
   let reviewerRound = 0;
   let reviewerCrashed = false;
   let malformedDiagnosticSent = false;
@@ -234,6 +234,8 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
   let writerRound = 0;
   let protocolRepaired = false;
   let architectureDraftRound = 0;
+  let postcommitNegative = false;
+  const postcommitQuote = "The archived roster establishes the entry sequence before the witness is asked to testify.";
   const improvements = [
     "The signed gate entry has an independently dated ledger counterfoil.",
     "The guard roster identifies the exact service entrance and time window.",
@@ -341,10 +343,24 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
         const user = ctx.messages.findLast(m => m.role === "user")!;
         const raw = typeof user.content === "string" ? user.content : user.content.filter(c => c.type === "text").map(c => c.text).join("");
         const packet = JSON.parse(raw.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
-        content = asText(JSON.stringify({sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
-          evidence: packet.items.map((item: any) => ({commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
-            path: item.assurance.changedPaths[0], line: 1, explanation: "The verified draft fulfills the bounded Architecture assignment."}))}));
+        const item = packet.items[0]!;
+        const fail = format.postcommitRepair && !postcommitNegative;
+        if (fail) postcommitNegative = true;
+        const path = fail || format.postcommitRepair ? archPath : item.assurance.changedPaths[0];
+        const ref = {commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1};
+        content = asText(JSON.stringify({sourceDigest: packet.sourceDigest, verdict: fail ? "fail" : "pass",
+          findings: fail ? [{...ref, kind: "missing-requirement", message: "The source needs one explicit entry-sequence statement.",
+            requiredCorrection: postcommitQuote, affectedPaths: [path]}] : [],
+          evidence: fail ? [] : [{...ref, explanation: "The verified draft fulfills the bounded Architecture assignment."}],
+          ...(format.postcommitRepair && !fail ? {progressDiagnosis: {status: "material", reason: "The entry sequence is explicitly stated.",
+            evidence: {path, quote: postcommitQuote, change: "added"}}} : {})}));
       }
+    } else if (format?.postcommitRepair && prompt.includes("Architecture repair is prose-only")) {
+      if (lastRole !== "toolResult") {
+        content = [{type: "toolCall", id: "postcommit-edit-" + randomUUID(), name: "edit", arguments: {
+          path: archPath, edits: [{oldText: improvements[2]!, newText: improvements[2]! + "\n" + postcommitQuote}]
+        }}]; reason = "toolUse";
+      } else content = asText("Clarified the explicit entry sequence without changing metadata.");
     } else if (needRead) { content = readCalls(); reason = "toolUse"; }
     else if (format?.architectureRecovery && prompt.includes("RESPONSE-CONTRACT CORRECTION ONLY (architecture.milestone-order.v1)")) {
       assert.deepEqual([...active], [], "format repair has no tools");
@@ -1123,9 +1139,10 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     "canonical draft must receive an independent source-reading early review");
 
     // Actual Generation parent, with current-format Turn and real sandbox.
-    for (const scenario of ["productive", "canonical-stall", "blueprint-replacement"] as const) {
+    for (const scenario of ["productive", "canonical-stall", "blueprint-replacement", "postcommit-repair"] as const) {
       const stalled = scenario === "canonical-stall";
       const replacement = scenario === "blueprint-replacement";
+      const postcommitRepair = scenario === "postcommit-repair";
       const parentId = randomUUID();
       parentJobIds.push(parentId);
       const parentDb = new DatabaseSync(join(app, "studio.sqlite"));
@@ -1137,7 +1154,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       const calls: Call[] = [];
       const runtime = await ModelRuntime.create({modelsPath: null, refreshOnCreate: false});
       runtime.registerNativeProvider(scripted(calls, replacement ? "replace-pass" : "productive", false, {
-        parentPlan: turn, architectureRecovery: true, architectureStall: stalled,
+        parentPlan: turn, architectureRecovery: true, architectureStall: stalled, postcommitRepair,
       }));
       await runtime.refresh({allowNetwork: false});
       await configurePiPolicy(parentJob, {version: 1, profile: {provider: model.provider, model: model.id},
@@ -1163,6 +1180,36 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
           const pin = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture-blueprints", "plan-1-approved.json"), "utf8"));
           assert.ok(pin.reviewerSessionId);
           assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT, READ-ONLY CAUSAL BLUEPRINT DIAGNOSTIC REVIEW.") && c.lastRole === "toolResult").length, 1);
+        } else if (postcommitRepair) {
+          const failed = await invoke({interruptBefore: ["assess_recovery"]});
+          started = true;
+          const original = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture.json"), "utf8"));
+          assert.equal(failed.recoveryLifecycle.active?.origin.operation, "independent-review",
+            JSON.stringify({reason: failed.reason, lifecycle: failed.recoveryLifecycle}));
+          const originalHead = git(parentJob.worktreeRoot, "rev-parse", "HEAD");
+          const before = readFileSync(join(parentJob.worktreeStoryRoot, "milestones/archive.md"), "utf8");
+          const selected = await invoke({interruptAfter: ["assess_recovery"]});
+          assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(selected.recoveryLifecycle));
+          saver.db.close();
+          saver = SqliteSaver.fromConnString(file);
+          graph = createGenerationGraph(saver, "server");
+          const finished = await invoke({interruptAfter: ["verify_committed_work"]});
+          const successor = git(parentJob.worktreeRoot, "rev-parse", "HEAD");
+          assert.notEqual(successor, originalHead);
+          assert.ok(finished.completedStages.some(e => e.stage === "architecture" && e.headSha === successor),
+            JSON.stringify({reason: finished.reason, lifecycle: finished.recoveryLifecycle}));
+          const repair = JSON.parse(readFileSync(join(parentJob.stateDir, "review-repairs", originalHead + ".json"), "utf8"));
+          assert.equal(repair.origin.sessionId, original.piSessionId);
+          assert.equal(repair.origin.workItem, "global-architecture");
+          assert.equal(repair.repairedCommitSha, successor);
+          assert.equal(repair.phase, "passed");
+          const after = readFileSync(join(parentJob.worktreeStoryRoot, "milestones/archive.md"), "utf8");
+          const {assertArchitectureProseOnly} = await import("../src/architecture-record-path.js");
+          assertArchitectureProseOnly(before, after);
+          assert.match(after, /archived roster establishes the entry sequence/);
+          assert.throws(() => assertArchitectureProseOnly(before, after.replace("decisions: []", "decisions: [invented]")), /metadata/);
+          const next = await invoke({interruptBefore: ["specialist_dispatch"]});
+          assert.equal(next.active?.stage, "foundations", JSON.stringify({reason: next.reason, active: next.active}));
         } else if (!stalled) {
           const cuts = ["blueprint-draft", "blueprint-negative", "blueprint-pin", "initial", "admitted", "corrected", "accepted", "committed"] as const;
           let writer: string | undefined;

@@ -575,16 +575,21 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
   return !!original && isDeepStrictEqual(original, d.evidence.at(-1)) &&
     isDeepStrictEqual(d.evidence.slice(0, -1), c.evidence);
 }
-/** A diagnostic may only select this bounded, existing Foundation writer
+/** A diagnostic may only select an admitted, existing bounded writer
  * adapter. Owner, scope, source, defect and actual prerequisites are checked
  * independently; prose is never a writer grant. */
-function foundationDiagnosticDecision(c: RecoveryCase,
+function diagnosticWriterSupported(assignment: string | undefined | null) {
+  return ["foundation", "architecture", "foundations"].includes(assignment ?? "") ||
+    /^(event|composition|interactive|choice|puzzle):milestone\.[a-z][a-z0-9-]*$/.test(assignment ?? "") ||
+    /^focus:[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(assignment ?? "");
+}
+function assignmentDiagnosticDecision(c: RecoveryCase,
   diagnostic: RecoveryDecision, proposal: RecoveryDiagnosticProposal): RecoveryDecision | null {
   const proof = diagnostic.evidence.at(-1);
-  if (c.origin.operation !== "specialist-result" || c.origin.assignmentId !== "foundation" ||
+  if (c.origin.operation !== "specialist-result" || !diagnosticWriterSupported(c.origin.assignmentId) ||
       c.kind !== "semantic" || c.observation !== "returned-failure" ||
       proposal.strategy !== "local-repair" || proposal.category !== "defect" ||
-      proposal.owner !== "foundation" || proposal.scopeRef !== proposal.sourceRef ||
+      proposal.owner !== c.origin.assignmentId || proposal.scopeRef !== proposal.sourceRef ||
       proposal.prerequisites.length || !proof?.digest || proof.store !== "specialist-receipt" ||
       proposal.sourceRef !== [proof.store, proof.ref, proof.digest].join(":") ||
       !isDeepStrictEqual(diagnostic.evidence.slice(0, -1), c.evidence) ||
@@ -593,19 +598,19 @@ function foundationDiagnosticDecision(c: RecoveryCase,
   return { ...base(c, proof), action: "known-correction", adapter: "assignment-diagnostic", receipt: proof };
 }
 
-function foundationDiagnosticDefects(failure: { defects: readonly import("./assignment-metadata-recovery.js").AssignmentDefect[] }) {
+function assignmentDiagnosticDefects(failure: { defects: readonly import("./assignment-metadata-recovery.js").AssignmentDefect[] }) {
   return failure.defects.length > 0 && failure.defects.every(d =>
-    d.path.startsWith("creative-direction/") &&
+    /^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(d.path) &&
     (d.kind === "metadata" && ["schema", "yaml", "frontmatter"].includes(d.code) ||
      d.kind === "provenance" && d.code === "missing-author-provenance"));
 }
 
 /** A pause retains the original diagnostic decision's receipt, not a new
  * writer allowance. The actual proposal/attempt is re-read on resumption. */
-export function foundationDiagnosticDecisionForLifecycle(l: RecoveryLifecycle): RecoveryDecision | null {
+export function assignmentDiagnosticDecisionForLifecycle(l: RecoveryLifecycle): RecoveryDecision | null {
   const d = l.decision;
   if (l.active?.origin.operation !== "specialist-result" ||
-      l.active.origin.assignmentId !== "foundation" || l.attempt?.purpose !== "diagnosis") return null;
+      !diagnosticWriterSupported(l.active.origin.assignmentId) || l.attempt?.purpose !== "diagnosis") return null;
   if (d?.action === "known-correction" && d.adapter === "assignment-diagnostic") return d;
   if (d?.action === "pause" && d.resumeRef?.store === "specialist-receipt" &&
       isDeepStrictEqual(d.resumeRef, d.evidence.at(-1)))
@@ -616,13 +621,13 @@ export function foundationDiagnosticDecisionForLifecycle(l: RecoveryLifecycle): 
 
 /** Re-read the exact diagnosis, not its graph projection, and reauthenticate
  * the original terminal and any already admitted successor. */
-export async function authenticateFoundationDiagnosticDecision(job: JobStartResult,
+export async function authenticateAssignmentDiagnosticDecision(job: JobStartResult,
   c: RecoveryCase, source: GenerationOperationRecovery, d: RecoveryDecision,
   expectedAttempt?: RecoveryAttempt | null, historicalHead?: string) {
   if (d.action !== "known-correction" || d.adapter !== "assignment-diagnostic" ||
       c.origin.jobId !== job.jobId || c.origin.jobThreadId !== job.threadId ||
       source.source.jobId !== job.jobId || source.source.threadId !== c.origin.graphThreadId ||
-      source.operation !== "specialist-result" || source.evidence.assignmentId !== "foundation" ||
+      source.operation !== "specialist-result" || source.evidence.assignmentId !== c.origin.assignmentId || !diagnosticWriterSupported(c.origin.assignmentId) ||
       source.outcome !== "returned-failure" || source.source.headSha !== c.origin.sourceHeadSha ||
       source.source.turnDigest !== c.origin.turnDigest || source.source.planVersion !== c.origin.planVersion ||
       source.evidence.assignmentFailure?.proof.kind !== "nonconverging" ||
@@ -631,34 +636,60 @@ export async function authenticateFoundationDiagnosticDecision(job: JobStartResu
     return null;
   const target = diagnosticCaseForDecision(c, d);
   const proposal = await inspectOriginalUnknownDiagnosis(job, target);
-  if (!("strategy" in proposal) || !isDeepStrictEqual(d, foundationDiagnosticDecision(c, d, proposal))) return null;
+  if (!("strategy" in proposal) || !isDeepStrictEqual(d, assignmentDiagnosticDecision(c, d, proposal))) return null;
   const attempt = await inspectDiagnosticAttempt(job, target, c.id);
   if (attempt.phase !== "settled" || attempt.mode !== "read-only" ||
       (expectedAttempt !== undefined && !isDeepStrictEqual(attempt, expectedAttempt))) return null;
   const authorization = { terminalDigest: d.receipt.digest!,
     decisionDigest: pendingDigest({ decision: d, attempt, proposal }), advice: proposal.diagnosis };
-  const terminal = await inspectFoundationDiagnosticFailure(job, c.origin.sourceHeadSha,
-    source.evidence.assignmentFailure.proof, authorization, historicalHead);
-  if (!terminal || terminal.ref !== d.receipt.ref || !foundationDiagnosticDefects(terminal)) return null;
+  const assignment = c.origin.assignmentId!;
+  const terminal = assignment === "foundation"
+    ? await inspectFoundationDiagnosticFailure(job, c.origin.sourceHeadSha,
+        source.evidence.assignmentFailure.proof, authorization, historicalHead)
+    : await (async () => {
+      const [stage, milestone] = assignment.split(":");
+      const head = c.origin.sourceHeadSha;
+      switch (stage) {
+        case "architecture": return (await import("./architecture.js")).inspectArchitectureFailure(job, head, authorization, historicalHead);
+        case "foundations": return (await import("./character-world.js")).inspectCharacterWorldFailure(job, head, authorization, historicalHead);
+        case "event": return (await import("./event-work.js")).inspectEventFailure(job, milestone!, head, authorization, historicalHead);
+        case "composition": return (await import("./composition-work.js")).inspectCompositionFailure(job, milestone!, head, authorization, historicalHead);
+        case "focus": return (await import("./focused-work.js")).inspectFocusedFailure(job, milestone!, head, authorization, historicalHead);
+        case "choice": case "puzzle": case "interactive": {
+          const domain = source.evidence.interactiveDomain;
+          if (!domain || stage !== "interactive" && stage !== domain) return null;
+          return (await import("./interactive-work.js")).inspectInteractiveFailure(job, milestone!, domain, head, authorization, historicalHead);
+        }
+        default: return null;
+      }
+    })();
+  if (!terminal || !isDeepStrictEqual(terminal.proof, source.evidence.assignmentFailure.proof) ||
+      terminal.ref !== d.receipt.ref || !assignmentDiagnosticDefects(terminal)) return null;
   return { terminal, authorization };
 }
 
-export async function authenticateFoundationDiagnosticDischarge(job: JobStartResult, c: RecoveryCase,
+export async function authenticateAssignmentDiagnosticDischarge(job: JobStartResult, c: RecoveryCase,
   source: GenerationOperationRecovery, correction: RecoveryEvidence, head: string): Promise<boolean> {
-  if (correction.store !== "specialist-receipt" || c.origin.assignmentId !== "foundation" ||
+  if (correction.store !== "specialist-receipt" || !diagnosticWriterSupported(c.origin.assignmentId) ||
       !source.evidence.assignmentFailure || head === c.origin.sourceHeadSha) return false;
   const proof = { store: "specialist-receipt" as const, ref: correction.ref,
     digest: source.evidence.assignmentFailure.proof.receiptDigest };
   const d = { ...base(c, proof), action: "known-correction" as const, adapter: "assignment-diagnostic" as const, receipt: proof };
-  const original = await authenticateFoundationDiagnosticDecision(job, c, source, d, undefined, head);
+  const original = await authenticateAssignmentDiagnosticDecision(job, c, source, d, undefined, head);
   if (!original || correction.digest !== original.authorization.decisionDigest ||
       original.terminal.invocationProof?.ordinal !== original.terminal.proof.ordinal + 1) return false;
   const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
-    p.workItem === "foundation" && p.commitSha === head && p.parentSha === c.origin.sourceHeadSha &&
-    p.validation.status === "passed" && p.semanticReview === "passed" &&
-    p.assurance?.turnDigest === c.origin.turnDigest && p.planVersion === c.origin.planVersion);
+    p.workItem === ("workItem" in original.terminal ? original.terminal.workItem : "foundation") && p.commitSha === head && p.parentSha === c.origin.sourceHeadSha &&
+    p.validation.status === "passed" && ["passed", "not-required"].includes(p.semanticReview) &&
+    p.assurance?.turnDigest === c.origin.turnDigest &&
+    p.planVersion === (c.origin.assignmentId === "architecture" ? c.origin.planVersion ?? 1 : c.origin.planVersion));
   if (!point?.assurance) return false;
   const reviewed = await inspectCheckpointReview(job, point);
+  // Preserve the existing controller's Review selection: no model verdict
+  // can waive a mandatory Review, and a native-only assignment needs no
+  // invented independent reviewer to certify its original bounded correction.
+  if (point.assurance.reviewSelection.status === "not-required")
+    return reviewed?.status === "not-required";
   if (reviewed?.status !== "passed" || reviewed.result?.status !== "passed" ||
       reviewed.result.reviewer !== "independent-pi-assignment-review") return false;
   const cycle = await inspectPostcommitReviewCycle(job, head, point.assurance.assignmentDigest);
@@ -672,11 +703,11 @@ export async function authenticateFoundationDiagnosticDischarge(job: JobStartRes
  * controller admission and the actual Pi transcript independently agree. */
 export async function authorizeOperationDiagnosticStrategy(job: JobStartResult, s: State, c: RecoveryCase,
   diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>, proposal: RecoveryDiagnosticProposal) {
-  const local = foundationDiagnosticDecision(c, diagnostic, proposal);
+  const local = assignmentDiagnosticDecision(c, diagnostic, proposal);
   if (local) {
     const original = await originalAssignmentFailure(job, s, c);
     if (!original || original.proof.kind !== "nonconverging" ||
-        !foundationDiagnosticDefects(original) || original.ref !== local.evidence.at(-1)?.ref ||
+        !assignmentDiagnosticDefects(original) || original.ref !== local.evidence.at(-1)?.ref ||
         original.proof.receiptDigest !== local.evidence.at(-1)?.digest) return null;
     return local;
   }
@@ -956,9 +987,9 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           original: packet.existingFindings, assignmentDefects: originalDraft.defects,
           observation: "Repeated source-bound native/provenance correction did not converge; draft remains uncommitted.",
         };
-        if (c.origin.assignmentId === "foundation" && c.origin.operation === "specialist-result" &&
-            foundationDiagnosticDefects(originalDraft))
-          packet.availableAdapters = ["local-repair: owner=foundation, scopeRef=exact sourceRef; only original native defects, no other owner or new prerequisites"];
+        if (diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
+            assignmentDiagnosticDefects(originalDraft))
+          packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef=exact sourceRef; only original native defects, no other owner or new prerequisites"];
       }
       await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider,
         s.request.model ?? policy.profile.model, packet);

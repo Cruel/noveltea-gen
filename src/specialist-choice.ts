@@ -54,7 +54,8 @@ export class SpecialistChoiceRequiredError extends Error {
 }
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 /** Deterministic, safe work-item identity for focused record IDs containing a dot. */
-export const focusedChoiceWorkItem = (target: string) => "focus-" + sha(target).slice(0, 24);
+export const focusedChoiceWorkItem = (target: string, workItemId = "focus:" + target) =>
+  "focus-" + sha(workItemId === "focus:" + target ? target : workItemId).slice(0, 24);
 const ID = /^[a-z][a-z0-9]*(?:[a-z0-9-]*[a-z0-9])?$/;
 // The shared schema bounds every question/answer string by characters, not
 // UTF-8 bytes. Up to four detailed options, context and a 4,000-character
@@ -192,6 +193,7 @@ async function readSpecialistState(job: JobStartResult, path: string) {
     jobId?: string; threadId?: string; workItemId?: string;
     phase?: string; authorChoiceId?: string; choiceWorkItem?: string;
     piSessionFile?: string; piSessionId?: string;
+    target?: string;
     units?: Array<{ id?: string; phase?: string; authorChoiceId?: string }>;
   };
   if (state.jobId !== job.jobId || state.threadId && state.threadId !== job.threadId)
@@ -201,11 +203,10 @@ async function readSpecialistState(job: JobStartResult, path: string) {
 /** Both choice issuance and owner-facing lookup use this exact trusted inventory. */
 async function focusedChoiceStates(job: JobStartResult) {
   const dir = join(job.stateDir, "focused-items");
-  if (!existsSync(dir)) return [];
-  const names = (await readdir(dir)).filter(name =>
+  const names = (existsSync(dir) ? await readdir(dir) : []).filter(name =>
     /^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.json$/.test(name));
   if (names.length > 256) throw Error("Focused choice inventory exceeds bounded limit.");
-  return Promise.all(names.map(async name => {
+  const states = await Promise.all(names.map(async name => {
     const target = name.slice(0, -5);
     const state = await readSpecialistState(job, join(dir, name));
     if (state.workItemId !== "focus:" + target ||
@@ -214,6 +215,26 @@ async function focusedChoiceStates(job: JobStartResult) {
       throw Error("Focused choice inventory differs from its bound record target.");
     return { target, state };
   }));
+  const supportDir = join(job.stateDir, "dependency-items");
+  if (!existsSync(supportDir)) return states;
+  const supportNames = (await readdir(supportDir)).filter(name =>
+    /^dependency:[1-9][0-9]*:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.json$/.test(name));
+  if (supportNames.length > 256) throw Error("Supporting choice inventory exceeds bounded limit.");
+  for (const name of supportNames) {
+    const state = await readSpecialistState(job, join(supportDir, name));
+    if (state.phase !== "awaiting-author" && !(state.phase === "writing" && state.choiceWorkItem)) continue;
+    const workItemId = name.slice(0, -5);
+    const target = workItemId.split(":")[2]!;
+    const plan = await (await import("./dependency-state.js")).inspectDependencyPlan(job);
+    const entry = plan?.entries.find(e => e.amendment?.assignment.id === workItemId);
+    if (!entry?.amendment || entry.phase !== "authorized" || entry.fixture ||
+        entry.amendment.assignment.targets[0] !== target || state.target !== target ||
+        state.workItemId !== workItemId ||
+        state.choiceWorkItem !== focusedChoiceWorkItem(target, workItemId))
+      throw Error("Supporting choice inventory differs from its admitted dependency assignment.");
+    states.push({ target, state });
+  }
+  return states;
 }
 function proposalDigest(r: SpecialistChoiceReceipt) {
   return sha(JSON.stringify({ jobId: r.jobId, workItem: r.workItem, headSha: r.headSha,

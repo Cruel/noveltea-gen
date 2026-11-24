@@ -656,6 +656,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
     let saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
     let originalNegative = false, repairYield = false, supportWrites = 0, originalReviews = 0;
     let writerYield = false, originalWrites = 0, localCorrections = 0;
+    let supportQuestion = false;
     let lastPrompt = "", step = 0;
     try {
       const { runtime, calls } = await scriptedStoryRuntime((index, context) => {
@@ -715,6 +716,11 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
             ...(path === eventPath ? ["nt-catalog/references/progression.md"] : [])].map(p => "skill://" + p));
           if (phase === 1) {
             if (scenario === "support-no-write" && support) return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [] });
+            if (support && !supportQuestion) {
+              supportQuestion = true;
+              return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [],
+                authorDecisionRequest: { kind: "free-text", question: "Which motive should Ada disclose to protect the witness?" } });
+            }
             if (scenario === "writer" && !support && !writerYield) {
               writerYield = true;
               return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-prerequisite", name: "report_dependency",
@@ -786,8 +792,37 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
       const originalHead = git(job.worktreeRoot, "rev-parse", "HEAD");
       const receiptPath = join(job.stateDir, "focused-items", event + ".json");
       const originalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      let supportInput: Parameters<ReturnType<typeof createGenerationGraph>["invoke"]>[0] = null;
+      if (scenario !== "support-no-write") {
+        const { pendingGenerationQuestion, generationQuestionResume } = await import("../src/generation-author-question.js");
+        const { answerSpecialistChoice, focusedChoiceWorkItem } = await import("../src/specialist-choice.js");
+        await invoke(null, { ...config, interruptAfter: ["dependency_amendment"] });
+        const graph = createGenerationGraph(saver, "cli");
+        const snapshot = await graph.getState(config);
+        const pending = await pendingGenerationQuestion(job, saver, snapshot, config.configurable.thread_id, "user:cli");
+        assert.ok(pending, JSON.stringify({ reason: snapshot.values.reason, supportQuestion }));
+        const entry = (await inspectDependencyPlan(job))!.entries[0]!;
+        assert.equal(pending.choice.assignment?.identity.assignmentId, entry.amendment!.assignment.id);
+        assert.equal(pending.choice.workItem, focusedChoiceWorkItem(character, entry.amendment!.assignment.id));
+        assert.notEqual(pending.choice.workItem, focusedChoiceWorkItem(character));
+        assert.equal(supportWrites, 0);
+        assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), originalHead);
+        await assert.rejects(pendingGenerationQuestion(job, saver, {
+          ...snapshot, values: { ...snapshot.values, planVersion: 999 },
+        }, config.configurable.thread_id, "user:cli"), /original assignment|dependency admission/);
+        const session = pending.choice.sessionId;
+        await answerSpecialistChoice(job, pending.choice.id, pending.choice.proposalSha256,
+          { kind: "custom", text: "Protect the witness from false accusation.", note: "" }, "user:cli");
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+        const reopened = await pendingGenerationQuestion(job, saver,
+          await createGenerationGraph(saver, "cli").getState(config), config.configurable.thread_id, "user:cli");
+        assert.ok(reopened);
+        assert.equal(reopened.choice.sessionId, session);
+        supportInput = generationQuestionResume(reopened);
+      }
       if (scenario === "writer") {
-        await crashAt(null, "support commit before original child reentry", (ns, writes) =>
+        await crashAt(supportInput, "support commit before original child reentry", (ns, writes) =>
           ns.includes("assignment-") && writes.some(([channel, value]) => channel === "submission" &&
             (value as { status?: string; receiptRef?: string } | undefined)?.status === "focused-committed" &&
             (value as { receiptRef?: string }).receiptRef?.startsWith("dependency:") === true),
@@ -796,7 +831,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(originalWrites, 0);
         assert.equal(git(job.worktreeRoot, "rev-list", "--count", originalHead + "..HEAD"), "1");
       }
-      const supported = await invoke(null, { ...config, interruptAfter: ["dependency_amendment"] });
+      const supported = await invoke(scenario === "writer" ? null : supportInput, { ...config, interruptAfter: ["dependency_amendment"] });
       if (scenario === "support-no-write") {
         assert.equal(supportWrites, 0);
         assert.equal(originalReviews, 0);

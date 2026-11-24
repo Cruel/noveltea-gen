@@ -333,6 +333,7 @@ export async function verifyArchitectureDraftReviewPin(
   blueprint?: CausalBlueprint,
   committedSourceHead?: string,
   writerRound?: string,
+  historicalCommit?: string,
 ): Promise<void> {
   const cycleId = reviewCycleId(cycleScope(job, snapshot, plan, provider, model, paths, task, blueprint, committedSourceHead));
   if (
@@ -354,8 +355,18 @@ export async function verifyArchitectureDraftReviewPin(
   )
     throw Error("Architecture precommit review admission has wrong session or authorization.");
   assertReviewCycleSession(writer, admitted.reviewer);
-  const current = await sourceDraft(job, paths, !!committedSourceHead);
-  const requirements = {foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
+  const historicalFile = (commit: string, path: string) => execFileSync("git", ["show",
+    commit + ":" + (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path], {
+      cwd: job.worktreeRoot, encoding: "utf8", maxBuffer: 32 * 1024 * 1024,
+    });
+  if (historicalCommit && (!committedSourceHead || !/^[a-f0-9]{40}$/.test(historicalCommit)))
+    throw Error("Historical Architecture Review requires its exact committed source.");
+  const current = historicalCommit
+    ? Object.fromEntries(paths.map(path => [path, historicalFile(historicalCommit, path)]))
+    : await sourceDraft(job, paths, !!committedSourceHead);
+  const requirements = {foundation: historicalCommit
+    ? historicalFile(committedSourceHead!, "creative-direction/foundation.md")
+    : await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
     contract: JSON.stringify(plan.contract), task, blueprint: JSON.stringify(blueprint ?? null)};
   const history: ArchitectureDraftRound[] = [];
   let prior = "";

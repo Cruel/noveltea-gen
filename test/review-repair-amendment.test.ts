@@ -258,3 +258,31 @@ test("Foundation-only exception retains exact Creative Direction path without au
   assert.throws(() => deriveReviewRepairAmendment({ assurance: check, review,
     original: foundation, planVersion: 1, originWorkItem: "focus:foundation" }), /protected/);
 });
+
+
+test("Architecture Review repair owns original prose only, never another lane or metadata", async () => {
+  const { assertArchitectureProseOnly } = await import("../src/architecture-record-path.js");
+  const path = "milestones/archive.md";
+  const architecture: TurnAssignmentEvidence = { ...original, id: "architecture",
+    specialist: "nt-story-architecture", targets: ["milestone.archive"],
+    authority: { recordTypes: ["milestone"], existingPaths: [path], mayCreate: true } };
+  const bound = { ...assurance, workItem: "global-architecture", assignmentId: architecture.id,
+    assignmentDigest: hash(architecture), changedPaths: [path], changedRecordTypes: ["milestone"] };
+  const negative: IndependentReviewResult = { ...result,
+    source: { ...result.source, assignmentId: bound.assignmentId, assignmentDigest: bound.assignmentDigest },
+    findings: [{ ...result.findings[0]!, path, affectedPaths: [path, "creative-direction/foundation.md"],
+      message: "Explain the entry sequence.", requiredCorrection: "Clarify the established entry sequence in prose." }] };
+  const request = { assurance: bound, review: negative, original: architecture,
+    planVersion: 1, originWorkItem: "global-architecture" };
+  const repair = deriveReviewRepairAmendment(request);
+  assert.deepEqual(repair.assignment.authority.existingPaths, [path]);
+  assert.equal(repair.assignment.authority.mayCreate, false);
+  assert.deepEqual(repair.readOnlyDependencies, ["creative-direction/foundation.md"]);
+  assert.throws(() => deriveReviewRepairAmendment({ ...request, review: { ...negative,
+    findings: [{ ...negative.findings[0]!, path: "milestones/other.md",
+      affectedPaths: ["milestones/other.md"] }] } }), /writable|source|path/);
+  const before = "---\nid: milestone.archive\nstatus: planned\n---\nOld narrative.\n";
+  assertArchitectureProseOnly(before, before.replace("Old narrative.", "Clarified narrative."));
+  assert.throws(() => assertArchitectureProseOnly(before, before.replace("planned", "complete")), /metadata/);
+  assert.throws(() => assertArchitectureProseOnly(before, before.replace("milestone.archive", "milestone.other")), /metadata/);
+});

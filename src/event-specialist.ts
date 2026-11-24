@@ -10,7 +10,7 @@ import { promptStorySpecialist } from "./story-interruption.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { parseEventManifest } from "./event-manifest.js";
-import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { createHash } from "node:crypto";
 import { readJobControl } from "./job-control.js";
 import { StoryCancelledError } from "./story-interruption.js";
@@ -468,7 +468,7 @@ export function eventInvocationDirectory(job: JobStartResult, workItem: string, 
 export async function authorEventCluster(
   job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, modelId: string, onSession: (file: string, id: string) => Promise<void>,
-  verifyDraft: (evidence: EventEvidence) => Promise<string[]>,
+  verifyDraft: (evidence: EventEvidence) => Promise<(string | AssignmentDefect)[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
   resume: SpecialistChoiceReceipt | undefined, reroutedFrom: string | undefined, round: AssignmentRoundCommand,
@@ -574,7 +574,7 @@ export async function authorEventCluster(
           throw Error("Event specialist did not author canonical Event Markdown with an editing tool.");
         const diagnostics = await verifyDraft(evidence);
         if (!diagnostics.length) accepted = evidence;
-        return diagnostics.map(detail => ({ kind: "semantic" as const, path: assignment.milestoneId,
+        return diagnostics.map(detail => typeof detail !== "string" ? detail : ({ kind: "semantic" as const, path: assignment.milestoneId,
           code: createHash("sha256").update(detail).digest("hex"), detail }));
       },
     }, round);

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 /**
  * A receipt adapter for the original assignment writer, not a scheduler or
  * independent RecoveryLifecycle. Format correction uses the existing protocol
@@ -103,6 +104,30 @@ export async function assignmentDraftEffect(job: JobStartResult, head: string): 
   }
   return paths.length ? digest(await Promise.all(paths.sort().map(async path =>
     [path, hash(await readFile(join(job.worktreeStoryRoot, path)))]))) : null;
+}
+
+/** Authenticate the same path/byte digest after the original writer publishes.
+ * Domain receipt readers still verify their own source, plan and commit proof. */
+export function assignmentCommittedEffect(job: JobStartResult, sourceHead: string, head: string,
+    paths: readonly string[], expected: string): string {
+  const env = { ...process.env };
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[k];
+  const git = (...args: string[]) => execFileSync("git", args, {
+    cwd: job.worktreeRoot, env, maxBuffer: 16 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const sorted = [...paths].sort();
+  if (!/^[a-f0-9]{40}$/.test(head) || !/^[a-f0-9]{40}$/.test(sourceHead) ||
+      !sorted.length || new Set(sorted).size !== sorted.length ||
+      sorted.some(path => !/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(path)) ||
+      git("rev-parse", head + "^").toString().trim() !== sourceHead ||
+      !isDeepStrictEqual(git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", head)
+        .toString().split("\0").filter(Boolean).sort(), sorted.map(path => prefix + path)))
+    throw new ProtocolIntegrityBlockedError("Diagnostic successor Git source or path inventory changed");
+  const effect = digest(sorted.map(path => [path, hash(git("show", head + ":" + prefix + path))]));
+  if (effect !== expected) throw new ProtocolIntegrityBlockedError("Diagnostic successor committed bytes changed");
+  return effect;
 }
 
 /** The validator's prose can quote arbitrary authored text. Only known

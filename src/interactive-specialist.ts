@@ -7,7 +7,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { lastSpecialistManifest } from "./specialist-manifest.js";
-import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof, type AssignmentDefect } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
@@ -193,7 +193,7 @@ export async function authorInteractive(
   modelId: string,
   thinking: "low" | "medium" | "high" | undefined,
   onSession: (file: string, id: string) => Promise<void>,
-  verifyDraft: (evidence: InteractiveEvidence) => Promise<string[]>,
+  verifyDraft: (evidence: InteractiveEvidence) => Promise<(string | AssignmentDefect)[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
   round: AssignmentRoundCommand,
@@ -307,7 +307,7 @@ export async function authorInteractive(
           obligations: data.obligations, skillReads, piSessionFile: sessionFile };
         const diagnostics = await verifyDraft(evidence);
         if (!diagnostics.length) accepted = evidence;
-        return diagnostics.map(detail => ({
+        return diagnostics.map(detail => typeof detail !== "string" ? detail : ({
           kind: "semantic" as const, path: assignment.milestoneId,
           code: createHash("sha256").update(detail).digest("hex"), detail,
         }));

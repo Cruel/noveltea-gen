@@ -1,3 +1,4 @@
+import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } from "./assignment-metadata-recovery.js";
 import { createDependencyTool } from "./dependency-tool.js";
 import { authorizedDependency, dependencyDigest, inspectDependencyPlan } from "./dependency-state.js";
 import { parseDependencyReport, type DependencyReport } from "./dependency-amendments.js";
@@ -140,16 +141,33 @@ function focusedInvocationOptions(job: JobStartResult, receipt: Receipt) {
     sourceDigest: receipt.invocationSource, sessionId: receipt.piSessionId,
     sessionFile: receipt.piSessionFile, sessionRoots: [root], responseKind: "manifest-or-choice" as const };
 }
-export async function inspectFocusedFailure(job: JobStartResult, target: string, sourceHead: string) {
+export async function inspectFocusedFailure(job: JobStartResult, target: string, sourceHead: string,
+    diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
   if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
   const file = receiptPath(job, { workItemId: "focus:" + target, target });
   if (!existsSync(file)) return null;
   const r = JSON.parse(await readFile(file, "utf8")) as Receipt;
   if (r.jobId !== job.jobId || r.workItemId !== "focus:" + target || r.target !== target ||
-      r.expectedHead !== sourceHead || r.phase !== "writing" || r.worker !== "pi") return null;
+      r.expectedHead !== sourceHead || (!diagnostic ? r.phase !== "writing" : !["writing", "authored", "committed"].includes(r.phase)) || r.worker !== "pi" || !r.assignmentKey) return null;
   const options = focusedInvocationOptions(job, r);
-  const terminal = await inspectAssignmentFailure({ ...options, effect: await assignmentDraftEffect(job, sourceHead) });
-  return terminal && { ...terminal, ref: options.directory + "/terminal.json" };
+  const head = historicalHead ?? git(job, "rev-parse", "HEAD").trim();
+  let effect: string | null;
+  if (head === sourceHead && !historicalHead) effect = await assignmentDraftEffect(job, sourceHead);
+  else {
+    if (!diagnostic || !r.sha256 || !r.invocationProof ||
+        !["authored", "committed"].includes(r.phase) ||
+        historicalHead && (r.phase !== "committed" || r.commitSha !== head)) return null;
+    const trailers = git(job, "log", "-1", "--format=%B", head).split("\n");
+    if (!["NovelTea-Job: " + job.jobId, "NovelTea-Work-Item: " + r.workItemId,
+      "NovelTea-Plan-Version: " + r.planVersion, "NovelTea-Focused-Digest: " + r.sha256]
+      .every(line => trailers.includes(line))) throw Error("Original Focused diagnostic commit provenance changed");
+    effect = assignmentCommittedEffect(job, sourceHead, head, r.paths, r.sha256);
+    if (!historicalHead && !await inspectPendingFocusedCommit(job, target, sourceHead)) return null;
+    await verifySettledAssignment({ ...options, proof: r.invocationProof, effect, historical: !!historicalHead });
+  }
+  const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic });
+  return terminal && { ...terminal, ref: options.directory + "/terminal.json", workItem: r.workItemId,
+    assignmentKey: r.assignmentKey, invocationProof: r.invocationProof, sessionId: r.piSessionId! };
 }
 export async function inspectPendingFocusedInvocation(job: JobStartResult, target: string, workItemId = "focus:" + target) {
   if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
@@ -842,7 +860,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       if (!continuing && (receipt.phase === "writing" || receipt.phase === "authored"))
         throw new Error("Interrupted focused writer: inspect preserved session and Git worktree; do not automatically replay.");
       if (receipt.phase === "awaiting-author") {
-        if (!receipt.authorChoiceId || receipt.choiceWorkItem !== focusedChoiceWorkItem(receipt.target))
+        if (!receipt.authorChoiceId || receipt.choiceWorkItem !== focusedChoiceWorkItem(receipt.target, receipt.workItemId))
           throw Error("Focused author-choice receipt lacks its original specialist identity.");
         const choice = await inspectSpecialistChoice(job, receipt.authorChoiceId);
         if (choice.phase === "awaiting-author") throw new SpecialistChoiceRequiredError();
@@ -981,7 +999,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         if (answered) await completeSpecialistChoice(job, receipt.authorChoiceId!);
         receipt.piSessionFile = output.sessionFile;
         receipt.piSessionId = output.sessionId;
-        receipt.choiceWorkItem = focusedChoiceWorkItem(receipt.target);
+        receipt.choiceWorkItem = focusedChoiceWorkItem(receipt.target, receipt.workItemId);
         await save(file, receipt);
         const pending = await recordSpecialistChoice(job, receipt.choiceWorkItem, output.authorQuestion,
           output.sessionId, output.sessionFile);

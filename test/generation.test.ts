@@ -5603,10 +5603,12 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const needsCharacter of [false, true]) test("R14D Event native correction and negative Review recover in the original SQLite assignment" + (needsCharacter ? " with Character support" : ""), {
+for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
-  const f = setup("r14d-event-rounds" + (needsCharacter ? "-character" : ""));
+  const needsCharacter = mode === "support";
+  const diagnosis = mode === "diagnosis";
+  const f = setup("r14d-event-rounds-" + mode);
   f.env.NT_ARCHITECTURE_FIXTURE_CASE = "decision-choice";
   f.env.NT_INTERACTIVE_FIXTURE_CASE = "two-choices";
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
@@ -5699,6 +5701,34 @@ for (const needsCharacter of [false, true]) test("R14D Event native correction a
       const write = (content: string) => ({ content: [{ type: "toolCall" as const,
         id: "r14d-event-" + index, name: "write", arguments: { path, content } }], reason: "toolUse" as const });
       if (index === 5) return write(authored.replace("value: knows", "value: known"));
+      if (diagnosis && index >= 7) {
+        if (index === 7 || index === 9) return write(authored.replace("value: knows", "value: known") + "\nRepeated invalid metadata.\n");
+        if (index === 8 || index === 10 || index === 13) return { content: scriptedText(manifest), reason: "stop" };
+        if (index === 11) {
+          const raw = JSON.stringify(context.messages);
+          const signature = raw.match(/signature=([a-f0-9]{64})/)?.[1];
+          const sourceRef = raw.match(/sourceRef=([^;]+); category=/)?.[1];
+          assert.ok(signature && sourceRef);
+          return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+            category: "defect", diagnosis: "The Event knowledge condition must use the valid enum value knows.",
+            strategy: "local-repair", owner: "event:milestone.disclosure", scopeRef: sourceRef, prerequisites: [],
+            uncertainty: "The native validator must verify the exact original Event correction." }), reason: "stop" };
+        }
+        if (index === 12) return write(authored);
+        if (index === 14) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 15) {
+          const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+          const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+            .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+          assert.ok(prompt);
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
+              explanation: "Valid knowledge condition and exact bounded Event." }] }), reason: "stop" };
+        }
+        throw Error("Unexpected diagnostic Event call " + index);
+      }
       if (index === 6 || index === 8) return { content: scriptedText(manifest), reason: "stop" };
       if (index === 7) {
         assert.match(JSON.stringify(context.messages), /SOURCE-BOUND STORY CORRECTION/);
@@ -5783,6 +5813,33 @@ for (const needsCharacter of [false, true]) test("R14D Event native correction a
       saver.db.close();
       saver = SqliteSaver.fromConnString(paused.checkpointPath);
       graph = createGenerationGraph(saver, "cli");
+    }
+    if (diagnosis) {
+      const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+      assert.equal(failed.recoveryLifecycle.active?.origin.assignmentId, item.id, JSON.stringify({ reason: failed.reason, lifecycle: failed.recoveryLifecycle, calls: observed.length }));
+      assert.equal(observed.length, 11);
+      const original = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.equal(chosen.recoveryLifecycle.decision?.action, "diagnostic");
+      const admitted = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.equal(admitted.recoveryLifecycle.decision?.adapter, "assignment-diagnostic", JSON.stringify(admitted.recoveryLifecycle));
+      saver.db.close();
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      graph = createGenerationGraph(saver, "cli");
+      await crashAtSubmission("writer-round", 14, { interruptAfter: ["assess_recovery"] });
+      const passed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.ok(passed.recoveryLifecycle.discharged?.some(c => c.case.id === failed.recoveryLifecycle.active?.id),
+        JSON.stringify({ reason: passed.reason, lifecycle: passed.recoveryLifecycle, calls: observed.length }));
+      const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(receipt.sessionId, original.sessionId);
+      assert.equal(receipt.assignmentKey, original.assignmentKey);
+      assert.equal(receipt.invocationProof.ordinal, 3);
+      assert.equal(observed.length, 16);
+      assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+      const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+      assert.equal(next.active?.stage, "interactive");
+      assert.equal(observed.length, 16);
+      return;
     }
     await crashAtSubmission("writer-round", 9, { interruptBefore: ["assess_recovery"] });
     const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));

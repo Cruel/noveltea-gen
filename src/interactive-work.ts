@@ -1,3 +1,4 @@
+import { nativeMetadataDefects, assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } from "./assignment-metadata-recovery.js";
 import { execFileSync } from "./git-read-cache.js";
 import { commitOrigin, readRecoveryFork } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1204,18 +1205,38 @@ export async function inspectPendingInteractiveInvocation(job: JobStartResult, m
 }
 
 export async function inspectInteractiveFailure(job: JobStartResult, milestone: string,
-    domain: InteractiveDomain, sourceHead: string) {
-  const original = await inspectPendingInteractiveInvocation(job, milestone, domain, sourceHead);
-  if (!original || original.unit.phase !== "writing" || original.unit.beforeHead !== sourceHead ||
-      !original.unit.piSessionId || !original.unit.piSessionFile) return null;
+    domain: InteractiveDomain, sourceHead: string, diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
+  const original = await inspectInteractiveUnit(job, milestone, domain);
+  if (!original) return null;
   const { receipt, unit } = original;
-  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId!);
-  const terminal = await inspectAssignmentFailure({ directory,
-    sourceDigest: unit.invocation!.sourceDigest, sessionId: unit.piSessionId!,
-    sessionFile: unit.piSessionFile!, sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)],
-    effect: await interactiveEffect(job, sourceHead) });
+  if (receipt.worker !== "pi" || unit.beforeHead !== sourceHead || !unit.assignmentKey ||
+      !unit.invocation || !unit.piSessionId || !unit.piSessionFile ||
+      (!diagnostic ? unit.phase !== "writing" : !["writing", "authored", "committed"].includes(unit.phase))) return null;
+  const { baseline, assignment, sourceDigest } = unit.invocation;
+  if (await interactiveSourceDigest(job, receipt, unit, baseline, assignment) !== sourceDigest ||
+      await openSkillSnapshot(receipt.snapshot!.id) !== receipt.snapshot!.path)
+    throw Error("Original Interactive diagnostic source changed");
+  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId);
+  const options = { directory, sourceDigest, sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+    sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)] };
+  const head = historicalHead ?? git(job, "rev-parse", "HEAD");
+  let effect: string | null;
+  if (head === sourceHead && !historicalHead) {
+    if (!await inspectPendingInteractiveInvocation(job, milestone, domain, sourceHead)) return null;
+    effect = await interactiveEffect(job, sourceHead);
+  } else {
+    if (!diagnostic || !unit.paths || !unit.digest || !unit.invocationProof ||
+        !["authored", "committed"].includes(unit.phase) ||
+        historicalHead && (unit.phase !== "committed" || unit.commitSha !== head) ||
+        !historicalHead && dirty(job).length) return null;
+    verifyCommit(job, receipt, unit, sourceHead, head);
+    effect = assignmentCommittedEffect(job, sourceHead, head, unit.paths, unit.digest);
+    await verifySettledAssignment({ ...options, proof: unit.invocationProof, effect, historical: !!historicalHead });
+  }
+  const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic });
   return terminal && { ...terminal, ref: "interactive-invocations/" + receipt.workItemId + "/" +
-    domain + "/" + unit.piSessionId + "/terminal.json" };
+    domain + "/" + unit.piSessionId + "/terminal.json", workItem: unit.id,
+    assignmentKey: unit.assignmentKey, invocationProof: unit.invocationProof, sessionId: unit.piSessionId };
 }
 
 export async function runInteractiveWorkItem(input: InteractiveOptions) {
@@ -1666,8 +1687,13 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
               await assertSafeInteractiveRepair(job, before, validate);
               return feedback;
             }
-            if (report.diagnostics.length) return report.diagnostics.slice(0, 24).map(d =>
-              `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
+            if (report.diagnostics.length) {
+              if (report.diagnostics.every(d => ["schema", "yaml", "frontmatter"].includes(d.code) && paths.includes(d.path)))
+                return nativeMetadataDefects(checked, { jobId: job.jobId, baseSha: before,
+                  worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths });
+              return report.diagnostics.slice(0, 24).map(d =>
+                `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
+            }
             if (checked.status !== "passed") throw new Error("Canonical validator rejected interactive draft without diagnostics.");
             try {
               await checkOutput(job, baseline, report, assign, { ...unit, paths }, evidence.obligations);

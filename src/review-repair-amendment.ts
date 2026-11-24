@@ -3,6 +3,7 @@
  * Cross-domain source records are evidence to read, not additional targets.
  * Other-owner corrections use a separate authorized dependency amendment. */
 import { createHash } from "node:crypto";
+import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import type { CheckpointAssurance, IndependentReviewResult } from "./checkpoint-assurance.js";
 import type { TurnAssignmentEvidence, TurnEvidence } from "./turn-plan-evidence.js";
 
@@ -95,6 +96,8 @@ export function reviewNeedsDependency(
   const repairable = new Set(reviewRepairTargets(assurance.changedPaths, originWorkItem, eventMilestone));
   return review.findings.some(f =>
     !repairable.has(f.path) ||
+    (originWorkItem === "global-architecture" &&
+      /\b(?:protected decision|author decision|retcon|author approval)\b/i.test(f.message + " " + (f.requiredCorrection ?? ""))) ||
     (f.kind === "missing-requirement" &&
       /\b(?:create|add|introduce|new)\b/i.test(f.requiredCorrection ?? "") &&
       /\bcharacter\b/i.test(f.requiredCorrection ?? "") &&
@@ -208,6 +211,8 @@ export function reviewRepairTargets(changedPaths: string[], originWorkItem: stri
   eventMilestone?: EventMilestoneRepairGrant): string[] {
   if (changedPaths.some(path => !canonicalPath.test(path) ||
       (path.startsWith("creative-direction/") && originWorkItem !== "foundation"))) return [];
+  if (originWorkItem === "global-architecture")
+    return changedPaths.filter(authorizedArchitectureRecordPath).sort();
   return changedPaths.filter(path =>
     !/^(?:arcs|milestones|narrative-positions)\//.test(path) ||
     path === eventMilestone?.path && originWorkItem.startsWith("event-")).sort();
@@ -262,7 +267,9 @@ export function deriveReviewRepairAmendment(input: {
         (!owned.has(path) && !original.authority.mayCreate && path !== eventMilestone?.path) ||
         (path.startsWith("creative-direction/") && originWorkItem !== "foundation") ||
         (/^(?:arcs|milestones|narrative-positions)\//.test(path) &&
-          path !== eventMilestone?.path)) ||
+          path !== eventMilestone?.path &&
+          !(originWorkItem === "global-architecture" && original.id === "architecture" &&
+            original.specialist === "nt-story-architecture" && authorizedArchitectureRecordPath(path)))) ||
       (originWorkItem === "foundation" && (paths.length !== 1 ||
         !paths[0]!.startsWith("creative-direction/"))) ||
       !original.specialist.trim())

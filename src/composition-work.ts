@@ -6,7 +6,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { assignmentDraftEffect, nativeMetadataDefects, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
+import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization, assignmentDraftEffect, nativeMetadataDefects, verifySettledAssignment, inspectAssignmentFailure, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { authorComposition, compositionInvocationDirectory, createCompositionReviewCycle, verifyCompositionReviewPin,
   type CompositionReviewPin, type CompositionAssignment,
   type CompositionEvidence, type SemanticReview } from "./composition-specialist.js";
@@ -173,15 +173,32 @@ export async function verifyCompositionReviewOrigin(job: JobStartResult, point: 
   if (verdict.sessionFile !== r.reviewSessionFile) throw Error("Original Composition reviewer identity changed");
   assertCompositionReviewerMatch(verdict, r.reviewedEvidence);
 }
-export async function inspectCompositionFailure(job: JobStartResult, milestone: string, sourceHead: string) {
+export async function inspectCompositionFailure(job: JobStartResult, milestone: string, sourceHead: string,
+  diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
   if (!milestonePattern.test(milestone)) return null;
   const receipt = JSON.parse(await readFile(join(job.stateDir, "composition-items", milestone.slice(10) + ".json"), "utf8")) as Receipt;
   if (receipt.jobId !== job.jobId || receipt.milestoneId !== milestone ||
       receipt.workItemId !== "composition-" + milestone.slice(10) || receipt.beforeHead !== sourceHead ||
-      receipt.phase !== "writing" || receipt.worker !== "pi") return null;
+      (!diagnostic ? receipt.phase !== "writing" : !["writing", "authored", "committed"].includes(receipt.phase)) ||
+      receipt.worker !== "pi" || !receipt.assignmentKey) return null;
   const options = compositionInvocationOptions(job, receipt);
-  const terminal = await inspectAssignmentFailure({ ...options, effect: await assignmentDraftEffect(job, sourceHead) });
-  return terminal && { ...terminal, ref: options.directory + "/terminal.json" };
+  const head = historicalHead ?? git(job, "rev-parse", "HEAD");
+  let effect: string | null;
+  if (head === sourceHead && !historicalHead) {
+    if (!await inspectPendingCompositionInvocation(job, milestone, sourceHead)) return null;
+    effect = await assignmentDraftEffect(job, sourceHead);
+  } else {
+    if (!diagnostic || !receipt.paths || !receipt.digest || !receipt.invocationProof ||
+        (receipt.phase !== "authored" && receipt.phase !== "committed") ||
+        (historicalHead && (receipt.phase !== "committed" || receipt.commitSha !== head))) return null;
+    verifyCommit(job, receipt, head);
+    effect = assignmentCommittedEffect(job, sourceHead, head, receipt.paths, receipt.digest);
+    if (!historicalHead && !await inspectPendingCompositionInvocation(job, milestone, sourceHead)) return null;
+    await verifySettledAssignment({ ...options, proof: receipt.invocationProof, effect, historical: !!historicalHead });
+  }
+  const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic });
+  return terminal && { ...terminal, ref: options.directory + "/terminal.json", workItem: receipt.workItemId,
+    assignmentKey: receipt.assignmentKey, invocationProof: receipt.invocationProof, sessionId: receipt.writerSessionId! };
 }
 /** The publication gate compares sealed semantic fields, not JSON key insertion order. */
 export function assertCompositionReviewerMatch(verified: SemanticReview,

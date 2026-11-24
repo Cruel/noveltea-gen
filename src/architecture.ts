@@ -1,3 +1,4 @@
+import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } from "./assignment-metadata-recovery.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -304,19 +305,41 @@ function architectureRoundSource(job: JobStartResult, state: Receipt, originalHe
     amendment: state.plan?.causalAmendment, snapshot: state.snapshot?.id, blueprint: state.blueprint,
     task: state.blueprintTask, provider: state.provider, model: state.model, prior: state.priorProtection }));
 }
-export async function inspectArchitectureFailure(job: JobStartResult, sourceHead: string) {
+export async function inspectArchitectureFailure(job: JobStartResult, sourceHead: string,
+    diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
   const state = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as Receipt;
-  if (state.phase !== "writing" || !state.sourceDigest || !state.piSessionId || !state.piSessionFile ||
-      (state.executionHead ?? state.expectedHead) !== sourceHead || architectureRoundSource(job, state) !== state.sourceDigest) return null;
-  assertHead(job, sourceHead);
+  if (state.worker !== "pi" || !state.assignmentKey || !state.sourceDigest || !state.piSessionId || !state.piSessionFile ||
+      (!diagnostic ? state.phase !== "writing" : !["writing", "authored", "committed"].includes(state.phase)) ||
+      architectureRoundSource(job, state, sourceHead) !== state.sourceDigest ||
+      state.phase !== "committed" && (state.executionHead ?? state.expectedHead) !== sourceHead) return null;
   await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
-  const paths = dirty(job).length ? await changedPaths(job) : [];
-  if (paths.length) assertCausalPaths(state.plan!, paths);
+  const head = historicalHead ?? git(job, "rev-parse", "HEAD").trim();
+  let effect: string | null;
+  if (head === sourceHead && !historicalHead) {
+    assertHead(job, sourceHead);
+    const paths = dirty(job).length ? await changedPaths(job) : [];
+    if (paths.length) assertCausalPaths(state.plan!, paths);
+    effect = paths.length ? await contentDigest(job, paths) : null;
+  } else {
+    if (!diagnostic || !state.paths || !state.contentDigest || !state.invocationProof ||
+        !["authored", "committed"].includes(state.phase) ||
+        historicalHead && (state.phase !== "committed" || state.expectedHead !== head) ||
+        !historicalHead && dirty(job).length) return null;
+    const trailers = git(job, "show", "-s", "--format=%B", head).split("\n");
+    if (!["NovelTea-Job: " + job.jobId, "NovelTea-Work-Item: global-architecture",
+      "NovelTea-Plan-Version: " + state.plan!.version, "NovelTea-Architecture: " + state.contentDigest]
+      .every(line => trailers.includes(line))) throw Error("Original Architecture diagnostic commit provenance changed");
+    effect = assignmentCommittedEffect(job, sourceHead, head, state.paths, state.contentDigest);
+    await verifySettledAssignment({ directory: join(job.stateDir, "architecture-assignment", state.sourceDigest),
+      proof: state.invocationProof, sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+      sessionRoots: [join(job.stateDir, "architecture-sessions")], responseKind: "architecture-order", effect, historical: !!historicalHead });
+  }
   const terminal = await inspectAssignmentFailure({ directory: join(job.stateDir, "architecture-assignment", state.sourceDigest),
     sourceDigest: state.sourceDigest, sessionId: state.piSessionId, sessionFile: state.piSessionFile,
     sessionRoots: [join(job.stateDir, "architecture-sessions")], responseKind: "architecture-order",
-    effect: paths.length ? await contentDigest(job, paths) : null });
-  return terminal && { ...terminal, ref: "architecture-assignment/" + state.sourceDigest + "/terminal.json" };
+    effect, diagnostic });
+  return terminal && { ...terminal, ref: "architecture-assignment/" + state.sourceDigest + "/terminal.json",
+    workItem: "global-architecture", assignmentKey: state.assignmentKey, invocationProof: state.invocationProof, sessionId: state.piSessionId };
 }
 
 /** Routing only: the original child still authenticates its invocation chain before effects. */
@@ -652,6 +675,59 @@ function output(job: JobStartResult, state: Receipt, recovery?: Reconciliation) 
     piSessionId: state.piSessionId, piSessionFile: state.piSessionFile,
     skillReads: state.skillReads, skillSnapshot: state.snapshot?.id };
 }
+/** A postcommit Review correction may append to the original writer. Verify
+ * its original committed effect, approved Blueprint and passing precommit
+ * Review against immutable source bytes and the sealed transcript prefix. */
+export async function verifyArchitectureReviewOrigin(job: JobStartResult, point: {
+  workItem: string; commitSha: string; parentSha: string; planVersion: number | null;
+  assurance?: { changedPaths: string[] } | null;
+}) {
+  const state = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as Receipt;
+  if (point.workItem !== "global-architecture" || state.format !== 1 || state.jobId !== job.jobId ||
+      state.threadId !== job.threadId || state.baseSha !== job.baseSha || state.branch !== job.branch ||
+      state.worktreeRoot !== job.worktreeRoot || state.worker !== "pi" || state.phase !== "committed" ||
+      state.expectedHead !== point.commitSha || state.plan?.version !== point.planVersion ||
+      state.plan.items[0]?.verifiedSha !== point.commitSha || !state.snapshot ||
+      await openSkillSnapshot(state.snapshot.id) !== state.snapshot.path || !state.assignmentKey ||
+      !state.paths?.length || !state.contentDigest || !state.sourceDigest ||
+      state.sourceDigest !== architectureRoundSource(job, state, point.parentSha) ||
+      !state.invocationProof || state.invocationProof.sourceDigest !== state.sourceDigest ||
+      !state.piSessionId || !state.piSessionFile || !state.draftReview || !state.blueprint ||
+      state.paths.some(path => !authorizedArchitectureRecordPath(path)) ||
+      JSON.stringify([...state.paths].sort()) !== JSON.stringify([...(point.assurance?.changedPaths ?? [])].sort()))
+    throw Error("Architecture Review lost its original committed writer.");
+  verifyPlanHistory(job, state);
+  const trailers = git(job, "show", "-s", "--format=%B", point.commitSha).split("\n");
+  const committedPaths = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", point.commitSha)
+    .trim().split("\n").filter(Boolean).sort();
+  const effect = hash(JSON.stringify(state.paths.map(path => [path,
+    hash(git(job, "show", point.commitSha + ":" + repoPath(job, path)))])));
+  if (git(job, "rev-parse", point.commitSha + "^").trim() !== point.parentSha ||
+      JSON.stringify(committedPaths) !== JSON.stringify(state.paths.map(p => repoPath(job, p)).sort()) ||
+      effect !== state.contentDigest ||
+      [`NovelTea-Job: ${job.jobId}`, "NovelTea-Work-Item: global-architecture",
+        `NovelTea-Plan-Version: ${state.plan.version}`, `NovelTea-Architecture: ${effect}`]
+        .some(trailer => !trailers.includes(trailer)))
+    throw Error("Architecture Review origin differs from its immutable Git effect.");
+  await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
+  const directory = join(job.stateDir, "architecture-assignment", state.sourceDigest);
+  await verifySettledAssignment({ proof: state.invocationProof, directory,
+    sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+    sessionRoots: [join(job.stateDir, "architecture-sessions")], effect,
+    responseKind: "architecture-order", historical: true });
+  const settled = JSON.parse(await readFile(join(directory, state.invocationProof.ordinal + ".settled.json"), "utf8"));
+  const approved = await readApprovedBlueprint(job, state.plan, state.snapshot, state.provider,
+    state.model, state.blueprintTask ?? "", point.parentSha, true);
+  if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(state.blueprint))
+    throw Error("Architecture Review origin lost its approved Blueprint.");
+  await (await import("./architecture-draft-review.js")).verifyArchitectureDraftReviewPin(
+    job, state.snapshot, state.plan, state.provider, state.model, state.paths,
+    { id: state.piSessionId, file: state.piSessionFile }, state.draftReview,
+    state.blueprintTask ?? "", approved.blueprint, point.parentSha, settled.transcriptSha256, point.commitSha);
+  return { workItem: point.workItem, sessionFile: state.piSessionFile, sessionId: state.piSessionId,
+    provider: state.provider, model: state.model, thinking: undefined, snapshot: state.snapshot };
+}
+
 /** Read-only verification of the exact settled canonical Architecture receipt.
  * A reused plan can have no new Git effect; verify its native scope at the
  * admitted source rather than manufacturing a checkpoint for the reuse. */

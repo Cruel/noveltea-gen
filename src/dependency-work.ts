@@ -6,7 +6,9 @@ import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { RunnableConfig } from "@langchain/core/runnables";
-import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, type AssignmentIdentity, type AssignmentOutcome, type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
+import { createGenerationQuestionGraph } from "./generation-author-question.js";
+import { focusedChoiceWorkItem } from "./specialist-choice.js";
+import { logicalAssignmentKey, assignmentChildConfig, type AssignmentIdentity, type AssignmentOutcome, type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
 import { join } from "node:path";
 import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
@@ -175,7 +177,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
   const key = logicalAssignmentKey(identity);
   const rounds = supportingWriterRounds(job, identity, { ...input, target: assignment.targets[0]!,
     dependencyAssignmentId: assignment.id }, async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest));
-  const child = createAssignmentLifecycleGraph({
+  const child = createGenerationQuestionGraph(job, identity, focusedChoiceWorkItem(assignment.targets[0]!, assignment.id), {
     preflight: rounds.preflight,
     invoke: rounds.invoke,
     correct: state => rounds.correct(state.submission!, state.correction!),
@@ -463,7 +465,7 @@ export async function advanceReviewDependency(input: {
     const rounds = supportingWriterRounds(job, identity, {
       ...input, target: assignment.targets[0]!, fixture: false, dependencyAssignmentId: assignment.id,
     }, async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === entry.reportDigest));
-    const child = createAssignmentLifecycleGraph({
+    const child = createGenerationQuestionGraph(job, identity, focusedChoiceWorkItem(assignment.targets[0]!, assignment.id), {
       preflight: rounds.preflight,
       invoke: rounds.invoke,
       correct: state => rounds.correct(state.submission!, state.correction!),

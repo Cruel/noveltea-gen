@@ -35,7 +35,7 @@ export function usesSharedAssignmentReview(workItem: string | undefined | null):
 /** Cutover registry: only lanes with the actual bounded Review adapter are
  * admitted here; the older policy registry alone is not proof of migration. */
 export function usesCheckpointedReviewRounds(workItem: string): boolean {
-  return ["foundation", "world-foundations", "character-foundations"].includes(workItem) ||
+  return ["foundation", "world-foundations", "character-foundations", "global-architecture"].includes(workItem) ||
     /^(?:interactive-(?:choice|puzzle)|event|composition)-[a-z][a-z0-9-]*$/.test(workItem) ||
     /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem);
 }

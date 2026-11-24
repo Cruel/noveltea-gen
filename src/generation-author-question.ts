@@ -11,6 +11,8 @@ import { createAssignmentLifecycleGraph, logicalAssignmentKey,
 import { activeSpecialistChoice, bindSpecialistChoice, verifySpecialistChoice, inspectSpecialistChoice,
   SpecialistChoiceRequiredError, withSpecialistAnswerAuthority, type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { inspectDependencyPlan, dependencyDigest } from "./dependency-state.js";
+import { focusedChoiceWorkItem } from "./specialist-choice.js";
 import { readJobControl } from "./job-control.js";
 import { guardPiBudget, PiBudgetPause } from "./job-pi-policy.js";
 import type { JobStartResult } from "./job.js";
@@ -108,11 +110,35 @@ export async function pendingGenerationQuestion(job: JobStartResult, saver: Sqli
   const binding = choice.assignment;
   if (!choice || !binding || binding.identity.graphThreadId !== thread ||
       binding.identity.turnDigest !== snapshot.values.request?.turnPlanDigest ||
-      binding.identity.planVersion !== snapshot.values.planVersion ||
       !binding.namespace.startsWith(question.task.name + "|") ||
       question.interrupt.value.assignmentKey !== logicalAssignmentKey(binding.identity) ||
       question.interrupt.value.questionRef !== ref(choice))
     throw Error("Pending Generation question lost its original assignment or source.");
+  if (binding.identity.assignmentId.startsWith("dependency:")) {
+    const plan = await inspectDependencyPlan(job);
+    const entry = plan?.entries.find(e =>
+      e.amendment?.assignment.id === binding.identity.assignmentId);
+    const grant = entry?.amendment;
+    const parent = snapshot.values;
+    const reviewPin = parent.reviewPrerequisite;
+    const reviewRequest = plan?.reviewRequests?.find(r => r.sourceSha === entry?.reviewSourceSha &&
+      r.digest === reviewPin?.suspension?.suspensionRef);
+    if (question.task.name !== "dependency_amendment" || !grant || entry?.fixture ||
+        !["authorized", "reviewing", "verified"].includes(entry.phase) ||
+        grant.afterVersion !== binding.identity.planVersion ||
+        grant.turnDigest !== binding.identity.turnDigest ||
+        grant.sourceSha !== binding.identity.sourceHeadSha ||
+        dependencyDigest(grant.assignment) !== binding.identity.scopeDigest ||
+        choice.workItem !== focusedChoiceWorkItem(grant.assignment.targets[0]!, grant.assignment.id) ||
+        (entry.reviewSourceSha
+          ? !reviewRequest || reviewPin.suspension.evidenceRef !== reviewRequest.reviewDigest ||
+            reviewPin.submission.headSha !== entry.reviewSourceSha ||
+            reviewPin.identity.planVersion !== parent.planVersion
+          : parent.focusedPrerequisite?.suspension?.evidenceRef !== entry.reportDigest ||
+            parent.focusedPrerequisite?.identity?.planVersion !== parent.planVersion))
+      throw Error("Pending supporting question lost its exact parent dependency admission.");
+  } else if (binding.identity.planVersion !== snapshot.values.planVersion)
+    throw Error("Pending Generation question lost its original assignment plan version.");
   const nested = await saver.getTuple({ configurable: { thread_id: thread,
     checkpoint_ns: binding.namespace } });
   const state = nested?.checkpoint.channel_values;
@@ -162,7 +188,16 @@ export async function pendingQuestionBudgetPause(job: JobStartResult,
   if (pending.phase !== "interrupt" || pending.choice.phase !== "answered") return null;
   const identity = pending.choice.assignment!.identity;
   const workItem = pending.choice.workItem;
-  const step = workItem === "world-foundations" ? "foundations:world" :
+  // Supporting writers charge the canonical Architecture plan version, not
+  // the independent dependency-overlay counter.
+  const support = identity.assignmentId.startsWith("dependency:")
+    ? (await inspectDependencyPlan(job))?.entries.find(e => e.amendment?.assignment.id === identity.assignmentId)
+    : undefined;
+  const supportVersion = support ? JSON.parse(await (await import("node:fs/promises")).readFile(
+    join(job.stateDir, "architecture.json"), "utf8")).plan?.version : undefined;
+  const step = support && Number.isSafeInteger(supportVersion)
+    ? identity.assignmentId + ":" + supportVersion :
+    workItem === "world-foundations" ? "foundations:world" :
     workItem === "character-foundations" ? "foundations:character" :
     workItem.startsWith("event-") ? "event:" + workItem :
     identity.assignmentId.startsWith("focus:") ? identity.assignmentId + ":" + identity.planVersion : null;

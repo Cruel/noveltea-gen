@@ -8,7 +8,7 @@ import { appendFile, lstat, mkdir, readFile, realpath, rename, writeFile } from 
 import { dirname, join } from "node:path";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type { Plan } from "./architecture.js";
-import { assignmentDraftEffect, executeAssignmentRound, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
+import { nativeMetadataDefects, assignmentCommittedEffect, type AssignmentDiagnosticAuthorization, assignmentDraftEffect, executeAssignmentRound, verifySettledAssignment, inspectAssignmentFailure, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
 import { StoryCancelledError } from "./story-interruption.js";
 import type { ResponseContractSession } from "./response-contract-recovery.js";
@@ -175,15 +175,32 @@ export async function inspectPendingEventInvocation(job: JobStartResult, milesto
   }
   return r;
 }
-export async function inspectEventFailure(job: JobStartResult, milestone: string, sourceHead: string) {
+export async function inspectEventFailure(job: JobStartResult, milestone: string, sourceHead: string,
+  diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
   if (!idPattern.test(milestone)) return null;
   const receipt = JSON.parse(await readFile(join(job.stateDir, "event-items", milestone.slice(10) + ".json"), "utf8")) as EventReceipt;
   if (receipt.jobId !== job.jobId || receipt.milestoneId !== milestone ||
       receipt.workItemId !== "event-" + milestone.slice(10) || receipt.expectedHead !== sourceHead ||
-      receipt.phase !== "writing" || receipt.worker !== "pi") return null;
+      (!diagnostic ? receipt.phase !== "writing" : !["writing", "authored", "committed"].includes(receipt.phase)) ||
+      receipt.worker !== "pi" || !receipt.assignmentKey) return null;
   const options = eventInvocationOptions(job, receipt);
-  const terminal = await inspectAssignmentFailure({ ...options, effect: await assignmentDraftEffect(job, sourceHead) });
-  return terminal && { ...terminal, ref: options.directory + "/terminal.json" };
+  const head = historicalHead ?? git(job, "rev-parse", "HEAD");
+  let effect: string | null;
+  if (head === sourceHead && !historicalHead) {
+    if (!await inspectPendingEventInvocation(job, milestone, sourceHead)) return null;
+    effect = await assignmentDraftEffect(job, sourceHead);
+  } else {
+    if (!diagnostic || !receipt.paths || !receipt.contentDigest || !receipt.invocationProof ||
+        (receipt.phase !== "authored" && receipt.phase !== "committed") ||
+        (historicalHead && (receipt.phase !== "committed" || receipt.commitSha !== head))) return null;
+    verifyCommit(job, receipt, head);
+    effect = assignmentCommittedEffect(job, sourceHead, head, receipt.paths, receipt.contentDigest);
+    if (!historicalHead && !await inspectPendingEventInvocation(job, milestone, sourceHead)) return null;
+    await verifySettledAssignment({ ...options, proof: receipt.invocationProof, effect, historical: !!historicalHead });
+  }
+  const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic });
+  return terminal && { ...terminal, ref: options.directory + "/terminal.json", workItem: receipt.workItemId,
+    assignmentKey: receipt.assignmentKey, invocationProof: receipt.invocationProof, sessionId: receipt.sessionId! };
 }
 const gitEnv = () => {
   const env = { ...process.env };
@@ -671,7 +688,7 @@ async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
  * round service; this function only performs the admitted fixture effect. */
 async function authorFixtureEventRound(job: JobStartResult, receipt: EventReceipt,
   receiptFile: string, assignment: EventAssignment, command: AssignmentRoundCommand,
-  verifyDraft: (candidate: EventEvidence) => Promise<string[]>) {
+  verifyDraft: (candidate: EventEvidence) => Promise<(string | AssignmentDefect)[]>) {
   const root = join(job.stateDir, "event-fixture-sessions", receipt.workItemId);
   await mkdir(root, { recursive: true });
   if (!receipt.sessionId && !receipt.sessionFile) {
@@ -744,7 +761,7 @@ async function authorFixtureEventRound(job: JobStartResult, receipt: EventReceip
         conflicts: summary.architecturalConflicts, obligations: summary.laterObligations, skillReads: [] };
       const diagnostics = await verifyDraft(evidence);
       if (!diagnostics.length) accepted = evidence;
-      return diagnostics.map(detail => ({ kind: "semantic" as const, path: assignment.milestoneId,
+      return diagnostics.map(detail => typeof detail !== "string" ? detail : ({ kind: "semantic" as const, path: assignment.milestoneId,
         code: hash(detail), detail }));
     },
   }, command);
@@ -1108,8 +1125,13 @@ export async function runEventWorkItem(input: EventOptions) {
                 draft.protection.changes.length || draft.protection.warnings.length) {
               throw new Error("Event draft has protected/unverified changes; automated repair cannot authorize it.");
             }
-            if (draft.diagnostics.length) return draft.diagnostics.slice(0, 20)
-              .map(d => `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
+            if (draft.diagnostics.length) {
+              if (paths && draft.diagnostics.every(d => ["schema", "yaml", "frontmatter"].includes(d.code) && paths!.includes(d.path)))
+                return nativeMetadataDefects(checked, { jobId: job.jobId, baseSha: receipt.expectedHead,
+                  worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths });
+              return draft.diagnostics.slice(0, 20)
+                .map(d => `${d.path}:${d.line ?? 1}:${d.column ?? 1} ${d.code}: ${d.message}`);
+            }
             if (checked.status !== "passed") throw new Error("Event validator rejected the draft without diagnostics.");
             if (repairablePathError) return [repairablePathError +
               " Edit an authorized Event if necessary, or correct modifiedRecords to list the exact Git changes. " +

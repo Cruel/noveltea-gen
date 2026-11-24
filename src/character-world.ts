@@ -1,3 +1,4 @@
+import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } from "./assignment-metadata-recovery.js";
 import { execFileSync } from "./git-read-cache.js";
 import { commitOrigin, readRecoveryFork } from "./recovery-fork-state.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -767,16 +768,44 @@ export async function inspectPendingCharacterWorldInvocation(job: JobStartResult
   const effect = await ownedEffect(job, unit, unit.assignment);
   return { receipt, unit, effect };
 }
-export async function inspectCharacterWorldFailure(job: JobStartResult, sourceHead: string) {
-  const pending = await inspectPendingCharacterWorldInvocation(job, sourceHead);
-  const unit = pending?.unit;
-  if (!pending || !unit?.piSessionId || !unit.piSessionFile) return null;
+export async function inspectCharacterWorldFailure(job: JobStartResult, sourceHead: string,
+    diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
+  const receipt = JSON.parse(await readFile(join(job.stateDir, "character-world.json"), "utf8")) as Receipt;
+  const unit = receipt.units.find(u => u.beforeHead === sourceHead &&
+    (u.phase === "writing" || diagnostic && ["authored", "committed"].includes(u.phase)));
+  if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId || receipt.baseSha !== job.baseSha ||
+      receipt.branch !== job.branch || receipt.worker !== "pi" || !unit?.assignmentKey ||
+      !unit.piSessionId || !unit.piSessionFile || unit.invocationTurnDigest === undefined ||
+      unit.invocationSource !== invocationSource(job, receipt, unit, unit.invocationTurnDigest)) return null;
+  await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
+  let effect: string;
+  const head = historicalHead ?? git(job, "rev-parse", "HEAD");
+  if (head === sourceHead && !historicalHead) {
+    if (unit.phase === "writing") {
+      const pending = await inspectPendingCharacterWorldInvocation(job, sourceHead);
+      if (!pending || pending.unit.id !== unit.id) return null;
+      effect = pending.effect;
+    } else {
+      if (!diagnostic || !unit.assignment || !unit.paths || !unit.digest) return null;
+      effect = await ownedEffect(job, unit, unit.assignment);
+      if (effect !== unit.digest) return null;
+    }
+  } else {
+    if (!diagnostic || !unit.paths || !unit.digest || !unit.invocationProof ||
+        !["authored", "committed"].includes(unit.phase) ||
+        historicalHead && (unit.phase !== "committed" || unit.commitSha !== head) ||
+        !historicalHead && dirty(job).length) return null;
+    verifyCommit(job, unit, sourceHead, head);
+    effect = assignmentCommittedEffect(job, sourceHead, head, unit.paths, unit.digest);
+    await verifyUnitInvocation(job, receipt, unit, effect, !!historicalHead);
+  }
   const directory = invocationDirectory(job, unit, unit.piSessionId);
   const terminal = await inspectAssignmentFailure({ directory, sourceDigest: unit.invocationSource!,
     sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
     sessionRoots: [join(job.stateDir, "character-world-sessions", unit.domain)],
-    responseKind: "manifest-or-choice", effect: pending.effect });
-  return terminal && { ...terminal, ref: directory.slice(job.stateDir.length + 1) + "/terminal.json" };
+    responseKind: "manifest-or-choice", effect, diagnostic });
+  return terminal && { ...terminal, ref: directory.slice(job.stateDir.length + 1) + "/terminal.json",
+    workItem: unit.id, assignmentKey: unit.assignmentKey, invocationProof: unit.invocationProof, sessionId: unit.piSessionId };
 }
 
 /** Read-only original Git reconciliation, including a commit made before the

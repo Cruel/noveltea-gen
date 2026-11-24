@@ -27,7 +27,7 @@ import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
 import { selectOperationStrategy, executeOperationStrategy,
   authenticateSealedDiagnosticStop, diagnosticCaseForDecision,
-  authenticateOperationDiagnosticProof, authorizeOperationDiagnosticStrategy, authenticateFoundationDiagnosticDecision, authenticateFoundationDiagnosticDischarge, foundationDiagnosticDecisionForLifecycle } from "./generation-operation-strategy.js";
+  authenticateOperationDiagnosticProof, authorizeOperationDiagnosticStrategy, authenticateAssignmentDiagnosticDecision, authenticateAssignmentDiagnosticDischarge, assignmentDiagnosticDecisionForLifecycle } from "./generation-operation-strategy.js";
 import { inspectSettledAdaptiveReconciliation } from "./adaptive-reconciliation.js";
 import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
@@ -801,11 +801,37 @@ export async function dispatchGenerationAssignment(s: { request: GenerationReque
  * author-update intake. The original foundation.json, Git and review receipts
  * remain the only authorities for external effects.
  */
+type AssignmentDiagnosticContinuation = NonNullable<Awaited<ReturnType<typeof authenticateAssignmentDiagnosticDecision>>>;
+function assignmentDiagnosticReentry(s: State, job: JobStartResult, identity: AssignmentIdentity,
+    diagnostic?: AssignmentDiagnosticContinuation) {
+  const c = diagnostic ? s.recoveryLifecycle.active : null;
+  return {
+    ref: c?.id ?? null,
+    submission: diagnostic ? {
+      receiptRef: [diagnostic.terminal.proof.sourceDigest,
+        (diagnostic.terminal.invocationProof ?? diagnostic.terminal.successorProof)?.ordinal ?? diagnostic.terminal.proof.ordinal,
+        (diagnostic.terminal.invocationProof ?? diagnostic.terminal.successorProof)?.settlementDigest ?? diagnostic.terminal.settlementDigest].join(":"),
+      status: "writer-round",
+    } : null,
+    command: (command: AssignmentRoundCommand): AssignmentRoundCommand =>
+      diagnostic ? { ...command, diagnostic: diagnostic.authorization } : command,
+    authenticate: async () => {
+      const source = c && s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+      const decision = s.recoveryLifecycle.decision;
+      if (!diagnostic || !c || !source || !decision || c.origin.assignmentId !== s.active?.id ||
+          s.recoveryLifecycle.phase !== "correcting") return false;
+      const current = await authenticateAssignmentDiagnosticDecision(job, c,
+        source.input as unknown as GenerationOperationRecovery, decision, s.recoveryLifecycle.attempt);
+      return !!current && current.terminal.assignmentKey === logicalAssignmentKey(identity) &&
+        isDeepStrictEqual(current.authorization, diagnostic.authorization);
+    },
+  };
+}
 async function runFoundationAssignmentChild(
   s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
   correctionSelected = false,
-  diagnostic?: NonNullable<Awaited<ReturnType<typeof authenticateFoundationDiagnosticDecision>>>,
+  diagnostic?: NonNullable<Awaited<ReturnType<typeof authenticateAssignmentDiagnosticDecision>>>,
 ): Promise<Partial<State>> {
   if (s.active?.stage !== "foundation" || !s.inventory)
     throw Error("R01 child requires the parent-admitted Foundation assignment.");
@@ -817,8 +843,6 @@ async function runFoundationAssignmentChild(
   // effect but before the original assignment is recorded complete. Recover
   // the immutable source from the eligible native receipt, not refreshed HEAD.
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
-  const diagnosisCase = diagnostic ? s.recoveryLifecycle.active : null;
-  const continuation = correction?.id ?? diagnosisCase?.id ?? null;
   const published = (await inspectRecoveryCheckpoints(job)).find(p =>
     p.eligible && p.workItem === "foundation" &&
     p.commitSha === (correction?.origin.sourceHeadSha ?? s.inventory!.headSha) &&
@@ -845,6 +869,8 @@ async function runFoundationAssignmentChild(
     sourceHeadSha: sourceHead, scopeDigest,
   };
   const key = logicalAssignmentKey(identity);
+  const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
+  const continuation = correction?.id ?? diagnosis.ref;
   let reviewPatch: Partial<State> | null = null;
   const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
     extra: Record<string, string>): AssignmentOutcome =>
@@ -857,17 +883,6 @@ async function runFoundationAssignmentChild(
     const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
     return !!s.recoveryLifecycle.decision &&
       await authenticateOperationReviewProof(job, s, correction, s.recoveryLifecycle.decision);
-  };
-  const authenticateDiagnosis = async () => {
-    const source = diagnosisCase && s.recoverySources.find(x => x.caseId === diagnosisCase.id && x.channel === "operationRecovery");
-    const decision = s.recoveryLifecycle.decision;
-    if (!diagnosisCase || !source || !decision || !diagnostic ||
-        s.recoveryLifecycle.phase !== "correcting" || diagnosisCase.origin.assignmentId !== identity.assignmentId)
-      return false;
-    const current = await authenticateFoundationDiagnosticDecision(job, diagnosisCase,
-      source.input as unknown as GenerationOperationRecovery, decision, s.recoveryLifecycle.attempt);
-    return !!current && current.terminal.assignmentKey === key &&
-      isDeepStrictEqual(current.authorization, diagnostic.authorization);
   };
   const preflight = async () => {
     const control = await readJobControl(job);
@@ -884,7 +899,7 @@ async function runFoundationAssignmentChild(
     await checkPlan(job, s.request, s.planVersion);
     if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
     if (diagnostic) {
-      if (!await authenticateDiagnosis()) throw Error("Foundation diagnostic correction lost its original assignment admission.");
+      if (!await diagnosis.authenticate()) throw Error("Foundation diagnostic correction lost its original assignment admission.");
       return null;
     }
     if (correctionSelected) {
@@ -930,7 +945,7 @@ async function runFoundationAssignmentChild(
       const stopped = await preflight();
       if (stopped) return stopped;
       const result = await runFoundationJob({ ...s.request, envelope: JSON.stringify(s.request.contract.envelope),
-        round: { assignmentKey: key, command: diagnostic ? { ...command, diagnostic: diagnostic.authorization } : command } });
+        round: { assignmentKey: key, command: diagnosis.command(command) } });
       if ("round" in result && result.round) {
         const ref = roundRef(result.round.proof);
         if (result.round.status === "correction")
@@ -1067,7 +1082,7 @@ async function runFoundationAssignmentChild(
   const child = createAssignmentLifecycleGraph({
     authenticateContinuation: async state =>
       state.continuationRef === continuation &&
-      (diagnostic ? await authenticateDiagnosis() : await authenticateCorrection()),
+      (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
     preflight: async state => { assertChildIdentity(state.identity, state.continuationRef); return preflight(); },
     invoke: async state => { assertChildIdentity(state.identity, state.continuationRef); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
@@ -1094,12 +1109,7 @@ async function runFoundationAssignmentChild(
   // LangGraph passes the parent's persistent SQLite checkpointer to the
   // nested graph. No standalone child scheduler, database, or recovery ledger.
   const finished = await child.invoke({
-    identity, submission: diagnostic ? {
-      receiptRef: roundRef(diagnostic.terminal.invocationProof ?? diagnostic.terminal.successorProof ?? {
-        sourceDigest: diagnostic.terminal.proof.sourceDigest, ordinal: diagnostic.terminal.proof.ordinal,
-        settlementDigest: diagnostic.terminal.settlementDigest!,
-      }), status: "writer-round",
-    } : correction && s.result
+    identity, submission: diagnostic ? diagnosis.submission : correction && s.result
       ? { receiptRef: "foundation.json", status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction || diagnostic ? key : null,
     outcome: null, continuationRef: continuation,
@@ -1213,7 +1223,7 @@ async function runFoundationAssignmentChild(
 /** The selected diagnostic continuation uses the original Foundation child,
  * not generic specialist dispatch. Its verified native/Git/Review result is
  * the only discharge authority. */
-async function runFoundationDiagnosticRecovery(s: State, config: RunnableConfig,
+async function runAssignmentDiagnosticRecovery(s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>): Promise<Partial<State>> {
   const lifecycle = s.recoveryLifecycle;
   const c = lifecycle.active;
@@ -1235,27 +1245,37 @@ async function runFoundationDiagnosticRecovery(s: State, config: RunnableConfig,
   try {
     if (!c || !d || d.action !== "known-correction" || d.adapter !== "assignment-diagnostic" ||
         !lifecycle.assessorPending || lifecycle.phase !== "correcting" || !source ||
-        s.active?.id !== "foundation" || s.result || !s.inventory ||
-        s.inventory.headSha !== c.origin.sourceHeadSha || s.planVersion !== c.origin.planVersion ||
+        s.active?.id !== c.origin.assignmentId || s.result || !s.inventory ||
+        s.inventory.headSha !== c.origin.sourceHeadSha && s.active?.stage !== "interactive" || s.planVersion !== c.origin.planVersion ||
         config.configurable?.thread_id !== c.origin.graphThreadId)
       return fence("Diagnostic successor has no exact original parent admission.");
     const job = await openJob(s);
     const operation = source.input as unknown as GenerationOperationRecovery;
-    const original = await authenticateFoundationDiagnosticDecision(job, c, operation, d, lifecycle.attempt);
+    const original = await authenticateAssignmentDiagnosticDecision(job, c, operation, d, lifecycle.attempt);
     if (!original || !await authenticateOriginalFailure(job, s.request, c.origin.graphThreadId, c.origin, c.evidence, true))
       return fence("Diagnostic successor lost its original failure, scope or Pi evidence.");
     const control = await readJobControl(job);
     if (control !== "running")
       return pause(control === "cancelled" ? "cancelled" : "author-pause", "Author control precedes diagnostic correction.");
-    const updated = await runFoundationAssignmentChild(s, config, reviewBoundary, false, original);
+    const stage = s.active?.stage;
+    const updated = stage === "foundation" ? await runFoundationAssignmentChild(s, config, reviewBoundary, false, original)
+      : stage === "architecture" ? await runArchitectureAssignmentChild(s, config, reviewBoundary, false, original)
+      : stage === "foundations" ? await runCharacterWorldAssignmentChild(s, config, reviewBoundary, false, original)
+      : stage === "focus" ? await runFocusedAssignmentChild(s, config, reviewBoundary, original)
+      : stage === "interactive" || stage === "choice" || stage === "puzzle"
+        ? await runInteractiveAssignmentChildren(s, config, reviewBoundary, false, original)
+        : await runNarrativeAssignmentChild(s, config, reviewBoundary, false, undefined, original);
     if (updated.status === "paused" || updated.status === "cancelled")
       return pause(updated.status === "cancelled" ? "cancelled" : "author-pause",
         updated.reason ?? "Original diagnostic correction is suspended.");
     const head = await trustedHead(job);
     const receipt: RecoveryEvidence = { store: "specialist-receipt", ref: original.terminal.ref,
       digest: original.authorization.decisionDigest };
-    if (updated.result?.headSha !== head ||
-        !await authenticateFoundationDiagnosticDischarge(job, c, operation, receipt, head))
+    const partialWorld = stage === "foundations" && updated.result === null &&
+      "workItem" in original.terminal && original.terminal.workItem === "world-foundations";
+    if (updated.status === "blocked" || updated.operationRecovery || updated.escalation ||
+        (!partialWorld && updated.result?.headSha !== head) ||
+        !await authenticateAssignmentDiagnosticDischarge(job, c, operation, receipt, head))
       return fence("Diagnostic successor lacks passing native Git and independent Review evidence.");
     return { ...updated, operationRecovery: null, status: "running", reason: null,
       recoveryLifecycle: finishVerifiedRecovery(lifecycle, { status: "verified", caseId: c.id,
@@ -1277,6 +1297,7 @@ async function runArchitectureAssignmentChild(
   s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
   correctionSelected = false,
+  diagnostic?: AssignmentDiagnosticContinuation,
 ): Promise<Partial<State>> {
   if (s.active?.stage !== "architecture" || !s.inventory ||
       config.configurable?.thread_id !== s.graphThreadId || !s.graphThreadId)
@@ -1308,12 +1329,14 @@ async function runArchitectureAssignmentChild(
     })).digest("hex"),
   };
   const key = logicalAssignmentKey(identity);
+  const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
+  const continuation = correction?.id ?? diagnosis.ref;
   const receiptRef = "architecture.json";
   const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
     extra: Record<string, string>): AssignmentOutcome =>
     ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome;
   const authenticateCorrection = async () => {
-    if (!correction || !original || s.result?.headSha !== original.commitSha ||
+    if (!correction || !original || saved?.assignmentKey !== key || s.result?.headSha !== original.commitSha ||
         correction.origin.assignmentId !== identity.assignmentId ||
         s.recoveryLifecycle.phase !== "correcting" || s.recoveryLifecycle.assessorPending ||
         !s.recoveryLifecycle.decision) return false;
@@ -1322,6 +1345,7 @@ async function runArchitectureAssignmentChild(
   };
   let reviewPatch: Partial<State> | undefined;
   const preflight = async () => {
+      if (diagnostic && !await diagnosis.authenticate()) throw Error("Diagnostic correction lost its original assignment admission.");
       const control = await readJobControl(job);
       if (control === "cancelled") {
         const error = Error("Original Turn was cancelled before Architecture dispatch.");
@@ -1346,7 +1370,7 @@ async function runArchitectureAssignmentChild(
       const stopped = await preflight();
       if (stopped) return stopped;
       const result = await runArchitectureJob({ ...s.request, action: "run",
-        round: { assignmentKey: key, command } });
+        round: { assignmentKey: key, command: diagnosis.command(command) } });
       if (!result.status && !("round" in result && result.round))
         throw Error("Architecture returned no settled specialist status.");
       return subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, receiptRef);
@@ -1363,7 +1387,7 @@ async function runArchitectureAssignmentChild(
     }
   };
   const assertChildIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
-    if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
+    if (logicalAssignmentKey(saved) !== key || continuationRef !== continuation)
       throw new ProtocolIntegrityBlockedError("Architecture checkpoint belongs to another admitted logical assignment.");
   };
   const invokeRound = async (command: AssignmentRoundCommand) => {
@@ -1393,7 +1417,7 @@ async function runArchitectureAssignmentChild(
         return outcome("unresolved", receiptRef, { dispositionRef: "generation-verification" });
       }
       try {
-        reviewPatch = await reviewBoundary(candidate, correctionSelected);
+        reviewPatch = await reviewBoundary(candidate, false);
       } catch (error) {
         reviewPatch = await operationFailure(candidate, job, "independent-review", error,
           { reference: "review-checkpoints", assignmentId: identity.assignmentId });
@@ -1420,37 +1444,44 @@ async function runArchitectureAssignmentChild(
       return outcome("verified", receiptRef, { headSha: head,
         reviewRef: disposition === "adopted" ? receiptRef : "review-checkpoints:" + head });
   };
+  const reviewRounds = subunitReviewTransitions(s, job, identity, receiptRef, correction, preflight, outcome, "global-architecture");
   const child = createAssignmentLifecycleGraph({
-    authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+    authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
     preflight: async state => { assertChildIdentity(state.identity, state.continuationRef); return preflight(); },
     invoke: async state => { assertChildIdentity(state.identity, state.continuationRef); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
       assertChildIdentity(state.identity, state.continuationRef);
-      if (correction) throw Error("Postcommit Review cannot authorize a precommit writer.");
+      if (correction) return reviewRounds.correct(state.submission!, state.correction!);
       return invokeRound({ phase: "correct", proof: subunitRoundProof(state.submission!), grantDigest: state.correction!.correctionRef });
     },
     verify: async state => {
       assertChildIdentity(state.identity, state.continuationRef);
       let submission = state.submission!;
+      if (correction) return reviewRounds.verify(submission);
       if (submission.status === "writer-round") {
         const verified = await runRound({ phase: "verify", proof: subunitRoundProof(submission) });
         if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
         if (verified.status === "writer-round") throw Error("Architecture verification did not settle the round.");
         submission = verified;
+        if (accepted.architecture.includes(submission.status) && submission.headSha)
+          return { submission, reviewPending: true as const };
       }
       return { outcome: await verifyCommitted(submission), submission };
     },
   });
   const finished = await child.invoke({
-    identity, submission: correction && s.result
+    identity, submission: diagnostic ? diagnosis.submission : correction && s.result
       ? { receiptRef, status: s.result.status, headSha: s.result.headSha } : null,
-    submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null,
-  }, { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
+    submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Architecture child returned no authenticated outcome.");
   if (finished.outcome.status === "verified")
-    return { ...reviewPatch, result: { status: finished.submission!.status,
-      headSha: s.request.fixture ? finished.submission!.headSha : finished.outcome.headSha } };
+    return { ...reviewPatch, ...(correction || diagnostic ? { planVersion: version } : {}),
+      result: { status: finished.submission!.status,
+      headSha: s.request.fixture ? finished.submission!.headSha : finished.outcome.headSha,
+      ...(correction && s.result ? { status: s.result.status } : {}) } };
+  if (correction) return subunitReviewStop(s, job, identity, correction, finished.outcome, "global-architecture");
   if (finished.submission && reviewPatch)
     return { ...reviewPatch, result: { status: finished.submission.status,
       headSha: finished.submission.headSha } };
@@ -1487,7 +1518,8 @@ async function runArchitectureAssignmentChild(
 function subunitReviewTransitions(s: State, job: JobStartResult, identity: AssignmentIdentity,
   ref: string, correction: State["recoveryLifecycle"]["active"],
   preflight: () => Promise<AssignmentOutcome | null>,
-  outcome: (status: AssignmentOutcome["status"], evidenceRef: string, extra: Record<string, string>) => AssignmentOutcome) {
+  outcome: (status: AssignmentOutcome["status"], evidenceRef: string, extra: Record<string, string>) => AssignmentOutcome,
+  workItem = identity.assignmentId) {
   return createReviewRoundTransitions({
     originalHead: correction?.origin.sourceHeadSha ?? identity.sourceHeadSha, originalReceipt: ref,
     outcome,
@@ -1499,7 +1531,7 @@ function subunitReviewTransitions(s: State, job: JobStartResult, identity: Assig
       try {
         return await executeReviewRound(job, {
           rootSha: correction.origin.sourceHeadSha, caseId: correction.id,
-          assignmentKey: logicalAssignmentKey(identity), workItem: identity.assignmentId,
+          assignmentKey: logicalAssignmentKey(identity), workItem,
         }, command, { skillsSource: s.request.skillsSource, provider: s.request.provider,
           model: s.request.model, canYieldForSteering: async () =>
             !!s.request.turnPlanDigest && (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion });
@@ -1531,9 +1563,10 @@ function subunitReviewTransitions(s: State, job: JobStartResult, identity: Assig
 /** Reconstruct parent projections from sealed Review boundaries, including
  * after a physical child checkpoint was restored without its local callbacks. */
 async function subunitReviewStop(s: State, job: JobStartResult, identity: AssignmentIdentity,
-  correction: NonNullable<State["recoveryLifecycle"]["active"]>, outcome: AssignmentOutcome): Promise<Partial<State>> {
+  correction: NonNullable<State["recoveryLifecycle"]["active"]>, outcome: AssignmentOutcome,
+  workItem = identity.assignmentId): Promise<Partial<State>> {
   const originalReview = (await inspectRecoveryCheckpoints(job)).find(p =>
-    p.eligible && p.commitSha === correction.origin.sourceHeadSha && p.workItem === identity.assignmentId);
+    p.eligible && p.commitSha === correction.origin.sourceHeadSha && p.workItem === workItem);
   if (!originalReview?.assurance || originalReview.assurance.turnDigest !== identity.turnDigest)
     throw new ProtocolIntegrityBlockedError("Subunit Review stop lacks its original sealed assignment.");
   const originalAssignmentId = originalReview.assurance.assignmentId;
@@ -1556,7 +1589,7 @@ async function subunitReviewStop(s: State, job: JobStartResult, identity: Assign
     if (outcome.dispositionRef === "review-prerequisite") {
       const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
         r.digest === outcome.evidenceRef && r.turnDigest === identity.turnDigest &&
-        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === identity.assignmentId &&
+        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === workItem &&
         r.action === "controller-amendment-required");
       if (!request) throw new ProtocolIntegrityBlockedError("Subunit Review prerequisite lost its original authority.");
       return { reviewDependencyRequest: request, result: s.result };
@@ -1569,7 +1602,7 @@ async function subunitReviewStop(s: State, job: JobStartResult, identity: Assign
     if (reason === "protected-approval") {
       const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
         r.digest === outcome.evidenceRef && r.turnDigest === identity.turnDigest &&
-        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === identity.assignmentId &&
+        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === workItem &&
         r.action === "author-approval-required");
       if (!request) throw new ProtocolIntegrityBlockedError("Subunit protected approval lost its original source.");
       return { status: "blocked", reviewPauseReason: "protected-approval", result: s.result,
@@ -1588,6 +1621,7 @@ async function runCharacterWorldAssignmentChild(
   s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
   correctionSelected = false,
+  diagnostic?: AssignmentDiagnosticContinuation,
 ): Promise<Partial<State>> {
   if (s.active?.stage !== "foundations" || !s.inventory)
     throw Error("World/Character child requires the admitted composite assignment.");
@@ -1610,7 +1644,8 @@ async function runCharacterWorldAssignmentChild(
     ["world-foundations", "character-foundations"].includes(p.workItem)) : undefined;
   if (correction && !original) throw Error("Correction lacks its original World/Character source.");
   let domain: "world" | "character" = "world";
-  if (original) domain = original.workItem === "world-foundations" ? "world" : "character";
+  if (diagnostic && "workItem" in diagnostic.terminal) domain = diagnostic.terminal.workItem === "world-foundations" ? "world" : "character";
+  else if (original) domain = original.workItem === "world-foundations" ? "world" : "character";
   else if (saved?.units[0]?.phase === "committed") {
     // An unreviewed World commit is still the original child, never a grant
     // for Character. A started Character must retain its exact prior source.
@@ -1654,6 +1689,8 @@ async function runCharacterWorldAssignmentChild(
     })).digest("hex"),
   };
   const key = logicalAssignmentKey(identity);
+  const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
+  const continuation = correction?.id ?? diagnosis.ref;
   const ref = "character-world.json#" + workItem;
   const resultStatus = domain === "world" ? "review-handoff" : "foundations-committed";
   const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
@@ -1669,6 +1706,7 @@ async function runCharacterWorldAssignmentChild(
       job, s, correction, s.recoveryLifecycle.decision);
   };
   const preflight = async (): Promise<AssignmentOutcome | null> => {
+      if (diagnostic && !await diagnosis.authenticate()) throw Error("Diagnostic correction lost its original assignment admission.");
       const currentPlan = await checkPlan(job, s.request, s.planVersion);
       if (currentPlan?.plan?.version !== s.planVersion)
         throw new ProtocolIntegrityBlockedError("Subunit round cannot use a stale plan; reconcile at parent intake.");
@@ -1695,7 +1733,7 @@ async function runCharacterWorldAssignmentChild(
       try {
         const stopped = await preflight();
         if (stopped) return stopped;
-        return subunitWriterResult(await dispatch(s, domain, { assignmentKey: key, command }), ref);
+        return subunitWriterResult(await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command) }), ref);
       } catch (error) {
         if (error instanceof AssignmentAuthorPauseError)
           return outcome("paused", "job-control", { controlRef: "job-control" });
@@ -1715,7 +1753,7 @@ async function runCharacterWorldAssignmentChild(
   };
   const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight, outcome);
   const assertIdentity = (state: { identity: AssignmentIdentity; continuationRef: string | null }) => {
-    if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== (correction?.id ?? null))
+    if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== continuation)
       throw new ProtocolIntegrityBlockedError("World/Character checkpoint belongs to another assignment.");
   };
   const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
@@ -1761,9 +1799,9 @@ async function runCharacterWorldAssignmentChild(
       return outcome("verified", "recovery-checkpoints:" + head,
         { headSha: head, reviewRef: "review-checkpoints:" + head });
   };
-  const child = (correction ? createAssignmentLifecycleGraph :
+  const child = (correction || diagnostic ? createAssignmentLifecycleGraph :
     createGenerationQuestionGraph.bind(null, job, identity, workItem))({
-    authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+    authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
     preflight: async state => { assertIdentity(state); return preflight(); },
     invoke: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
@@ -1788,10 +1826,10 @@ async function runCharacterWorldAssignmentChild(
     },
   });
   const finished = await child.invoke({
-    identity, submission: correction && s.result
+    identity, submission: diagnostic ? diagnosis.submission : correction && s.result
       ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
-    submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null,
-  }, { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
+    submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("World/Character child did not settle its original assignment.");
   const patch = reviewPatch as Partial<State> | null;
@@ -1855,7 +1893,8 @@ async function runCharacterWorldAssignmentChild(
 async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
   correctionSelected = false,
-  reroute?: { reportDigest: string; sourceSha: string; task: string }): Promise<Partial<State>> {
+  reroute?: { reportDigest: string; sourceSha: string; task: string },
+  diagnostic?: NonNullable<Awaited<ReturnType<typeof authenticateAssignmentDiagnosticDecision>>>): Promise<Partial<State>> {
   const job = await openJob(s);
   const active = s.active;
   const graphThreadId = config.configurable?.thread_id;
@@ -1893,6 +1932,8 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       ...(reroute ? { reroute } : {}) }),
   };
   const key = logicalAssignmentKey(identity);
+  const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
+  const continuation = correction?.id ?? diagnosis.ref;
   const ref = active.stage === "focus" ? "focused-items/" + active.milestone + ".json" :
     active.stage + "-items/" + active.milestone.slice(10) + ".json";
   const milestone = active.milestone;
@@ -1918,20 +1959,22 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       error.name = "StoryCancelledError"; throw error;
     }
     if (control !== "running") return disposition("paused", correction ? "author-pause:job-control" : "job-control");
+    if (diagnostic && !await diagnosis.authenticate())
+      throw Error("Narrative diagnostic correction lost its exact original admission.");
     if (correction && !await authenticateCorrection())
       throw Error("Narrative correction lost its authenticated original Review case.");
     if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
     return null;
   };
   const assertIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
-    if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
+    if (logicalAssignmentKey(saved) !== key || continuationRef !== continuation)
       throw new ProtocolIntegrityBlockedError("Narrative checkpoint belongs to another admitted logical assignment.");
   };
   const runRound = async (command: AssignmentRoundCommand, publish?: true): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
     const stopped = await preflight();
     if (stopped) return stopped;
     try {
-      const round = { assignmentKey: key, command, publish };
+      const round = { assignmentKey: key, command: diagnosis.command(command), publish };
       result = reroute ? await runEventWorkItem({ ...s.request, action: "run", milestone,
         task: reroute.task, reroute, round }) : await dispatch(s, undefined, round);
       const saved = subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, ref);
@@ -1957,9 +2000,10 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   const checkpointedReview = !!correction;
   const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight,
     (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome);
-  const child = (correction ? createAssignmentLifecycleGraph :
+  const child = (correction || diagnostic ? createAssignmentLifecycleGraph :
     createGenerationQuestionGraph.bind(null, job, identity, workItem))({
-    authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+    authenticateContinuation: async state => state.continuationRef === continuation &&
+      (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
     preflight: async state => {
       assertIdentity(state.identity, state.continuationRef);
       return preflight();
@@ -2042,9 +2086,9 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
         reviewRef: "review-checkpoints:" + native.commitSha, headSha: head };
   };
   const finished = await child.invoke({ identity,
-    submission: correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
-    submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null },
-    { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
+    submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
+    submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation },
+    { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Narrative child returned without an authenticated disposition.");
   if (checkpointedReview && correction) {
@@ -2092,6 +2136,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
  * Neither this child nor the suspended writer can authorize supporting work. */
 async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+  diagnostic?: AssignmentDiagnosticContinuation,
 ): Promise<Partial<State>> {
   const job = await openJob(s);
   const active = s.active;
@@ -2114,6 +2159,8 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
     scopeDigest: dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }),
   };
   const key = logicalAssignmentKey(identity);
+  const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
+  const continuation = diagnosis.ref ?? pin?.supportRef ?? null;
   if (pin && logicalAssignmentKey(pin.identity) !== key)
     throw Error("Suspended focused assignment no longer matches the admitted scope.");
   const suspensionOf = (original: NonNullable<typeof prior>): AssignmentPrerequisiteSuspension => ({
@@ -2135,6 +2182,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
       p.eligible && p.workItem === active.id && p.parentSha === entry.commitSha && p.commitSha === head);
   };
   const preflight = async () => {
+    if (diagnostic && !await diagnosis.authenticate()) throw Error("Focused diagnostic lost its original assignment admission.");
     await checkPlan(job, s.request, planVersion);
     await assertSteeringReceipts(job, turnDigest);
     const control = await readJobControl(job);
@@ -2150,7 +2198,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
     if (stopped) return stopped;
     let result: Awaited<ReturnType<typeof dispatch>>;
     try {
-      result = await dispatch(s, undefined, { assignmentKey: key, command });
+      result = await dispatch(s, undefined, { assignmentKey: key, command: diagnosis.command(command) });
     } catch (error) {
       if (error instanceof AssignmentAuthorPauseError) return { status: "paused", assignmentKey: key,
         evidenceRef: active.id, controlRef: "job-control" };
@@ -2176,14 +2224,14 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
     return result;
   };
   let patch: Partial<State> | undefined;
-  const child = createGenerationQuestionGraph(job, identity, focusedChoiceWorkItem(target), {
+  const adapter: Parameters<typeof createGenerationQuestionGraph>[3] = {
     preflight: async state => {
-      if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== (pin?.supportRef ?? null))
+      if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== continuation)
         throw new ProtocolIntegrityBlockedError("Focused checkpoint belongs to another assignment.");
       return preflight();
     },
     authenticateContinuation: async state =>
-      state.continuationRef === pin?.supportRef && await authenticate(),
+      state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : await authenticate()),
     invoke: async () => invokeRound({ phase: "invoke" }),
     reenterWriter: async () => invokeRound({ phase: "invoke" }),
     correct: async state => invokeRound({ phase: "correct", proof: subunitRoundProof(state.submission!),
@@ -2216,9 +2264,11 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
       return { status: "unresolved", assignmentKey: key, evidenceRef: active.id,
         dispositionRef: "review-checkpoints" };
     },
-  }, async head => !!pin && await authenticate() && await trustedHead(job) === head);
-  const finished = await child.invoke({ identity, submission: null, submissionKey: null,
-    outcome: null, continuationRef: pin?.supportRef ?? null, suspension: pin?.suspension ?? null }, { ...assignmentChildConfig(config, identity), durability: "sync" });
+  };
+  const child = diagnostic ? createAssignmentLifecycleGraph(adapter) : createGenerationQuestionGraph(job, identity, focusedChoiceWorkItem(target), adapter,
+    async head => !!pin && await authenticate() && await trustedHead(job) === head);
+  const finished = await child.invoke({ identity, submission: diagnosis.submission, submissionKey: diagnostic ? key : null,
+    outcome: null, continuationRef: continuation, suspension: diagnostic ? null : pin?.suspension ?? null }, { ...assignmentChildConfig(config, identity, diagnostic ? "correction" : "original"), durability: "sync" });
   if (finished.outcome?.status === "needs-prerequisite")
     return { result: { status: "dependency-required" },
       focusedPrerequisite: { identity, suspension: finished.outcome, supportRef: null } };
@@ -2423,7 +2473,7 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
  * amendments; neither Choice nor Puzzle can certify the other. */
 async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig,
     reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
-    correctionSelected = false): Promise<Partial<State>> {
+    correctionSelected = false, diagnostic?: AssignmentDiagnosticContinuation): Promise<Partial<State>> {
   if (!s.active?.milestone || !s.inventory ||
       !["interactive", "choice", "puzzle"].includes(s.active.stage))
     throw Error("Interactive child requires its original parent assignment");
@@ -2436,6 +2486,10 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
   await checkPlan(job, s.request, s.planVersion);
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
   let correctionDomain: InteractiveDomain | undefined;
+  if (diagnostic && "workItem" in diagnostic.terminal)
+    correctionDomain = diagnostic.terminal.workItem === "interactive-choice-" + milestone.slice(10) ? "choice" :
+      diagnostic.terminal.workItem === "interactive-puzzle-" + milestone.slice(10) ? "puzzle" : undefined;
+  if (diagnostic && !correctionDomain) throw Error("Diagnostic lost the original Interactive unit.");
   if (correction) {
     const root = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
       p.commitSha === correction.origin.sourceHeadSha);
@@ -2444,11 +2498,11 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     if (!correctionDomain || !s.result || correction.origin.assignmentId !== active.id)
       throw Error("Interactive correction lacks the original reviewed subunit");
   }
-  const pending = !correction && active.stage === "interactive" &&
+  const pending = !correction && !diagnostic && active.stage === "interactive" &&
     await inspectPendingInteractiveInvocation(job, milestone, "puzzle", s.inventory.headSha);
   if (pending) await assertNativeReviewDependencies(job, pending.unit.id);
   let choiceReviewed = false;
-  if (!correction && !pending && active.stage === "interactive") {
+  if (!correction && !diagnostic && !pending && active.stage === "interactive") {
     const choice = await inspectInteractiveUnit(job, milestone, "choice");
     if (choice?.unit.phase === "committed" && choice.unit.commitSha) {
       const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
@@ -2479,6 +2533,8 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       })).digest("hex"),
     };
     const key = logicalAssignmentKey(identity);
+    const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
+    const continuation = correction?.id ?? diagnosis.ref;
     const ref = "interactive-items/" + milestone.slice(10) + ".json#" + workItem;
     let patch: Partial<State> | undefined;
     let result: Awaited<ReturnType<typeof runInteractiveWorkItem>> | undefined;
@@ -2488,6 +2544,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       await (await import("./generation-operation-strategy.js")).authenticateOperationReviewProof(
         job, s, correction, s.recoveryLifecycle.decision);
     const preflight = async (): Promise<AssignmentOutcome | null> => {
+      if (diagnostic && !await diagnosis.authenticate()) throw Error("Diagnostic correction lost its original assignment admission.");
         const currentPlan = await checkPlan(job, s.request, s.planVersion);
         if (currentPlan?.plan?.version !== s.planVersion)
           throw new ProtocolIntegrityBlockedError("Subunit round cannot use a stale plan; reconcile at parent intake.");
@@ -2508,7 +2565,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         try {
           const stopped = await preflight();
           if (stopped) return stopped;
-          result = await dispatch(s, domain, { assignmentKey: key, command }) as typeof result;
+          result = await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command) }) as typeof result;
           if (!result) throw Error("Interactive child returned no original receipt");
           return subunitWriterResult(result, ref);
         } catch (error) {
@@ -2535,7 +2592,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight,
       (status, evidenceRef, extra) => ({ ...outcome(status, extra), evidenceRef }));
     const assertIdentity = (state: { identity: AssignmentIdentity; continuationRef: string | null }) => {
-      if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== (correction?.id ?? null))
+      if (logicalAssignmentKey(state.identity) !== key || state.continuationRef !== continuation)
         throw new ProtocolIntegrityBlockedError("Interactive checkpoint belongs to another assignment.");
     };
     const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
@@ -2610,7 +2667,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         return outcome("verified", { headSha: await trustedHead(job), reviewRef: "review-checkpoints:" + unit.commitSha });
     };
     const child = createAssignmentLifecycleGraph({
-      authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+      authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
       preflight: async state => { assertIdentity(state); return preflight(); },
       invoke: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
       correct: async state => {
@@ -2636,9 +2693,9 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       },
     });
     const finished = await child.invoke({ identity,
-      submission: correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
-      submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null },
-      { ...assignmentChildConfig(config, identity, correction ? "correction" : "original"), durability: "sync" });
+      submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
+      submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation },
+      { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
     if (!finished.outcome || finished.outcome.assignmentKey !== key)
       throw Error("Interactive child returned no authenticated outcome");
     const settled = finished.outcome;
@@ -2681,7 +2738,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
 
     // Inherited Choice has already crossed its original Review boundary.
     // There is no local checkpoint for the parent to wait on in this fork.
-    if (domain === "choice" && domains.length === 2 && !settled.reviewRef?.startsWith("recovery-fork:") &&
+    if (domain === "choice" && (domains.length === 2 || diagnostic && active.stage === "interactive") && !settled.reviewRef?.startsWith("recovery-fork:") &&
         (await inspectInteractiveUnit(job, milestone, domain))?.unit.phase === "committed")
       return { result: { status: "review-handoff", headSha: settled.headSha } };
     if (domain === domains.at(-1)) {
@@ -3246,9 +3303,9 @@ export function recoveryNode(
       return { status: "cancelled", recoveryLifecycle: prior.recoveryLifecycle };
     if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
         prior.recoveryLifecycle.decision?.action === "pause" &&
-        foundationDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)) {
+        assignmentDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)) {
       const c = prior.recoveryLifecycle.active!;
-      const d = foundationDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)!;
+      const d = assignmentDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)!;
       try {
         const job = await openJob(state);
         const source = prior.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
@@ -3256,7 +3313,7 @@ export function recoveryNode(
         if (control !== "running")
           return { status: control, reason: "Author control precedes original diagnostic resumption.", recoveryLifecycle: prior.recoveryLifecycle };
         if (!source || config.configurable?.thread_id !== c.origin.graphThreadId ||
-            !await authenticateFoundationDiagnosticDecision(job, c, source.input as unknown as GenerationOperationRecovery,
+            !await authenticateAssignmentDiagnosticDecision(job, c, source.input as unknown as GenerationOperationRecovery,
               d, prior.recoveryLifecycle.attempt) ||
             !await authenticateOriginalFailure(job, state.request, c.origin.graphThreadId, c.origin, c.evidence, true))
           throw Error("Paused diagnostic successor lost its exact original authorization");
@@ -3737,7 +3794,7 @@ export function createGenerationGraph(
     .addNode("assess_recovery", recoveryNode("assess_recovery", async (s, config) => {
       if (s.recoveryLifecycle.decision?.action === "known-correction" &&
           s.recoveryLifecycle.decision.adapter === "assignment-diagnostic")
-        return runFoundationDiagnosticRecovery(s, config, reviewBoundary);
+        return runAssignmentDiagnosticRecovery(s, config, reviewBoundary);
       // Historical v1 unknownRecovery receipts remain inspectable, not executable.
       // Only the shared source-bound C03 operation lane can start a new diagnosis.
       if (s.unknownRecovery?.phase === "assessment")
@@ -4005,7 +4062,22 @@ export function createGenerationGraph(
               "Original committed specialist reconciliation proof disappeared.",
               { reference: "specialist-receipt", assignmentId: s.active.id });
           }
-          if (s.active && (receipt?.plan?.version ?? null) === s.planVersion) {
+          // The first Architecture commit creates plan v1. Its original
+          // failed Review is still admitted against the pre-plan parent;
+          // preserve that in-flight result until its Review is settled.
+          const initialArchitectureReview = s.active?.stage === "architecture" &&
+            s.planVersion === null && receipt?.phase === "committed" &&
+            receipt.plan?.version === 1 && s.result?.headSha === receipt.expectedHead &&
+            s.recoveryLifecycle.phase === "correcting" &&
+            s.recoveryLifecycle.active?.origin.operation === "independent-review" &&
+            s.recoveryLifecycle.active.origin.assignmentId === "architecture" &&
+            s.recoveryLifecycle.active.origin.planVersion === null &&
+            s.recoveryLifecycle.active.origin.sourceHeadSha === s.result?.headSha &&
+            s.recoveryLifecycle.decision?.action === "known-correction" &&
+            s.recoveryLifecycle.decision.adapter === "review-cycle" &&
+            await (await import("./generation-operation-strategy.js")).authenticateOperationReviewProof(
+              job, s, s.recoveryLifecycle.active, s.recoveryLifecycle.decision);
+          if (s.active && ((receipt?.plan?.version ?? null) === s.planVersion || initialArchitectureReview)) {
             if (s.result) {
               // A failed correction may have reached a *reviewed*, clean
               // checkpoint while author steering was queued during its Pi
@@ -4497,6 +4569,7 @@ export function createGenerationGraph(
           dependencyHistory: [...(s.dependencyHistory ?? []).filter(p =>
           p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
       } catch (error) {
+        if (isGraphBubbleUp(error)) throw error;
         const stop = blocked(error);
         if (stop.status !== "blocked") return { ...stop, result: s.result };
         // The original negative Review already owns the active RecoveryCase.

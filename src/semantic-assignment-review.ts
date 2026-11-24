@@ -186,12 +186,15 @@ export async function prepareSemanticReview(job: JobStartResult,
     // New and existing Stories may use ANY canonical Creative Direction stem.
     // Bind the read-only baseline to the exact reviewed commit, not a guessed
     // filename or mutable filesystem lookup. This adds no repair write grant.
-    const direction = point.workItem === 'global-architecture'
+    const architectureReview = point.workItem === "global-architecture" ||
+      point.workItem.startsWith("repair-") && assignment.id === "architecture" &&
+      assignment.specialist === "nt-story-architecture";
+    const direction = architectureReview
       ? git(job, 'ls-tree', '-r', '--name-only', point.commitSha, '--',
         prefix + 'creative-direction/').split('\n').filter(Boolean)
         .filter(path => path.startsWith(prefix + 'creative-direction/'))
         .map(path => path.slice(prefix.length)) : [];
-    if (point.workItem === 'global-architecture' && (direction.length !== 1 ||
+    if (architectureReview && (direction.length !== 1 ||
       !/^creative-direction\/[a-z0-9][a-z0-9._-]*\.md$/.test(direction[0]!)))
       throw new Error('Independent Architecture review needs one pinned canonical Creative Direction.');
     const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
@@ -215,7 +218,8 @@ export async function prepareSemanticReview(job: JobStartResult,
       eventMilestone = repair.planAmendment.eventMilestone;
     }
     const repairTargets = reviewRepairTargets(assurance.changedPaths,
-      eventMilestone ? "event-" + eventMilestone.id.slice("milestone.".length) : point.workItem,
+      architectureReview ? "global-architecture" :
+        eventMilestone ? "event-" + eventMilestone.id.slice("milestone.".length) : point.workItem,
       eventMilestone);
     const readOnlyPaths = canonicalContext.map(c => c.path).filter(p => !repairTargets.includes(p));
     let eventConsequenceProof: EventConsequenceProof | undefined;
@@ -357,7 +361,7 @@ export async function prepareSemanticReview(job: JobStartResult,
       }
     }
     items.push({ assignment, reviewedWorkItem: point.workItem,
-      unitOutcome: semanticUnitOutcome(point.workItem, assignment.specialist) + milestoneBlueprintObligations +
+      unitOutcome: semanticUnitOutcome(architectureReview ? "global-architecture" : point.workItem, assignment.specialist) + milestoneBlueprintObligations +
         (refinement ? " Additional controller-admitted, source-bound assignment outcome (" +
           refinement.item + ", " + (refinement.sourcePath ?? "verified Architecture") + " at " + refinement.sourceSha +
           "): " + refinement.outcome +

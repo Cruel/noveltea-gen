@@ -1,5 +1,6 @@
 import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
 import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
+import { assertArchitectureProseOnly, authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
 import { auditEventParticipantCorrection } from "./event-participant-correction.js";
 import { CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
@@ -209,6 +210,8 @@ export async function readRejectedRepairOrigin(job: JobStartResult, point: Recov
     const previous = await inspectRejectedRepair(job, point.workItem.slice(7));
     return predecessorOrigin(previous, point);
   }
+  if (point.workItem === "global-architecture")
+    return (await import("./architecture.js")).verifyArchitectureReviewOrigin(job, point);
   const source = specialistSource(job, point.workItem);
   if (!source) throw Error("This specialist has no registered original-session repair adapter; preserve the rejected checkpoint.");
   const stat = await lstat(source);
@@ -484,6 +487,13 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
     if (!next || next.workItem !== "repair-" + sha ||
         next.assurance?.assignmentId !== state.assignment.id)
       throw Error("Repaired commit is not a verified successor of this rejected source.");
+    if (state.origin.workItem === "global-architecture") {
+      for (const path of next.assurance?.changedPaths ?? []) {
+        if (!authorizedArchitectureRecordPath(path)) throw Error("Foreign Architecture correction path.");
+        assertArchitectureProseOnly(gitRaw(job, "show", next.parentSha + ":" + repoPath(job, path)),
+          gitRaw(job, "show", next.commitSha + ":" + repoPath(job, path)));
+      }
+    }
     if (["passed", "failed", "blocked"].includes(state.phase)) {
       const sealed = await inspectCheckpointReview(job, next);
       if (sealed?.status !== (state.phase === "passed" ? "passed" : "failed") ||
@@ -723,9 +733,18 @@ export function changedRepairPaths(job: JobStartResult, state: RepairReceipt) {
   const milestonePath = state.planAmendment?.eventMilestone?.path;
   if (paths.some(path => !allowed.includes(path) ||
       (path.startsWith("creative-direction/") && state.origin.workItem !== "foundation") ||
-      path.startsWith("arcs/") || path.startsWith("narrative-positions/") ||
-      path.startsWith("milestones/") && path !== milestonePath))
+      (path.startsWith("arcs/") || path.startsWith("narrative-positions/") ||
+        path.startsWith("milestones/") && path !== milestonePath) &&
+        !(state.origin.workItem === "global-architecture" && authorizedArchitectureRecordPath(path))))
     throw Error("Review feedback never authorizes unrelated or protected Story changes.");
+  if (state.origin.workItem === "global-architecture") {
+    for (const path of paths) {
+      const target = join(job.worktreeStoryRoot, path);
+      if (!authorizedArchitectureRecordPath(path) || realpathSync(target) !== target || !lstatSync(target).isFile())
+        throw Error("Unsafe Architecture correction path.");
+      assertArchitectureProseOnly(gitRaw(job, "show", state.baselineHead + ":" + repoPath(job, path)), readFileSync(target, "utf8"));
+    }
+  }
   const eventCharacter = state.planAmendment?.eventCharacter;
   if (eventCharacter) {
     if (paths.length !== 1 || paths[0] !== eventCharacter.path)
@@ -1379,6 +1398,7 @@ async function prepareRepairWriter(job: JobStartResult, state: RepairReceipt) {
   const focus = state.origin.workItem.startsWith("focus:")
     ? state.origin.workItem.slice(6).split(".")[0] : null;
   const skill = state.origin.workItem === "foundation" ? "nt-story-discovery" :
+    state.origin.workItem === "global-architecture" ? "nt-story-architecture" :
     state.origin.workItem.startsWith("event-") || focus === "event"
       ? "nt-event-design" :
     state.origin.workItem.startsWith("composition-") || focus === "authored-content"
@@ -1491,6 +1511,8 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
       "a prose-only rewrite cannot resolve a remaining typed mismatch. " +
       "If truthful state cannot fit the original slots, report the later Choice " +
       "dependency or required source rather than inventing a Fact or Relationship transition. " +
+      (state.origin.workItem === "global-architecture" ?
+        "Architecture repair is prose-only; retain every byte of canonical metadata, every record identity and the approved plan order. " : "") +
       (state.origin.workItem.startsWith("interactive-choice-") ? CHOICE_PAYOFF_REPAIR + " " :
         state.origin.workItem.startsWith("interactive-puzzle-") ? PUZZLE_GOAL_REPAIR + " " : "") +
       "If correction genuinely requires changing a source listed as a READ-ONLY " +
