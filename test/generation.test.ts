@@ -24,7 +24,7 @@ import { pendingDigest } from "../src/pending-work-amendments.js";
 import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { parseStoryPlanning } from "../src/story-planning.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics } from "../src/story-metrics.js";
-import { renderFoundation } from "../src/demo.js";
+import { renderFoundation } from "../src/foundation-record.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { startStoryJob } from "../src/job.js";
 import { validateStoryJob } from "../src/validator.js";

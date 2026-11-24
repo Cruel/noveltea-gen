@@ -120,7 +120,7 @@ and no live Pi usage is claimed by this inventory.
 
 - [Generation](../src/generation.ts) `runFoundationAssignmentChild`: every original/metadata correction dispatch uses a child transition with synchronous checkpoint durability; each pending node checks current assignment, plan, author control and source. The generic Foundation branch of `dispatch` refuses execution. Integrity exceptions use the existing parent specialist-dispatch assessment; authenticated exhaustion/nonconvergence use original specialist-result proof.
 - [Foundation](../src/foundation.ts) `runFoundationJob`, `piAuthor`, `executeFoundationGraph`: preserve the original Pi session, writer lock, validation, commit and effect reconciliation. `writer-round` returns without committing or processing post-work author updates; only accepted verification may publish. Unadmitted standalone Pi writing is refused. Approved Chat materialization is not a Pi writer.
-- [Shared receipt service](../src/assignment-metadata-recovery.ts) `executeAssignmentRound`, `runAssignmentReceipts`: invoke/reconcile one round, verify actual defects and seal next grant, or execute the exact admitted grant. Local format correction remains tool-free; historical receipts reconstruct progress without dispatch. `recoverSubmittedAssignment` is a temporary adapter for unmigrated lanes only, not reachable from Foundation.
+- [Shared receipt service](../src/assignment-metadata-recovery.ts) `executeAssignmentRound`, `runAssignmentReceipts`: invoke/reconcile one round, verify actual defects and seal next grant, or execute the exact admitted grant. Local format correction remains tool-free; historical receipts reconstruct progress without dispatch. `recoverSubmittedAssignment` was a temporary adapter for unmigrated lanes; R14K removes it and requires an explicit round command.
 - [Shared child](../src/generation-assignment-lifecycle.ts) `createAssignmentLifecycleGraph`: verification may publish the authoritative committed submission alongside its disposition, rather than promoting the preceding draft reference. Pending verification checks submission identity; the parent still independently reviews and reconciles commit/plan.
 - Proof gates: [round and source AST](../test/generation-recovery-coverage.test.ts), [model consumer AST](../test/generation-model-consumer-coverage.test.ts), and [production-shaped Generation regression](../test/generation.test.ts). See the [R14A contract](generation-recovery-contract.md#r14a-261--foundation-substantive-writer-rounds).
 
@@ -269,3 +269,21 @@ inventory throw, and the changed source-proof functions (Turn admission,
 operation selection, fulfillment and Studio worker). The worker retains one
 model consumer; its fingerprint changes only because admission now precedes
 runtime acquisition. No blanket rebaseline.
+
+#### R14K receipt admission and whole-assignment adapter removal
+
+| Source / entrypoint | Disposition and evidence |
+| --- | --- |
+| [Shared assignment receipts](../src/assignment-metadata-recovery.ts) | Remove the unused whole-assignment `recoverSubmittedAssignment` entry and the command-less correction loop. The existing `executeAssignmentRound` interface requires an invoke, verify, or correct command; absent or invalid commands fail before session/effect access. Iteration only authenticates preceding receipts. [Receipt tests](../test/assignment-metadata-recovery.test.ts) now drive the same explicit rounds, including pause/resume, drift, protocol exhaustion, and non-convergence. |
+| [Turn reader](../src/turn-plan-evidence.ts), [fork review projection](../src/fork-review-turn.ts) | Reject old objective-less receipts even with a matching digest, including inherited Review criteria. The shared web verifier also uses the current objective attestation. Existing fork evidence with a current objective remains usable. [Cutover regressions](../test/recovery-cutover.test.ts) and [fork regressions](../test/fork-review-turn.test.ts). |
+| [CLI demo](../src/cli.ts) | Retire the pre-Generation standalone Creative Direction authoring command for both live and fixture modes, before project creation, skill snapshot, provider initialization or writer access. Delete its separate model writer and custom write tool; the pure canonical serializer remains shared by Foundation and Studio. [Negative controls](../test/demo.test.ts) assert no state, cache, existing bytes or directory creation; [certification](../test/certification.test.ts) checks both roots and source checkout. Consolidate the former paid demo smoke into [authenticated Foundation certification](../test/foundation-live.test.ts). The read-only `run` routing demonstration remains separate. |
+
+The only updated model consumer fingerprint is `runAssignmentReceipts` (still two
+call sites); the R02 gate tracks its mandatory command and removes the deleted
+whole-assignment adapter. The no-Turn fixture admission and standalone repair paths remain outstanding.
+
+
+
+
+The deleted `runFoundationDemo` model consumer is removed from the reviewed
+inventory; no other model consumer changes for this retirement.

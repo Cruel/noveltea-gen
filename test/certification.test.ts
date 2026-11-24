@@ -186,37 +186,22 @@ test("certification: cross-process safe handoff resumes the original pinned skil
   assert.deepEqual(readdirSync(story), [], "graph invocation never writes Story canon");
 });
 
-test("certification: two disposable Story roots produce only minimal draft foundations from pinned skills", t => {
+test("certification: obsolete demo cannot write either disposable Story root or skill checkout", t => {
   const f = certificationFixture(t);
   const before = git(f.checkout, "status", "--porcelain");
   const revision = git(f.checkout, "rev-parse", "HEAD");
   for (const name of ["foundation-a", "foundation-b"]) {
     const root = join(f.root, name);
     mkdirSync(root);
-    const result = f.success("demo-story", root,
-      ["--fixture", "--task", "A murder mystery; delegate the remaining creative choices"]);
-    assert.equal(result.mode, "fixture", "fixture must not claim actual Pi skill use");
-    assert.equal(result.status, "completed");
-    assert.equal(result.recordStatus, "draft");
-    assert.equal(result.catalogValidation, "unverified");
-    assert.equal(result.skillSnapshot.id, result.skillSnapshot.digest);
-    assert.equal(result.skillSnapshot.commit, revision);
-    assert.equal(result.skillReads.length, 5);
-    assert.ok(result.skillReads.every((path: string) =>
-      path.startsWith(join(result.skillSnapshot.path, "skills") + "/")));
-    assert.deepEqual(readdirSync(root), ["creative-direction"]);
-    assert.deepEqual(readdirSync(join(root, "creative-direction")), ["foundation.md"]);
-    const source = readFileSync(result.artifact, "utf8");
-    assert.match(source, /schema: '0.1'/);
-    assert.match(source, /status: draft/);
-    assert.match(source, /origin: user\n\s+authority: user-protected/);
-    assert.match(source, /origin: agent\n\s+authority: delegated/);
-    const duplicate = f.execute("demo-story", root, ["--fixture", "--task", "overwrite"]);
-    assert.notEqual(duplicate.status, 0);
-    assert.match(duplicate.stderr, /fresh empty Story directory/);
+    for (const flags of [[], ["--fixture"]]) {
+      const result = f.execute("demo-story", root, [...flags, "--task", "A murder mystery"]);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /Standalone Story authoring is retired/);
+      assert.deepEqual(readdirSync(root), []);
+    }
   }
-  assert.equal(git(f.checkout, "status", "--porcelain"), before,
-    "source checkout must not be modified by demo authoring");
+  assert.equal(git(f.checkout, "status", "--porcelain"), before);
+  assert.equal(git(f.checkout, "rev-parse", "HEAD"), revision);
 });
 
 test("certification: invalid Pi handoff, invalid updates and model errors never run a fallback worker", async () => {

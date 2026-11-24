@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, after } from "node:test";
-import { renderFoundation, type FoundationDraft } from "../src/demo.js";
+import { renderFoundation, type FoundationDraft } from "../src/foundation-record.js";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 

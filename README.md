@@ -2407,7 +2407,7 @@ Alternatively, create an **empty** Story directory:
 pnpm dev run --project ./story-test --create-project --task "Suggest a one-sentence premise."
 ```
 
-For `run`, `--create-project` performs directory creation only. It does **not** initialize an engine game, install skills, modify an existing project or generate Story content. The separate opt-in `demo-story` command below has one narrowly scoped Story-writing tool.
+For `run`, `--create-project` performs directory creation only. It does **not** initialize an engine game, install skills, modify an existing project or generate Story content. The former standalone `demo-story` writer is retired.
 
 The default model is `openai/gpt-6-luna`, if the selected Pi credentials support it. Use `pi --list-models` to see available provider/model combinations, and override with `--provider` and `--model`. Unsupported pairs fail explicitly.
 
@@ -2487,36 +2487,23 @@ this proof of concept. Restore missing session files or SQLite backups when
 recovery reports a damaged or mismatched record—do not replace them with fresh
 Pi conversations.
 
-## Opt-in skill-driven Story foundation demo (#9)
+## Authenticated Story foundation certification
 
-`demo-story` is **separate from** the existing `run` LangGraph handoff. It exercises a real Pi agent using the immutable NovelTea skill snapshot against a **fresh, empty, explicitly selected** Story root. Configure `.local/config.json` with `novelteaSkills` pointing at the `noveltea-skills` Git checkout first (see configuration above). The command forces explicit-only discovery from the **pinned snapshot**, requires `nt-story-discovery` and `nt-catalog`, and does not install skills, update their source checkout or change global Pi configuration. It retains its own Pi transcript under the application state directory, not inside the Story.
-
-With valid Pi credentials, run:
-
-```sh
-pnpm dev demo-story --project ./scratch-story-foundation --create-project \
-  --task "Create a murder mystery set aboard a stopped midnight train. Keep it dialogue-led with reusable visual locations. You are delegated all other creative foundation choices."
-```
-
-The agent is directed to actually load `nt-story-discovery/SKILL.md`, `nt-catalog/SKILL.md`, `nt-catalog/references/records.md`, `authority-and-validation.md` and `glossary.md` through its restricted `read` tool. The one allowlisted `write_creative_direction` tool **refuses to write until those reads succeed**. It accepts constrained structured inputs and creates only `creative-direction/foundation.md`, with `schema: '0.1'`, `status: draft`, required foundation fields, Markdown prose and individually attributed Creative Decisions. User-supplied choices are `origin: user` / `authority: user-protected`; choices filled within the explicitly delegated scope remain `origin: agent` / `authority: delegated`. There is no approval implied by the draft status.
-
-The directory must be **empty**, even if it already exists. The tool cannot overwrite canon or create additional records, an engine project, or an entire Story. The response reports the skill digest and Git provenance, exact read paths, Pi transcript file, created artifact, and `catalogValidation: "unverified"`. The demo performs constrained input checks and reads the written file back, but does **not** claim native catalog validation, foundation readiness, creative quality, author approval or NovelTea engine playability. The installed native NovelTea CLI exposes `noveltea narrative validate` and `noveltea narrative readiness`; use them separately for canonical diagnostics and design versus approved foundation minimums. The demonstration itself does not claim these checks were performed.
-
-To exercise the same file boundary deterministically without credentials or a model:
+The standalone `demo-story` writer has been retired. Creative Direction
+authoring belongs to the authenticated Generation Turn (or the approved
+Studio Discovery handoff), with the original source, native validation and
+independent Review gates. To opt in to the real Pi Foundation certification
+against a disposable Git Story Job:
 
 ```sh
-pnpm dev demo-story --project ./scratch-story-fixture --create-project \
-  --fixture --task "A murder mystery"
+NT_LIVE_FOUNDATION=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
+  pnpm exec tsx --test test/foundation-live.test.ts
 ```
 
-The fixture is **not** proof of a Pi agent actually reading or using the skills. For an opt-in real-model integration smoke that checks the persisted Pi tool calls, validates the authored record with the development catalog, and verifies the source checkout remains unchanged:
-
-```sh
-NT_LIVE_TEST=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \
-  pnpm exec tsx --test --test-name-pattern='opt-in real Pi authors' test/live.test.ts
-```
-
-Set `NT_PROVIDER` and `NT_MODEL` if needed. The real-model test may incur usage; it uses a disposable Story root and isolated local state/cache paths. Canonical Story validation is provided by the native `noveltea` CLI; the normal `run` command remains a graph-routing proof of concept with **no Story write permissions**.
+Set `NT_PROVIDER` and `NT_MODEL` for a supported provider/model. This test
+uses the real whole-Story Turn planner and pauses at the Foundation boundary.
+It may incur model usage. The separate `run` routing demonstration has no
+Story writing tools.
 
 ## Certification of the integration proof (#11)
 
@@ -2568,7 +2555,7 @@ pnpm studio:input --story /path/to/story --job studio-draft \
 
 The helper validates the saved Turn against the supplied contract and existing Job identity, and emits the production `request` object including the Turn digest. It does not create a job, invoke a model or edit Story files. Omit `--fixture` to opt into real Pi; optional `--provider` and `--model` override defaults. Specialists pin their own skills and transcripts through the same work-item APIs used by CLI generation.
 
-**Studio limits:** Use only one execution surface/thread per job. Studio owns its development-server checkpoints, separate from CLI `generation.sqlite`; use `job generate` for tested durable CLI restart/reconciliation. The generator now also binds a server-run job to its original thread/request and refuses CLI takeover. Never start a fresh thread to overwrite interrupted specialist work. See the production generation section for safe-boundary controls, resume and preserved crash evidence. Legacy `run`/`demo-story` CLI commands remain available, but are not Studio's registered graph.
+**Studio limits:** Use only one execution surface/thread per job. Studio owns its development-server checkpoints, separate from CLI `generation.sqlite`; use `job generate` for tested durable CLI restart/reconciliation. The generator now also binds a server-run job to its original thread/request and refuses CLI takeover. Never start a fresh thread to overwrite interrupted specialist work. See the production generation section for safe-boundary controls, resume and preserved crash evidence. The read-only `run` routing demonstration is not Studio's registered graph.
 
 **Web generation owner:** Studio now admits jobs into a durable SQLite queue, while a separate trusted NovelTea agent process executes LangGraph.js directly, owns graph checkpoints and author-update resumes, and polls queued jobs independently of browser traffic. The earlier Skein Agent Protocol qualification was retired: its extra protocol and checkpoint store were unused by Studio. See [historical Skein qualification](docs/skein-qualification.md) and the deployment guide.
 

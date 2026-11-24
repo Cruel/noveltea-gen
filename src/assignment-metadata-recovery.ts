@@ -520,21 +520,15 @@ export async function executeAssignmentRound(options: AssignmentRecoveryOptions,
   return runAssignmentReceipts(options, command);
 }
 
-/** Temporary adapter for not-yet-migrated specialist lanes. Foundation must
- * never call this entry point. */
-export async function recoverSubmittedAssignment(options: AssignmentRecoveryOptions): Promise<AssignmentInvocationProof> {
-  const result = await runAssignmentReceipts(options);
-  if (result.status !== "accepted") throw Error("Whole assignment did not reach acceptance");
-  return result.proof;
-}
-
 async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
-  command?: AssignmentRoundCommand): Promise<AssignmentRoundResult> {
+  command: AssignmentRoundCommand): Promise<AssignmentRoundResult> {
+  if (!command || !["invoke", "verify", "correct"].includes(command.phase))
+    throw new ProtocolIntegrityBlockedError("Missing or invalid assignment round command");
   const { session, directory, sourceDigest, sessionRoots } = options;
   const policy = responsePolicy(options.responseKind);
   const sessionFile = session.sessionManager.getSessionFile();
   if (!sessionFile || !hex.test(sourceDigest)) throw new ProtocolIntegrityBlockedError("Missing assignment invocation identity");
-  if (command && command.phase !== "invoke" &&
+  if (command.phase !== "invoke" &&
       (command.proof.sourceDigest !== sourceDigest || !hex.test(command.proof.settlementDigest) ||
        !Number.isSafeInteger(command.proof.ordinal) || command.proof.ordinal < 0))
     throw new ProtocolIntegrityBlockedError("Foreign assignment round reference");
@@ -579,8 +573,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       command?.phase === "correct" ? command.proof.ordinal + 1 : null;
     if (requested !== null && ordinal > requested)
       throw new ProtocolIntegrityBlockedError("Assignment advanced beyond the requested round");
-    if (command && ((command.phase === "verify" || next || requested !== null && ordinal < requested) && !settled ||
-        requested !== null && ordinal <= requested && !grant))
+    if ((command.phase === "verify" || next || requested !== null && ordinal < requested) && !settled ||
+        requested !== null && ordinal <= requested && !grant)
       throw new ProtocolIntegrityBlockedError("Requested round lost its settled effect or admitted grant");
     if (!grant && (started || submitted || settled || await optionalJson(protocolPath)))
       throw new ProtocolIntegrityBlockedError("Original assignment attempt lost its grant");
@@ -622,7 +616,7 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
     if (settled) await attestPrefix(sessionFile, settled);
     if (!submitted) {
       if (started) throw new ProtocolIntegrityBlockedError("Original writer started without a sealed effect; never replay");
-      if (command && (command.phase === "verify" || ordinal > 0 && command.phase !== "correct"))
+      if (command.phase === "verify" || ordinal > 0 && command.phase !== "correct")
         throw new ProtocolIntegrityBlockedError("No child transition authorized this substantive writer invocation");
       if (!precedingProtocol && session.messages.some(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") &&
           (!options.initialTranscriptSha256 || (await transcriptPrefix(sessionFile)).transcriptSha256 !== options.initialTranscriptSha256))
@@ -802,8 +796,6 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       if (!next) await seal(join(directory, String(ordinal + 1)) + ".grant.json", successor);
       return { status: "correction", proof, grantDigest: digest(successor) };
     }
-    if (command) throw new ProtocolIntegrityBlockedError("Round must settle before verification");
-    seen.add(finding);
-    precedingProtocol = { base, grantDigest, settlement: settled };
+    throw new ProtocolIntegrityBlockedError("Round must settle before verification");
   }
 }

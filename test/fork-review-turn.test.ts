@@ -28,6 +28,8 @@ const turnBody = {
   originalRequest: "Write a mystery on an overnight train",
   source: { jobId: null, verifiedSha: sourceSha },
   contract,
+  objective: { breadth: "whole-story" as const, requestedTargets: [],
+    deliveryDepth: contract.scope.depth, obligations: ["Ground incident evidence in-scene"] },
   reviewRequired: true,
   assignments: [
     {

@@ -8,7 +8,7 @@ import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/pro
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { renderFoundation, type FoundationDraft } from "./demo.js";
+import { renderFoundation, type FoundationDraft } from "./foundation-record.js";
 import { hasUserProtectedDecision } from "./foundation-record.js";
 import { readChatApprovedFoundation } from "./chat-approved-foundation.js";
 import { startStoryJob, type JobStartResult } from "./job.js";

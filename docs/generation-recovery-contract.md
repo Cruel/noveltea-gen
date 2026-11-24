@@ -725,3 +725,19 @@ the remaining fixture transport stop in the assessor. The shared policy cannot
 be skipped by toggling a fixture flag. This does not yet remove the fixture-only
 effect and Review bypasses or authenticate the historical no-Turn fixture lane;
 those remain R14K cutover work, not supported final execution semantics.
+
+
+R14K assignment receipt cutover: the shared receipt service accepts only
+explicit `invoke`, `verify`, or `correct` commands. The former
+`recoverSubmittedAssignment` whole-loop adapter has been removed, including its
+test callers. An absent or invalid command is an integrity error before any
+session/effect access. The common Turn reader and inherited Review projection
+reject objective-less legacy receipts, even when their old digest matches.
+See [the source-linked inventory](recovery-exit-inventory.md#r14k-receipt-admission-and-whole-assignment-adapter-removal).
+
+
+The standalone `demo-story` Creative Direction writer is retired before
+project setup for either live or fixture requests. Its model session and write
+tool are deleted; production Foundation uses the shared pure canonical
+serializer. Paid Foundation certification now enters via the current whole-Story
+Turn and parent pause boundary; the read-only `run` demonstration is unaffected.

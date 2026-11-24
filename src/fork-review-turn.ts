@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
-import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
+import { readTurnEvidence, validTurnObjective, type TurnEvidence } from "./turn-plan-evidence.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -16,6 +16,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 export function projectReviewTurn(original: TurnEvidence, job: JobStartResult): TurnEvidence {
   if (
     original?.version !== 1 ||
+    !validTurnObjective(original) ||
     !original.source ||
     !/^[a-f0-9]{40}$/.test(original.source.verifiedSha) ||
     !Array.isArray(original.assignments) ||
@@ -46,7 +47,9 @@ export function readInheritedReviewTurn(job: JobStartResult): TurnEvidence | nul
   const fork = readRecoveryFork(job);
   if (!fork) return null; // unplanned fixture/legacy CLI job
   const original = fork.reviewTurn;
-  if (!original) return null; // legacy fork: caller MUST reject real work
+  if (!original) return null; // historical fork: no current review authority
+  if (!validTurnObjective(original))
+    throw Error("Inherited review lacks an authenticated current-format Turn objective.");
   const { digest, ...body } = original;
   if (
     digest !== hash(body) ||

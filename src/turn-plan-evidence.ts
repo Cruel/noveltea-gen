@@ -44,9 +44,9 @@ const safePath = /^[a-z][a-z-]*\/[a-z0-9-]+\.md$/;
 /** Shared, structural objective attestation for web admission and worker replay.
  * Per-boundary ownership, Git and contract integrity checks remain with callers. */
 export function validTurnObjective(plan: TurnEvidence): boolean {
-  if (plan.objective === undefined) return true; // Pre-#149 saved receipts.
-  const objective = plan.objective;
-  if (!objective || typeof objective !== "object" || Array.isArray(objective) ||
+  const objective = plan?.objective;
+  if (!["full-story", "revision", "protected-amendment"].includes(plan?.kind) ||
+      !objective || typeof objective !== "object" || Array.isArray(objective) ||
       !plan.contract?.scope || !Array.isArray(plan.contract.scope.targets)) return false;
   return objective.breadth === (plan.kind === "full-story" ? "whole-story" :
       plan.kind === "revision" ? "focused" : "protected-amendment") &&
@@ -76,6 +76,8 @@ export async function readTurnEvidence(job: JobStartResult, contract: Completion
   catch { throw new Error("Stored Turn plan is not valid JSON."); }
   const { digest, ...body } = plan ?? ({} as TurnEvidence);
   const assignments = plan?.assignments;
+  if (!plan?.objective)
+    throw new Error("Saved plan lacks an authenticated current-format Turn objective; obsolete execution is refused.");
   if (plan?.version !== 1 || !SHA.test(plan.source?.verifiedSha ?? "") ||
     plan.source.verifiedSha !== job.baseSha || !plan.goal?.trim() ||
     (originalRequest !== undefined && plan.originalRequest !== originalRequest) ||

@@ -5,11 +5,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
+import type { CompletionContract } from "../src/architecture.js";
 
 test("opt-in real Pi specialist reads pinned skills and directly writes validated Markdown", {
   skip: process.env.NT_LIVE_FOUNDATION !== "1" ? "set NT_LIVE_FOUNDATION=1 for paid live Pi certification" : false,
   timeout: 300_000,
-}, () => {
+}, async () => {
   const source = resolve(process.env.NT_SKILLS_CHECKOUT || "../noveltea-skills");
   assert.ok(existsSync(join(source, "skills/nt-story-discovery/SKILL.md")));
   const temp = mkdtempSync(join(tmpdir(), "nt-foundation-live-"));
@@ -42,16 +45,27 @@ test("opt-in real Pi specialist reads pinned skills and directly writes validate
     const init = command("start", "--story", story, "--job", "live-foundation");
     assert.equal(init.status, 0, init.stderr);
     const job = JSON.parse(init.stdout);
-    const args = ["foundation", "--story", story, "--job", "live-foundation",
-      "--task", "Write a concise mystery visual-novel foundation: an archivist on a stranded midnight train discovers that every passenger is concealing part of a disappearance. You are delegated all unspecified creative choices.",
-      "--envelope", "Small cast, two reusable locations, dialogue-led clues, no fixed number of endings.",
-      "--skills-source", source];
+    const task = "Create a concise mystery visual novel: an archivist on a stranded midnight train discovers that every passenger is concealing part of a disappearance. Use a small cast, two reusable locations and dialogue-led clues. You are delegated all unspecified creative choices.";
+    const contract: CompletionContract = {
+      scope: { kind: "full-story", depth: "composition", targets: [], branches: [] },
+      constraints: ["Small cast", "Two reusable locations", "Dialogue-led clues"],
+      envelope: { presentation: "Dialogue-led visual novel", hardLimits: [], preferences: [] },
+    };
+    const contractFile = join(temp, "contract.json");
+    writeFileSync(contractFile, JSON.stringify(contract));
+    await saveJobTurnPlan(job, planWholeStory(task, contract, job.baseSha));
+    const args = ["generate", "start", "--story", story, "--job", "live-foundation",
+      "--task", task, "--contract", contractFile, "--skills-source", source,
+      "--pause-after", "foundation"];
     if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
     if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
     const result = command(...args);
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    const outcome = JSON.parse(result.stdout);
-    assert.equal(outcome.status, "committed");
+    const generation = JSON.parse(result.stdout);
+    assert.equal(generation.status, "paused", JSON.stringify(generation));
+    assert.ok(generation.completedStages.some((entry: { stage: string }) => entry.stage === "foundation"));
+    const outcome = JSON.parse(readFileSync(join(job.stateDir, "foundation.json"), "utf8"));
+    assert.equal(outcome.stage, "committed");
     assert.equal(outcome.validation, "passed", "Native CLI must verify valid empty Git baselines");
     assert.equal(outcome.skillReads.length, 5);
     const entries = readFileSync(outcome.piSessionFile, "utf8").trim().split("\n").map(JSON.parse);

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { nativeMetadataDefects, executeAssignmentRound, type AssignmentRoundCommand, recoverSubmittedAssignment, verifySettledAssignment, type AssignmentDefect, type AssignmentResponseKind } from "../src/assignment-metadata-recovery.js";
+import { nativeMetadataDefects, executeAssignmentRound, type AssignmentRoundCommand, verifySettledAssignment, type AssignmentDefect, type AssignmentResponseKind } from "../src/assignment-metadata-recovery.js";
 import { ProtocolExhaustedError, ProtocolIntegrityBlockedError, type ResponseContractSession } from "../src/response-contract-recovery.js";
 import type { ValidationResult } from "../src/validator.js";
 
@@ -106,8 +106,19 @@ async function harness(t: import("node:test").TestContext, replies: Reply[], res
       await add({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: reply.text }] });
     },
   });
-  const run = () => recoverSubmittedAssignment(options());
+  // Test-only driver of the production round API, never a production retry
+  // adapter. Retain the exact command across a safe pause or failure, as the
+  // checkpointed child does. The next correction is granted by verify.
   const round = (command: AssignmentRoundCommand) => executeAssignmentRound(options(), command);
+  let command: AssignmentRoundCommand = { phase: "invoke" };
+  const run = async () => {
+    for (;;) {
+      const result = await round(command);
+      if (result.status === "accepted") return result.proof;
+      command = result.status === "settled" ? { phase: "verify", proof: result.proof } :
+        { phase: "correct", proof: result.proof, grantDigest: result.grantDigest };
+    }
+  };
   return { dir, file, receiptDir, run, round, calls,
     pauseAt: (n: number) => { pauseAt = n; },
     changeEffect: (value: string) => { effect = value; },
@@ -215,7 +226,7 @@ test("source, permission, effect, and diagnostic-grant drift refuse the next cor
       grant.defects = [provenance];
       await writeFile(grantFile, JSON.stringify(grant));
     }
-    await assert.rejects(h.run(), /source changed|Permission changed|draft changed|no longer matches/);
+    await assert.rejects(h.run(), /source changed|Permission changed|draft changed|no longer matches|Foreign assignment round reference|Corrective grant differs/);
     assert.equal(h.calls.length, 1);
   }
 });
@@ -328,4 +339,11 @@ test("R14A child round refuses " + damage + " without another prompt", async t =
   if (damage !== "grant") await assert.rejects(h.round({ phase: "invoke" }), ProtocolIntegrityBlockedError);
   else await assert.rejects(h.round({ phase: "verify", proof: first.proof }), ProtocolIntegrityBlockedError);
   assert.equal(h.calls.length, calls);
+});
+
+test("R14K missing round command cannot invoke or grant a writer", async t => {
+  const h = await harness(t, [{ text: report, effect: "valid" }]);
+  await assert.rejects(h.round(undefined as unknown as AssignmentRoundCommand), /round command/i);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.verifyCalls(), 0);
 });

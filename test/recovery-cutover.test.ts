@@ -10,6 +10,8 @@ import { selectOperationStrategy } from "../src/generation-operation-strategy.js
 import type { GenerationGraphState } from "../src/generation.js";
 import type { RecoveryCase } from "../src/generation-recovery-contract.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { readTurnEvidence } from "../src/turn-plan-evidence.js";
+import { verifyTurnPlan } from "../web/src/lib/turn-plan.js";
 import { prepareTurnFulfillment } from "../src/turn-fulfillment.js";
 import { createHash } from "node:crypto";
 import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
@@ -150,6 +152,9 @@ test("historical Turn receipts cannot grant final fulfillment or current executi
     const digest = createHash("sha256").update(JSON.stringify(body)).digest("hex");
     writeFileSync(join(stateDir, "turn-plan.json"), JSON.stringify({ ...body, digest }));
     await assert.rejects(prepareTurnFulfillment(job, context), /authenticated current-format Turn/);
+    await assert.rejects(readTurnEvidence(job, contract, body.originalRequest, digest),
+      /current-format Turn objective/);
+    assert.throws(() => verifyTurnPlan({ ...body, digest }), /Invalid persisted Turn plan/);
     for (const fixture of [true, false])
       await assert.rejects(requireGenerationTurn(job, { story: job.storyRoot, job: job.jobId,
         task: body.originalRequest, contract, fixture, turnPlanDigest: digest }), /current-format Turn objective/);
