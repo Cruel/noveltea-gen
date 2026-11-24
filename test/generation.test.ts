@@ -7967,7 +7967,6 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       assert.deepEqual([...settledRounds].sort(), [0, 1, 2]);
       assert.deepEqual([...correctiveGrants].sort(), [0, 1]);
       assert.ok(observed.slice(-2).every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
-      const { inspectPiPolicy } = await import("../src/job-pi-policy.js");
       const policy = await inspectPiPolicy(f.job);
       assert.equal(policy.budget.modelCalls, expectedCalls);
       assert.ok(namespaces.size >= 2, "Parent and production Foundation child need distinct SQLite namespaces");
