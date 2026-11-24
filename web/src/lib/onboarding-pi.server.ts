@@ -594,7 +594,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         throw new DiscoveryError(404, 'Repository is not connected to this account')
       if (!chat) return
       const story = await store.persistence.naturalStory.story(actor.id, chat.storyId)
-      const message = await store.persistence.messages.owned(actor.id,
+      const message = await store.persistence.messages.ownedWithSource(actor.id,
         'root:' + chat.firstTurnId, chat.firstTurnId)
       const membership = message ? await store.persistence.messages.membership(actor.id,
         'root:' + chat.firstTurnId) : null

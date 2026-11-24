@@ -20,7 +20,7 @@ export async function storyChatDiscoveryRequest(
   const actor = await requireUser(auth, request.headers)
   if (!actor) return Response.json({ error: 'Sign in required.' }, { status: 401 })
   const story = await store.persistence.naturalStory.story(actor.id, storyId)
-  const message = await store.persistence.messages.owned(actor.id, 'root:' + firstTurnId, firstTurnId)
+  const message = await store.persistence.messages.ownedWithSource(actor.id, 'root:' + firstTurnId, firstTurnId)
   const membership = message ? await store.persistence.messages.membership(actor.id,
     'root:' + firstTurnId) : null
   if (!story || !message || membership?.storyId !== storyId || message.role !== 'user' ||
