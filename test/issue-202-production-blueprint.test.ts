@@ -1123,7 +1123,9 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     "canonical draft must receive an independent source-reading early review");
 
     // Actual Generation parent, with current-format Turn and real sandbox.
-    for (const stalled of [false, true]) {
+    for (const scenario of ["productive", "canonical-stall", "blueprint-replacement"] as const) {
+      const stalled = scenario === "canonical-stall";
+      const replacement = scenario === "blueprint-replacement";
       const parentId = randomUUID();
       parentJobIds.push(parentId);
       const parentDb = new DatabaseSync(join(app, "studio.sqlite"));
@@ -1134,7 +1136,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       writeFileSync(join(parentJob.stateDir, "turn-plan.json"), JSON.stringify(turn));
       const calls: Call[] = [];
       const runtime = await ModelRuntime.create({modelsPath: null, refreshOnCreate: false});
-      runtime.registerNativeProvider(scripted(calls, "productive", false, {
+      runtime.registerNativeProvider(scripted(calls, replacement ? "replace-pass" : "productive", false, {
         parentPlan: turn, architectureRecovery: true, architectureStall: stalled,
       }));
       await runtime.refresh({allowNetwork: false});
@@ -1150,7 +1152,18 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       let started = false;
       const invoke = (extra = {}) => withJobModelRuntime(runtime, () => graph.invoke(started ? null : input, {...config, ...extra}));
       try {
-        if (!stalled) {
+        if (replacement) {
+          const pending = await invoke({interruptAfter: ["assess_recovery"]});
+          started = true;
+          assert.equal(pending.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(pending.recoveryLifecycle));
+          assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+          const finished = await invoke({interruptAfter: ["assess_recovery"]});
+          assert.ok(finished.recoveryLifecycle.discharged?.length, JSON.stringify({reason: finished.reason, lifecycle: finished.recoveryLifecycle}));
+          assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+          const pin = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture-blueprints", "plan-1-approved.json"), "utf8"));
+          assert.ok(pin.reviewerSessionId);
+          assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY STORY BLUEPRINT DIAGNOSIS")).length <= 1, true);
+        } else if (!stalled) {
           const cuts = ["initial", "admitted", "corrected", "accepted", "committed"] as const;
           let writer: string | undefined;
           for (const cut of cuts) {
@@ -1172,7 +1185,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
                   cut === "admitted" && child && correction?.rejectedReceiptRef.split(":")[1] === "0" ||
                   cut === "corrected" && child && submission?.status === "writer-round" && submission.receiptRef.split(":")[1] === "1" ||
                   cut === "accepted" && cfg.configurable?.thread_id?.includes(":architecture:") && receipt?.phase === "authored" ||
-                  cut === "committed" && child && entry("outcome")?.status === "verified") {
+                  cut === "committed" && child && !cfg.configurable?.thread_id?.includes(":architecture:") && entry("outcome")?.status === "verified") {
                 crashed = true; abort.abort(failure); throw failure;
               }
               return originalWrites.call(this, cfg, writes, taskId);

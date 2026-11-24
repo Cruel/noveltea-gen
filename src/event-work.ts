@@ -101,6 +101,7 @@ export interface EventOptions {
   /** Internal controller-only reassignment, never a model-provided grant. */
   reroute?: { reportDigest: string; sourceSha: string; task: string };
   round?: { assignmentKey: string; command: AssignmentRoundCommand };
+  blueprintAssessment?: import("./blueprint-reassessment.js").BlueprintAssessmentGrant;
 }
 const idPattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -992,10 +993,15 @@ export async function runEventWorkItem(input: EventOptions) {
       const task = receipt.blueprintTask ?? "";
       const local = await ensureMilestoneBlueprint(job, arch.plan!, assign, receipt.snapshot!,
         receipt.provider, receipt.model, task, receipt.expectedHead, receipt.worker === "fixture",
-        undefined, receipt.assignmentKey, input.turnPlanDigest);
+        undefined, input.round?.assignmentKey ?? receipt.assignmentKey, input.turnPlanDigest, input.blueprintAssessment);
       receipt.blueprintPin = local.pin;
       receipt.blueprintTask = task;
       await persist(receiptFile, receipt);
+    }
+    if (input.blueprintAssessment) {
+      if (!receipt.blueprintPin || receipt.phase !== "ready")
+        throw Error("Original Milestone Blueprint assessment did not reach its independently approved pin.");
+      return { ...output(job, receipt), status: "blueprint-approved", blueprintPin: receipt.blueprintPin };
     }
     const Channels = Annotation.Root({ receipt: Annotation<EventReceipt>(),
       round: Annotation<AssignmentRoundResult | null>({ reducer: (_, next) => next, default: () => null }) });

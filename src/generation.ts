@@ -40,6 +40,7 @@ import type { RecoveryLifecycle, RecoveryOrigin, RecoveryEvidence } from "./gene
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { captureVerificationFailure, verifyCorrectedOriginalResult, verifiableResultStatus } from "./commit-verification-continuation.js";
 import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
+import { BlueprintAssessmentRequired } from "./blueprint-reassessment.js";
 import { ProtocolExhaustedError, ProtocolIntegrityBlockedError, ProtocolVerifierRecheckRejectedError } from "./response-contract-recovery.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
 import { Annotation, END, START, StateGraph, isGraphBubbleUp } from "@langchain/langgraph";
@@ -4426,6 +4427,10 @@ export function createGenerationGraph(
             return { result: { status: "review-handoff", headSha } };
           });
         }
+        if (error instanceof BlueprintAssessmentRequired)
+          return operationFailure(s, job, "specialist-result", error,
+            { reference: "specialist-receipt", assignmentId: s.active?.id,
+              resultStatus: "blueprint-assessment", blueprintAssessment: error.ref }, "returned-failure");
         const assessment = await operationFailure(s, job, "specialist-dispatch", error,
           { reference: "specialist-receipt", assignmentId: s.active?.id });
         // The failure may belong only to this cluster. Record it as blocked

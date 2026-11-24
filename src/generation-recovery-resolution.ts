@@ -99,6 +99,17 @@ export async function inspectActiveRecoveryResolution(
   git(job, "merge-base", "--is-ancestor", original.origin.sourceHeadSha, resolution.correctedHeadSha);
   git(job, "merge-base", "--is-ancestor", resolution.correctedHeadSha, head);
   const { correction, correctedHeadSha } = resolution;
+  if (source.channel === "operationRecovery" && original.origin.operation === "specialist-result") {
+    const ref = (source.input as unknown as GenerationOperationRecovery).evidence?.blueprintAssessment;
+    if (ref) {
+      if (correctedHeadSha !== original.origin.sourceHeadSha) return false;
+      const { readBlueprintAssessment, verifyBlueprintAssessmentResolution } = await import("./blueprint-reassessment.js");
+      const proof = await readBlueprintAssessment(job, ref);
+      if (proof.identity.turnDigest !== original.origin.turnDigest ||
+          proof.identity.planVersion !== (original.origin.planVersion ?? 1)) return false;
+      return verifyBlueprintAssessmentResolution(job, ref, correction, correctedHeadSha);
+    }
+  }
   const checkpoints = await inspectRecoveryCheckpoints(job);
   if (correction.store === "specialist-receipt" && source.channel === "operationRecovery" &&
       original.origin.operation === "specialist-result" && original.origin.assignmentId === "foundation")

@@ -1,9 +1,14 @@
 /** Private, source-bound causal Architecture planning. This is not canonical Story
  * content, a user approval or a portable completed-Git recovery checkpoint. */
+import { authenticateBlueprintGrant, blueprintAssessmentSeal, requestBlueprintAssessment, type BlueprintAssessmentGrant } from "./blueprint-reassessment.js";
+import { getConfig } from "@langchain/langgraph";
+import { execFileSync } from "./git-read-cache.js";
+import { createAssignmentLifecycleGraph, assignmentChildConfig, logicalAssignmentKey,
+  type AssignmentIdentity, type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
@@ -277,8 +282,9 @@ const plannerAdmissionPausePath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-pause-planner-admission.json");
 const initialReviewStartedPath = (job: JobStartResult, version: number) =>
   join(root(job), "plan-" + version + "-initial-review-started.json");
-async function obligationSources(job: JobStartResult, plan: Plan, task: string): Promise<ObligationSources> {
-  return { foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
+async function obligationSources(job: JobStartResult, plan: Plan, task: string, head: string): Promise<ObligationSources> {
+  const path = relative(job.worktreeRoot, join(job.worktreeStoryRoot, "creative-direction/foundation.md")).split(sep).join("/");
+  return { foundation: execFileSync("git", ["show", head + ":" + path], { cwd: job.worktreeRoot, encoding: "utf8" }),
     contract: plan.contract, task };
 }
 export function parseInitialBlueprint(text: string, sources: ObligationSources) {
@@ -589,7 +595,7 @@ async function readRecordedBlueprint(job: JobStartResult, plan: Plan, snapshot: 
       (start as Record<string, unknown>).plannerSessionId !== record.plannerSessionId ||
       (start as Record<string, unknown>).plannerSessionFile !== record.plannerSessionFile)
     throw Error("Causal blueprint source-bound planner start receipt is stale or absent.");
-  const sources = await obligationSources(job, plan, task);
+  const sources = await obligationSources(job, plan, task, head);
   const manifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const { initial } = await verifyStageChain(job, plan, record.stagesDigest);
   if (initial.schema === "noveltea-causal-blueprint/v2")
@@ -748,7 +754,8 @@ async function readPlannerAdmissionPause(job: JobStartResult, plan: Plan, snapsh
   const files = (await readdir(root(job))).filter(name =>
     name.startsWith("plan-" + plan.version + "-"));
   if (files.some(name => name !== "plan-" + plan.version + "-admitted.json" &&
-      name !== "plan-" + plan.version + "-pause-planner-admission.json"))
+      name !== "plan-" + plan.version + "-pause-planner-admission.json" &&
+      name !== "plan-" + plan.version + "-assignment.json"))
     throw Error("Planner advanced beyond its budget pause; inspect Pi work instead of replay.");
   return true;
 }
@@ -814,7 +821,7 @@ async function readInitialReviewPause(job: JobStartResult, plan: Plan, snapshot:
         !outline || (stages as { schema?: string }).schema !== "noveltea-blueprint-stages/v3") ||
       sha(initial) !== marker.draftDigest)
     throw Error("Initial Blueprint draft or stage chain differs from paused receipt.");
-  const sources = await obligationSources(job, plan, task);
+  const sources = await obligationSources(job, plan, task, head);
   const rawManifest = await safeRead(obligationsPath(job, plan.version), root(job));
   const manifest = initial.schema === "noveltea-causal-blueprint/v2" ?
     validateCompactBlueprintSources(rawManifest, sources) :
@@ -907,13 +914,13 @@ async function readPausedBlueprint(job: JobStartResult, plan: Plan, snapshot: Sk
       (diagnosisBoundary && !existsSync(verdictPath(job, plan.version, version))))
     throw Error("Causal blueprint budget pause does not end at a sealed negative verdict.");
   if (diagnosisBoundary) {
-    const sources = await obligationSources(job, plan, task);
+    const sources = await obligationSources(job, plan, task, head);
     const cycleId = verified.pin.reviewCycleId!;
     const original = await safeRead(reviewSessionPath(job, plan.version, version), root(job)) as
       { sessionId: string };
     const diagnosis = await readDiagnosis(job, plan, version, cycleId,
       verified.rounds, sources, original.sessionId, verified.pin.plannerSessionId);
-    if ((boundary === "diagnostic" && diagnosis) ||
+    if ((boundary === "diagnostic" && diagnosis && existsSync(replacementPath(job, plan.version, version))) ||
         (boundary === "replacement" && (!diagnosis || diagnosis.diagnosis.action !== "replace" ||
           existsSync(replacementPath(job, plan.version, version)))))
       throw Error("Causal Blueprint diagnostic pause no longer matches the sealed action.");
@@ -1457,6 +1464,9 @@ async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSna
   }
   const pendingFormat = await readBlueprintFormatPending(job, plan,
     "diagnostic", cycleId, rounds, writer, reviewer);
+  const started = join(root(job), "plan-" + plan.version + "-diagnostic-started-" + version + ".json");
+  if (existsSync(started) && !pendingFormat)
+    throw Error("Interrupted Blueprint diagnostic has no sealed response; inspect original transcript.");
   const diagnosisSession = await sessionFor(job, snapshot, provider, model,
     "blueprint-diagnostic:" + cycleId + ":" + version,
     "architecture-blueprint-diagnostic-sessions",
@@ -1465,6 +1475,9 @@ async function performBlueprintDiagnosis(job: JobStartResult, snapshot: SkillSna
     if ([writer.id, reviewer.id].includes(diagnosisSession.session.sessionId) ||
         [writer.file, reviewer.file].includes(diagnosisSession.file))
       throw Error("Diagnostic reviewer is not independent of the Review cycle.");
+    if (!pendingFormat) await immutable(started, { cycleId, version, draftDigest: sha(rounds.at(-1)!.blueprint),
+      reviewDigest: sha(rounds.at(-1)!.verdict), writer, reviewer,
+      sessionId: diagnosisSession.session.sessionId, sessionFile: diagnosisSession.file });
     const start = pendingFormat ? 0 : diagnosisSession.session.messages.length;
     if (!pendingFormat) await reportControllerReviewPhase("diagnosing");
     if (!pendingFormat) await promptStorySpecialist(diagnosisSession.session,
@@ -1572,6 +1585,9 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
     throw Error("Completed replacement review must be resumed from its sealed writer boundary.");
   const pendingFormat = await readBlueprintFormatPending(job, plan,
     "replacement", cycleId, rounds, writer, reviewer);
+  const started = join(root(job), "plan-" + plan.version + "-replacement-started-" + version + ".json");
+  if (existsSync(started) && !pendingFormat)
+    throw Error("Interrupted Blueprint replacement has no sealed response; inspect original transcript.");
   const fresh = await sessionFor(job, snapshot, provider, model,
     "blueprint-review-replacement:" + cycleId + ":" + version,
     "architecture-blueprint-review-sessions",
@@ -1580,6 +1596,9 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
     if ([writer.id, reviewer.id, diagnosis.sessionId].includes(fresh.session.sessionId) ||
         [writer.file, reviewer.file, diagnosis.sessionFile].includes(fresh.file))
       throw Error("Replacement reviewer reused a writer, diagnostic or disputed review session.");
+    if (!pendingFormat) await immutable(started, { cycleId, version, draftDigest: sha(rounds.at(-1)!.blueprint),
+      reviewDigest: sha(rounds.at(-1)!.verdict), writer, reviewer,
+      sessionId: fresh.session.sessionId, sessionFile: fresh.file });
     const start = pendingFormat ? 0 : fresh.session.messages.length;
     if (!pendingFormat) await promptStorySpecialist(fresh.session,
       fresh.context.contextNote +
@@ -1639,27 +1658,48 @@ async function performBlueprintReplacement(job: JobStartResult, snapshot: SkillS
 
 /** A fail-closed, checkpointed original planner session, with independently
  * reviewed immutable versions and a final approved pin published last. */
-export async function createReviewedBlueprint(job: JobStartResult, snapshot: SkillSnapshot,
-  plan: Plan, provider: string, model: string, task: string, head: string): Promise<BlueprintPin> {
+type StoryBlueprintBoundary = "initial" | "initial-review" | BlueprintPause["boundary"];
+type StoryBlueprintStep = { boundary: StoryBlueprintBoundary; version: number; digest: string };
+type StoryBlueprintInput = { job: JobStartResult; snapshot: SkillSnapshot; plan: Plan;
+  provider: string; model: string; task: string; head: string };
+
+async function storyBlueprintBoundary({ job, snapshot, plan, provider, model, task, head }: StoryBlueprintInput) {
   const approved = await readApprovedBlueprint(job, plan, snapshot, provider, model, task, head);
-  if (approved) return approved.pin;
+  if (approved) return { approved, paused: null, initial: null, step: null };
   const paused = await readPausedBlueprint(job, plan, snapshot, provider, model, task, head);
-  const initialPause = paused ? null :
-    await readInitialReviewPause(job, plan, snapshot, provider, model, task, head);
-  const plannerAdmissionPause = !paused && !initialPause &&
-    await readPlannerAdmissionPause(job, plan, snapshot, provider, model, task, head);
-  // Never quietly replay a partially executed planner or reviewer after crash.
-  if (!paused && !initialPause && !plannerAdmissionPause && existsSync(root(job))) {
+  const initial = paused ? null : await readInitialReviewPause(job, plan, snapshot, provider, model, task, head);
+  if (paused) {
+    const digest = paused.boundary === "review" ? sha(paused.nextDraft) : paused.pin.blueprintDigest;
+    return { approved: null, paused, initial, step: {
+      boundary: paused.boundary, version: paused.nextVersion, digest } satisfies StoryBlueprintStep };
+  }
+  if (initial) return { approved: null, paused, initial, step: {
+    boundary: "initial-review", version: 0, digest: sha(initial.initial) } satisfies StoryBlueprintStep };
+  const admission = await readPlannerAdmissionPause(job, plan, snapshot, provider, model, task, head);
+  if (!admission && existsSync(root(job))) {
     const { readdir } = await import("node:fs/promises");
-    if ((await readdir(root(job))).some(name => name.startsWith("plan-" + plan.version + "-")))
+    if ((await readdir(root(job))).some(name => name.startsWith("plan-" + plan.version + "-") && name !== "plan-" + plan.version + "-assignment.json"))
       throw Error("Unfinished causal blueprint sessions/evidence exist; inspect rather than replay an ambiguous Pi plan.");
   }
-  const sources = await obligationSources(job, plan, task);
-  // Durable admission precedes the Pi SDK session creation. A process crash
-  // in the sessionFor/started-receipt gap must never re-enter a new planner.
-  if (!paused && !initialPause && !plannerAdmissionPause)
-    await immutable(admittedPath(job, plan.version),
-      sameLineage(job, plan, snapshot, provider, model, task, head));
+  return { approved: null, paused, initial, step: {
+    boundary: "initial", version: 0, digest: sha(sameLineage(job, plan, snapshot, provider, model, task, head))
+  } satisfies StoryBlueprintStep };
+}
+
+/** Execute precisely one authenticated draft, Review, or auxiliary Review effect.
+ * The existing safe-boundary receipts are now sealed unconditionally, not only
+ * on resource exhaustion. Their exact transcript lengths fence ambiguous starts. */
+async function advanceStoryBlueprint(input: StoryBlueprintInput, expected: StoryBlueprintStep) {
+  const { job, snapshot, plan, provider, model, task, head } = input;
+  const current = await storyBlueprintBoundary(input);
+  if (!isDeepStrictEqual(current.step, expected))
+    throw Error("Story Blueprint effect does not match its authenticated boundary.");
+  const { paused, initial: initialPause } = current;
+  const sources = await obligationSources(job, plan, task, head);
+  const version = expected.version;
+  const cycleId = reviewCycleId(sameLineage(job, plan, snapshot, provider, model, task, head));
+  if (expected.boundary === "initial" && !existsSync(admittedPath(job, plan.version)))
+    await immutable(admittedPath(job, plan.version), sameLineage(job, plan, snapshot, provider, model, task, head));
   let planner: Awaited<ReturnType<typeof sessionFor>>;
   try {
     planner = await sessionFor(job, snapshot, provider, model,
@@ -1667,7 +1707,8 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       paused ? { file: paused.pin.plannerSessionFile, id: paused.pin.plannerSessionId } :
         initialPause ? { file: initialPause.plannerSessionFile, id: initialPause.plannerSessionId } : undefined);
   } catch (error) {
-    if (error instanceof PiBudgetPause && !paused && !initialPause && !plannerAdmissionPause)
+    if (error instanceof PiBudgetPause && expected.boundary === "initial" &&
+        !existsSync(plannerAdmissionPausePath(job, plan.version)))
       await immutable(plannerAdmissionPausePath(job, plan.version), {
         schema: "noveltea-blueprint-planner-admission-pause/v1",
         lineage: sameLineage(job, plan, snapshot, provider, model, task, head),
@@ -1681,7 +1722,7 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
     let manifest!: BlueprintObligations | CompactBlueprintSources;
     let outline: BlueprintOutline | undefined;
     let stagesReceipt!: unknown;
-    if (!paused && !initialPause) {
+    if (expected.boundary === "initial") {
       // Even a crash before the first successful JSON result leaves durable evidence
       // of the begun Pi writer. Its session must not be silently replayed.
       await immutable(join(root(job), "plan-" + plan.version + "-started.json"), {
@@ -1716,73 +1757,53 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
       stagesReceipt = { schema: "noveltea-blueprint-stages/v4",
         draftDigest: sha(initialBlueprint) };
       await immutable(stagesPath(job, plan.version), stagesReceipt);
-    } else {
-      const stored = paused ?? initialPause!;
-      initialBlueprint = stored.initial;
-      manifest = stored.manifest;
-      outline = stored.outline;
-      stagesReceipt = stored.stages;
+
+      await planner.context.completed(planner.file, planner.session.sessionId);
+      const bytes = await readFile(planner.file);
+      await immutable(initialPausePath(job, plan.version), {
+        schema: "noveltea-blueprint-initial-review-pause/v1",
+        lineage: sameLineage(job, plan, snapshot, provider, model, task, head),
+        plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
+        plannerTranscriptBytes: bytes.length,
+        plannerTranscriptDigest: createHash("sha256").update(bytes).digest("hex"),
+        draftDigest: sha(initialBlueprint), stagesDigest: sha(stagesReceipt),
+        obligationsDigest: sha(manifest),
+      } satisfies InitialReviewPause);
+      return;
     }
-    let previous: { blueprint: CausalBlueprint; verdict: BlueprintReview } | undefined =
-      paused?.rounds.at(-1);
+    const stored = paused ?? initialPause!;
+    initialBlueprint = stored.initial;
+    manifest = stored.manifest;
+    outline = stored.outline;
+    stagesReceipt = stored.stages;
+    const previous = paused?.rounds.at(-1);
     const reviewHistory: Array<ReviewRound & { patch?: unknown }> = paused
       ? await Promise.all(paused.rounds.map(async (round, index) => ({ ...round,
           ...(index ? { patch: await safeRead(patchPath(job, plan.version, index), root(job)) } : {}) })))
       : [];
-    let stalled = paused?.stalled ?? 0;
+    const stalled = paused?.stalled ?? 0;
     let sourceChanges: unknown = paused?.nextPatch ??
       (paused?.boundary === "diagnostic" || paused?.boundary === "replacement"
         ? reviewHistory.at(-1)?.patch : undefined);
-    const cycleId = reviewCycleId(sameLineage(job, plan, snapshot, provider, model, task, head));
     const latestRotation = paused?.rounds.map((_, index) =>
       existsSync(replacementPath(job, plan.version, index)) ? index : -1)
       .filter(index => index >= 0).at(-1);
     const reviewerGroup = latestRotation === undefined
       ? "blueprint-review-cycle:" + cycleId
       : "blueprint-review-replacement:" + cycleId + ":" + latestRotation;
-    // A fully staged initial draft is durable before the first reviewer
-    // budget gate. Pausing here must not force the planner to run again.
-    if (!paused && !initialPause)
-      await planner.context.completed(planner.file, planner.session.sessionId);
-    try {
-      reviewer = await sessionFor(job, snapshot, provider, model,
-        reviewerGroup, "architecture-blueprint-review-sessions",
-        paused ? { file: paused.pin.reviewerSessionFile, id: paused.pin.reviewerSessionId } : undefined);
-    } catch (error) {
-      if (error instanceof PiBudgetPause && !paused && !initialPause) {
-        const bytes = await readFile(planner.file);
-        await immutable(initialPausePath(job, plan.version), {
-          schema: "noveltea-blueprint-initial-review-pause/v1",
-          lineage: sameLineage(job, plan, snapshot, provider, model, task, head),
-          plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
-          plannerTranscriptBytes: bytes.length,
-          plannerTranscriptDigest: createHash("sha256").update(bytes).digest("hex"),
-          draftDigest: sha(initialBlueprint), stagesDigest: sha(stagesReceipt),
-          obligationsDigest: sha(manifest),
-        } satisfies InitialReviewPause);
-      }
-      throw error;
-    }
+    reviewer = await sessionFor(job, snapshot, provider, model,
+      reviewerGroup, "architecture-blueprint-review-sessions",
+      paused ? { file: paused.pin.reviewerSessionFile, id: paused.pin.reviewerSessionId } : undefined);
     assertReviewCycleSession(
       { id: planner.session.sessionId, file: planner.file },
       { id: reviewer.session.sessionId, file: reviewer.file },
       paused ? { id: paused.pin.reviewerSessionId, file: paused.pin.reviewerSessionFile } : undefined);
     const expectedWriter = paused
       ? { id: paused.pin.plannerSessionId, file: paused.pin.plannerSessionFile }
-      : initialPause
-        ? { id: initialPause.plannerSessionId, file: initialPause.plannerSessionFile }
-        : null;
-    if (expectedWriter && (planner.session.sessionId !== expectedWriter.id ||
-        planner.file !== expectedWriter.file))
+      : { id: initialPause!.plannerSessionId, file: initialPause!.plannerSessionFile };
+    if (planner.session.sessionId !== expectedWriter.id || planner.file !== expectedWriter.file)
       throw Error("Paused causal Blueprint writer Pi session was replaced.");
-    if (paused?.boundary === "writer") {
-      const last = paused.rounds.at(-1)!;
-      await promptStorySpecialist(planner.session,
-        "RESUME AT VERIFIED CAUSAL BLUEPRINT WRITER BOUNDARY. Reuse this ORIGINAL writer " +
-        "conversation; source and authority are unchanged. " +
-        blueprintCorrectionPrompt(last.blueprint, last.verdict, outline));
-    }
-    const sealBudgetPause = async (boundary: BlueprintPause["boundary"],
+    const sealBoundary = async (boundary: BlueprintPause["boundary"],
       nextVersion: number, pin: BlueprintPin, nextDraftDigest: string | null) => {
       const writerBytes = await readFile(planner.file);
       const reviewerBytes = await readFile(reviewer!.file);
@@ -1799,19 +1820,12 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           throw Error("Repeated Blueprint budget pause changed its original sealed boundary.");
       } else await immutable(target, marker);
     };
-    let lastPin: BlueprintPin | undefined = paused?.pin;
-    for (let version = paused?.nextVersion ?? 0; ; version++) {
-      const resumingDiagnosis = !!paused && version === paused.nextVersion &&
-        (paused.boundary === "diagnostic" || paused.boundary === "replacement");
+    if (expected.boundary === "writer") {
+      await promptStorySpecialist(planner.session,
+        "RESUME AT VERIFIED CAUSAL BLUEPRINT WRITER BOUNDARY. Reuse this ORIGINAL writer " +
+        "conversation; source and authority are unchanged. " +
+        blueprintCorrectionPrompt(previous!.blueprint, previous!.verdict, outline));
       let blueprint: CausalBlueprint;
-      if (resumingDiagnosis) {
-        blueprint = paused.blueprint;
-      } else if (version === 0) {
-        blueprint = initialBlueprint;
-      } else if (paused?.boundary === "review" && version === paused.nextVersion) {
-        blueprint = paused.nextDraft!;
-        sourceChanges = paused.nextPatch;
-      } else {
         const parsePatch = () =>
           parseBlueprintPatch(lastText(planner.session), previous!.blueprint, previous!.verdict);
         verifyReadSources(planner.session.messages, planner.project.root, snapshot);
@@ -1840,27 +1854,16 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         sourceChanges = result.patch;
         blueprint = result.blueprint;
         await immutable(draftPath(job, plan.version, version), blueprint);
-      }
-      // An authored correction is complete before a reviewer-budget pause.
-      // Its exact patch/draft are immutable and can be inspected on resume.
-      if (version > 0 && !resumingDiagnosis) {
-        await planner.context.completed(planner.file, planner.session.sessionId);
-        try { await reviewer.context.beforeTurn(reviewer.file); }
-        catch (error) {
-          if (error instanceof PiBudgetPause && lastPin)
-            await sealBudgetPause("review", version, lastPin, sha(blueprint));
-          throw error;
-        }
-      }
-      let verdict: BlueprintReview;
-      let convergence: ReturnType<typeof evaluateReviewConvergence>;
-      if (resumingDiagnosis) {
-        // The negative verdict was already sealed before the budget pause.
-        // Never ask the original reviewer to repeat it or count another round.
-        verdict = paused.rounds.at(-1)!.verdict;
-        convergence = { review: verdict as ConvergentReview, productive: false,
-          stalled, reassess: stalled >= 2, oscillating: false };
-      } else {
+
+      await planner.context.completed(planner.file, planner.session.sessionId);
+      await sealBoundary("review", version, paused!.pin, sha(blueprint));
+      return;
+    }
+    const blueprint = expected.boundary === "initial-review" ? initialBlueprint :
+      expected.boundary === "review" ? paused!.nextDraft! : paused!.blueprint;
+    let verdict: BlueprintReview;
+    let convergence: ReturnType<typeof evaluateReviewConvergence>;
+    if (expected.boundary === "initial-review" || expected.boundary === "review") {
         if (version === 0) {
           await immutable(initialReviewStartedPath(job, plan.version), {
             schema: "noveltea-blueprint-initial-review-start/v1",
@@ -1910,8 +1913,8 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
           verdictDigest: sha(verdict), productive: convergence.productive,
           stalled: convergence.stalled, oscillating: convergence.oscillating,
         });
-      }
-      let pin: BlueprintPin = {
+
+      const pin: BlueprintPin = {
         schema: "noveltea-approved-blueprint/v4", reviewCycleId: cycleId,
         ...sameLineage(job, plan, snapshot, provider, model, task, head),
         draftVersion: version, blueprintDigest: sha(blueprint), reviewDigest: sha(verdict),
@@ -1919,88 +1922,192 @@ export async function createReviewedBlueprint(job: JobStartResult, snapshot: Ski
         plannerSessionId: planner.session.sessionId, plannerSessionFile: planner.file,
         reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file,
       };
-      if (verdict.status !== "pass") {
-        const rounds: Array<ReviewRound & { patch?: unknown }> = resumingDiagnosis
-          ? [...reviewHistory]
-          : [...reviewHistory, { blueprint, verdict,
-              ...(version ? { patch: sourceChanges } : {}) }];
-        const diagnosedRounds = rounds.slice(0, -1).flatMap((_, i) =>
-          existsSync(diagnosticPath(job, plan.version, i)) ? [i + 1] : []);
-        const sealedDiagnosis = resumingDiagnosis &&
-          existsSync(diagnosticPath(job, plan.version, version))
-          ? await readDiagnosis(job, plan, version, cycleId, rounds, sources,
-              reviewer.session.sessionId, planner.session.sessionId)
-          : null;
-        const trigger = sealedDiagnosis?.trigger ??
-          diagnosticTrigger(rounds, convergence.stalled, diagnosedRounds.at(-1) ?? 0);
-        if (trigger) {
-          let diagnosis: BlueprintDiagnosticReceipt;
-          try {
-            diagnosis = await performBlueprintDiagnosis(job, snapshot, plan, provider, model,
-              task, cycleId, rounds, sources, trigger,
-              { id: planner.session.sessionId, file: planner.file },
-              { id: reviewer.session.sessionId, file: reviewer.file },
-              rounds.map(round => round.patch ?? null));
-          } catch (error) {
-            if (error instanceof PiBudgetPause)
-              await sealBudgetPause("diagnostic", version, pin, null);
-            throw error;
-          }
-          if (diagnosis.diagnosis.action === "split" ||
-              diagnosis.diagnosis.action === "escalate")
-            throw Error("Diagnostic review requires author-guided " +
-              (diagnosis.diagnosis.action === "split" ? "plan restructuring" : "escalation") +
-              "; no automatic scope expansion or review approval.");
-          if (diagnosis.diagnosis.action === "replace") {
-            let replacement: Awaited<ReturnType<typeof performBlueprintReplacement>>;
-            try {
-              replacement = await performBlueprintReplacement(job, snapshot, plan,
-                provider, model, task, cycleId, rounds, sources, diagnosis,
-                { id: planner.session.sessionId, file: planner.file },
-                { id: reviewer.session.sessionId, file: reviewer.file },
-                manifest!, outline, sourceChanges);
-            } catch (error) {
-              if (error instanceof PiBudgetPause)
-                await sealBudgetPause("replacement", version, pin, null);
-              throw error;
-            }
-            reviewer.session.dispose();
-            reviewer = replacement.session;
-            verdict = replacement.receipt.verdict;
-            pin = { ...pin, reviewDigest: sha(verdict),
-              reviewerSessionId: reviewer.session.sessionId,
-              reviewerSessionFile: reviewer.file };
-          }
-          stalled = 0;
-        } else {
-          stalled = convergence.stalled;
-        }
-      }
-      lastPin = pin;
       if (verdict.status === "pass") {
-        await planner.context.completed(planner.file, planner.session.sessionId);
         await immutable(approvedPath(job, plan.version), pin);
-        return pin;
-      }
-      previous = { blueprint, verdict };
-      if (resumingDiagnosis) {
-        reviewHistory[reviewHistory.length - 1] = { blueprint, verdict,
-          ...(version ? { patch: sourceChanges } : {}) };
       } else {
-        reviewHistory.push({ blueprint, verdict, ...(version ? { patch: sourceChanges } : {}) });
+        const rounds = [...reviewHistory, { blueprint, verdict }];
+        const diagnosed = rounds.slice(0, -1).flatMap((_, i) =>
+          existsSync(diagnosticPath(job, plan.version, i)) ? [i + 1] : []);
+        const trigger = diagnosticTrigger(rounds, convergence.stalled, diagnosed.at(-1) ?? 0);
+        await sealBoundary(trigger ? "diagnostic" : "writer", trigger ? version : version + 1, pin, null);
       }
-      await planner.context.completed(planner.file, planner.session.sessionId);
-      try { await planner.context.beforeTurn(planner.file); }
-      catch (error) {
-        if (error instanceof PiBudgetPause)
-          await sealBudgetPause("writer", version + 1, pin, null);
-        throw error;
-      }
-      await promptStorySpecialist(planner.session,
-        blueprintCorrectionPrompt(blueprint, verdict, outline));
+      return;
     }
+    // Reassessment never substitutes its advice for the independent Review.
+    const rounds = reviewHistory;
+    const pin = paused!.pin;
+    const originalReviewer = { id: reviewer.session.sessionId, file: reviewer.file };
+    const writer = { id: planner.session.sessionId, file: planner.file };
+    const diagnosed = rounds.slice(0, -1).flatMap((_, i) =>
+      existsSync(diagnosticPath(job, plan.version, i)) ? [i + 1] : []);
+    const saved = await readDiagnosis(job, plan, version, cycleId, rounds, sources, originalReviewer.id, writer.id);
+    const trigger = saved?.trigger ?? diagnosticTrigger(rounds, stalled, diagnosed.at(-1) ?? 0);
+    if (!trigger) throw Error("Blueprint reassessment lacks a source-bound Review trigger.");
+    if (expected.boundary === "diagnostic") {
+      const diagnosis = saved ?? await performBlueprintDiagnosis(job, snapshot, plan, provider, model,
+        task, cycleId, rounds, sources, trigger, writer, originalReviewer,
+        rounds.map(round => round.patch ?? null));
+      if (diagnosis.diagnosis.action === "split" || diagnosis.diagnosis.action === "escalate")
+        throw Error("Diagnostic review requires author-guided " +
+          (diagnosis.diagnosis.action === "split" ? "plan restructuring" : "escalation") +
+          "; no automatic scope expansion or review approval.");
+      const replace = diagnosis.diagnosis.action === "replace";
+      await sealBoundary(replace ? "replacement" : "writer", replace ? version : version + 1, pin, null);
+      return;
+    }
+    if (!saved || saved.diagnosis.action !== "replace")
+      throw Error("Blueprint replacement lacks its independent reassessment.");
+    const replacement = await performBlueprintReplacement(job, snapshot, plan, provider, model,
+      task, cycleId, rounds, sources, saved, writer, originalReviewer, manifest, outline, sourceChanges);
+    reviewer.session.dispose();
+    reviewer = replacement.session;
+    verdict = replacement.receipt.verdict;
+    const successor = { ...pin, reviewDigest: sha(verdict),
+      reviewerSessionId: reviewer.session.sessionId, reviewerSessionFile: reviewer.file };
+    if (verdict.status === "pass") await immutable(approvedPath(job, plan.version), successor);
+    else await sealBoundary("writer", version + 1, successor, null);
   } finally {
     reviewer?.session.dispose();
     planner.session.dispose();
   }
+}
+
+/** One logical source-bound Blueprint assignment, using the shared child for
+ * each draft, independent Review, and admitted correction. */
+export async function createReviewedBlueprint(job: JobStartResult, snapshot: SkillSnapshot,
+  plan: Plan, provider: string, model: string, task: string, head: string,
+  parentAssignmentKey?: string, turnDigest?: string, assessment?: BlueprintAssessmentGrant): Promise<BlueprintPin> {
+  const input = { job, snapshot, plan, provider, model, task, head };
+  const config = getConfig();
+  const checkpointed = !!config?.configurable?.__pregel_checkpointer;
+  if (turnDigest && (!checkpointed || !HASH.test(parentAssignmentKey ?? "") || !HASH.test(turnDigest)))
+    throw Error("Story Blueprint lacks its original Generation assignment.");
+  const identity: AssignmentIdentity = {
+    schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+    graphThreadId: checkpointed ? String(config!.configurable!.thread_id) : job.threadId,
+    turnDigest: turnDigest ?? null, assignmentId: "story-blueprint", planVersion: plan.version,
+    sourceHeadSha: head, scopeDigest: sha({ lineage: sameLineage(job, plan, snapshot, provider, model, task, head),
+      plan, parentAssignmentKey: parentAssignmentKey ?? null }),
+  };
+  const key = logicalAssignmentKey(identity);
+  const assertSource = () => {
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: job.worktreeRoot, encoding: "utf8" }).trim();
+    if (git("rev-parse", "HEAD") !== head || git("status", "--porcelain", "--untracked-files=all"))
+      throw Error("Story Blueprint source changed before its next effect.");
+  };
+  if (assessment) await authenticateBlueprintGrant(job, assessment, identity, parentAssignmentKey);
+  const existing = await readApprovedBlueprint(job, plan, snapshot, provider, model, task, head);
+  if (existing) return existing.pin;
+  const assignmentFile = join(root(job), "plan-" + plan.version + "-assignment.json");
+  // The first admission's identity is separate from the historical approval
+  // schema. Existing in-progress legacy effects do not gain new authority.
+  const first = await storyBlueprintBoundary(input);
+  if (existsSync(assignmentFile)) {
+    if (!isDeepStrictEqual(await safeRead(assignmentFile, root(job)), identity))
+      throw Error("Story Blueprint belongs to a different logical assignment.");
+  } else {
+    if (first.step?.boundary !== "initial") throw Error("Unadmitted Story Blueprint effect.");
+    await immutable(assignmentFile, identity);
+  }
+  const submission = (version: number, digest: string, phase: string): AssignmentSubmission => ({
+    status: "story-blueprint-" + phase, headSha: head,
+    receiptRef: [version, phase, digest, sha([key, version, phase, digest])].join(":"),
+  });
+  const authenticate = async (value: AssignmentSubmission) => {
+    const [raw, phase, digest] = value.receiptRef.split(":");
+    const version = Number(raw);
+    if (!Number.isSafeInteger(version) || version < 0 || !HASH.test(digest ?? "") ||
+        !["review", "diagnostic", "replacement"].includes(phase!) ||
+        !isDeepStrictEqual(value, submission(version, digest!, phase!)) ||
+        sha(await safeRead(draftPath(job, plan.version, version), root(job))) !== digest)
+      throw Error("Story Blueprint checkpoint lost its exact draft submission.");
+    return { version, phase, digest };
+  };
+  const fromBoundary = (boundary: Awaited<ReturnType<typeof storyBlueprintBoundary>>): AssignmentSubmission => {
+    if (boundary.approved) return submission(boundary.approved.pin.draftVersion, boundary.approved.pin.blueprintDigest, "review");
+    const step = boundary.step!;
+    if (step.boundary === "writer") return submission(step.version - 1, step.digest, "review");
+    if (step.boundary === "initial") throw Error("Story Blueprint has no settled draft.");
+    return submission(step.version, step.digest, step.boundary === "initial-review" ? "review" : step.boundary);
+  };
+  const child = createAssignmentLifecycleGraph({
+    preflight: async state => {
+      assertSource();
+      if (logicalAssignmentKey(state.identity) !== key ||
+          !isDeepStrictEqual(await safeRead(assignmentFile, root(job)), identity))
+        throw Error("Story Blueprint checkpoint belongs to another assignment.");
+      return null;
+    },
+    invoke: async () => {
+      assertSource();
+      let boundary = await storyBlueprintBoundary(input);
+      if (boundary.step?.boundary === "initial") {
+        await advanceStoryBlueprint(input, boundary.step);
+        boundary = await storyBlueprintBoundary(input);
+      }
+      return fromBoundary(boundary);
+    },
+    verify: async state => {
+      assertSource();
+      const prior = await authenticate(state.submission!);
+      let boundary = await storyBlueprintBoundary(input);
+      const matches = (step: StoryBlueprintStep) => step.version === prior.version &&
+        step.digest === prior.digest && (step.boundary === prior.phase ||
+          step.boundary === "initial-review" && prior.phase === "review");
+      if (boundary.step && matches(boundary.step)) {
+        if (turnDigest && !assessment && boundary.step.boundary === "diagnostic") {
+          const pin = boundary.paused!.pin;
+          const rounds = boundary.paused!.rounds;
+          const diagnosed = rounds.slice(0, -1).flatMap((_, i) =>
+            existsSync(diagnosticPath(job, plan.version, i)) ? [i + 1] : []);
+          const trigger = diagnosticTrigger(rounds, boundary.paused!.stalled, diagnosed.at(-1) ?? 0);
+          if (!trigger) throw Error("Story Blueprint assessment has no deterministic trigger.");
+          await requestBlueprintAssessment(job, { schema: "noveltea-blueprint-assessment/v1",
+            identity, parentAssignmentKey: parentAssignmentKey!, round: prior.version, draftDigest: prior.digest,
+            reviewDigest: pin.reviewDigest, trigger,
+            writer: await blueprintAssessmentSeal(pin.plannerSessionId, pin.plannerSessionFile),
+            reviewer: await blueprintAssessmentSeal(pin.reviewerSessionId, pin.reviewerSessionFile),
+            context: { plan, snapshot, provider, model, task } });
+        }
+        await advanceStoryBlueprint(input, boundary.step);
+        boundary = await storyBlueprintBoundary(input);
+      }
+      if (boundary.approved) {
+        const pin = boundary.approved.pin;
+        if (pin.draftVersion !== prior.version || pin.blueprintDigest !== prior.digest)
+          throw Error("Story Blueprint approval belongs to a different submission.");
+        return { status: "verified", assignmentKey: key, evidenceRef: sha(pin),
+          headSha: head, reviewRef: pin.reviewDigest };
+      }
+      const step = boundary.step!;
+      if (step.boundary === "writer" && step.version === prior.version + 1 && step.digest === prior.digest)
+        return { correctionRef: sha([key, boundary.paused!.pin]), rejectedReceiptRef: state.submission!.receiptRef };
+      if (step.version === prior.version && step.digest === prior.digest &&
+          (step.boundary === "diagnostic" || step.boundary === "replacement") &&
+          step.boundary !== prior.phase)
+        return { submission: fromBoundary(boundary), reviewPending: true as const };
+      throw Error("Story Blueprint verification advanced beyond its authenticated boundary.");
+    },
+    correct: async state => {
+      assertSource();
+      const prior = await authenticate(state.submission!);
+      const boundary = await storyBlueprintBoundary(input);
+      const step = boundary.step;
+      if (!step || step.version !== prior.version + 1 || !boundary.paused ||
+          sha([key, boundary.paused.pin]) !== state.correction!.correctionRef)
+        throw Error("Story Blueprint correction lacks its original negative Review.");
+      if (step.boundary === "writer") await advanceStoryBlueprint(input, step);
+      else if (step.boundary !== "review") throw Error("Story Blueprint correction lost its settled draft.");
+      return fromBoundary(await storyBlueprintBoundary(input));
+    },
+  }, checkpointed);
+  const finished = await child.invoke({ identity, submission: null, submissionKey: null,
+    outcome: null, continuationRef: null }, checkpointed
+    ? { ...assignmentChildConfig(config!, identity), durability: "sync" }
+    : { recursionLimit: 10000 });
+  assertSource();
+  const approved = await readApprovedBlueprint(job, plan, snapshot, provider, model, task, head);
+  if (!approved || finished.outcome?.status !== "verified" || finished.outcome.evidenceRef !== sha(approved.pin))
+    throw Error("Story Blueprint child did not independently verify its approved pin.");
+  return approved.pin;
 }

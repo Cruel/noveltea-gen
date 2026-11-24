@@ -44,6 +44,7 @@ export interface GenerationOperationRecovery {
     assignmentId?: string; resultStatus?: string;
     /** Settled original child failure at its unpublished draft source. */
     assignmentFailure?: { sourceHeadSha: string; proof: AssignmentFailureProof };
+    blueprintAssessment?: import("./blueprint-reassessment.js").BlueprintAssessmentRef;
     interactiveDomain?: "choice" | "puzzle";
     closeout?: { milestoneId: string; proposalDigest: string; repairId: string };
     /** Original settled Event no-write report, never a replacement Event writer lease. */

@@ -22,6 +22,7 @@ import { readAuthorApproval, verifyAuthorEvidence, type AuthorApprovalEvidence }
 import { isFocusedScope, resolveFocusedScope } from "./focused-scope.js";
 import { validateFocusedCreationGrants } from "./creation-grants.js";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
+import { BlueprintAssessmentRequired, type BlueprintAssessmentGrant } from "./blueprint-reassessment.js";
 import { createReviewedBlueprint, readApprovedBlueprint, inspectPausedBlueprint, classifyBlueprintFailure,
   type BlueprintPin } from "./architecture-blueprint.js";
 import { nativeMetadataDefects, verifySettledAssignment, inspectAssignmentFailure,
@@ -127,10 +128,11 @@ interface CatalogReport {
 export interface ArchitectureOptions {
   story: string; job: string; action: "run" | "inspect" | "propose" | "approve" | "reconcile";
   contract?: unknown; task?: string; mode?: "autonomous" | "collaborative";
-  skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string;
+  skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; turnPlanDigest?: string;
   proposal?: string; approvalFile?: string; recoveryDigest?: string; carryForward?: string[];
   causalDigest?: string;
   round?: { assignmentKey: string; command: AssignmentRoundCommand };
+  blueprintAssessment?: BlueprintAssessmentGrant;
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 function git(job: JobStartResult, ...args: string[]) {
@@ -949,9 +951,9 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         let pin: BlueprintPin;
         try {
           pin = await createReviewedBlueprint(job, receipt.snapshot!, receipt.plan!,
-            receipt.provider, receipt.model, receipt.blueprintTask, head);
+            receipt.provider, receipt.model, receipt.blueprintTask, head, input.round?.assignmentKey, input.turnPlanDigest, input.blueprintAssessment);
         } catch (error) {
-          if (error instanceof PiBudgetPause) {
+          if (error instanceof PiBudgetPause || error instanceof BlueprintAssessmentRequired) {
             // Safe-budget pauses have durable source/session receipts, not a
             // semantic rejection or an ambiguous interrupted writer.
             delete receipt.blueprintFailure;
@@ -1200,7 +1202,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         return { receipt };
       })
       .addEdge(START, "review_causal_blueprint")
-      .addEdge("review_causal_blueprint", "architecture_specialist")
+      .addConditionalEdges("review_causal_blueprint", () => input.blueprintAssessment ? END : "architecture_specialist", [END, "architecture_specialist"])
       .addConditionalEdges("architecture_specialist", state => state.round ? END : "validate_and_commit_architecture", [END, "validate_and_commit_architecture"])
       .addEdge("validate_and_commit_architecture", END).compile({ checkpointer: saver });
     let result: { receipt: Receipt; round: AssignmentRoundResult | null };
@@ -1210,6 +1212,11 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           (state.executionHead ?? state.expectedHead),
       } });
     } finally { saver.db.close(); }
+    if (input.blueprintAssessment) {
+      if (!result.receipt.blueprint || result.receipt.phase !== "ready")
+        throw Error("Original Story Blueprint assessment did not reach its independently approved pin.");
+      return { ...output(job, result.receipt), status: "blueprint-approved", blueprintPin: result.receipt.blueprint };
+    }
     if (result.round) return { ...output(job, result.receipt), status: "writer-round", round: result.round };
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");

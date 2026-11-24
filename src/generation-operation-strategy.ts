@@ -1,5 +1,6 @@
 /** Decisions at the existing assessor only. Original adapters retain every
  * receipt, writer lock, validation, independent review and budget check. */
+import { readBlueprintAssessment } from "./blueprint-reassessment.js";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -447,10 +448,38 @@ export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonN
     evidence.closeout.milestoneId === pending.milestoneId && pending.sourceSha === c.origin.sourceHeadSha &&
     pending.planVersion === c.origin.planVersion && evidence.assignmentId === c.origin.assignmentId;
 }
+/** The checkpointed negative private Review is not a canonical Git failure.
+ * Authenticate the original child and source before admitting only its
+ * read-only Blueprint progression in the parent assessor. */
+async function originalBlueprintAssessment(job: JobStartResult, s: State, c: RecoveryCase) {
+  const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+  const ref = op?.evidence.blueprintAssessment;
+  if (!ref) return null;
+  if (s.request.fixture || c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
+      op?.evidence.resultStatus !== "blueprint-assessment" || op.evidence.reference !== "specialist-receipt" ||
+      s.active?.id !== c.origin.assignmentId || s.result || s.inventory?.headSha !== c.origin.sourceHeadSha)
+    throw Error("Original Blueprint assessment lost its active parent assignment.");
+  const proof = await readBlueprintAssessment(job, ref);
+  const story = proof.identity.assignmentId === "story-blueprint";
+  if (proof.identity.sourceHeadSha !== c.origin.sourceHeadSha ||
+      proof.identity.planVersion !== (c.origin.planVersion ?? 1) ||
+      proof.identity.turnDigest !== c.origin.turnDigest ||
+      (story ? s.active?.stage !== "architecture" :
+        s.active?.stage !== "event" || proof.identity.assignmentId !== "milestone-blueprint:" + s.active.milestone))
+    throw Error("Original Blueprint assessment does not match its authenticated Turn and scope.");
+  await assertSource(job, s, c);
+  return { ref, proof, evidence: { store: "specialist-receipt" as const,
+    ref: "blueprint-assessments/" + ref.key + "-" + ref.round + ".json", digest: ref.digest } };
+}
+
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (s.request.fixture || !s.request.turnPlanDigest) return null;
   const originalOperation = s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+  const blueprint = await originalBlueprintAssessment(job, s, c);
+  if (blueprint)
+    return { ...base(c, blueprint.evidence), action: "known-correction",
+      adapter: "review-cycle", receipt: blueprint.evidence };
   if (originalOperation?.evidence.protocolFailure) {
     const proof = await authenticateNonSpecialistProtocolFailure(job, originalOperation);
     if (!proof || c.kind !== "protocol") throw Error("Original non-specialist protocol evidence changed");
@@ -516,6 +545,9 @@ export async function authenticateOperationReviewProof(job: JobStartResult, s: S
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   if (d.action !== "known-correction" || d.adapter !== "review-cycle") return false;
   try {
+  const blueprint = await originalBlueprintAssessment(job, s, c);
+  if (blueprint) return !d.reviewAssessment && isDeepStrictEqual(d.receipt, blueprint.evidence) &&
+    isDeepStrictEqual(d.evidence, [...c.evidence, blueprint.evidence]);
   const original = await originalFailedReviewProof(job, s, c);
   if (!original || !isDeepStrictEqual(original, d.receipt) ||
       !isDeepStrictEqual(d.evidence, [...c.evidence, original])) return false;
@@ -689,6 +721,57 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work"].includes(d.adapter)) &&
         !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
   if (d.action === "known-correction") {
+    const original = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+    if (original?.evidence.blueprintAssessment) {
+      const settled = { ...lifecycle, assessorPending: false };
+      const stop = (decision: RecoveryDecision, reason: string, status: State["status"]) =>
+        ({ recoveryLifecycle: decideRecovery(settled, decision), reason, status });
+      try {
+        const source = await originalBlueprintAssessment(job, s, c);
+        if (!source || !isDeepStrictEqual(await selectOperationStrategy(job, s, c), d))
+          throw Error("Blueprint reassessment has no original source-bound decision.");
+        const control = await readJobControl(job);
+        if (control !== "running")
+          return stop({ ...base(c), action: "pause", reason: control === "cancelled" ? "cancelled" : "author-pause", resumeRef: d.receipt },
+            "Author control precedes Blueprint reassessment.", control);
+        const author = await withStoryJobLock(job, "blueprint-reassessment-author-intake", () => processAuthorUpdatesAfterWork(job));
+        if ("error" in author) throw Error("Blueprint reassessment could not authenticate author intake.");
+        if (author.status !== "ready")
+          return stop({ ...base(c), action: "pause", reason: author.status === "cancelled" ? "cancelled" : "author-pause", resumeRef: d.receipt },
+            "Author intake precedes Blueprint reassessment.", author.status === "cancelled" ? "cancelled" : "paused");
+        await assertSource(job, s, c);
+        const round = { assignmentKey: source.proof.parentAssignmentKey, command: { phase: "invoke" as const } };
+        const blueprintAssessment = { caseId: c.id, ref: source.ref };
+        const result = source.proof.identity.assignmentId === "story-blueprint"
+          ? await (await import("./architecture.js")).runArchitectureJob({ ...s.request, action: "run", round, blueprintAssessment })
+          : await (async () => {
+              const milestone = s.active!.milestone!;
+              const event = JSON.parse(await readFile(join(job.stateDir, "event-items", milestone.slice(10) + ".json"), "utf8"));
+              return (await import("./event-work.js")).runEventWorkItem({ ...s.request, action: "run",
+                milestone, task: event.blueprintTask, round, blueprintAssessment });
+            })();
+        if (result.status !== "blueprint-approved" || !("blueprintPin" in result) || !result.blueprintPin ||
+            await trustedHead(job) !== c.origin.sourceHeadSha || git(job, "status", "--porcelain").trim())
+          throw Error("Blueprint reassessment did not settle an independently approved, unchanged source.");
+        return { recoveryLifecycle: finishVerifiedRecovery(settled, { status: "verified", caseId: c.id,
+          sourceHeadSha: c.origin.sourceHeadSha, assurance: { store: "specialist-receipt",
+            ref: source.proof.identity.assignmentId === "story-blueprint"
+              ? "architecture-blueprints/plan-" + source.proof.identity.planVersion + "-approved.json"
+              : "milestone-blueprints/" + s.active!.milestone!.slice(10) + ".json",
+            digest: createHash("sha256").update(JSON.stringify(result.blueprintPin)).digest("hex") } }, true),
+          reason: null, status: "running" };
+      } catch (error) {
+        if (error instanceof PiModelUnavailableError || error instanceof Error && error.name === "PiBudgetPause")
+          return stop({ ...base(c), action: "pause",
+            reason: error instanceof PiModelUnavailableError ? "provider-unavailable" : "budget", resumeRef: d.receipt },
+            error.message, "paused");
+        if (error instanceof Error && error.name === "StoryCancelledError")
+          return stop({ ...base(c), action: "pause", reason: "cancelled", resumeRef: d.receipt }, error.message, "cancelled");
+        return stop({ ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
+          requiredInspection: "Inspect the original negative Blueprint, independent diagnosis, and exact settled sessions; no canonical writer was authorized." },
+          error instanceof Error ? error.message : String(error), "blocked");
+      }
+    }
     const foundation = usesSharedAssignmentReview(c.origin.assignmentId);
     try {
     if (!foundation || !await authenticateFoundationReviewHead(job, c.origin.sourceHeadSha))

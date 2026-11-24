@@ -5,6 +5,7 @@ import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
+import { authenticateBlueprintGrant, requestBlueprintAssessment, type BlueprintAssessmentGrant } from "./blueprint-reassessment.js";
 import { getConfig } from "@langchain/langgraph";
 import { createAssignmentLifecycleGraph, assignmentChildConfig, logicalAssignmentKey,
   type AssignmentIdentity, type AssignmentSubmission, type AssignmentOutcome } from "./generation-assignment-lifecycle.js";
@@ -1240,7 +1241,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   task: string, head: string, fixture: boolean,
   correction?: { candidate: MilestoneBlueprint; supersedes: Supersession; sources: string[];
     exactPatch: boolean; accepts: (draft: MilestoneBlueprint) => boolean },
-  parentAssignmentKey?: string, parentTurnDigest?: string,
+  parentAssignmentKey?: string, parentTurnDigest?: string, assessment?: BlueprintAssessmentGrant,
 ): Promise<{ blueprint: MilestoneBlueprint; pin: MilestoneBlueprintPin }> {
   if (!MILESTONE.test(assignment.milestoneId) || !plan.items.some(i =>
       i.id === "global-architecture" && i.status === "verified" &&
@@ -1266,6 +1267,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       supersedes: correction?.supersedes ?? null }),
   };
   const key = logicalAssignmentKey(identity);
+  if (assessment) await authenticateBlueprintGrant(job, assessment, identity, parentAssignmentKey);
   const file = fileFor(job, assignment.milestoneId);
   let loaded = await load(job, assignment.milestoneId);
   if (loaded) {
@@ -1559,6 +1561,14 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       receipt.diagnostics.at(-1)!.round === round;
     if (!trigger || continuationDue) return;
     const last = receipt.rounds[round]!;
+    if (parentTurnDigest && !assessment) {
+      if (!receipt.writer || !receipt.reviewer)
+        throw Error("Milestone Blueprint assessment lacks independent settled sessions.");
+      await requestBlueprintAssessment(job, { schema: "noveltea-blueprint-assessment/v1",
+        identity, parentAssignmentKey: parentAssignmentKey!, round, draftDigest: last.draftDigest,
+        reviewDigest: last.reviewDigest, trigger, writer: receipt.writer, reviewer: receipt.reviewer,
+        context: { plan, snapshot, provider, model, task, assignment, cycleId: binding.reviewCycleId } });
+    }
     const fingerprint = milestoneDiagnosticFingerprint(binding.reviewCycleId,
       last.draft, last.review.findings, { task, contract: plan.contract });
     if ((receipt.diagnostics ?? []).some(d => d.caseFingerprint === fingerprint)) {
@@ -1627,4 +1637,20 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   if (finished.outcome.evidenceRef !== sha(pin))
     throw Error("Milestone Blueprint child returned a foreign approval.");
   return { blueprint: await readReviewedMilestoneBlueprint(job, pin, assignment, binding), pin };
+}
+
+/** Locate the exact current or archived pin of an assessed assignment. */
+export async function readAssessmentMilestoneApproval(job: JobStartResult, assignment: EventAssignment,
+  cycleId: string, sourceHead: string, key: string, digest?: string) {
+  if (!HASH.test(cycleId) || !HASH.test(key) || !HASH.test(digest ?? "")) return false;
+  const historical = historicalFileFor(job, { milestoneId: assignment.milestoneId, cycleId, sourceSha: sourceHead, digest: "" });
+  const record = existsSync(historical)
+    ? JSON.parse(await readFile(historical, "utf8")) as Receipt
+    : await load(job, assignment.milestoneId);
+  if (!record || record.phase !== "approved" || record.assignmentKey !== key ||
+      record.lineage.reviewCycleId !== cycleId || record.lineage.executionHead !== sourceHead) return false;
+  const pin = pinOf(record);
+  if (sha(pin) !== digest) return false;
+  await readReviewedMilestoneBlueprint(job, pin, assignment, record.lineage);
+  return true;
 }
