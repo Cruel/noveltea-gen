@@ -170,3 +170,20 @@ test("C05 unsupported advice is a typed sealed STOP, never an authorized writer"
   assert.throws(() => decideRecovery(lifecycle, terminalDiagnosticDecision(c, diagnostic,
     { store: "response-contract", ref: signature }, forged)));
 });
+
+test("R14H only the independently accepted original adaptive effect can select reconciliation", () => {
+  const adaptiveOrigin = { ...origin, operation: "adaptive-admission" };
+  const adaptiveCase = { ...c, origin: adaptiveOrigin, id: recoveryCaseId(adaptiveOrigin) };
+  const proof = { store: "response-contract" as const, ref: "a".repeat(64), digest: "c".repeat(64) };
+  const selected = { ...diagnostic, caseId: adaptiveCase.id, evidence: [...evidence, proof] };
+  const proposal = { ...example, sourceRef: [proof.store, proof.ref, proof.digest].join(":") };
+  assert.equal(authorizeDiagnosticStrategy(state, adaptiveCase, selected, proposal), null);
+  assert.equal(authorizeDiagnosticStrategy(state, adaptiveCase, selected, proposal,
+    { ...proof, digest: "f".repeat(64) }), null);
+  assert.equal(authorizeDiagnosticStrategy(state, adaptiveCase, selected, proposal, proof)?.action,
+    "reconcile-effects");
+  assert.equal(authorizeDiagnosticStrategy(state, adaptiveCase, selected,
+    { ...proposal, strategy: "local-repair" }, proof), null);
+  assert.equal(authorizeDiagnosticStrategy({ ...state, planVersion: 3 }, adaptiveCase, selected,
+    proposal, proof), null);
+});

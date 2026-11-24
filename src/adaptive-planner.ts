@@ -30,11 +30,11 @@ export class InvalidAdaptiveProposalError extends Error {}
 /** Reconcile an invoked ORIGINAL Pi operation using its on-disk transcript.
  * This is deliberately read-only until all session, prefix, terminal response,
  * methodology and source identities agree. No new prompt is ever issued. */
-export async function recoverCompletedAdaptiveProposal(input: {
+export async function inspectCompletedAdaptiveProposal(input: {
   job: JobStartResult; selected: StoryOrchestratorSelection; effect: AdaptiveEffect;
   signature: string; required: string[];
-}): Promise<{ proposal: AdaptiveProposal; sessionFile: string; skillReads: string[] }> {
-  const { job, selected, effect, signature } = input;
+}) {
+  const { job, selected, effect } = input;
   const ref = effect.invocation;
   if (!ref || !effect.contextDigest ||
       effect.snapshotId !== selected.receipt.skillSnapshot.id ||
@@ -86,6 +86,15 @@ export async function recoverCompletedAdaptiveProposal(input: {
   const skillReads = completedPinnedSkillReads(messages, project.root, selected.receipt.skillSnapshot.path);
   if (missingAdaptiveMethodReads(messages, project.root, selected.receipt.skillSnapshot.path, input.required).length)
     throw Error("Original adaptive Pi response lacks required verified methodology reads.");
+  return { text, project, skillReads, ref };
+}
+
+/** Restore only the authenticated original context; inspection itself has no
+ * budget, receipt, or model side effects. */
+export async function recoverCompletedAdaptiveProposal(input: Parameters<typeof inspectCompletedAdaptiveProposal>[0]):
+  Promise<{ proposal: AdaptiveProposal; sessionFile: string; skillReads: string[] }> {
+  const { job, effect, signature } = input;
+  const { text, project, skillReads, ref } = await inspectCompletedAdaptiveProposal(input);
   // The original completed session remains the only basis for admission;
   // malformed responses still go through the existing protocol correction.
   await restoreCompletedAdaptivePiContext(job, project, {

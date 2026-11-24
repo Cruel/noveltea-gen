@@ -17,6 +17,8 @@ import { inspectPiPolicy, PiModelUnavailableError } from "./job-pi-policy.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
+import { inspectSettledAdaptiveReconciliation } from "./adaptive-reconciliation.js";
+import type { RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
 import { inspectRejectedRepair, authenticateFoundationReviewHead, inspectFoundationReviewBoundary,
@@ -219,6 +221,8 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         op.evidence.reference === "generation-checkpoint" && !op.evidence.assignmentId &&
         !op.evidence.closeout && !op.evidence.eventNoWrite &&
         !op.evidence.interactiveNoWrite && !op.evidence.verifier) {
+      const accepted = await inspectSettledAdaptiveReconciliation(job, s.request, c.origin);
+      if (accepted) return accepted.receipt;
       const state = await readAdaptiveState(job, turnDigest, planVersion);
       const attempt = state?.attempts.at(-1);
       if (attempt?.sourceSha === head && ["rejected", "unchanged", "admitted"].includes(attempt.phase) &&
@@ -526,6 +530,15 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
   return !!original && isDeepStrictEqual(original, d.evidence.at(-1)) &&
     isDeepStrictEqual(d.evidence.slice(0, -1), c.evidence);
 }
+/** The proposal cannot select an adaptive reconciliation unless the original
+ * controller admission and the actual Pi transcript independently agree. */
+export async function authorizeOperationDiagnosticStrategy(job: JobStartResult, s: State, c: RecoveryCase,
+  diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>, proposal: RecoveryDiagnosticProposal) {
+  const adaptive = c.origin.operation === "adaptive-admission" ?
+    await inspectSettledAdaptiveReconciliation(job, s.request, c.origin) : null;
+  return authorizeDiagnosticStrategy(s, c, diagnostic, proposal, adaptive?.receipt);
+}
+
 export function diagnosticCaseForDecision(c: RecoveryCase, d: RecoveryDecision) {
   const proof = d.evidence.at(-1);
   if (!proof?.digest || !["repair-ledger", "response-contract", "review-checkpoint",
@@ -754,7 +767,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       const attempt = await inspectDiagnosticAttempt(job, target, c.id);
       const counted = recordRecoveryOutcome(settled, { status: "started", caseId: c.id, attempt }, true);
       if ("strategy" in diagnosis) {
-        const controller = authorizeDiagnosticStrategy(s, c, d, diagnosis);
+        const controller = await authorizeOperationDiagnosticStrategy(job, s, c, d, diagnosis);
         if (controller) return { status: "running", reason: null,
           recoveryLifecycle: { ...decideRecovery(counted, controller), assessorPending: true } };
         return { status: "blocked", reason: "The read-only diagnosis has no presently authenticated corrective adapter. Original source and recommendation are preserved for plan/Review escalation.",

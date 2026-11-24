@@ -627,3 +627,7 @@ reloads the draft from reopened persistence, submits through the authenticated
 HTTP boundary, and executes the queued production worker to the next Character
 question. Event and Focused direct transport regressions are not established
 by the World regression.
+
+#### R14H accepted parent planner continuation (partial #268)
+
+A source-authenticated `reconcile-original` diagnosis of `adaptive-admission` may select the existing checkpoint reconciliation adapter only for an already controller-admitted amendment from the original completed Pi operation. The accepted receipt binds the original prompt, session, native source, Turn, plan and amendment version; a model recommendation is not an admission. The assessor restores the ordinary native-verified inventory with new amendments disabled, rechecks the settled diagnosis and source, and discharges only the original Case on verified restore. Rejected/ambiguous/unsupported cases remain fenced; existing owner, Review, author and budget gates remain unchanged. See the source-linked exit inventory. Post-nonconvergence writer admission and production fault-injection certification are not completed by this change.

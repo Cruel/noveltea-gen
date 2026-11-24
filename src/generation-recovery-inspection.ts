@@ -27,9 +27,8 @@ import { verifyPlanHistory } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import type { GenerationGraphState } from "./generation.js";
-import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy } from "./generation-operation-strategy.js";
+import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy, authorizeOperationDiagnosticStrategy } from "./generation-operation-strategy.js";
 import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
-import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
 import { originalInventorySnapshotDigest } from "./selective-revalidation.js";
@@ -336,7 +335,7 @@ export async function inspectModernGenerationRecovery(
             const target = diagnosticCaseForDecision(active, selected);
             const proposed = await inspectOriginalUnknownDiagnosis(job, target);
             return "strategy" in proposed && isDeepStrictEqual(d,
-              authorizeDiagnosticStrategy(values as GenerationGraphState, active, selected, proposed));
+              await authorizeOperationDiagnosticStrategy(job, values as GenerationGraphState, active, selected, proposed));
           } catch { return false; }
         }
         case "known-correction":

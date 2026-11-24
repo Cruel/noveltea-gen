@@ -27,8 +27,8 @@ import { projectRecoveryInspection, authenticateOriginalFailure,
   inspectModernGenerationRecovery } from "./generation-recovery-inspection.js";
 import { selectOperationStrategy, executeOperationStrategy,
   authenticateSealedDiagnosticStop, diagnosticCaseForDecision,
-  authenticateOperationDiagnosticProof } from "./generation-operation-strategy.js";
-import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
+  authenticateOperationDiagnosticProof, authorizeOperationDiagnosticStrategy } from "./generation-operation-strategy.js";
+import { inspectSettledAdaptiveReconciliation } from "./adaptive-reconciliation.js";
 import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
   recordRecoveryOutcome, resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
@@ -3369,7 +3369,7 @@ export function recoveryNode(
           const target = diagnosticCaseForDecision(current, original);
           const proposal = await inspectOriginalUnknownDiagnosis(job, target);
           if (!("strategy" in proposal) || !isDeepStrictEqual(previous,
-                authorizeDiagnosticStrategy(state as State, current, original, proposal)) ||
+                await authorizeOperationDiagnosticStrategy(job, state as State, current, original, proposal)) ||
               !isDeepStrictEqual(prior.recoveryLifecycle.attempt,
                 await inspectDiagnosticAttempt(job, target, current.id)))
             throw Error("Original diagnostic proposal or Pi attempt changed");
@@ -3384,6 +3384,14 @@ export function recoveryNode(
                   state.request.task, state.request.turnPlanDigest))
               throw Error("Original author objective proof is missing");
             receipt = original.evidence.at(-1)!;
+          } else if (current.origin.operation === "adaptive-admission") {
+            const accepted = await inspectSettledAdaptiveReconciliation(job, state.request, current.origin);
+            if (!accepted || !isDeepStrictEqual(accepted.receipt, original.evidence.at(-1)) ||
+                rest.adaptiveVersion !== accepted.version ||
+                (rest.inventory as State["inventory"])?.headSha !== head ||
+                rest.planVersion !== current.origin.planVersion)
+              throw Error("Original adaptive reconciliation has no verified restored inventory");
+            receipt = accepted.receipt;
           } else if (current.origin.operation === "independent-review") {
             const point = (await inspectRecoveryCheckpoints(job)).find(p =>
               p.eligible && p.commitSha === head && p.workItem === state.active?.id &&
@@ -3652,6 +3660,45 @@ export function createGenerationGraph(
               operationRecovery: { ...op, phase: "continued" as const } };
           } catch (error) {
             return fence("Read-only recovery remains unresolved: " +
+              (error instanceof Error ? error.message : String(error)));
+          }
+        }
+        if (op.operation === "adaptive-admission" && op.outcome === "exception" &&
+            s.recoveryLifecycle.decision?.action === "reconcile-effects" &&
+            s.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
+            s.recoveryLifecycle.attempt.phase === "settled") {
+          try {
+            return await withStoryJobLock(job, "generation-adaptive-reconciliation", async () => {
+              clean(job);
+              const current = s.recoveryLifecycle.active;
+              const decision = s.recoveryLifecycle.decision;
+              if (!current || decision?.action !== "reconcile-effects" ||
+                  await trustedHead(job) !== current.origin.sourceHeadSha)
+                throw Error("Original adaptive source changed");
+              const original = await selectOperationStrategy(job, s, current);
+              if (original?.action !== "diagnostic") throw Error("Original adaptive diagnosis is no longer eligible");
+              const target = diagnosticCaseForDecision(current, original);
+              const proposal = await inspectOriginalUnknownDiagnosis(job, target);
+              if (!("strategy" in proposal) || !isDeepStrictEqual(decision,
+                  await authorizeOperationDiagnosticStrategy(job, s, current, original, proposal)) ||
+                  !isDeepStrictEqual(s.recoveryLifecycle.attempt, await inspectDiagnosticAttempt(job, target, current.id)))
+                throw Error("Original adaptive diagnosis or authorization changed");
+              const accepted = await inspectSettledAdaptiveReconciliation(job, s.request, current.origin);
+              if (!accepted || process.env.NT_ADAPTIVE_PLANNING !== "1")
+                throw Error("Original adaptive planner has no eligible accepted effect");
+              // Rebuild the inventory from the original native source and
+              // sealed amendment. The false flag forbids new planner calls.
+              const next = await reconcile(s, job, false);
+              if (next.operationRecovery || next.recovery || next.escalation ||
+                  next.status === "blocked" || next.status === "paused" ||
+                  next.adaptiveVersion !== accepted.version ||
+                  next.planVersion !== current.origin.planVersion ||
+                  next.inventory?.headSha !== current.origin.sourceHeadSha)
+                throw Error("Original adaptive plan cannot be restored");
+              return { ...next, status: "running" as const, reason: null, operationRecovery: null };
+            });
+          } catch (error) {
+            return fence("Adaptive reconciliation remains unresolved: " +
               (error instanceof Error ? error.message : String(error)));
           }
         }

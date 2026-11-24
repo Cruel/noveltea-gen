@@ -15,7 +15,7 @@ import { pendingDigest } from "../src/pending-work-amendments.js";
 import { beginAdaptiveAttempt, beginAdaptiveInvocation, bindAdaptiveContext,
   completeAdaptiveInvocation, emptyAdaptiveState, readAdaptiveState,
   assertAdaptiveSettled, isProvablyUninvokedAdaptiveAttempt, settleAdaptiveAttempt } from "../src/adaptive-state.js";
-import { recoverCompletedAdaptiveProposal } from "../src/adaptive-planner.js";
+import { inspectCompletedAdaptiveProposal, recoverCompletedAdaptiveProposal } from "../src/adaptive-planner.js";
 import { inspectPiPolicy, guardPiBudget, registerPendingPiSession, recordPiSession } from "../src/job-pi-policy.js";
 
 const sha = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
@@ -156,6 +156,17 @@ test("#228: started Pi effects are fenced until the original completed transcrip
     await assert.rejects(recover(), /prompt changed/i,
       "a same-ID but substituted original user prompt cannot authenticate a completed response");
     writeFileSync(sessionFile, originalSession);
+    const inspect = () => inspectCompletedAdaptiveProposal({
+      job: f.job, selected, effect: state.attempts[0]!.effect!, signature,
+      required: ["nt-catalog/SKILL.md"],
+    });
+    const preInspectionState = readFileSync(join(f.stateDir, "adaptive-plan.json"));
+    const preInspectionPolicy = await inspectPiPolicy(f.job);
+    const inspected = await inspect();
+    assert.deepEqual(JSON.parse(inspected.text), proposal);
+    assert.deepEqual(inspected.skillReads, [join(snapshot.path, "skills", "nt-catalog", "SKILL.md")]);
+    assert.deepEqual(readFileSync(join(f.stateDir, "adaptive-plan.json")), preInspectionState);
+    assert.deepEqual((await inspectPiPolicy(f.job)).budget, preInspectionPolicy.budget);
     const recovered = await recover();
     assert.deepEqual(recovered.proposal, proposal);
     assert.deepEqual(recovered.skillReads, [join(snapshot.path, "skills", "nt-catalog", "SKILL.md")]);
@@ -168,6 +179,7 @@ test("#228: started Pi effects are fenced until the original completed transcrip
     writeFileSync(sessionFile, readFileSync(sessionFile, "utf8") + JSON.stringify({
       type: "message", message: { role: "user", content: [{ type: "text", text: "new request" }] } }) + "\n");
     await assert.rejects(recover(), /changed|truncated/);
+    await assert.rejects(inspect(), /changed|truncated/);
     const valid = readFileSync(sessionFile, "utf8").split("\n").slice(0, -2).join("\n") + "\n";
     writeFileSync(sessionFile, valid);
     await settleAdaptiveAttempt(f.job, state, signature, "unchanged");

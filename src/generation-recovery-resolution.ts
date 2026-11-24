@@ -17,6 +17,7 @@ import { assertCompletedSelectiveRevalidation } from "./selective-revalidation-w
 import { readEventOnlyOmission, readHistoricalEventOnlyOmission } from "./interactive-event-only.js";
 import { verifiedNarrativeChain } from "./job-successor.js";
 import { inspectInteractiveConflict } from "./interactive-work.js";
+import { inspectSettledAdaptiveReconciliation } from "./adaptive-reconciliation.js";
 import { readAdaptiveState } from "./adaptive-state.js";
 import { verifyCompletedAdaptiveResponseCorrection, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
@@ -188,6 +189,11 @@ export async function inspectActiveRecoveryResolution(
     if (correction.ref !== input.proof.file || correctedHeadSha !== original.origin.sourceHeadSha)
       return false;
     return verifyCompletedAdaptiveResponseCorrection(job, { ...input, phase: "assessment" });
+  }
+  if (correction.store === "response-contract" && source.channel === "operationRecovery" &&
+      original.origin.operation === "adaptive-admission" && correctedHeadSha === original.origin.sourceHeadSha) {
+    const accepted = await inspectSettledAdaptiveReconciliation(job, state.request, original.origin, correction.ref);
+    return !!accepted && isDeepStrictEqual(accepted.receipt, correction);
   }
   if (correction.store === "graph-checkpoint" && source.channel === "operationRecovery" &&
       original.origin.operation === "scheduling" && correctedHeadSha === original.origin.sourceHeadSha &&

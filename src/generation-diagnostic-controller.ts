@@ -45,7 +45,7 @@ export function diagnosticPacket(s: GenerationGraphState, c: RecoveryCase,
       failure: c.origin.assignmentId ? s.failures[c.origin.assignmentId]?.slice(0, 1200) ?? null : null },
     previousAttempts: s.recoveryLifecycle.attempt ? [{ id: s.recoveryLifecycle.attempt.id,
       phase: s.recoveryLifecycle.attempt.phase }] : [],
-    availableAdapters: ["scheduling", "independent-review"].includes(c.origin.operation) &&
+    availableAdapters: ["scheduling", "independent-review", "adaptive-admission"].includes(c.origin.operation) &&
       c.observation === "exception" ? ["checkpoint-reconciliation"] : [],
   };
 }
@@ -56,7 +56,7 @@ export function diagnosticPacket(s: GenerationGraphState, c: RecoveryCase,
  * still requires the source-specific original check and verifier. */
 export function authorizeDiagnosticStrategy(s: GenerationGraphState, c: RecoveryCase,
   diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>,
-  proposal: RecoveryDiagnosticProposal): RecoveryDecision | null {
+  proposal: RecoveryDiagnosticProposal, adaptiveProof?: RecoveryEvidence): RecoveryDecision | null {
   // Prerequisites are model-authored advice, not executable gates or grants.
   // The original controller independently checks source, author control,
   // scope and the read-only operation. Requiring an empty prose list made
@@ -86,7 +86,9 @@ export function authorizeDiagnosticStrategy(s: GenerationGraphState, c: Recovery
     !!s.active && s.active.id === c.origin.assignmentId &&
     !!s.result && s.result.headSha === c.origin.sourceHeadSha &&
     !!s.inventory?.items.some(i => i.id === s.active?.id);
-  if (!scheduling && !review) return null;
+  const adaptive = c.origin.operation === "adaptive-admission" && !s.active && !s.result &&
+    c.origin.assignmentId === null && !!adaptiveProof && isDeepStrictEqual(proof, adaptiveProof);
+  if (!scheduling && !review && !adaptive) return null;
   return { ...base(c, diagnostic.evidence), action: "reconcile-effects",
     adapter: "checkpoint-reconciliation", originalRef: c.evidence[0]! };
 }

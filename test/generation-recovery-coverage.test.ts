@@ -43,7 +43,7 @@ const siteNames = [
  * in docs/generation-recovery-contract.md rather than silent test regeneration. */
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   schedule: "returns:10,status:6,blocked:3,operationFailure:1,authorBoundary:1,throws:10",
-  assess_recovery: "returns:18,status:7,blocked:1,throws:9",
+  assess_recovery: "returns:21,status:8,blocked:1,reconcile:1,throws:14",
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
@@ -60,7 +60,7 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:10,blocked:6,reconcile:1,throws:17",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
-  recoveryNode: "returns:24,status:18,throws:14",
+  recoveryNode: "returns:24,status:18,throws:15",
 };
 const operations = [
   "adaptive-admission",
@@ -247,6 +247,12 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["generation-operation-strategy.ts", "executeOperationStrategy", "4507b2a0c3ff3335dccd4fac945598e1fbe18b9d83569b7db662caaa242fe832"],
     ["generation-recovery-inspection.ts", "inspectModernGenerationRecovery", "9c40354b3557271acdbcb12c10af8ae8d48aec49eaaaa69699feba992c9c1601"],
     ["assignment-metadata-recovery.ts", "materialProgress", "2357f7530030b88d019879e4f74c7b8dcaf5f7f93e70a682059395bc07da3869"],
+    ["generation-operation-strategy.ts", "diagnosticEvidence", "85d4666ca51a0d41072d7d70c60a6e3a4486365f896f8ec6f7e2cbc333585f28"],
+    ["generation-operation-strategy.ts", "authorizeOperationDiagnosticStrategy", "4848cf3844cc868b664a969ead5d11df4102e4ea6a9203c196962bbb62250bdc"],
+    ["generation-recovery-resolution.ts", "inspectActiveRecoveryResolution", "cce6bf8da8f2a44ffa0435a5e8d1859bfea64a36071e33bae0d0bbd9898a71c9"],
+    ["adaptive-reconciliation.ts", "inspectSettledAdaptiveReconciliation", "9dd191fdf4c3f40172153062906729113097e7ff6943a42531107667a636e6bb"],
+    ["adaptive-planner.ts", "inspectCompletedAdaptiveProposal", "fb1991e2c50f7c9cf0d7cb597cde012cf0d1d6eac379a3ca347c77a29a809ac4"],
+    ["generation-diagnostic-controller.ts", "authorizeDiagnosticStrategy", "ff2cf049ca089645f6217fd31698d8c5dab32b4e9671b4f5977397fcb3beb458"],
     ["assignment-metadata-recovery.ts", "nativeMetadataDefects", "a0660a5dec21e5c81a2bb8a8a3f39dd5d5d5317fdde3ad896d4e22689434e063"],
     ["assignment-metadata-recovery.ts", "inspectSettledChain", "69917422bd51372124c219ffb3fb8b5deb37c728920fac75f3d7e1e9cd60cfdf"],
     ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "d1c2b90f2dfe5e316eea32edae5590f6682391ec3fb5696c85e646cdda402024"],
@@ -570,8 +576,8 @@ test("an existing blocked exit cannot change to running without changing its sou
   const altered = exitSites(bypass).assess_recovery!.filter((r) => r.id.includes("/return#"));
   assert.equal(altered.length, original.length, "Return count deliberately unchanged");
   assert.notEqual(
-    altered[16]!.fingerprint,
-    original[16]!.fingerprint,
+    altered[19]!.fingerprint,
+    original[19]!.fingerprint,
     "Source-specific fingerprint catches bypass even with the same return count",
   );
 });
@@ -630,8 +636,8 @@ const reviewedDirectStopFamilies = {
     sites: [
       "schedule/status#4",
       "assess_recovery/return#2", "assess_recovery/return#4",
-      "assess_recovery/return#9", "assess_recovery/return#11",
-      "assess_recovery/return#12", "assess_recovery/return#16",
+      "assess_recovery/return#12", "assess_recovery/return#14",
+      "assess_recovery/return#15", "assess_recovery/return#19",
       "assess_recovery/status#2",
       "completion_decision/return#6", "completion_decision/status#1",
       "observeNodeOutcome/return#3",
@@ -653,9 +659,15 @@ const reviewedDirectStopFamilies = {
     proof: "Same original read-only check remains negative or unchanged-source repeated check has already been assessed",
     regression: ["test/generation.test.ts", "C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation"],
     sites: [
-      "assess_recovery/return#7", "assess_recovery/return#13",
+      "assess_recovery/return#7", "assess_recovery/return#16",
       "operationFailure/return#2", "operationFailure/status#1",
     ],
+  },
+  "adaptive-original-effect-unverified": {
+    disposition: "integrity-fence",
+    proof: "Only the accepted original adaptive response, exact diagnostic receipt and restored native inventory can discharge the failed parent check",
+    regression: ["test/recovery-diagnostic-proposal.test.ts", "R14H only the independently accepted original adaptive effect can select reconciliation"],
+    sites: ["assess_recovery/return#10"],
   },
   "protocol-verifier-exhausted": {
     disposition: "bounded-protocol-stop",

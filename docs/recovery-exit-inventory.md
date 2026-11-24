@@ -187,3 +187,15 @@ and no live Pi usage is claimed by this inventory.
   World variants certify CLI submission and the registered Studio Chat/HTTP/
   queue-worker flow through the next Character question; the standalone HTTP
   test separately checks draft/revision and receipt controls.
+
+### R14H: accepted parent adaptive effect reconciliation (partial #268)
+
+| Source | Authority / effect | Verification or refusal |
+| --- | --- | --- |
+| `adaptive-planner.ts` `inspectCompletedAdaptiveProposal` | Read original Pi session only, no new context restoration or budget admission. | Exact session prefix, terminal response, original prompt, selected model and pinned method reads. |
+| `adaptive-reconciliation.ts` `inspectSettledAdaptiveReconciliation` | Read original controller-admitted amendment; bind receipt to Job, Thread, Turn, plan, source, session, exact proposal and version. | Reject non-admitted, interrupted, corrected-format, stale or substituted receipts. Historical verification does not grant new work. |
+| `generation-operation-strategy.ts` `diagnosticEvidence`, `authorizeOperationDiagnosticStrategy` | Parent assessor chooses original no-write reconciliation only with independently authenticated accepted effect. | Rejected and unsupported proposals remain unresolved. |
+| `generation.ts` assessor returns 8–10 and recoveryNode throw 13 | Restore the native-checked pending inventory with amendment disabled; same Case. | Accepted version and HEAD must match; original diagnosis reauthenticated before and after restore. Errors fence without a writer. |
+| `generation-recovery-inspection.ts`, `generation-recovery-resolution.ts` | Reauthenticate original decision/attempt and historical discharge. | No model call or new permission. |
+
+Existing scheduling and already-passed Review reconciliation remain supported. Local repair after assignment nonconvergence, Review adjudication/replacement, dependency/Blueprint/work-plan changes and no-write omission are **not** admitted from generic diagnostic prose by this partial change; they require their own existing deterministic authority and source-specific admission. Actual control/resource gates remain authoritative; unsafe or unsupported proposals remain sealed unresolved. No new generic writer or retry engine. Foundation successor admission, crash-window certification, and production end-to-end adaptive graph certification remain open under #268.
