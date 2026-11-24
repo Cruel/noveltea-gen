@@ -477,37 +477,62 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       assert.equal(accepted.semanticReview.proposalDigest, accepted.digest)
     }
 
-    // The original resource window persists across retry. Expired admission
-    // is a resource pause, never a new provider call or an invented proposal.
+    // #258: the original Turn budget meters actual execution across author
+    // rounds, not elapsed wall time while the author or provider is idle.
+    // Exhaust the first model-call allowance through a real settled response.
     {
-      const workspace = 'projects/expired-original-budget'
+      const workspace = 'projects/cumulative-original-budget'
       let calls = 0
-      const writer: DiscoveryInference = async () => {
+      const writer: DiscoveryInference = async state => {
         calls++
-        throw new DiscoveryInvocationNotStarted('Unavailable before dispatch')
+        return state.turns.length === 1
+          ? structuredQuestions([{ id: 'ending', kind: 'yes-no',
+              question: 'Should there be multiple endings?', allowStudioDecision: true }])
+          : structuredQuestions([{ id: 'tone', kind: 'free-text',
+              question: 'What tone should the mystery use?' }])
       }
-      const started = await request('POST', { action: 'start', model, text: 'A short mystery' },
-        own, url, writer, workspace)
-      assert.equal(started.status, 503)
-      const row = (await store.persistence.onboarding.conversation(alice.id, repo, workspace))!
-      const saved = JSON.parse(row.state)
-      const originalStart = Date.now() - 16 * 60_000
-      assert.equal(await store.persistence.onboarding.saveConversation(alice.id, repo, workspace,
-        row.revision + 1, JSON.stringify({ ...saved, revision: row.revision + 1, startedAt: originalStart }),
-        row.revision, 'now'), true)
-      const retry = await request('POST', { action: 'retry', revision: row.revision + 1 },
-        own, url, writer, workspace)
-      assert.equal(retry.status, 503)
-      const blocked = JSON.parse((await store.persistence.onboarding.conversation(
+      const readSaved = async () => JSON.parse((await store.persistence.onboarding.conversation(
         alice.id, repo, workspace))!.state)
+      const started = await request('POST', { action: 'start', model, text: 'A short mystery',
+        limits: { modelCalls: 1, activeSeconds: 5400 } }, own, url, writer, workspace)
+      assert.equal(started.status, 200, JSON.stringify(started.body))
+      assert.equal(calls, 1)
+      const initial = await readSaved()
+      assert.equal(initial.settledAttempts.length, 1)
+      const qs = started.body.session.questions
+      const answered = await request('POST', { action: 'answer', revision: initial.revision,
+        setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace)
+      assert.equal(answered.status, 503, JSON.stringify(answered.body))
+      const blocked = await readSaved()
+      assert.equal(blocked.phase, 'blocked')
       assert.equal(blocked.recovery.status, 'paused')
       assert.equal(blocked.recovery.reason, 'budget')
-      assert.equal(blocked.startedAt, originalStart)
+      assert.deepEqual(blocked.settledAttempts, initial.settledAttempts)
+      assert.deepEqual(blocked.activeAttempts, [], 'Budget admission precedes any new invocation')
       assert.equal(blocked.proposal, undefined)
       assert.equal(calls, 1)
-      assert.equal((await request('POST', { action: 'retry', revision: blocked.revision },
-        own, url, writer, workspace)).status, 409)
-      assert.equal(calls, 1)
+      for (const limits of [undefined, { modelCalls: 1 }, { modelCalls: 2, activeSeconds: 5399 }]) {
+        const denied = await request('POST', { action: 'retry', revision: blocked.revision, limits },
+          own, url, writer, workspace)
+        assert.equal(denied.status, 422, JSON.stringify(denied.body))
+        assert.equal((await readSaved()).revision, blocked.revision)
+        assert.equal(calls, 1)
+      }
+      const resumed = await request('POST', { action: 'retry', revision: blocked.revision,
+        limits: { modelCalls: 2 } }, own, url, writer, workspace)
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+      assert.equal(resumed.body.session.phase, 'questions')
+      assert.equal(resumed.body.session.questions.questions[0].id, 'tone')
+      const settled = await readSaved()
+      assert.equal(settled.startedAt, blocked.startedAt)
+      assert.deepEqual(settled.limits, { modelCalls: 2, activeSeconds: 5400 })
+      assert.deepEqual(settled.settledAttempts.slice(0, 1), initial.settledAttempts)
+      assert.equal(settled.settledAttempts.length, 2)
+      assert.deepEqual(settled.accepted, blocked.accepted)
+      assert.equal(settled.recovery, undefined)
+      assert.equal(calls, 2, 'Replenishment must invoke only the unfinished author round')
     }
 
     // The shared contract permits 16 typed questions, each with 4,000 custom
