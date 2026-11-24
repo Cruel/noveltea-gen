@@ -88,3 +88,13 @@ test("versioned amendments cannot reduce original breadth, targets, branches or 
     contract("partial", "composition")), /breadth/i);
   assert.doesNotThrow(() => assertDeliveryNotReduced(original, contract("full-story", "composition")));
 });
+
+test("original delivery contract comparison tolerates object-key ordering but not scope changes", () => {
+  const original = contract("partial", "interactive", ["arc.archive"], ["confess"]);
+  const reordered = { ...original, scope: { targets: original.scope.targets,
+    kind: original.scope.kind, branches: original.scope.branches, depth: original.scope.depth } };
+  assert.doesNotThrow(() => assertTurnDeliveryHistory(original, reordered, []));
+  assert.doesNotThrow(() => assertTurnDeliveryHistory(original, reordered, [{ plan: { contract: reordered } }]));
+  assert.throws(() => assertTurnDeliveryHistory(original,
+    { ...reordered, scope: { ...reordered.scope, branches: [] } }, []), /original|history/);
+});

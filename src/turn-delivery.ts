@@ -2,6 +2,7 @@
  * This is a semantic-review checklist, not a record-count quota or a write grant.
  * The controller retains the original criteria when a plan is amended.
  */
+import { isDeepStrictEqual } from "node:util";
 import type { CompletionContract } from "./architecture.js";
 import type { TurnEvidence } from "./turn-plan-evidence.js";
 
@@ -67,8 +68,8 @@ export function deliveryCriteria(kind: TurnEvidence["kind"],
 export function assertTurnDeliveryHistory(original: CompletionContract,
   approved: CompletionContract,
   history: ReadonlyArray<{ plan: { contract: CompletionContract } }>): void {
-  if ((!history.length && JSON.stringify(original) !== JSON.stringify(approved)) ||
-      (history.length > 0 && JSON.stringify(history[0]!.plan.contract) !== JSON.stringify(original)))
+  if ((!history.length && !isDeepStrictEqual(original, approved)) ||
+      (history.length > 0 && !isDeepStrictEqual(history[0]!.plan.contract, original)))
     throw new Error("Approved plan history does not descend from the original Turn contract.");
   assertDeliveryNotReduced(original, approved);
 }

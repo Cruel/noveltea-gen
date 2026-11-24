@@ -310,3 +310,16 @@ certified by these changes.
 | [Historical Event](../test/issue-168-live.test.ts), [historical Choice](../test/issue-173-checkpoint-repair-live.test.ts), [hosted Foundation](../test/sandbox-hosted-live.test.ts) | The first two opt-in certificates now inspect historical negative evidence and verify refusal rather than dispatch an obsolete standalone writer. The hosted repair certificate requires the preserved original current-format CLI Generation and resumes it, not a separate repair operation. These paid/preserved-environment opt-ins were not executed in the focused offline run; positive scripted current-contract correction is covered separately. |
 
 The reviewed AST changes remove the deleted parent exits and the retired Discovery model consumer, and attest the new parent integrity refusal and bounded Review operation adapter. Remaining no-Turn structural fixture admission, direct structural fixture stage writers, and test-only legacy recovery orchestration are not certified by this increment.
+
+#### R14K focused revision transport and canonical baseline
+
+| Source / entrypoint | Disposition and evidence |
+| --- | --- |
+| [Archive witness baseline](../test/fixtures/README.md), [focused integration tests](../test/focused-generation.test.ts) | Replace seven generated seed setups with static canonical author input committed to fresh repositories; do not copy any approval, execution, native or Review receipt. |
+| [Scripted focused CLI](../test/support/scripted-focused-cli.ts) | Test-only transport uses native catalog, actual revision planner, immutable current Turn, ordinary CLI, scoped Pi tools, real Git, independent assignment/narrative/Turn Review. Five separate record types and a two-assignment restart exercise the same production graph, with model-call logs to prove no replay. Only Pi responses and sandbox filesystem are substituted, not authority. |
+| [Turn reader](../src/turn-plan-evidence.ts), [delivery history](../src/turn-delivery.ts) | Preserve exact signed receipt integrity and semantic contract equality regardless of object key order after preset parsing and SQLite normalization. Reordered keys pass; changed depth or branch scope does not. |
+| [CLI resume](../src/generation.ts) | Verify pinned dependency and pending-plan histories before generic recovery reconciliation, including when a previous terminal diagnostic exists. Missing history fences rather than being hidden by a previously selected decision. Existing focused missing-ledger regressions prove refusal and unchanged Git. The enclosing CLI return fingerprint is updated for these two added checks only. |
+
+This increment migrates the public scoped revision scenario and removes its
+legacy seed execution prerequisite. Other focused structural fixtures and
+missing-Turn dispatch paths remain pending; this is not final R14K certification.

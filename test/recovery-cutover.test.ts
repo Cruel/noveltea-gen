@@ -91,6 +91,14 @@ test("current Turn admission authenticates exact request and source, not a claim
     const request = { story: job.storyRoot, job: job.jobId, task, contract,
       fixture: false, turnPlanDigest: plan.digest };
     assert.deepEqual(await requireGenerationTurn(job, request), plan);
+    // Presets and SQLite normalization can reorder object keys. The signed
+    // receipt is unchanged; only the semantic comparison is order independent.
+    const reordered = { ...contract, scope: { kind: contract.scope.kind,
+      targets: contract.scope.targets, branches: contract.scope.branches, depth: contract.scope.depth } };
+    assert.deepEqual(await requireGenerationTurn(job, { ...request, contract: reordered }), plan);
+    await assert.rejects(requireGenerationTurn(job, { ...request,
+      contract: { ...reordered, scope: { ...reordered.scope, depth: "architecture" } } }), /corrupt\/stale/);
+
     await assert.rejects(requireGenerationTurn(job, { ...request, turnPlanDigest: "b".repeat(64) }),
       /corrupt\/stale/);
     await assert.rejects(requireGenerationTurn(job, { ...request, job: "other" }),

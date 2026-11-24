@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -54,7 +54,9 @@ function fixture(name: string) {
     }));
   };
   const cli = (job: string, args: string[], success = true) => {
-    const r = spawnSync(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
+    const scripted = args[0] === "generate" && env.NT_TEST_FOCUSED_CLI === "1";
+    const r = spawnSync(process.execPath, ["--import", "tsx", resolve(scripted
+      ? "test/support/scripted-focused-cli.ts" : "src/cli.ts"),
       "job", ...args, "--story", story, "--job", job], {
       encoding: "utf8", env, timeout: 240_000, maxBuffer: 32 * 1024 * 1024,
     });
@@ -64,16 +66,19 @@ function fixture(name: string) {
   return { repo, story, env, contract, cli, contractPath };
 }
 
+/** Canonical author-owned baseline only: no Generation state, fake Review
+ * verdicts, or historical specialist receipts are imported. */
+function seedArchiveWitness(story: string) {
+  cpSync(resolve("test/fixtures/archive-witness"), story, { recursive: true });
+  git(story, "add", ".");
+  git(story, "commit", "-qm", "Author-provided archive witness Story");
+}
 test("bounded conversation creation commits only canonical new support with preserved source Story", {
   skip: !available, timeout: 300_000,
 }, async () => {
   const f = fixture("focused-conversation-creation");
-  f.cli("seed", ["start"]);
+  seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  const seeded = f.cli("seed", ["generate", "start", "--task", "Seed a witness mystery",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  assert.equal(seeded.reason, "editorial-unverified");
-  git(f.repo, "merge", "--ff-only", seeded.report.identity.branch);
   const canonical = git(f.repo, "rev-parse", "HEAD");
   f.cli("conversation", ["start"]);
   const oldState = process.env.NT_STATE_DIR, oldCache = process.env.NT_SKILL_CACHE_DIR;
@@ -182,11 +187,8 @@ test("native-verified focused Turn restores a source-bound pending omission afte
   skip: !available, timeout: 300_000,
 }, async () => {
   const f = fixture("pending-native-restart");
-  f.cli("seed", ["start"]);
+  seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  const seeded = f.cli("seed", ["generate", "start", "--task", "Seed witness mystery",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  git(f.repo, "merge", "--ff-only", seeded.report.identity.branch);
   const characterPath = join(f.story, "characters/ada.md");
   const character = readFileSync(characterPath, "utf8");
   assert.match(character, /^status: draft$/m);
@@ -341,12 +343,8 @@ test("public scoped generation revises Event, Character, Choice, Puzzle and bran
   skip: !available, timeout: 300_000,
 }, () => {
   const f = fixture("scoped-records");
-  f.cli("seed", ["start"]);
-  f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  const baseline = f.cli("seed", ["generate", "start", "--task", "Create a branching witness mystery",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  assert.equal(baseline.reason, "editorial-unverified");
-  git(f.repo, "merge", "--ff-only", baseline.report.identity.branch);
+  seedArchiveWitness(f.story);
+  Object.assign(f.env, { NT_TEST_FOCUSED_CLI: "1", NT_TEST_SCRIPTED_MODEL_LOG: f.contractPath + ".model-calls" });
   const canonical = git(f.repo, "rev-parse", "HEAD");
   const authored = ["events/disclose-ledger.md", "characters/ada.md", "authored-content/disclosure-scene.md",
     "choice-points/loyalty.md", "puzzles/ledger-proof.md"];
@@ -358,6 +356,8 @@ test("public scoped generation revises Event, Character, Choice, Puzzle and bran
     ["puzzle.ledger-proof", "interactive", []],
   ].entries()) {
     const name = "focus-" + index;
+    const log = f.contractPath + "." + name + ".model-calls";
+    Object.assign(f.env, { NT_TEST_SCRIPTED_MODEL_LOG: log });
     const job = f.cli(name, ["start"]);
     f.contract([id as string], depth as string, branches as string[]);
     if (index === 1) {
@@ -367,9 +367,12 @@ test("public scoped generation revises Event, Character, Choice, Puzzle and bran
       writeFileSync(f.contractPath, JSON.stringify(preset));
     }
     const result = f.cli(name, ["generate", "start", "--task", "Clarify the witness's motivation",
-      "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-    assert.equal(result.status, "blocked", JSON.stringify(result));
-    assert.equal(result.reason, "editorial-unverified", JSON.stringify(result));
+      "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source]);
+    assert.equal(result.status, "completed", result.reason + "\n" + readFileSync(log, "utf8"));
+    assert.equal(result.request.fixture, false);
+    assert.match(result.request.turnPlanDigest, /^[a-f0-9]{64}$/);
+    const calls = readFileSync(log, "utf8");
+    assert.equal(calls.trim().split("\n").map(line => JSON.parse(line)).filter(call => call.kind === "writer").length, 3);
     const targeted = result.inventory.items.find((item: any) => item.stage === "focus");
     assert.equal(targeted.status, "verified", JSON.stringify(result.inventory));
     assert.equal(targeted.milestone, id);
@@ -380,23 +383,32 @@ test("public scoped generation revises Event, Character, Choice, Puzzle and bran
     assert.deepEqual(changed, ["story/" + authored[index]], JSON.stringify(result));
     assert.equal(git(f.repo, "rev-parse", "HEAD"), canonical);
     const head = git(job.worktreeRoot, "rev-parse", "HEAD");
-    assert.equal(f.cli(name, ["generate", "resume"]).status, "blocked");
+    assert.equal(f.cli(name, ["generate", "resume"]).status, "completed");
+    assert.equal(readFileSync(log, "utf8"), calls, "Completed restart must not call planner, writer or reviewer");
     assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), head);
   }
   const combined = f.cli("combined", ["start"]);
+  const combinedLog = f.contractPath + ".combined.model-calls";
+  Object.assign(f.env, { NT_TEST_SCRIPTED_MODEL_LOG: combinedLog });
   f.contract(["event.disclose-ledger", "character.ada"], "interactive");
   const first = f.cli("combined", ["generate", "start", "--task", "Link the Event and protagonist",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source, "--pause-after", "focus"]);
+    "--contract", f.contractPath, "--provider", scriptedModel.provider, "--model", scriptedModel.id, "--skills-source", source, "--pause-after", "focus"]);
   assert.equal(first.status, "paused");
   assert.equal(first.inventory.items.filter((i: any) => i.stage === "focus" && i.status === "verified").length, 1);
   const continued = f.cli("combined", ["generate", "resume"]);
-  assert.equal(continued.reason, "editorial-unverified", JSON.stringify(continued));
+  assert.equal(continued.status, "completed", JSON.stringify(continued));
   assert.equal(continued.inventory.items.filter((i: any) => i.stage === "focus" && i.status === "verified").length, 2);
   assert.deepEqual(git(combined.worktreeRoot, "diff", "--name-only", canonical, "HEAD").split("\n"),
     ["story/characters/ada.md", "story/events/disclose-ledger.md"]);
   assert.equal(git(combined.worktreeRoot, "rev-list", "--count", canonical + "..HEAD"), "2");
   const afterResume = git(combined.worktreeRoot, "rev-parse", "HEAD");
-  f.cli("combined", ["generate", "resume"]);
+  const calls = readFileSync(combinedLog, "utf8");
+  const invocations = calls.trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(invocations.filter(call => call.kind === "planner").length, 2);
+  assert.equal(invocations.filter(call => call.kind === "writer").length, 6);
+  assert.equal(invocations.filter(call => call.kind === "writer" && call.command === "resume").length, 3);
+  assert.equal(f.cli("combined", ["generate", "resume"]).status, "completed");
+  assert.equal(readFileSync(combinedLog, "utf8"), calls);
   assert.equal(git(combined.worktreeRoot, "rev-parse", "HEAD"), afterResume);
 });
 
@@ -404,11 +416,8 @@ test("R07 focused commit before checkpoint finalization resumes without replay",
   skip: !available, timeout: 120_000,
 }, () => {
   const f = fixture("r07-focus-crash");
-  f.cli("seed", ["start"]);
+  seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  const seed = f.cli("seed", ["generate", "start", "--task", "Seed a mystery",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
   const job = f.cli("focused", ["start"]);
   f.contract(["character.ada"], "architecture");
   const env = f.env as NodeJS.ProcessEnv;
@@ -433,12 +442,8 @@ test("focused revisions reject missing existing target IDs and unauthorized file
   skip: !available, timeout: 180_000,
 }, () => {
   const f = fixture("reject-expansion");
-  f.cli("seed", ["start"]);
+  seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  f.cli("seed", ["generate", "start", "--task", "Seed a mystery", "--contract", f.contractPath,
-    "--fixture", "--skills-source", source]);
-  const seed = f.cli("seed", ["generate", "inspect"]);
-  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
   const baseline = git(f.repo, "rev-parse", "HEAD");
   f.cli("missing", ["start"]);
   f.contract(["event.not-present"], "interactive");
@@ -483,11 +488,8 @@ test("discovered prerequisite amends a focused plan and survives process restart
   skip: !available, timeout: 300_000,
 }, async () => {
   const f = fixture("dependency-amendment");
-  f.cli("seed", ["start"]);
+  seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  const seed = f.cli("seed", ["generate", "start", "--task", "Seed a mystery",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
   const old = { state: process.env.NT_STATE_DIR, cache: process.env.NT_SKILL_CACHE_DIR,
     report: process.env.NT_FOCUS_FIXTURE_DEPENDENCY };
   process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
@@ -628,11 +630,8 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
   skip: !available, timeout: 300_000,
 }, async () => {
   const f = fixture("r04-prerequisite-" + scenario);
-  f.cli("seed", ["start"]);
+  seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
-  const seed = f.cli("seed", ["generate", "start", "--task", "Seed a mystery",
-    "--contract", f.contractPath, "--fixture", "--skills-source", source]);
-  git(f.repo, "merge", "--ff-only", seed.report.identity.branch);
   const oldState = process.env.NT_STATE_DIR, oldCache = process.env.NT_SKILL_CACHE_DIR;
   process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
   process.env.NT_SKILL_CACHE_DIR = f.env.NT_SKILL_CACHE_DIR;

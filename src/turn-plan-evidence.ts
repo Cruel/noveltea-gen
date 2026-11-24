@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
@@ -82,7 +83,7 @@ export async function readTurnEvidence(job: JobStartResult, contract: Completion
     plan.source.verifiedSha !== job.baseSha || !plan.goal?.trim() ||
     (originalRequest !== undefined && plan.originalRequest !== originalRequest) ||
     (plan.creativePolicy !== undefined && !validSavedPolicy(plan.creativePolicy)) ||
-    JSON.stringify(plan.contract) !== JSON.stringify(contract) ||
+    !isDeepStrictEqual(plan.contract, contract) ||
     !validTurnObjective(plan) ||
     !Array.isArray(assignments) || !assignments.length || assignments.length > 129 ||
     new Set(assignments.map(a => a.id)).size !== assignments.length ||

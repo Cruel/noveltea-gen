@@ -4912,6 +4912,8 @@ export async function runStoryGeneration(options: GenerationOptions) {
       if (options.action !== "inspect") {
         try {
           await requireGenerationTurn(job, state.request, !!state.graphThreadId);
+          await verifyDependencyHistory(job, state.dependencyHistory ?? []);
+          await verifyPinnedPendingWork(job, state.request.turnPlanDigest, state.pendingVersion);
           if (state.inventory && state.inventory.invalidationVersion !== 1)
             throw Error("Obsolete Generation inventory cannot authorize execution.");
         } catch (error) { state = { ...state, ...blocked(error) }; preflightStopped = true; }
