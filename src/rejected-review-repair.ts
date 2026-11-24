@@ -40,6 +40,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
 import { runPiAssignmentReview, prepareSemanticReview, validateSemanticVerdict, independentReviewResults } from "./semantic-assignment-review.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
+import { usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
 import { foundationDiagnosticReason, postcommitDiagnosticReason, readPostcommitDiagnosis, readSealedPostcommitVerdict, postcommitDiagnosticAdmissionForSource } from "./postcommit-repair-diagnostic.js";
 import { assertReviewCycleSession } from "./review-cycle.js";
 import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
@@ -928,7 +929,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   if (review.status === "failed" && point.assurance) {
     const cycle = await inspectPostcommitReviewCycle(job,
       state.rootFailureSha, point.assurance.assignmentDigest);
-    if (cycle && (sharedFoundationReviewWorkItem(state.origin.workItem)
+    if (cycle && (usesSharedAssignmentReview(state.origin.workItem)
       ? await foundationDiagnosticReason(job, cycle, state.allowedPaths)
       : postcommitDiagnosticReason(cycle.rounds.length))) {
       const diagnosis = await readPostcommitDiagnosis(job, cycle, state.repairedCommitSha);
@@ -943,7 +944,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
       }
     }
   }
-  const stagnation = sharedFoundationReviewWorkItem(state.origin.workItem) ? null : detectRepairStagnation(job, state, review.result);
+  const stagnation = usesSharedAssignmentReview(state.origin.workItem) ? null : detectRepairStagnation(job, state, review.result);
   if (stagnation) {
     finished.phase = "blocked";
     finished.failure = stagnation === "oscillation"
@@ -1588,7 +1589,7 @@ async function foundationDiagnosticSource(job: JobStartResult, state: RepairRece
  * shared assessor. No model reply or child outcome grants a new strategy. */
 async function foundationReviewBoundary(job: JobStartResult, state: RepairReceipt,
   selected?: ReviewAssessment): Promise<ReviewAssessment | null> {
-  if (!sharedFoundationReviewWorkItem(state.origin.workItem)) return null;
+  if (!usesSharedAssignmentReview(state.origin.workItem)) return null;
   const make = (kind: ReviewAssessment["kind"], evidence: unknown): ReviewAssessment =>
     ({ kind, sourceSha: state.sourceCommitSha, digest: hash({ root: state.rootFailureSha,
       source: state.sourceReviewDigest, kind, evidence }) });
@@ -1626,13 +1627,13 @@ async function foundationReviewBoundary(job: JobStartResult, state: RepairReceip
 /** Current HEAD may have advanced through this original correction case,
  * but never through unrelated work or an unverified replacement writer. */
 export function sharedFoundationReviewWorkItem(workItem: string) {
-  return ["foundation", "world-foundations", "character-foundations"].includes(workItem);
+  return usesSharedAssignmentReview(workItem);
 }
 
 export async function authenticateFoundationReviewHead(job: JobStartResult, root: string) {
   const head = await trustedHead(job);
   const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
-  const original = points.find(p => p.commitSha === root && sharedFoundationReviewWorkItem(p.workItem) &&
+  const original = points.find(p => p.commitSha === root && usesSharedAssignmentReview(p.workItem) &&
     p.validation.status === "passed" && p.semanticReview === "failed");
   if (!original?.assurance) return false;
   let cursor = head;
@@ -1662,8 +1663,8 @@ export async function inspectFoundationReviewBoundary(job: JobStartResult, root:
     if (seen.has(sha)) throw Error("Cyclic Foundation repair source lineage");
     seen.add(sha);
     const state = await inspectRejectedRepair(job, sha);
-    if (state.rootFailureSha !== root || !sharedFoundationReviewWorkItem(state.origin.workItem))
-      throw Error("Foreign Foundation repair lineage");
+    if (state.rootFailureSha !== root || !usesSharedAssignmentReview(state.origin.workItem))
+      throw Error("Foreign shared assignment repair lineage");
     if (state.phase === "failed" && state.repairedCommitSha) {
       sha = state.repairedCommitSha;
       continue;
@@ -1797,9 +1798,9 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
-  if (!options.sharedAssessment && (sharedFoundationReviewWorkItem(point.workItem) ||
-      point.workItem.startsWith("repair-") && sharedFoundationReviewWorkItem((await readRejectedRepairOrigin(job, point)).workItem)))
-    throw Error("Foundation Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
+  if (!options.sharedAssessment && (usesSharedAssignmentReview(point.workItem) ||
+      point.workItem.startsWith("repair-") && usesSharedAssignmentReview((await readRejectedRepairOrigin(job, point)).workItem)))
+    throw Error("Shared assignment Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
   return driveRejectedRepairCycle({
     begin: async () => {
       const state = await beginRejectedRepair(job, point);

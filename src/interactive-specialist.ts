@@ -1,23 +1,26 @@
 import { createPiStatusTool } from "./pi-work-status.js";
-import { mkdir } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, realpath } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { promptStorySpecialist } from "./story-interruption.js";
+import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
-import { lastSpecialistManifest, requireSpecialistManifest } from "./specialist-manifest.js";
+import { lastSpecialistManifest } from "./specialist-manifest.js";
+import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { readJobControl } from "./job-control.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
-import { preparePiContext, piNarrativeGroup } from "./job-pi-policy.js";
+import { preparePiContext, guardPiBudget, recordPiSession, registerPendingPiSession } from "./job-pi-policy.js";
 import type { SkillConfig } from "./skills.js";
 import type { SkillSnapshot } from "./snapshot.js";
 import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./bounded-specialist-prompt.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
-import { CHOICE_PAYOFF_AUTHOR, CHOICE_PAYOFF_REPAIR } from "./choice-payoff-guidance.js";
-import { PUZZLE_GOAL_AUTHOR, PUZZLE_GOAL_REPAIR } from "./puzzle-goal-fidelity.js";
+import { CHOICE_PAYOFF_AUTHOR } from "./choice-payoff-guidance.js";
+import { PUZZLE_GOAL_AUTHOR } from "./puzzle-goal-fidelity.js";
 import type { ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
@@ -52,6 +55,7 @@ export interface InteractiveEvidence {
   obligations: string[];
   skillReads: string[];
   piSessionFile?: string;
+  invocationProof?: AssignmentInvocationProof;
 }
 const SPECIALISTS = {
   choice: { name: "nt-interactive-narrative" },
@@ -188,8 +192,10 @@ export async function authorInteractive(
   provider: string,
   modelId: string,
   thinking: "low" | "medium" | "high" | undefined,
-  onSession: (file: string) => Promise<void>,
+  onSession: (file: string, id: string) => Promise<void>,
   verifyDraft: (evidence: InteractiveEvidence) => Promise<string[]>,
+  original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
+    authorize: () => Promise<void>; effect: () => Promise<string | null> },
 ): Promise<InteractiveEvidence> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const selected = SPECIALISTS[domain];
@@ -216,7 +222,7 @@ export async function authorInteractive(
     job,
     project,
     {
-      group: piNarrativeGroup("interactive:" + domain, assignment.sourcePaths, assignment.milestoneId),
+      group: "interactive:" + assignment.workItemId + ":" + domain + ":" + original.sourceDigest,
       step: "interactive:" + assignment.workItemId + ":" + domain,
       paths: assignment.sourcePaths,
       snapshot: snapshot.id,
@@ -225,9 +231,13 @@ export async function authorInteractive(
       task: { kind: "puzzle", ids: [...assignment.eventIds, assignment.milestoneId], scope: "related" },
       thinking,
       directory: dir,
+      insideWriter: true,
     },
     runtime,
   );
+  if (original.sessionFile && (await realpath(original.sessionFile) !== original.sessionFile ||
+      !original.sessionFile.startsWith(dir + sep) || !(await lstat(original.sessionFile)).isFile()))
+    throw Error("Original Interactive session is outside its assignment");
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
   const { session } = await createAgentSession({
     cwd: project.root,
@@ -236,7 +246,9 @@ export async function authorInteractive(
     thinkingLevel: context.thinking,
     resourceLoader: loader,
     settingsManager,
-    sessionManager: context.manager,
+    sessionManager: original.sessionFile
+      ? SessionManager.open(original.sessionFile, dirname(original.sessionFile), project.root)
+      : context.manager,
     customTools: [
       ...(sandboxTools ?? []),
       createStoryValidateTool(job),
@@ -251,107 +263,66 @@ export async function authorInteractive(
       throw new Error("Pi did not honor requested " + thinking + " thinking level.");
     }
     const sessionFile = session.sessionManager.getSessionFile();
-    if (sessionFile) await onSession(sessionFile);
+    if (!sessionFile || original.sessionId && original.sessionId !== session.sessionId)
+      throw Error("Interactive writer lost its original persisted session");
+    await onSession(sessionFile, session.sessionId);
     const pinned = pinnedSourcePaths(snapshot, required);
-    let prompt = interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools));
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt === 0) await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
-      await promptStorySpecialist(session, attempt === 0 ? context.contextNote + prompt : prompt);
-      const skillReads = await requirePinnedSkillReads(
-        session,
-        project.root,
-        pinned,
-        "Interactive specialist",
-      );
-      const last = [...session.messages].reverse().find((m) => m.role === "assistant");
-      if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
-        throw new Error(
-          "Interactive Pi turn failed: " +
-            (last?.role === "assistant"
-              ? last.stopReason + ": " + (last.errorMessage ?? "")
-              : "no assistant response"),
-        );
-      }
-      const completed = new Set(
-        session.messages
-          .filter(
-            (m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult" && !m.isError,
-          )
-          .map((m) => m.toolCallId),
-      );
-      const calls = session.messages.flatMap((m) =>
-        m.role === "assistant" ? m.content.filter((c) => c.type === "toolCall") : [],
-      );
-
-      const edits = calls
-        .filter(
-          (c) =>
-            ["write", "edit"].includes(c.name) &&
-            completed.has(c.id) &&
-            typeof c.arguments?.path === "string",
-        )
-        .map((c) =>
-          relative(project.root, resolve(project.root, c.arguments.path as string))
-            .split(sep)
-            .join("/"),
-        );
-      // A linked Choice/Puzzle may already exist. The independent audit must
-      // check its final state; tool-call evidence need not show a cosmetic edit
-      // to that particular record type.
-      const data = await requireSpecialistManifest(
-        session,
-        (text) => parseInteractiveManifest(text, domain),
-        "Interactive",
-        join(job.stateDir, "protocol-recovery", "interactive-" + encodeURIComponent(assignment.workItemId) +
-          "-" + domain + "-" + attempt + ".json"),
-        () => context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined),
-      );
-      if (data.paths.length === 0) {
-        if (!data.conflicts.length)
-          throw new Error("A negative Interactive report requires specific conflicts.");
-        // Whether the report is an optional omission or an unmet mandatory
-        // obligation is a controller decision against actual Git and sources,
-        // not a response-contract failure. verifyDraft authenticates no edits.
-      } else if (!edits.length) {
-        throw new Error("Interactive specialist made no canonical Story edits.");
-      }
-      const evidence: InteractiveEvidence = {
-        modifiedRecords: data.paths,
-        conflicts: data.conflicts,
-        obligations: data.obligations,
-        skillReads,
-        piSessionFile: session.sessionManager.getSessionFile() ?? undefined,
-      };
-      const diagnostics = await verifyDraft(evidence);
-      if (!diagnostics.length) {
-        await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-        return evidence;
-      }
-      if (attempt === 2)
-        throw new Error(
-          "Interactive specialist exhausted bounded repair attempts: " + diagnostics.join("; "),
-        );
-      prompt =
-        "The INDEPENDENT graph audit rejected your uncommitted work. " +
-        "In this SAME Pi session, repair only the specific diagnostics below without touching " +
-        "existing Event prerequisite gates or protected decisions. If a READ-ONLY file was edited, " +
-        "restore precisely that file using read/edit/write tools, not git checkout/restore/reset; " +
-        "retain your authorized changes. The sourcePaths inventory and scope.targets are READ-ONLY context/goals, " +
-        "not edit permissions. Compare changed files against the originally read sources and provide " +
-        "the FULL cumulative modifiedRecords manifest EXCLUDING restored files. " +
-        "Do not claim a conditional or unverified path is proven. " +
-        (domain === "puzzle" && assignment.puzzleObligation?.required === false
-          ? "If there is NO source-grounded solvable Puzzle, restore every draft edit and " +
-            "return modifiedRecords: [] with specific architecturalConflicts. " +
-            "Do not fabricate missing clue or solution evidence. "
-          : "") +
-        (domain === "choice" ? CHOICE_PAYOFF_REPAIR : PUZZLE_GOAL_REPAIR) +
-        " " +
-        "Diagnostics:\n" +
-        diagnostics.join("\n");
-    }
-    throw new Error("Unexpected interactive repair loop termination.");
+    let accepted: InteractiveEvidence | undefined;
+    const invocationProof = await recoverSubmittedAssignment({
+      session, directory: interactiveInvocationDirectory(job, assignment.workItemId, domain, session.sessionId),
+      sourceDigest: original.sourceDigest, sessionRoots: [dir],
+      initialPrompt: context.contextNote + interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools)),
+      authorize: original.authorize, effect: original.effect,
+      beforeTurn: async () => {
+        const control = await readJobControl(job);
+        if (control === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (control !== "running") throw new AssignmentAuthorPauseError();
+        await guardPiBudget(job, "interactive:" + assignment.workItemId + ":" + domain, sessionFile);
+        const after = await readJobControl(job);
+        if (after === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (after !== "running") throw new AssignmentAuthorPauseError();
+      },
+      prompt: async prompt => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, prompt);
+        await recordPiSession(job, sessionFile);
+      },
+      verify: async manifest => {
+        const data = parseInteractiveManifest(JSON.stringify(manifest), domain);
+        const skillReads = await requirePinnedSkillReads(session, project.root, pinned, "Interactive specialist");
+        const completed = new Set(session.messages
+          .filter(m => m.role === "toolResult" && !m.isError)
+          .map(m => (m as Extract<typeof m, { role: "toolResult" }>).toolCallId));
+        const edits = session.messages.flatMap(m => m.role === "assistant"
+          ? m.content.filter(c => c.type === "toolCall" && ["write", "edit"].includes(c.name) &&
+              completed.has(c.id) && typeof c.arguments?.path === "string")
+            .map(c => c.type === "toolCall" ? relative(project.root, resolve(project.root, c.arguments.path as string)) : "")
+          : []);
+        if (!data.paths.length && !data.conflicts.length)
+          throw Error("A negative Interactive report requires specific conflicts");
+        if (data.paths.length && !edits.length)
+          throw Error("Interactive specialist made no canonical Story edits");
+        const evidence: InteractiveEvidence = { modifiedRecords: data.paths, conflicts: data.conflicts,
+          obligations: data.obligations, skillReads, piSessionFile: sessionFile };
+        const diagnostics = await verifyDraft(evidence);
+        if (!diagnostics.length) accepted = evidence;
+        return diagnostics.map(detail => ({
+          kind: "semantic" as const, path: assignment.milestoneId,
+          code: createHash("sha256").update(detail).digest("hex"), detail,
+        }));
+      },
+    });
+    if (!accepted) throw Error("Original Interactive invocation has no independently checked result");
+    await context.completed(sessionFile, session.sessionId);
+    return { ...accepted, invocationProof };
   } finally {
     session.dispose();
   }
+}
+
+/** Invocation receipt namespace is unique to the original subunit/session. */
+export function interactiveInvocationDirectory(job: JobStartResult, workItem: string, domain: InteractiveDomain, sessionId: string) {
+  if (!/^interactive-[a-z][a-z0-9-]*$/.test(workItem) || !["choice", "puzzle"].includes(domain) || !/^[a-zA-Z0-9-]+$/.test(sessionId))
+    throw Error("Invalid Interactive invocation identity");
+  return join(job.stateDir, "interactive-invocations", workItem, domain, sessionId);
 }

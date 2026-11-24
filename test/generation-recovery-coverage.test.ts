@@ -47,10 +47,10 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
-  specialist_dispatch: "returns:17,status:1,blocked:1,operationFailure:5,throws:5",
+  specialist_dispatch: "returns:18,status:1,blocked:1,operationFailure:5,throws:5",
   dependency_amendment: "returns:5,blocked:1,operationFailure:1,authorBoundary:1,throws:6",
   independent_assignment_review: "returns:8,status:2,operationFailure:1,throws:1",
-  verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
+  verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:6",
   completion_decision:
     "returns:10,status:2,blocked:1,operationFailure:3,authorBoundary:2,reconcile:1,throws:2",
   reconcile: "returns:13,status:6,operationFailure:2,throws:9",
@@ -209,6 +209,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "runFocusedAssignmentChild", "692eb56fd45ccc7ae2ad323c14876207b68817086db494098bc18ea7f421028b"],
     [child, "createAssignmentLifecycleGraph", "d190943cd002418ceefd8f158c99baecb2124f470354a4fd5d7950568d6c56cc"],
     [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
+    [file, "runInteractiveAssignmentChildren", "ac74294cdecc51c45fbe621e20cae8aeda6f487ebd4a5fac01905116e666d181"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
     const body = helpers(source).get(name);
@@ -232,10 +233,11 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["character-world.ts", "inspectRecoverableCharacterWorldCommit", "ff7d64d08ab609775cde44af310b0cfef840862325bfe5f1369f72c3ba52875a"],
     ["foundation.ts", "foundationSourceDigest", "f1520e850f14566097c03e9750c229d73f29b2874fc770d7d15027dad3ff53a0"],
     ["foundation.ts", "inspectFoundationFailure", "8ea7e6c1ac238a0bc742e7e344e4de30ca1f07a0d10c7ac7564ad4ff6394bf48"],
-    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "37851c421fbe8b2803533f7c4b51e7ae4ec3a253e4a7f0f4121f6b263790ec54"],
-    ["generation-operation-strategy.ts", "originalAssignmentFailure", "097d55048dfc63b6505160f1c202f4eadf07d6ffe5c6ee80dc2558a2248f476d"],
-    ["generation.ts", "authenticateRecoveryOrigin", "93785bc0b45741a66bdcc91df51fa144a98f62df97bd7d56c96bb94ebbdfe454"],
-    ["generation.ts", "recoverySourceHead", "3c98eabbab5c48478d8803727b3d07361c88fb38c226796ed2f72989ed94477b"],
+    ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "57b19cbb9c4fbd95c14d0a4288a6853c02e50f4c0c9987a6e63c85b89c1211dc"],
+    ["generation-operation-strategy.ts", "originalAssignmentFailure", "f9586de113493b5804fa7e53219a0b7816c84280fc358eb3c708971275d1685d"],
+    ["generation.ts", "authenticateRecoveryOrigin", "54da6d1399ad76f89e3d85e990df26d4baa27ae5828c051aa55976b3c7906adf"],
+    ["generation.ts", "recoverySourceHead", "fd6141d99953e6634ecb99c519817c4b211a563257d57e784d044a16a311d181"],
+    ["interactive-work.ts", "inspectPendingInteractiveInvocation", "b17f6e0277797c386c1bb436081c94a7b77058593530a2187367a042ae021067"],
   ] as const;
   const printer = ts.createPrinter({ removeComments: true });
   for (const [path, name, expected] of reviewed) {

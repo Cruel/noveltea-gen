@@ -18,6 +18,7 @@ import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { readAdaptiveState } from "./adaptive-state.js";
+import { usesSharedAssignmentReview } from "./generation-assignment-lifecycle.js";
 import { inspectRejectedRepair, authenticateFoundationReviewHead, inspectFoundationReviewBoundary,
   executeFoundationReviewAssessment, inspectFoundationReviewStop } from "./rejected-review-repair.js";
 import { inspectJobReport } from "./job-report.js";
@@ -41,12 +42,21 @@ async function originalAssignmentFailure(job: JobStartResult, s: State, c: Recov
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined;
   if (!op?.evidence.assignmentFailure) return null;
-  if (c.origin.operation !== "specialist-result" || !["foundation", "foundations"].includes(c.origin.assignmentId ?? "") ||
+  if (c.origin.operation !== "specialist-result" || c.origin.assignmentId !== op.evidence.assignmentId ||
       c.observation !== "returned-failure" || s.active?.id !== c.origin.assignmentId || s.result ||
-      s.inventory?.headSha !== c.origin.sourceHeadSha || s.request.fixture ||
+      !s.inventory || s.request.fixture ||
       s.request.turnPlanDigest !== c.origin.turnDigest || s.planVersion !== c.origin.planVersion ||
       s.request.job !== job.jobId || c.origin.jobThreadId !== job.threadId)
     throw Error("Original settled assignment failure is not the admitted active child.");
+  if (s.inventory.headSha !== c.origin.sourceHeadSha) {
+    if (s.active.stage !== "interactive" || op.evidence.interactiveDomain !== "puzzle" || !s.active.milestone)
+      throw Error("Original assignment failure does not match its admitted inventory source.");
+    const { inspectPendingInteractiveInvocation } = await import("./interactive-work.js");
+    const original = await inspectPendingInteractiveInvocation(job, s.active.milestone, "puzzle", s.inventory.headSha);
+    if (!original || original.unit.beforeHead !== c.origin.sourceHeadSha ||
+        original.receipt.units[0]?.beforeHead !== s.inventory.headSha)
+      throw Error("Original Puzzle failure does not match the admitted Choice predecessor.");
+  }
   const failure = await authenticateAssignmentFailure(job, op.evidence, c.origin.sourceHeadSha);
   if (!failure) throw Error("Original settled assignment failure proof changed.");
   return failure;
@@ -405,7 +415,7 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   }
   const reviewProof = await originalFailedReviewProof(job, s, c);
   if (reviewProof) {
-    if (!["foundation", "foundations"].includes(c.origin.assignmentId ?? "") || !await authenticateFoundationReviewHead(job, c.origin.sourceHeadSha))
+    if (!usesSharedAssignmentReview(c.origin.assignmentId) || !await authenticateFoundationReviewHead(job, c.origin.sourceHeadSha))
       await assertSource(job, s, c);
     return { ...base(c, reviewProof), action: "known-correction",
       adapter: "review-cycle", receipt: reviewProof };
@@ -446,7 +456,7 @@ export async function authenticateOperationReviewProof(job: JobStartResult, s: S
   if (!original || !isDeepStrictEqual(original, d.receipt) ||
       !isDeepStrictEqual(d.evidence, [...c.evidence, original])) return false;
   if (!d.reviewAssessment) return true;
-  return ["foundation", "foundations"].includes(c.origin.assignmentId ?? "") &&
+  return usesSharedAssignmentReview(c.origin.assignmentId) &&
     isDeepStrictEqual(d.reviewAssessment,
       await inspectFoundationReviewBoundary(job, c.origin.sourceHeadSha, d.reviewAssessment));
   } catch { return false; }
@@ -454,7 +464,7 @@ export async function authenticateOperationReviewProof(job: JobStartResult, s: S
 export async function authenticateFoundationReviewExhaustion(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   if (d.action !== "exhausted" || d.reason !== "nonconverging" || !d.reviewAssessment ||
-      !["foundation", "foundations"].includes(c.origin.assignmentId ?? "") || c.origin.operation !== "independent-review") return false;
+      !usesSharedAssignmentReview(c.origin.assignmentId) || c.origin.operation !== "independent-review") return false;
   try {
   const original = await originalFailedReviewProof(job, s, c);
   const terminal = await inspectFoundationReviewStop(job, c.origin.sourceHeadSha, d.reviewAssessment);
@@ -505,7 +515,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work"].includes(d.adapter)) &&
         !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
   if (d.action === "known-correction") {
-    const foundation = ["foundation", "foundations"].includes(c.origin.assignmentId ?? "");
+    const foundation = usesSharedAssignmentReview(c.origin.assignmentId);
     try {
     if (!foundation || !await authenticateFoundationReviewHead(job, c.origin.sourceHeadSha))
       await assertSource(job, s, c);

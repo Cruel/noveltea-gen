@@ -44,6 +44,7 @@ export interface GenerationOperationRecovery {
     assignmentId?: string; resultStatus?: string;
     /** Settled original child failure at its unpublished draft source. */
     assignmentFailure?: { sourceHeadSha: string; proof: AssignmentFailureProof };
+    interactiveDomain?: "choice" | "puzzle";
     closeout?: { milestoneId: string; proposalDigest: string; repairId: string };
     /** Original settled Event no-write report, never a replacement Event writer lease. */
     eventNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string };
@@ -123,12 +124,17 @@ export async function authenticateAssignmentFailure(job: JobStartResult,
   evidence: GenerationOperationRecovery["evidence"], sourceHead: string) {
   const failure = evidence.assignmentFailure;
   if (!failure || failure.sourceHeadSha !== sourceHead ||
-      !["foundation", "foundations"].includes(evidence.assignmentId ?? "") || evidence.reference !== "specialist-receipt" ||
+      evidence.reference !== "specialist-receipt" ||
       evidence.resultStatus !== failure.proof.kind) return null;
-  const inspect = evidence.assignmentId === "foundation"
-    ? (await import("./foundation.js")).inspectFoundationFailure
-    : (await import("./character-world.js")).inspectCharacterWorldFailure;
-  const original = await inspect(job, sourceHead).catch(() => null);
+  const assignment = evidence.assignmentId;
+  const original = ["foundation", "foundations"].includes(assignment ?? "") && !evidence.interactiveDomain
+    ? await (assignment === "foundation" ? (await import("./foundation.js")).inspectFoundationFailure : (await import("./character-world.js")).inspectCharacterWorldFailure)(job, sourceHead).catch(() => null)
+    : await (async () => {
+      const match = /^(interactive|choice|puzzle):(milestone\.[a-z][a-z0-9-]*)$/.exec(assignment ?? "");
+      const domain = evidence.interactiveDomain;
+      if (!match || !domain || match[1] !== "interactive" && match[1] !== domain) return null;
+      return (await import("./interactive-work.js")).inspectInteractiveFailure(job, match[2]!, domain, sourceHead).catch(() => null);
+    })();
   return original && isDeepStrictEqual(original.proof, failure.proof) ? original : null;
 }
 

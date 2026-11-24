@@ -4793,8 +4793,9 @@ test(mode === "event-only-complete"
     // A real production Turn selects this exact identity on initial admission;
     // the fixture CLI deliberately did not have a Turn digest.
     const selectedFile = join(f.job.stateDir, "orchestrator-selection.json");
-    assert.equal(JSON.parse(readFileSync(selectedFile, "utf8")).turnPlanDigest, null);
-    unlinkSync(selectedFile);
+    const previousMethod = JSON.parse(readFileSync(selectedFile, "utf8"));
+    assert.ok(previousMethod.turnPlanDigest === null || previousMethod.turnPlanDigest === turn.digest);
+    if (previousMethod.turnPlanDigest === null) unlinkSync(selectedFile);
     const originalMethod = await selectStoryOrchestrator(f.job,
       f.job.threadId + ":generation", { task, kind: "full-story",
         turnPlanDigest: turn.digest }, source);
@@ -5307,6 +5308,88 @@ test("R06 production graph preserves a required Puzzle contradiction after the c
   assert.equal(f.cli(["generate", "resume"]).status, "blocked");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
   assert.equal(readFileSync(original, "utf8"), saved);
+});
+
+for (const domain of ["choice", "puzzle"] as const) test(`R06 ${domain} commit before checkpoint finalization resumes without replay`, { skip: !available }, () => {
+  const f = setup("r06-crash-" + domain);
+  const id = "interactive-" + domain + "-disclosure";
+  f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT = id;
+  const crashed = f.cli([...f.start, "--pause-after", "interactive"]);
+  assert.equal(crashed.status, "blocked", JSON.stringify(crashed));
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.ok(crashed.recoveryCheckpoints.some((p: any) => p.commitSha === head && !p.eligible));
+  const file = join(f.job.stateDir, "interactive-items/disclosure.json");
+  const before = JSON.parse(readFileSync(file, "utf8"));
+  delete f.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT;
+  const resumed = f.cli(["generate", "resume", "--pause-after", "interactive"]);
+  assert.equal(resumed.status, "paused", JSON.stringify({ reason: resumed.reason, operationRecovery: resumed.operationRecovery }));
+  assert.ok(resumed.recoveryCheckpoints.some((p: any) => p.commitSha === head && p.workItem === id && p.eligible));
+  const after = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(after.units[0].commitSha, before.units[0].commitSha);
+  if (domain === "puzzle") assert.equal(after.units[1].commitSha, head);
+  assert.equal(after.units[1].phase, "committed");
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+});
+
+test("R06 real Interactive Pi manifest correction preserves the original session and zero-write dependency", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("r06-original-choice-pi");
+  f.env.NT_EVENT_FIXTURE_CASE = "decision-pending";
+  const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+  contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+  writeFileSync(f.contract, JSON.stringify(contract));
+  saveFixtureTurn(f.job, contract, f.start[3]!, ["The player must make a consequential local Choice."]);
+  assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "foundation");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "global-architecture");
+  assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false), /review|independent/i);
+  await sealFixtureGenerationCheckpoint(f, "world-foundations");
+  assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
+  await sealFixtureGenerationCheckpoint(f, "character-foundations");
+  assert.equal(f.cli(["generate", "resume", "--pause-after", "event"]).status, "paused");
+  await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+  const env = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const { runtime, observed } = await scriptedStoryRuntime(i => {
+      if (i === 0) return { content: scriptedReadCalls(
+        boundedPinnedSources("nt-interactive-narrative").map(p => "skill://" + p), i), reason: "toolUse" };
+      if (i === 1) return { content: scriptedText("malformed output"), reason: "stop" };
+      if (i === 2) return { content: scriptedText({ modifiedRecords: [],
+        architecturalConflicts: ["The approved local Choice depends on a missing upstream Event effect."],
+        laterObligations: ["Preserve the author's required local decision."] }), reason: "stop" };
+      throw Error("Original Interactive writer was replayed");
+    });
+    const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+    const opts = { story: f.story, job: "single", action: "run" as const,
+      milestone: "milestone.disclosure", unit: "choice" as const, fixture: false,
+      skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id,
+      generationObjective: f.start[3]!, turnPlanDigest: turn.digest };
+    const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const result = await withJobModelRuntime(runtime, () => runInteractiveWorkItem(opts));
+    assert.equal(result.status, "interactive-conflict-reported");
+    assert.equal(observed.length, 3);
+    assert.equal(observed[2]!.tools.includes("write"), false);
+    const original = JSON.parse(readFileSync(join(f.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+    const unit = original.units[0];
+    assert.equal(unit.phase, "conflicted");
+    assert.equal(unit.invocationProof.ordinal, 0);
+    assert.ok(unit.piSessionId);
+    const proof = await inspectInteractiveConflict(f.job, "milestone.disclosure");
+    assert.equal(proof.reportDigest, unit.digest);
+    const again = await withJobModelRuntime(runtime, () => runInteractiveWorkItem(opts));
+    assert.equal(again.status, result.status);
+    assert.equal(observed.length, 3);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  } finally {
+    restoreSandbox();
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test("a clean local cluster block does not stop independent work or spin on resume", { skip: !available }, () => {

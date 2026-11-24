@@ -70,6 +70,8 @@ async function harness(t: import("node:test").TestContext, replies: Reply[]) {
     effect: async () => sha(effect),
     verify: async () => {
       verifyCalls++;
+      if (effect.startsWith("semantic:")) return Array.from({ length: Number(effect.slice(9)) }, (_, i) =>
+        ({ kind: "semantic" as const, path: "events/disclosure.md", code: "missing-route-" + i }));
       return effect === "invalid metadata" ? [defect] :
         effect === "shifted metadata" ? [{ ...defect, line: 8 }] :
         effect === "different metadata" ? [{ ...defect, pointer: "/other" }] :
@@ -133,6 +135,18 @@ test("unstarted corrective invocation survives a safe pause; settled effects and
   assert.equal(g1.sessionId, g2.sessionId);
   assert.notEqual(g1.previous, g2.previous);
   assert.notEqual(g1.effectBefore, g2.effectBefore);
+});
+
+test("R06 improving Interactive semantic corrections have no fixed attempt ceiling", async t => {
+  const h = await harness(t, [4, 3, 2, 1, 0].map(n => ({ text: report, effect: "semantic:" + n })));
+  h.pauseAt(4);
+  await assert.rejects(h.run(), /safe budget pause/);
+  const proof = await h.run();
+  assert.equal(proof.ordinal, 4);
+  assert.equal(h.calls.length, 5);
+  assert.ok(h.calls.every(c => c.tools.includes("write")));
+  await h.run();
+  assert.equal(h.calls.length, 5);
 });
 
 test("ambiguous initial and corrective effects cannot be replayed", async t => {

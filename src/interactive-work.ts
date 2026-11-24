@@ -4,8 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { authorInteractive, parseInteractiveManifest, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
+import { authorInteractive, interactiveInvocationDirectory, parseInteractiveManifest, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
+import { inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { inspectPiPolicy } from "./job-pi-policy.js";
 import { eventCompletionDigest, currentMilestoneChoiceBinding } from "./event-work.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
@@ -21,6 +22,9 @@ import { preflightPiAssignment } from "./job-pi-policy.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { Plan } from "./architecture.js";
+import type { ExecutionItem } from "./generation-plan.js";
+import { preservesWholeStoryInteraction } from "./adaptive-assignments.js";
+import { parseStoryPlanning } from "./story-planning.js";
 import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
 import { decideEventOnlyOmission, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
@@ -35,6 +39,9 @@ interface Unit {
   id: string; domain: InteractiveDomain; phase: Phase;
   beforeHead?: string; commitSha?: string; paths?: string[]; digest?: string;
   claimedPaths?: string[]; piSessionFile?: string; skillReads?: string[];
+  piSessionId?: string; invocationProof?: AssignmentInvocationProof;
+  /** Native pre-writer baseline and exact original assignment, bound to the first grant. */
+  invocation?: { baseline: Report; assignment: InteractiveAssignment; sourceDigest: string };
   conflicts?: string[]; obligations?: string[]; failure?: string;
   noWrite?: PuzzleNoWriteRef;
   /** Original settled negative report; never a new writer lease. */
@@ -91,6 +98,9 @@ export interface InteractiveOptions {
   /** Production graph can checkpoint Choice and Puzzle independently; the
    * persisted two-unit receipt and original writer/review gates are shared. */
   unit?: InteractiveDomain;
+  /** The composite parent owns the boundary between independently reviewed units. */
+  deferBoundary?: boolean;
+  interactionInventory?: ExecutionItem[];
   generationObjective?: string; turnPlanDigest?: string;
 }
 const validMilestone = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -371,6 +381,39 @@ export async function scopeRepairFeedback(job: JobStartResult, before: string, e
     "to confirm there is no remaining change. Preserve all authorized edits. " +
     "Do not include restored files in modifiedRecords. If the design truly needs these edits, " +
     "leave them unchanged at HEAD and report the proposed change as a later obligation or conflict."];
+}
+async function interactiveEffect(job: JobStartResult, before: string) {
+  assertHead(job, before);
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const paths: string[] = [];
+  for (const entry of dirty(job)) {
+    const path = entry.slice(3);
+    if (!["??", " M"].includes(entry.slice(0, 2)) || !path.startsWith(prefix))
+      throw Error("Interactive invocation has an unsafe Git effect");
+    const local = path.slice(prefix.length);
+    if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(local))
+      throw Error("Interactive invocation has an unsafe path");
+    const absolute = join(job.worktreeStoryRoot, local);
+    if (await realpath(absolute) !== absolute || !(await lstat(absolute)).isFile())
+      throw Error("Interactive invocation has an unsafe file");
+    paths.push(local);
+  }
+  return paths.length ? fileDigest(job, paths.sort()) : null;
+}
+async function interactiveSourceDigest(job: JobStartResult, receipt: Receipt, unit: Unit,
+    baseline: Report, assignment: InteractiveAssignment) {
+  const { resolved } = await inspectPiPolicy(job);
+  if (!resolved || !receipt.snapshot || !unit.beforeHead)
+    throw Error("Original Interactive invocation lacks pinned model/source");
+  return digest(JSON.stringify({ job: job.jobId, thread: job.threadId, base: job.baseSha,
+    branch: job.branch, plan: receipt.planDigest, planVersion: receipt.planVersion,
+    head: unit.beforeHead, unit: unit.id, eventSource: receipt.eventSource,
+    blueprint: receipt.correctedBlueprintPin, snapshot: receipt.snapshot.id,
+    worker: receipt.worker, provider: receipt.provider, model: receipt.model,
+    selected: resolved.selected, thinking: resolved.thinking, validator: job.validatorVersion,
+    turn: await readFile(join(job.stateDir, "turn-plan.json"), "utf8").catch(e => {
+      if (e.code === "ENOENT") return null; throw e;
+    }), baseline, assignment }));
 }
 async function fileDigest(job: JobStartResult, paths: string[]) {
   return digest(JSON.stringify(await Promise.all(paths.map(async path =>
@@ -781,6 +824,15 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       throw Error("Original Interactive Pi report lacks a settled final assistant response");
     const reported = parseInteractiveManifest((last.content ?? [])
       .filter(c => c.type === "text").map(c => c.text ?? "").join("\n"), negative.domain);
+    if (negative.invocation) {
+      if (!negative.invocationProof || !negative.piSessionId || !negative.piSessionFile ||
+          negative.invocationProof.sourceDigest !== negative.invocation.sourceDigest)
+        throw Error("Original Interactive contradiction lacks its settled invocation proof");
+      await verifySettledAssignment({ proof: negative.invocationProof,
+        directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId),
+        sessionId: negative.piSessionId, sessionFile: negative.piSessionFile,
+        sessionRoots: [directory], effect: null });
+    }
     if (reported.paths.length ||
         JSON.stringify(reported.conflicts) !== JSON.stringify(negative.conflicts) ||
         JSON.stringify(reported.obligations) !== JSON.stringify(negative.obligations))
@@ -842,7 +894,7 @@ function output(job: JobStartResult, receipt: Receipt, unit?: InteractiveDomain)
       : "event-route-fulfilled",
     workItemId: receipt.workItemId, planVersion: receipt.planVersion,
     thinking: receipt.thinking ?? "configured-default",
-    specialistUnits: receipt.units.map(u => ({ ...u, specialist: u.domain === "choice"
+    specialistUnits: receipt.units.map(({ invocation: _invocation, ...u }) => ({ ...u, specialist: u.domain === "choice"
       ? "nt-interactive-narrative" : "nt-puzzle-design" })),
     completionEvidence: { deterministicChoiceAndPuzzlePaths: receipt.units.every(u => u.phase === "committed"),
       deterministicChoicePathAndOptionalPuzzle: receipt.units[0].phase === "committed" && completed(receipt),
@@ -1091,6 +1143,79 @@ revelations: [revelation.ledger-secret]`,
         ? ["Future Events must check choice-point.loyalty outcome for conditional consequences of the two routes"]
         : ["Conditional player-facing prose must be reviewed for choice and clue visibility"] };
 }
+/** Read-only receipt projection used to identify the original child before
+ * invoking it. The domain adapter still authenticates all native/Git effects. */
+export async function inspectInteractiveUnit(job: JobStartResult, milestone: string, domain: InteractiveDomain) {
+  if (!validMilestone.test(milestone)) throw Error("Invalid Interactive milestone");
+  const path = join(job.stateDir, "interactive-items", milestone.slice(10) + ".json");
+  if (!existsSync(path)) return null;
+  const receipt = JSON.parse(await readFile(path, "utf8")) as Receipt;
+  const unit = receipt.units?.[domain === "choice" ? 0 : 1];
+  if (receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
+      receipt.milestoneId !== milestone || receipt.workItemId !== "interactive-" + milestone.slice(10) ||
+      unit?.domain !== domain || unit.id !== "interactive-" + domain + "-" + milestone.slice(10))
+    throw Error("Interactive child receipt identity changed");
+  return { receipt, unit };
+}
+
+/** Routing proof for the exact unfinished child; never an authorization to
+ * run a new Pi session or treat its draft as a verified source. */
+export async function inspectPendingInteractiveInvocation(job: JobStartResult, milestone: string,
+    domain: InteractiveDomain, sourceHead?: string) {
+  const original = await inspectInteractiveUnit(job, milestone, domain);
+  if (!original) return null;
+  const { receipt, unit } = original;
+  if (receipt.worker !== "pi" || unit.phase !== "writing" && unit.phase !== "authored" ||
+      !unit.invocation || !unit.beforeHead ||
+      sourceHead && sourceHead !== unit.beforeHead && sourceHead !== receipt.units[0].beforeHead)
+    return null;
+  const { baseline, assignment, sourceDigest } = unit.invocation;
+  if (await interactiveSourceDigest(job, receipt, unit, baseline, assignment) !== sourceDigest ||
+      await openSkillSnapshot(receipt.snapshot!.id) !== receipt.snapshot!.path)
+    throw Error("Original Interactive invocation source changed");
+  if (git(job, "rev-parse", "HEAD") === unit.beforeHead) {
+    await interactiveEffect(job, unit.beforeHead);
+  } else {
+    if (unit.phase !== "authored" || dirty(job).length) throw Error("Unrecognized Interactive writer effect");
+    verifyCommit(job, receipt, unit, unit.beforeHead, git(job, "rev-parse", "HEAD"));
+    if (!unit.paths || await fileDigest(job, unit.paths) !== unit.digest || !unit.invocationProof ||
+        !unit.piSessionId || !unit.piSessionFile || unit.invocationProof.sourceDigest !== sourceDigest)
+      throw Error("Interrupted Interactive commit lacks its original settled effect");
+    await verifySettledAssignment({ proof: unit.invocationProof,
+      directory: interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId),
+      sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+      sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)], effect: unit.digest! });
+  }
+  if (!unit.piSessionFile || !unit.piSessionId) {
+    if (dirty(job).length || unit.phase !== "writing") throw Error("Interactive draft lacks original session");
+  } else {
+    const directory = join(job.stateDir, "interactive-sessions", receipt.workItemId, domain);
+    if (!unit.piSessionFile.startsWith(directory + "/") ||
+        await realpath(unit.piSessionFile) !== unit.piSessionFile ||
+        !(await lstat(unit.piSessionFile)).isFile())
+      throw Error("Original Interactive Pi transcript is unsafe");
+    const first = JSON.parse((await readFile(unit.piSessionFile, "utf8")).split("\n")[0]!);
+    if (first.type !== "session" || first.id !== unit.piSessionId)
+      throw Error("Original Interactive session identity changed");
+  }
+  return original;
+}
+
+export async function inspectInteractiveFailure(job: JobStartResult, milestone: string,
+    domain: InteractiveDomain, sourceHead: string) {
+  const original = await inspectPendingInteractiveInvocation(job, milestone, domain, sourceHead);
+  if (!original || original.unit.phase !== "writing" || original.unit.beforeHead !== sourceHead ||
+      !original.unit.piSessionId || !original.unit.piSessionFile) return null;
+  const { receipt, unit } = original;
+  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId!);
+  const terminal = await inspectAssignmentFailure({ directory,
+    sourceDigest: unit.invocation!.sourceDigest, sessionId: unit.piSessionId!,
+    sessionFile: unit.piSessionFile!, sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)],
+    effect: await interactiveEffect(job, sourceHead) });
+  return terminal && { ...terminal, ref: "interactive-invocations/" + receipt.workItemId + "/" +
+    domain + "/" + unit.piSessionId + "/terminal.json" };
+}
+
 export async function runInteractiveWorkItem(input: InteractiveOptions) {
   if (!validMilestone.test(input.milestone)) throw new Error("--milestone requires an exact typed Milestone ID.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
@@ -1102,7 +1227,10 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
   const execute = async () => {
     if (input.action === "review-omission" && input.unit)
       throw Error("Adaptive omission review applies to a whole interactive assignment.");
-    if (input.action === "run") await processAuthorUpdatesAtBoundary(job);
+    // A started original draft owns reconciliation before author-update intake.
+    const inFlight = existsSync(file) && (JSON.parse(await readFile(file, "utf8")) as Receipt)
+      .units?.some(u => u.phase === "writing" || u.phase === "authored");
+    if (input.action === "run" && !inFlight) await processAuthorUpdatesAtBoundary(job);
     if (!existsSync(join(root, "architecture.json")) || !existsSync(join(root, "character-world.json")) ||
         !existsSync(join(root, "event-items", input.milestone.slice(10) + ".json"))) {
       throw new Error("Interactive design requires verified architecture, foundations and Event design for the Milestone.");
@@ -1230,13 +1358,19 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         const head = await trustedHead(job);
         const baseline = reportOf(await validateStoryJob(job, input.validatorSource ??
           input.skillsSource, { ...job, baseSha: head }), head);
-        const omission = await decideEventOnlyOmission(job, architecture.plan, baseline,
+        const direction = baseline.records.find(r => r.metadata.type === "creative-direction" && r.metadata.status === "approved");
+        const planning = direction?.metadata.planning ? parseStoryPlanning(direction.metadata.planning) : null;
+        const admitted = input.interactionInventory?.find(i => i.milestone === input.milestone &&
+          ["interactive", "choice"].includes(i.stage));
+        const preserves = !planning || !admitted || preservesWholeStoryInteraction(
+          input.interactionInventory!.filter(i => i.milestone !== input.milestone || i.id === admitted.id), admitted, planning);
+        const omission = preserves ? await decideEventOnlyOmission(job, architecture.plan, baseline,
           input.milestone, event.commitSha, event.validation.eventIds, event.snapshot.id,
           event.obligations ?? [], {
             fixture: !!input.fixture, skillsSource: input.skillsSource,
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
             blueprint: await historicalMilestoneHandoff(job, event),
-          });
+          }) : null;
         await correctPendingBlueprint(job, architecture.plan, event, {
           head, fixture: !!input.fixture, omission, protectionBase: baseline.protection.base,
           objective: input.generationObjective, turnDigest: input.turnPlanDigest,
@@ -1338,14 +1472,6 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     const validate = async (head: string) => validateStoryJob(
       await startStoryJob({ story: input.story, job: input.job }, false),
       input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: head });
-    const Channels = Annotation.Root({ receipt: Annotation<Receipt>() });
-    const graph = new StateGraph(Channels)
-      .addNode("choice_design", async ({ receipt }) => { await executeUnit(receipt.units[0]!, receipt); return { receipt }; })
-      .addNode("puzzle_design", async ({ receipt }) => { await executeUnit(receipt.units[1]!, receipt); return { receipt }; })
-      .addConditionalEdges(START, () => input.unit === "puzzle" ? "puzzle_design" : "choice_design")
-      .addConditionalEdges("choice_design", ({ receipt }) =>
-        input.unit === "choice" || receipt.units[0].phase === "conflicted" ? END : "puzzle_design")
-      .addEdge("puzzle_design", END).compile();
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
       if (unit.phase === "pending") await processAuthorUpdatesAtBoundary(job);
@@ -1402,9 +1528,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         return;
       }
       if (index > 0) await assertNativeReviewDependencies(job, unit.id);
-      if (unit.phase === "writing") {
-        throw new Error("Interrupted interactive specialist; inspect the preserved uncommitted Story and Pi transcript.");
-      }
+      if (unit.phase === "writing" && (state.worker !== "pi" || !unit.invocation))
+        throw new Error("Interrupted Interactive specialist lacks current-format invocation evidence; preserve its effects.");
       const current = git(job, "rev-parse", "HEAD");
       const recovering = unit.phase === "authored" && current !== before;
       if (recovering && (!unit.paths || !unit.digest || dirty(job).length ||
@@ -1416,12 +1541,28 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         assertHead(job, before);
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Interactive writer requires a clean Story boundary.");
       }
-      const baseline = reportOf(await validate(before), before);
+      const baseline = unit.invocation?.baseline ?? reportOf(await validate(before), before);
       const selected = selectAssignment(architecture.plan!, baseline, state.milestoneId,
         state.eventSource ?? eventSource, milestoneBlueprint);
       const puzzleDecision = unit.domain === "puzzle"
         ? await puzzleObligation(job, architecture.plan!, baseline.records,
-            selected.eventIds, eventSource.missingObligations) : undefined;
+            selected.eventIds, [...eventSource.missingObligations,
+              ...(milestoneBlueprint?.design.downstream.filter(o => o.owner === "interactive").map(o => o.obligation) ?? [])]) : undefined;
+      // A Story-wide minimum is not a demand for a Puzzle at every milestone.
+      // Preserve the last admitted opportunity if the canonical minimum is not met.
+      if (puzzleDecision && input.interactionInventory) {
+        const direction = baseline.records.find(r => r.metadata.type === "creative-direction" && r.metadata.status === "approved");
+        const planning = direction?.metadata.planning ? parseStoryPlanning(direction.metadata.planning) : null;
+        const minimum = planning ? Math.max(planning.puzzle_count?.min ?? 0,
+          ["custom", "hybrid"].includes(planning.puzzle_emphasis ?? "none") ? 1 : 0) : 0;
+        const existing = baseline.records.filter(r => r.metadata.type === "puzzle" && r.metadata.status !== "superseded").length;
+        const otherPending = input.interactionInventory.filter(i => i.milestone !== input.milestone &&
+          ["interactive", "puzzle"].includes(i.stage) && i.status === "pending" && !i.omission).length;
+        if (minimum > existing + otherPending) {
+          puzzleDecision.required = true;
+          puzzleDecision.reasons.push("Approved Story-wide Puzzle minimum requires this remaining admitted opportunity.");
+        }
+      }
       const assign = { ...selected,
         ...(puzzleDecision ? { puzzleObligation: puzzleDecision } : {}),
         ...(input.task ? { authorTask: input.task } : {}) };
@@ -1430,7 +1571,19 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           state.worker === "pi" ? { provider: state.provider, model: state.model, thinking: state.thinking } : undefined);
         unit.phase = "writing";
         unit.beforeHead = before;
+        if (state.worker === "pi") unit.invocation = { baseline, assignment: assign,
+          sourceDigest: await interactiveSourceDigest(job, state, unit, baseline, assign) };
         await persist(file, state);
+      }
+      const authorizeInvocation = async () => {
+        assertHead(job, before);
+        if (!unit.invocation || JSON.stringify(assign) !== JSON.stringify(unit.invocation.assignment) ||
+            await interactiveSourceDigest(job, state, unit, baseline, assign) !== unit.invocation.sourceDigest ||
+            await openSkillSnapshot(state.snapshot!.id) !== state.snapshot!.path)
+          throw Error("Original Interactive assignment, native baseline, or model source changed");
+        await interactiveEffect(job, before);
+      };
+      if (unit.phase === "writing") {
         try {
           const verifyDraft = async (evidence: InteractiveEvidence) => {
             if (evidence.modifiedRecords.length === 0 &&
@@ -1451,7 +1604,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
                 throw new Error("No-write Puzzle report disagrees with the actual dirty Story tree.");
               const checked = reportOf(await validate(before), before);
               const current = await puzzleObligation(job, architecture.plan!, checked.records,
-                assign.eventIds, eventSource.missingObligations);
+                assign.eventIds, [...eventSource.missingObligations,
+                  ...(milestoneBlueprint?.design.downstream.filter(o => o.owner === "interactive").map(o => o.obligation) ?? [])]);
               if (current.required || current.turnDigest !== puzzleDecision.turnDigest)
                 throw new Error("Puzzle source obligation changed before optional no-write decision.");
               verifyChoice(checked, state.units[0]!.paths ?? [], assign,
@@ -1483,8 +1637,10 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             if (evidence.conflicts.length) {
               const feedback = interactiveConflictRepairFeedback(
                 evidence.conflicts, paths, report.diagnostics);
-              if (!feedback) throw new Error("Unresolved interactive architectural conflict: " +
-                evidence.conflicts.join("; "));
+              if (!feedback) {
+                await assertSafeInteractiveRepair(job, before, validate);
+                return ["The draft reports an unresolved architectural conflict. Restore only your audited changes to their original source and submit a truthful no-write dependency report, or resolve the conflict entirely within the existing assignment. Do not change another owner's records."];
+              }
               // A model's "architectural conflict" label is not a grant.
               // Independently reverify this job, baseline and exact pinned
               // Git protection before returning any in-scope correction.
@@ -1505,8 +1661,23 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           if (state.worker === "fixture") {
             evidence = await fixtureAuthor(job, unit.domain, assign);
           } else {
+            await authorizeInvocation();
             evidence = await authorInteractive(job, state.snapshot!, unit.domain, assign, state.provider, state.model, state.thinking,
-              async session => { unit.piSessionFile = session; await persist(file, state); }, verifyDraft);
+              async (session, id) => {
+                if (unit.piSessionFile && (unit.piSessionFile !== session || unit.piSessionId !== id))
+                  throw Error("Interactive invocation session changed");
+                unit.piSessionFile = session; unit.piSessionId = id; await persist(file, state);
+              }, verifyDraft, { sourceDigest: unit.invocation!.sourceDigest,
+                sessionFile: unit.piSessionFile, sessionId: unit.piSessionId,
+                authorize: authorizeInvocation, effect: () => interactiveEffect(job, before) });
+            unit.invocationProof = evidence.invocationProof;
+            if (!unit.invocationProof || !unit.piSessionId || !unit.piSessionFile)
+              throw Error("Interactive result lacks its original settled invocation");
+            await verifySettledAssignment({ proof: unit.invocationProof,
+              directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId),
+              sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+              sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
+              effect: await interactiveEffect(job, before) });
           }
           unit.claimedPaths = evidence.modifiedRecords;
           unit.conflicts = evidence.conflicts;
@@ -1543,7 +1714,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             if (dirty(job).length) throw new Error("No-write Puzzle left dirty Story files.");
             const checked = reportOf(await validate(before), before);
             const current = await puzzleObligation(job, architecture.plan!, checked.records,
-              assign.eventIds, eventSource.missingObligations);
+              assign.eventIds, [...eventSource.missingObligations,
+                ...(milestoneBlueprint?.design.downstream.filter(o => o.owner === "interactive").map(o => o.obligation) ?? [])]);
             if (current.required || current.turnDigest !== puzzleDecision.turnDigest)
               throw new Error("Puzzle no-write source changed since initial assessment.");
             verifyChoice(checked, state.units[0]!.paths ?? [], assign,
@@ -1582,6 +1754,17 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         if (!unit.paths || !unit.digest ||
             await fileDigest(job, unit.paths) !== unit.digest || unit.conflicts?.length) {
           throw new Error("Interactive files differ from their audited manifest or have unresolved conflicts.");
+        }
+        if (state.worker === "pi") {
+          if (!unit.invocation || !unit.invocationProof || !unit.piSessionId || !unit.piSessionFile ||
+              await interactiveSourceDigest(job, state, unit, baseline, assign) !== unit.invocation.sourceDigest ||
+              unit.invocationProof.sourceDigest !== unit.invocation.sourceDigest)
+            throw Error("Interactive authored effect lacks its original invocation proof");
+          await verifySettledAssignment({ proof: unit.invocationProof,
+            directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId),
+            sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+            sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
+            effect: unit.digest });
         }
         const checked = await validate(before);
         const report = reportOf(checked, before);
@@ -1624,17 +1807,22 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         throw error;
       }
     }
-    const result = await graph.invoke({ receipt });
-    if (result.receipt.units.some(unit => unit.phase === "conflicted")) {
+    // The production parent checkpoints each subunit using the shared child.
+    // The standalone domain command is only a serial adapter over the same receipts.
+    if (input.unit !== "puzzle") await executeUnit(receipt.units[0]!, receipt);
+    if (input.unit !== "choice" && receipt.units[0].phase !== "conflicted")
+      await executeUnit(receipt.units[1]!, receipt);
+    if (receipt.units.some(unit => unit.phase === "conflicted")) {
       // No next-stage or deferred-idea authorization follows a negative
       // original assignment. The generation controller owns its disposition.
       await inspectInteractiveConflict(job, input.milestone);
-      return output(job, result.receipt, input.unit);
+      return output(job, receipt, input.unit);
     }
+    if (input.deferBoundary) return output(job, receipt, input.unit);
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "interactive-work");
-    return { ...output(job, result.receipt, input.unit), authorUpdates };
+    return { ...output(job, receipt, input.unit), authorUpdates };
   };
   if (input.action === "review-omission")
     return withStoryJobLockOrReuse(job, "interactive-" + input.milestone.slice(10),

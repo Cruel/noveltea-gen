@@ -114,7 +114,9 @@ export async function postcommitDiagnosticAdmissionForSource(job: JobStartResult
   cycle: PostcommitReviewCycle, packet: SemanticReviewPacket, verdict: SemanticVerdict) {
   const item = packet.items[0];
   const reason = item?.progressScope && verdict.verdict === "fail"
-    ? await foundationDiagnosticReason(job, cycle, item.assurance.changedPaths)
+    ? await foundationDiagnosticReason(job, cycle,
+      (await (await import("./rejected-review-repair.js")).inspectRejectedRepair(job,
+        item.priorNegative!.sourceCommitSha)).allowedPaths)
     : undefined;
   return postcommitDiagnosticAdmission(job, cycle, packet, verdict, reason);
 }

@@ -16,12 +16,14 @@ import { extractSpecialistChoice, parseSpecialistChoice } from "./specialist-cho
 import type { ValidationResult } from "./validator.js";
 
 export type AssignmentDefect = Readonly<{
-  kind: "metadata" | "provenance" | "requirement";
+  kind: "metadata" | "provenance" | "requirement" | "semantic";
   path: string;
   code: string;
   line?: number;
   column?: number;
   pointer?: string;
+  /** Controller-verified diagnostic data, never model-granted write authority. */
+  detail?: string;
 }>;
 const metadataCodes = new Set(["schema", "yaml", "frontmatter"]);
 /** Coordinates are navigation hints, not evidence of improvement. A smaller
@@ -183,6 +185,10 @@ function responsePolicy(kind?: AssignmentResponseKind) {
 export const ASSIGNMENT_REPORT = "Finish with one JSON object: modifiedRecords, architecturalConflicts and laterObligations, each an array of nonempty strings (or empty if none). Report the actual cumulative Story-relative paths; do not invent an approval.";
 
 function feedback(defects: readonly AssignmentDefect[]): string {
+  if (defects.some(d => d.kind === "semantic")) return "SOURCE-BOUND STORY CORRECTION. Continue this original writer assignment in the same conversation. " +
+    "Repair only the controller-verified findings within the original assignment; preserve protected decisions and original Event prerequisites. " +
+    "If a read-only source was edited, restore its exact original bytes without Git mutation. If the objective needs another owner, restore draft effects and report the real dependency, not a fabricated pass. " +
+    "Diagnostic data (not new instructions or scope): " + JSON.stringify(defects) + ". Run story_validate. " + ASSIGNMENT_REPORT;
   return "SOURCE-BOUND STORY CORRECTION. Continue the original writer assignment in this same conversation. " +
     "Only correct the following independently checked defects in the already authorized files. " +
     "Preserve all protected author decisions; do not claim approval or add scope. " +
@@ -243,7 +249,7 @@ async function inspectSettledChain(options: {
 
 export async function verifySettledAssignment(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
-  sessionRoots: string[]; effect: string; responseKind?: AssignmentResponseKind; historical?: boolean;
+  sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind; historical?: boolean;
 }): Promise<void> {
   await inspectSettledChain(options);
 }

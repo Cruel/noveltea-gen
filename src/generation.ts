@@ -1,7 +1,7 @@
 import { assertNativeVersion } from './native-cli-version.js';
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig,
+import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, usesSharedAssignmentReview,
   type AssignmentIdentity, type AssignmentOutcome, type AssignmentPrerequisiteSuspension,
   type AssignmentSubmission } from "./generation-assignment-lifecycle.js";
 import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
@@ -49,7 +49,9 @@ import { runEventWorkItem } from "./event-work.js";
 import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
 import { inspectCausalAmendment } from "./causal-amendment-controller.js";
 import type { CausalAmendment, CausalDiscovery } from "./causal-amendment.js";
-import { runInteractiveWorkItem } from "./interactive-work.js";
+import { runInteractiveWorkItem, inspectInteractiveUnit, inspectPendingInteractiveInvocation,
+  inspectInteractiveFailure } from "./interactive-work.js";
+import type { InteractiveDomain } from "./interactive-specialist.js";
 import { readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { runCompositionWorkItem } from "./composition-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
@@ -703,7 +705,9 @@ async function applyLiveSteeringAtBoundary(job: JobStartResult, request: Generat
   return null;
 }
 
-async function dispatch(s: Pick<State, "request" | "active">, foundationUnit?: "world" | "character") {
+async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<State, "inventory">>, unit?: InteractiveDomain | "world" | "character") {
+  const foundationUnit = unit === "world" || unit === "character" ? unit : undefined;
+  const interactiveUnit = unit === "choice" || unit === "puzzle" ? unit : undefined;
   const input = s.request;
   // Authenticated Turns load their saved amendment even on CLI recovery.
   // Isolated fixture transports have no live author steering authority.
@@ -715,6 +719,10 @@ async function dispatch(s: Pick<State, "request" | "active">, foundationUnit?: "
       // Foundation has its own pinned objective; no new steering authority
       // can be derived from its unfinished draft or a moving worktree.
       if (s.active?.stage === "foundation") return "";
+      if (interactiveUnit && s.active?.milestone) {
+        const pending = await inspectPendingInteractiveInvocation(job, s.active.milestone, interactiveUnit);
+        if (pending) return steeringForAssignment(job, turnDigest, s.active.id, pending.unit.beforeHead!);
+      }
       const head = await trustedHead(job).catch(async error => {
         if (s.active?.stage !== "foundations" || !await inspectRecoverableCharacterWorldCommit(job)) throw error;
         return jobGit(job, "rev-parse", "HEAD^");
@@ -731,7 +739,9 @@ async function dispatch(s: Pick<State, "request" | "active">, foundationUnit?: "
     case "event": return runEventWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
     case "interactive": case "choice": case "puzzle": return runInteractiveWorkItem({ ...input,
       generationObjective: input.task, task: guidedTask, milestone, action: "run",
-      unit: s.active.stage === "interactive" ? undefined : s.active.stage });
+      unit: interactiveUnit ?? (s.active.stage === "interactive" ? undefined : s.active.stage),
+      deferBoundary: s.active.stage === "interactive" && interactiveUnit === "choice",
+      interactionInventory: s.inventory?.items });
     case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
     case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering });
     case "review": return runNarrativeReview({ ...input, action: "run" });
@@ -1490,6 +1500,200 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
   return { reviewPrerequisite: null, dependencyHistory, result, escalation: null };
 }
 
+/** Each native Interactive subunit has its own original source and nested
+ * assignment lifecycle. The parent alone handles negative results and plan
+ * amendments; neither Choice nor Puzzle can certify the other. */
+async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig,
+    reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
+    correctionSelected = false): Promise<Partial<State>> {
+  if (!s.active?.milestone || !s.inventory ||
+      !["interactive", "choice", "puzzle"].includes(s.active.stage))
+    throw Error("Interactive child requires its original parent assignment");
+  const job = await openJob(s);
+  const active = s.active;
+  const milestone = active.milestone!;
+  const graphThreadId = config.configurable?.thread_id;
+  if (typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId)
+    throw Error("Interactive child lacks original graph Thread identity");
+  await checkPlan(job, s.request, s.planVersion);
+  const correction = correctionSelected ? s.recoveryLifecycle.active : null;
+  let correctionDomain: InteractiveDomain | undefined;
+  if (correction) {
+    const root = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+      p.commitSha === correction.origin.sourceHeadSha);
+    correctionDomain = root?.workItem === "interactive-choice-" + milestone.slice(10) ? "choice" :
+      root?.workItem === "interactive-puzzle-" + milestone.slice(10) ? "puzzle" : undefined;
+    if (!correctionDomain || !s.result || correction.origin.assignmentId !== active.id)
+      throw Error("Interactive correction lacks the original reviewed subunit");
+  }
+  const pending = !correction && active.stage === "interactive" &&
+    await inspectPendingInteractiveInvocation(job, milestone, "puzzle", s.inventory.headSha);
+  if (pending) await assertNativeReviewDependencies(job, pending.unit.id);
+  const domains: InteractiveDomain[] = correctionDomain ? [correctionDomain] :
+    active.stage === "interactive" ? (pending ? ["puzzle"] : ["choice", "puzzle"]) : [active.stage as InteractiveDomain];
+  for (const domain of domains) {
+    const original = await inspectInteractiveUnit(job, milestone, domain);
+    const sourceHead = original?.unit.beforeHead ?? await trustedHead(job);
+    const workItem = "interactive-" + domain + "-" + milestone.slice(10);
+    const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
+    const identity: AssignmentIdentity = {
+      schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
+      graphThreadId, turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
+        jobId: job.jobId, jobThreadId: job.threadId, graphThreadId, turnDigest: null,
+        fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
+      }), assignmentId: workItem, planVersion: s.planVersion, sourceHeadSha: sourceHead,
+      scopeDigest: createHash("sha256").update(JSON.stringify({
+        scope, domain, task: s.request.task, contract: s.request.contract,
+      })).digest("hex"),
+    };
+    const key = logicalAssignmentKey(identity);
+    const ref = "interactive-items/" + milestone.slice(10) + ".json#" + workItem;
+    let patch: Partial<State> | undefined;
+    let result: Awaited<ReturnType<typeof runInteractiveWorkItem>> | undefined;
+    const outcome = (status: AssignmentOutcome["status"], extra: Record<string, string> = {}): AssignmentOutcome =>
+      ({ status, assignmentKey: key, evidenceRef: ref, ...extra }) as AssignmentOutcome;
+    const authenticateCorrection = async () => !!correction && !!s.recoveryLifecycle.decision &&
+      await (await import("./generation-operation-strategy.js")).authenticateOperationReviewProof(
+        job, s, correction, s.recoveryLifecycle.decision);
+    const child = createAssignmentLifecycleGraph({
+      authenticateContinuation: async state => state.continuationRef === correction?.id && await authenticateCorrection(),
+      preflight: async () => {
+        await checkPlan(job, s.request, s.planVersion);
+        const control = await readJobControl(job);
+        if (control === "cancelled") { const e = Error("Original Interactive assignment cancelled"); e.name = "StoryCancelledError"; throw e; }
+        if (control !== "running") return outcome("paused", { controlRef: "job-control" });
+        if (correction && !await authenticateCorrection())
+          throw Error("Interactive child correction lacks its admitted Review case");
+        const saved = await inspectInteractiveUnit(job, milestone, domain);
+        if (saved?.unit.beforeHead && saved.unit.beforeHead !== sourceHead)
+          throw Error("Interactive child source changed");
+        if (!correction && !saved?.unit.beforeHead && await trustedHead(job) !== sourceHead)
+          throw Error("Interactive child lacks its original verified HEAD");
+        return null;
+      },
+      invoke: async () => {
+        try {
+          result = await dispatch(s, domain) as typeof result;
+          if (!result) throw Error("Interactive child returned no original receipt");
+          return { receiptRef: ref, status: result.status, headSha: result.headSha };
+        } catch (error) {
+          if (error instanceof AssignmentAuthorPauseError || error instanceof Error &&
+              ["PiBudgetPause", "PiModelUnavailableError"].includes(error.name))
+            return outcome("paused", { controlRef: "job-control" });
+          if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
+          const terminal = await inspectInteractiveFailure(job, milestone, domain, sourceHead);
+          if (!terminal) throw Error("Interactive terminal failure lacks authenticated original effects");
+          patch = await operationFailure(s, job, "specialist-result", error,
+            { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
+              assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof }, interactiveDomain: domain },
+            "returned-failure");
+          return outcome("unresolved", { dispositionRef: terminal.proof.receiptDigest });
+        }
+      },
+      verify: async state => {
+        const saved = await inspectInteractiveUnit(job, milestone, domain);
+        if (!saved || state.submission?.receiptRef !== ref ||
+            saved.unit.beforeHead !== sourceHead)
+          throw Error("Interactive child submission lost its exact original receipt");
+        const { unit, receipt } = saved;
+        if (unit.phase === "conflicted")
+          return outcome("unresolved", { dispositionRef: unit.digest! });
+        if (unit.phase === "not-applicable") {
+          // Reopen the existing authoritative no-write seal, never synthesize a commit.
+          const inspected = await runInteractiveWorkItem({ ...s.request, milestone, unit: domain, action: "inspect" });
+          if (unit.eventOnly) await readEventOnlyOmission(job, milestone, unit.eventOnly);
+          else {
+            const { readPuzzleNoWrite } = await import("./puzzle-obligation.js");
+            const proof = await readPuzzleNoWrite(job, milestone, unit.noWrite);
+            if (proof.unitId !== unit.id || proof.choiceHead !== receipt.units[0].commitSha ||
+                proof.verifiedHead !== unit.beforeHead || proof.planDigest !== receipt.planDigest)
+              throw Error("Interactive omission does not match original source");
+          }
+          if (!inspected.headSha) throw Error("Interactive omission has no verified source");
+          return outcome("verified", { headSha: unit.beforeHead!, reviewRef: ref });
+        }
+        if (unit.phase !== "committed" || !unit.commitSha)
+          throw Error("Interactive child has no committed native result");
+        const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const point = points.find(p => p.workItem === workItem && p.commitSha === unit.commitSha &&
+          p.parentSha === sourceHead && p.validation.status === "passed" &&
+          p.planVersion === s.planVersion &&
+          (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+        if (!point) throw Error("Interactive child lacks independently verified native checkpoint");
+        const covered = await resolvedCheckpointReviews(job, points);
+        const pending = !(s.request.fixture && !point.assurance) &&
+          !["passed", "not-required"].includes(covered.get(point.commitSha) ?? point.semanticReview);
+        const candidate: State = { ...s, result: correction ? s.result :
+          { status: active.stage === "interactive" && domain === "choice"
+              ? "review-handoff" : state.submission!.status, headSha: unit.commitSha } };
+        if (pending && s.request.fixture)
+          return outcome("needs-prerequisite", { suspensionRef: "review-checkpoints:" + unit.commitSha,
+            owner: "nt-narrative-review", scopeRef: identity.scopeDigest, pendingPhase: "review" });
+        if (pending || correction) {
+          patch = await reviewBoundary(candidate, correctionSelected);
+          if (patch.status === "paused") return outcome("paused", { controlRef: "review-checkpoints" });
+          if (patch.status === "blocked" || patch.status === "cancelled" || patch.operationRecovery ||
+              patch.reviewAssessmentRequested || patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest)
+            return outcome("unresolved", { dispositionRef: "review-checkpoints:" + unit.commitSha });
+        }
+        const refreshed = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const reviews = await resolvedCheckpointReviews(job, refreshed);
+        const current = refreshed.find(p => p.commitSha === unit.commitSha);
+        if (!current || !(s.request.fixture && !current.assurance) &&
+            !["passed", "not-required"].includes(reviews.get(unit.commitSha) ?? current.semanticReview))
+          throw Error("Interactive child did not settle its mandatory independent Review");
+        return outcome("verified", { headSha: await trustedHead(job), reviewRef: "review-checkpoints:" + unit.commitSha });
+      },
+    });
+    const finished = await child.invoke({ identity,
+      submission: correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
+      submissionKey: correction ? key : null, outcome: null, continuationRef: correction?.id ?? null },
+      assignmentChildConfig(config, identity, correction ? "correction" : "original"));
+    if (!finished.outcome || finished.outcome.assignmentKey !== key)
+      throw Error("Interactive child returned no authenticated outcome");
+    const settled = finished.outcome;
+    if (patch && (patch.operationRecovery || patch.status || patch.reviewAssessmentRequested ||
+        patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest)) {
+      const candidate = finished.submission && { status: active.stage === "interactive" && domain === "choice"
+        ? "review-handoff" : finished.submission.status, headSha: finished.submission.headSha };
+      return { ...patch, result: correction ? s.result : candidate ?? null };
+    }
+    if (settled.status === "paused") return { status: "paused", reason: "Original Interactive assignment suspended at a safe boundary." };
+    if (settled.status === "unresolved") {
+      const saved = await inspectInteractiveUnit(job, milestone, domain);
+      if (saved?.unit.phase === "conflicted")
+        return { result: await runInteractiveWorkItem({ ...s.request, milestone, unit: domain, action: "inspect" }) };
+      // Child checkpoint replay must reconstruct the original terminal proof
+      // rather than interpreting a missing callback projection as success.
+      const terminal = await inspectInteractiveFailure(job, milestone, domain, sourceHead);
+      if (terminal) return operationFailure(s, job, "specialist-result", terminal.proof.kind,
+        { reference: "specialist-receipt", assignmentId: active.id, resultStatus: terminal.proof.kind,
+          assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof }, interactiveDomain: domain },
+        "returned-failure");
+      if (finished.submission) {
+        const candidate = { status: active.stage === "interactive" && domain === "choice"
+          ? "review-handoff" : finished.submission.status, headSha: finished.submission.headSha };
+        return { ...await reviewBoundary({ ...s, result: correction ? s.result : candidate }, correctionSelected),
+          result: correction ? s.result : candidate };
+      }
+      throw Error("Interactive child returned an unauthenticated unresolved disposition");
+    }
+    if (settled.status === "needs-prerequisite") {
+      const inspected = await runInteractiveWorkItem({ ...s.request, milestone, unit: domain, action: "inspect" });
+      if (inspected.status === "interactive-conflict-reported") return { result: inspected };
+      return { result: { status: "review-handoff", headSha: finished.submission?.headSha } };
+    }
+    if (settled.status !== "verified") throw Error("Interactive child cannot advance without verified disposition");
+    if (correction) return { ...patch, result: patch?.result === undefined ? s.result : patch.result };
+    if (domain === domains.at(-1)) {
+      const inspected = await runInteractiveWorkItem({ ...s.request, milestone,
+        unit: active.stage === "interactive" ? undefined : domain, action: "inspect" });
+      return { result: { ...inspected, headSha: await trustedHead(job) } };
+    }
+  }
+  throw Error("Interactive child returned without a completed assignment");
+}
+
 const accepted: Record<Stage, readonly string[]> = {
   ...verifiableResultStatus,
   review: ["complete-in-scope", "editorial-unverified", "blocked"],
@@ -1622,7 +1826,7 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
         const progress = await advanceRejectedRepair(job, point.commitSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider,
           model: s.request.model,
-          sharedAssessment: ["foundation", "foundations"].includes(s.active.stage),
+          sharedAssessment: usesSharedAssignmentReview(s.active.id),
           canYieldForSteering: async () => !!s.request.turnPlanDigest &&
             !!s.inventory?.items.some(item => item.stage === "architecture" &&
               item.status === "verified") && !!s.active && !!s.result &&
@@ -1706,7 +1910,7 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
               "and propose a separately controller-authorized bounded assignment; " +
               "do not replay the original writer or expand its file permissions.",
           } } : {}),
-          ...(["foundation", "foundations"].includes(s.active.stage) && progress.next === "author-choice" ?
+          ...(usesSharedAssignmentReview(s.active.id) && progress.next === "author-choice" ?
             { reviewPauseReason: "author-choice" as const } : {}),
           status: progress.next === "author-choice" ? "paused" : "blocked",
           reason: progress.next === "author-choice"
@@ -1730,7 +1934,7 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
     }
     return { result: { ...s.result, headSha: await trustedHead(job) } };
   } catch (error) {
-    if (correctionSelected && ["foundation", "foundations"].includes(s.active?.stage ?? "") && error instanceof Error) {
+    if (correctionSelected && usesSharedAssignmentReview(s.active?.id) && error instanceof Error) {
       const reason = error.name === "PiBudgetPause" ? "budget" :
         error.name === "PiModelUnavailableError" ? "provider-unavailable" :
         error.name === "StoryCancelledError" ? "cancelled" :
@@ -1776,6 +1980,17 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
  * Git trailer/content/session proof; World uses a finalized native checkpoint
  * and the original Character/World receipt. This is never permission for a
  * new session, replacement writer or unrelated specialist. */
+async function pendingInteractiveForResume(s: State, job: JobStartResult) {
+  if (!s.active?.milestone || s.result || !s.inventory ||
+      !["interactive", "choice", "puzzle"].includes(s.active.stage)) return null;
+  const domains: InteractiveDomain[] = s.active.stage === "interactive" ? ["puzzle", "choice"] : [s.active.stage as InteractiveDomain];
+  for (const domain of domains) {
+    const original = await inspectPendingInteractiveInvocation(job, s.active.milestone, domain, s.inventory.headSha);
+    if (original) return original;
+  }
+  return null;
+}
+
 async function inspectOriginalSpecialistCommitForResume(
   s: State, job: JobStartResult,
 ): Promise<boolean> {
@@ -1784,6 +1999,15 @@ async function inspectOriginalSpecialistCommitForResume(
   if (s.active.stage === "foundation") {
     const { inspectRecoverableFoundationCommit } = await import("./foundation.js");
     return inspectRecoverableFoundationCommit(job);
+  }
+  if (["interactive", "choice", "puzzle"].includes(s.active.stage) && s.active.milestone) {
+    const pending = await pendingInteractiveForResume(s, job);
+    if (pending?.unit.phase === "authored") return true;
+    const head = await trustedHead(job);
+    const points = await inspectRecoveryCheckpoints(job);
+    const domains = s.active.stage === "interactive" ? ["choice", "puzzle"] : [s.active.stage];
+    return points.some(p => p.eligible && p.commitSha === head && p.validation.status === "passed" &&
+      p.planVersion === s.planVersion && domains.some(d => p.workItem === "interactive-" + d + "-" + s.active!.milestone!.slice(10)));
   }
   if (s.active.stage !== "foundations") return false;
   return inspectRecoverableCharacterWorldCommit(job);
@@ -1864,7 +2088,7 @@ async function authenticateRecoveryOrigin(
   }
   if (assignmentEvidence?.assignmentFailure) {
     if (historicalSource || origin.operation !== "specialist-result" ||
-        !["foundation", "foundations"].includes(origin.assignmentId ?? "") ||
+        origin.assignmentId !== assignmentEvidence.assignmentId ||
         !await authenticateAssignmentFailure(job, assignmentEvidence, origin.sourceHeadSha)) return false;
     return authenticateOriginalFailure(job, request, graphThreadId, origin, evidence, true);
   }
@@ -1881,7 +2105,7 @@ async function recoverySourceHead(job: JobStartResult, state: RecoveryState, ori
   const evidence = assignmentFailureEvidence(state, origin);
   if (evidence?.assignmentFailure)
     return await authenticateAssignmentFailure(job, evidence, origin.sourceHeadSha) ? origin.sourceHeadSha : null;
-  if (origin.operation === "independent-review" && ["foundation", "foundations"].includes(origin.assignmentId ?? "") &&
+  if (origin.operation === "independent-review" && usesSharedAssignmentReview(origin.assignmentId) &&
       await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, origin.sourceHeadSha))
     return origin.sourceHeadSha;
   return trustedHead(job);
@@ -2115,7 +2339,7 @@ export function recoveryNode(
       try {
       const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
       const { inspectFoundationReviewBoundary, authenticateFoundationReviewHead } = await import("./rejected-review-repair.js");
-      if (!active || !["foundation", "foundations"].includes(active.origin.assignmentId ?? "") ||
+      if (!active || !usesSharedAssignmentReview(active.origin.assignmentId) ||
           decision?.action !== "known-correction" || decision.adapter !== "review-cycle" ||
           !await authenticateOperationReviewProof(job, local, active, decision) ||
           !await authenticateFoundationReviewHead(job, active.origin.sourceHeadSha))
@@ -2330,7 +2554,7 @@ export function createGenerationGraph(
           (op.operation === "scheduling" || op.operation === "author-update-intake") ?
           { status: "running" as const, operationRecovery: { ...op, phase: "assessment" as const } } :
           op.operation === "specialist-dispatch" && op.outcome === "exception" && s.active &&
-            (s.active.stage === "foundation" || s.active.stage === "foundations") &&
+            (["foundation", "foundations", "interactive", "choice", "puzzle"].includes(s.active.stage)) &&
             !s.result ?
           await (async () => {
             const job = await openJob(s);
@@ -2612,11 +2836,11 @@ export function createGenerationGraph(
               await inspectPendingFoundationInvocation(job, s.inventory.headSha) ||
               s.active?.stage === "foundations" &&
               (await inspectPendingCharacterWorldInvocation(job, s.inventory.headSha) ||
-               await inspectRecoverableCharacterWorldCommit(job) && !await trustedHead(job).catch(() => null)))) {
+               await inspectRecoverableCharacterWorldCommit(job) && !await trustedHead(job).catch(() => null)) || await pendingInteractiveForResume(s, job))) {
             await checkPlan(job, s.request, s.planVersion);
             const control = await readJobControl(job);
             if (control !== "running") return { status: control === "cancelled" ? "cancelled" : "paused",
-              reason: "Author control precedes original Foundation reconciliation." };
+              reason: "Author control precedes original assignment reconciliation." };
             return { status: "running" as const, reason: null };
           }
           const stopped = await authorBoundary(job, s);
@@ -2689,7 +2913,7 @@ export function createGenerationGraph(
             // trustedHead deliberately refuses incomplete receipts, so do
             // not misclassify this narrow crash window as an untrusted source
             // or start a replacement writer.
-            if (s.active.stage === "foundation" &&
+            if (["foundation", "interactive", "choice", "puzzle"].includes(s.active.stage) &&
                 await inspectOriginalSpecialistCommitForResume(s, job))
               return { status: "running" as const, reason: null };
             try { clean(job); await trustedHead(job); }
@@ -2930,7 +3154,13 @@ export function createGenerationGraph(
           return await runCharacterWorldAssignmentChild(s, config, reviewBoundary);
         if (s.active?.stage === "focus" && s.request.turnPlanDigest)
           return runFocusedAssignmentChild(s, config, reviewBoundary);
-        let result = await dispatch(s);
+        let result;
+        if (s.active && ["interactive", "choice", "puzzle"].includes(s.active.stage)) {
+          const child = await runInteractiveAssignmentChildren(s, config, reviewBoundary);
+          if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
+              child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest || child.result.status === "review-handoff") return child;
+          result = child.result;
+        } else result = await dispatch(s);
         if (result.status === "interactive-conflict-reported") {
           const evidence = result as typeof result & { prerequisite?: {
             milestoneId: string; expectedHead: string; reportDigest: string; domain: string };
@@ -3069,8 +3299,7 @@ export function createGenerationGraph(
           return await withStoryJobLock(job, "generation-failed-specialist-inventory", async () => {
             clean(job); await trustedHead(job);
             const sameHead = s.inventory?.headSha === await trustedHead(job);
-            if (!sameHead && (s.active?.stage === "foundation" ||
-                              s.active?.stage === "foundations"))
+            if (!sameHead && ["foundation", "foundations", "interactive", "choice", "puzzle"].includes(s.active?.stage ?? ""))
               return assessment; // Original commit can be reconciled only by its pinned specialist.
             const safeAction = sameHead ? "continue-independent" as const : undefined;
             const assessed = safeAction ? await operationFailure(s, job,
@@ -3164,7 +3393,9 @@ export function createGenerationGraph(
             ? await runFoundationAssignmentChild(s, config, reviewBoundary, true)
             : correction && s.active?.stage === "foundations"
               ? await runCharacterWorldAssignmentChild(s, config, reviewBoundary, true)
-              : await reviewBoundary(s, correction);
+              : correction && s.active && ["interactive", "choice", "puzzle"].includes(s.active.stage)
+                ? await runInteractiveAssignmentChildren(s, config, reviewBoundary, true)
+                : await reviewBoundary(s, correction);
         if (reviewed.reviewDependencyRequest) {
           const request = reviewed.reviewDependencyRequest;
           return runReviewPrerequisiteChild(s, config, request,
@@ -3219,6 +3450,14 @@ export function createGenerationGraph(
             if (!next) throw Error("Fixture Review handoff has no original specialist.");
             try {
               await assertNativeReviewDependencies(job, next);
+              if (stage !== "foundations") {
+                const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+                const point = points.find(p => p.commitSha === s.result!.headSha &&
+                  p.workItem.startsWith("interactive-"));
+                const reviews = await resolvedCheckpointReviews(job, points);
+                if (!point || point.assurance && !["passed", "not-required"].includes(reviews.get(point.commitSha) ?? point.semanticReview))
+                  throw new IndependentReviewGateError("Original Interactive subunit Review is pending.");
+              }
             } catch (error) {
               if (!(error instanceof IndependentReviewGateError)) throw error;
               return { nonsemanticStop: "fixture-verdict" as const, status: "blocked" as const,

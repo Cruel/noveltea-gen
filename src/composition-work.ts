@@ -671,7 +671,8 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           return (milestone?.metadata.arcs as string[] ?? []).includes(id);
         })).map(record => record.metadata.id);
       const obligation = await puzzleObligation(job, architecture.plan, sourceReport.records, related,
-        source.eventSource?.missingObligations ?? []);
+        [...(source.eventSource?.missingObligations ?? []),
+          ...(milestoneBlueprint?.design.downstream.filter(o => o.owner === "interactive").map(o => o.obligation) ?? [])]);
       if (obligation.required || obligation.turnDigest !== proof.turnDigest)
         throw new Error("Optional Puzzle source no longer satisfies the approved goal obligation.");
     }

@@ -271,7 +271,7 @@ export async function inspectModernGenerationRecovery(
     }
     const operation = source.channel === "operationRecovery" ? source.input as unknown as GenerationOperationRecovery : null;
     if (operation?.evidence.assignmentFailure) {
-      if (origin.operation !== "specialist-result" || !["foundation", "foundations"].includes(origin.assignmentId ?? "") ||
+      if (origin.operation !== "specialist-result" || origin.assignmentId !== operation.evidence.assignmentId ||
           operation.outcome !== "returned-failure" ||
           !await authenticateAssignmentFailure(job, operation.evidence, origin.sourceHeadSha)) return false;
       return authenticateOriginalFailure(job, request, threadId, origin, evidence, true);
