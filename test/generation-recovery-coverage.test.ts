@@ -207,7 +207,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "runCharacterWorldAssignmentChild", "7009d6ba4919502568060a2a10da49b4150cd03ebe872a27160aba2d36e18d9e"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
     [file, "runFocusedAssignmentChild", "692eb56fd45ccc7ae2ad323c14876207b68817086db494098bc18ea7f421028b"],
-    [child, "createAssignmentLifecycleGraph", "6b344735d806683e12bb39d4dd789ee434b11ecd5845df3abdc6a1f19d9940e9"],
+    [child, "createAssignmentLifecycleGraph", "d190943cd002418ceefd8f158c99baecb2124f470354a4fd5d7950568d6c56cc"],
     [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
