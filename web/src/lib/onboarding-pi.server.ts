@@ -464,6 +464,36 @@ async function openDiscoveryGraph(store: StudioDatabase, owner: string, repo: st
   })
 }
 
+/** Approval is a deterministic transformation of the exact native-validated
+ * author submission. A reserved or claimed approval can be settled after a
+ * crash without re-running Pi or losing the accepted proposal. */
+function approvedProposal(state: Session): Proposal {
+  if (!state.proposal || !state.digest || state.digest !== sha(state.proposal) ||
+      state.semanticReview?.proposalDigest !== state.digest)
+    throw new DiscoveryError(409, 'Saved approval proposal evidence changed.')
+  return { ...state.proposal, foundation: {
+    ...state.proposal.foundation, decisions: state.proposal.foundation.decisions.map(d =>
+      d.origin === 'agent' && d.authority !== 'delegated'
+        ? { ...d, authority: 'user-protected' as const } : d),
+  } }
+}
+
+async function settleInterruptedApproval(store: StudioDatabase, owner: string, repo: string,
+  workspace: string, saved: Session, verifyAuthority: () => Promise<void>) {
+  await verifyAuthority()
+  assertGraphIdentity(owner, repo, workspace, saved)
+  const operation = saved.graphOperation!
+  if (saved.phase !== 'running' || operation.kind !== 'approve' ||
+      operation.status === 'settled' || operation.inputDigest !== operationInputDigest(saved))
+    throw new DiscoveryError(409, 'Saved approval operation is inconsistent.')
+  const proposal = approvedProposal(saved)
+  const settled: Session = { ...saved, phase: 'approved', proposal, digest: sha(proposal),
+    revision: saved.revision + 1, graphOperation: { ...operation, status: 'settled' } }
+  await save(store, owner, repo, workspace, settled, saved.revision)
+  await reconcileDiscoveryGraph(store, owner, repo, workspace, settled, verifyAuthority)
+  return settled
+}
+
 async function reconcileDiscoveryGraph(store: StudioDatabase, owner: string, repo: string,
   workspace: string, state: Session, verifyAuthority: () => Promise<void>) {
   try {
@@ -568,10 +598,11 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         'root:' + chat.firstTurnId, chat.firstTurnId)
       const membership = message ? await store.persistence.messages.membership(actor.id,
         'root:' + chat.firstTurnId) : null
-      if (!story || membership?.storyId !== chat.storyId ||
+      if (!story || membership?.storyId !== chat.storyId || membership.archivedAt ||
           story.repositoryId !== repo || story.directory !== chat.directory ||
           story.headSha !== chat.sourceSha || !message ||
           message.content !== chat.originalObjective ||
+          (!message.jobId && message.verifiedCommitSha !== chat.sourceSha) ||
           message.role !== 'user' || (message.jobId && message.jobId !== chat.firstTurnId) ||
           message.phase === 'cancelled')
         throw new DiscoveryError(409, 'Saved Story discovery identity or source revision changed')
@@ -629,6 +660,11 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           !saved.startedAt || Date.now() - saved.startedAt < 10 * 60_000) {
         throw new DiscoveryError(409, 'Only a running turn older than ten minutes may be reconciled; refresh first')
       }
+      if (currentGraph(saved) && saved.graphOperation!.kind === 'approve') {
+        const settled = await settleInterruptedApproval(store, actor.id, repo, workspace,
+          saved, verifyAuthority)
+        return reply({ session: scope(settled) })
+      }
       // This is an explicit operator/author decision after the previous worker
       // may have died. It does not run any model or mutate a Story file. A
       // late former worker response cannot overwrite this CAS revision.
@@ -647,15 +683,10 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           data.digest !== saved.digest || !saved.semanticReview ||
           saved.semanticReview.proposalDigest !== saved.digest)
         throw new DiscoveryError(409, 'Proposal is stale or unavailable')
-      const approved: Session = { ...saved, phase: 'approved', revision: saved.revision + 1,
-        proposal: { ...saved.proposal!, foundation: {
-          ...saved.proposal!.foundation, decisions: saved.proposal!.foundation.decisions.map(d =>
-            d.origin === 'agent' && d.authority !== 'delegated'
-              ? { ...d, authority: 'user-protected' as const } : d),
-        } } }
-      approved.digest = sha(approved.proposal)
+      const proposal = approvedProposal(saved)
+      const digest = sha(proposal)
       // Exact review is durable before any provider, worktree or queue effect.
-      if (chat) await validateNewStory(candidate(approved.proposal!.foundation).file)
+      if (chat) await validateNewStory(candidate(proposal.foundation).file)
       const operation: DiscoveryOperation = { id: saved.revision + 1, kind: 'approve',
         from: gateFor(saved).ref, inputDigest: operationInputDigest(saved) }
       const reserved: Session = { ...saved, phase: 'running', startedAt: Date.now(),
@@ -663,7 +694,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       await save(store, actor.id, repo, workspace, reserved, saved.revision)
       const graph = await openDiscoveryGraph(store, actor.id, repo, workspace, reserved,
         verifyAuthority, async claimed => ({ ...claimed, phase: 'approved',
-          proposal: approved.proposal, digest: approved.digest }))
+          proposal, digest }))
       await graph.advance(operation, false)
       const settled = (await load(store, actor.id, repo, workspace))!
       await reconcileDiscoveryGraph(store, actor.id, repo, workspace, settled, verifyAuthority)

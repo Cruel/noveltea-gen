@@ -4,7 +4,11 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { acquireCachedStory } from '../src/lib/git-cache.server'
+import { acquireCachedStory, inspectCachedStory } from '../src/lib/git-cache.server'
+import { nativeValidateSource } from '../../src/native-validator'
+import { nativeVersion } from '../../src/native-cli-version'
+import { reusableExistingFoundation } from '../../src/foundation-readiness'
+import { renderFoundation } from '../../src/foundation-record'
 
 function git(cwd: string, ...args: string[]) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -38,6 +42,27 @@ test('pinned GitHub Story acquisition shares objects but never job files, and re
       commit: pinned, directory: 'story', token: 'secret-never-stored',
       verifiedSizeBytes: 15, verifiedBlobCount: 1,
     }
+    let inspectedRoot = ''
+    const reusable = await inspectCachedStory(input, async view => {
+      inspectedRoot = view.worktreeRoot
+      assert.equal(view.baseSha, pinned)
+      assert.equal(git(view.worktreeRoot, 'rev-parse', 'HEAD'), pinned)
+      assert.equal(git(view.worktreeRoot, 'branch', '--show-current'), '')
+      assert.equal(existsSync(join(view.worktreeRoot, 'massive-assets')), false)
+      assert.equal(readFileSync(join(view.worktreeStoryRoot, 'creative-direction', 'foundation.md'), 'utf8'), 'Original canon\n')
+      const result = nativeValidateSource(view, { contract: 'noveltea-validator/v1',
+        implementation: 'native-cli', version: nativeVersion() })
+      assert.equal('jobId' in result, false)
+      return reusableExistingFoundation(view, result)
+    })
+    assert.equal(reusable, false)
+    assert.equal(existsSync(inspectedRoot), false)
+    assert.equal(existsSync(join(root, 'durable')), false, 'inspection creates no Generation manifest')
+    await assert.rejects(() => inspectCachedStory(input, async view => {
+      inspectedRoot = view.worktreeRoot
+      throw Error('interrupted inspection')
+    }), /interrupted inspection/)
+    assert.equal(existsSync(inspectedRoot), false)
     const first = await acquireCachedStory({ ...input, jobId: 'job-a' })
     const second = await acquireCachedStory({ ...input, jobId: 'job-b' })
     assert.equal(first.baseSha, pinned)
@@ -89,6 +114,28 @@ test('pinned GitHub Story acquisition shares objects but never job files, and re
     assert.equal(readFileSync(join(rootStory.worktreeRoot, 'creative-direction', 'root.md'), 'utf8'), 'Root canon\n')
     await assert.rejects(() => acquireCachedStory({ ...input, directory: 'story/*', jobId: 'unsafe-pattern' }),
       /Invalid cached Story identity/)
+    const approved = renderFoundation({
+      id: 'foundation', title: 'The Last Bell',
+      premise: 'A bell disappears', central_conflict: 'The town conceals the culprit',
+      genre: 'Mystery', tone: 'Somber', player_experience: 'Investigate the clues',
+      scope: 'A coastal town', body: 'An investigator searches for a missing bell.',
+      decisions: [{ id: 'author-genre', statement: 'Make it a mystery.',
+        origin: 'user', authority: 'user-protected' }],
+    }, 'approved')
+    mkdirSync(join(remote, 'approved-story', 'creative-direction'), { recursive: true })
+    writeFileSync(join(remote, 'approved-story', 'creative-direction', 'foundation.md'), approved)
+    git(remote, 'add', '.'); git(remote, 'commit', '-qm', 'Existing approved Story')
+    const approvedSha = git(remote, 'rev-parse', 'HEAD')
+    const branches = git(first.gitRoot, 'for-each-ref', '--format=%(refname)', 'refs/heads')
+    assert.equal(await inspectCachedStory({ ...input, directory: 'approved-story',
+      commit: approvedSha, verifiedSizeBytes: Buffer.byteLength(approved), verifiedBlobCount: 1 },
+      async view => {
+        const result = nativeValidateSource(view, { contract: 'noveltea-validator/v1',
+          implementation: 'native-cli', version: nativeVersion() })
+        assert.equal(result.status, 'passed', JSON.stringify(result))
+        return reusableExistingFoundation(view, result)
+      }), true, 'approved existing canon is recognized without creating a job')
+    assert.equal(git(first.gitRoot, 'for-each-ref', '--format=%(refname)', 'refs/heads'), branches)
     git(first.gitRoot, 'worktree', 'remove', '--force', first.worktreeRoot)
     await assert.rejects(() => acquireCachedStory({ ...input, jobId: 'job-a' }),
       /could not be created or reopened safely/)

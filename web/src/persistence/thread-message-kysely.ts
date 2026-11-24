@@ -118,8 +118,9 @@ async function ownedMessage(db: Executor, owner: string, threadId: string, id: s
   const row = await messagesQuery(db).where('storyThreadMessages.id', '=', id)
     .where('storyThreadMessages.ownerUserId', '=', owner)
     .where('storyThreadMessages.threadId', '=', threadId)
+    .select('storyThreadMessages.verifiedCommitSha as verifiedCommitSha')
     .executeTakeFirst()
-  return row ? asMessage(row) : null
+  return row ? { ...asMessage(row), verifiedCommitSha: row.verifiedCommitSha } : null
 }
 
 async function jobSummary(db: Executor, owner: string, jobId: string): Promise<string> {

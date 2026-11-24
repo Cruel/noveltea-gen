@@ -296,9 +296,72 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       if (configuredCli === undefined) delete process.env.NT_NATIVE_CLI
       else process.env.NT_NATIVE_CLI = configuredCli
     }
-    const approve = await req(storyIds[0]!, firstId, 'POST', {
-      action: 'approve', revision: proposed.revision, digest: proposed.digest,
-    })
+    // Crash at each of the three durable approval boundaries. Both real
+    // persistence backends must recover the exact proposal without Pi.
+    const recoverApproval = async (storyId: string, turnId: string, proposal: any,
+      interruptedAt: 'reserved' | 'claimed' | 'settled') => {
+      const workspace = 'story-chat,' + storyId + ',' + turnId
+      const persistence = store.persistence.onboarding
+      const save = persistence.saveConversation.bind(persistence)
+      let interrupted = false
+      persistence.saveConversation = async (...args: Parameters<typeof save>) => {
+        const state = args[2] === workspace ? JSON.parse(args[4]) : null
+        const failAt = interruptedAt === 'reserved' ? 'claimed' :
+          interruptedAt === 'claimed' ? 'settled' : null
+        if (!interrupted && state?.graphOperation?.kind === 'approve' &&
+            state.graphOperation.status === failAt) {
+          interrupted = true
+          throw Error('synthetic approval process interruption')
+        }
+        const result = await save(...args)
+        if (!interrupted && interruptedAt === 'settled' && state?.graphOperation?.kind === 'approve' &&
+            state.graphOperation.status === 'settled') {
+          interrupted = true
+          throw Error('synthetic interruption after approval receipt')
+        }
+        return result
+      }
+      try {
+        const response = await req(storyId, turnId, 'POST', {
+          action: 'approve', revision: proposal.revision, digest: proposal.digest,
+        })
+        assert.notEqual(response.status, 200)
+        assert.equal(interrupted, true)
+      } finally { persistence.saveConversation = save }
+      const row = (await persistence.conversation(alice, repositoryId, workspace))!
+      const state = JSON.parse(row.state)
+      assert.equal(state.graphOperation.status, interruptedAt)
+      assert.equal(await store.persistence.generation.jobs.identity(turnId), null)
+      // Reload through another connection; the saved operation, not a
+      // browser replay or new model answer, is authoritative.
+      const interruptedStore = store
+      const recoveryStore = openSharedStudioStore(fixture.databaseOptions)
+      store = recoveryStore
+      auth = createStudioAuth(store, config)
+      try {
+      if (interruptedAt !== 'settled') {
+        state.startedAt = Date.now() - 11 * 60_000
+        assert.equal(await save(alice, repositoryId, workspace, row.revision + 1,
+          JSON.stringify({ ...state, revision: row.revision + 1 }), row.revision, 'now'), true)
+        const recovered = await req(storyId, turnId, 'POST', {
+          action: 'reconcile', revision: row.revision + 1,
+        })
+        assert.equal(recovered.status, 200, JSON.stringify(recovered.body))
+      }
+      const recovered = await req(storyId, turnId, 'GET')
+      assert.equal(recovered.status, 200, JSON.stringify(recovered.body))
+      assert.equal(recovered.body.session.phase, 'approved')
+      assert.deepEqual(recovered.body.session.proposal.foundation.planning,
+        proposal.proposal.foundation.planning)
+      assert.equal(await store.persistence.generation.jobs.identity(turnId), null)
+      return recovered
+      } finally {
+        await recoveryStore.close()
+        store = interruptedStore
+        auth = createStudioAuth(store, config)
+      }
+    }
+    const approve = await recoverApproval(storyIds[0]!, firstId, proposed, 'reserved')
     assert.equal(approve.status, 200, JSON.stringify(approve.body))
     assert.equal(approve.body.session.phase, 'approved')
     assert.equal(approve.body.continuation.state, 'blocked',
@@ -348,9 +411,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const delegatedSession = (await req(storyIds[1]!, delegatedId, 'GET')).body.session
     assert.equal(delegatedSession.phase, 'proposed')
     assert.equal(delegatedSession.proposal.task, delegatedPrompt)
-    assert.equal((await req(storyIds[1]!, delegatedId, 'POST', {
-      action: 'approve', revision: delegatedSession.revision, digest: delegatedSession.digest,
-    })).status, 200)
+    await recoverApproval(storyIds[1]!, delegatedId, delegatedSession, 'claimed')
     assert.equal((await listStoryThreads(store, alice, storyIds[1]!)).threads.length, 1)
     const collaborativeId = randomUUID()
     const collaborative = await submitFirstStoryTurn(auth, store, headers, url, {
@@ -417,9 +478,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.equal((await resolveRound(store)).status, 409, 'settled resume cannot be repeated')
     assert.equal(resolvingCalls, 1)
     assert.equal((await listStoryThreads(store, alice, storyIds[2]!)).threads.length, 1)
-    assert.equal((await req(storyIds[2]!, collaborativeId, 'POST', {
-      action: 'approve', revision: resolvedSession.revision, digest: resolvedSession.digest,
-    })).status, 200)
+    await recoverApproval(storyIds[2]!, collaborativeId, resolvedSession, 'settled')
     // An insufficiently constrained model cannot treat Autonomous as implied
     // permission to skip baseline questions. Correct it once within the same
     // reserved turn, without persisting its premature proposal.

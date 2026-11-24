@@ -29,7 +29,7 @@ export class ThreadMessageConflict extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 export interface ThreadMessagePersistence {
-  owned(owner: string, threadId: string, id: string): Promise<ThreadMessage | null>
+  owned(owner: string, threadId: string, id: string): Promise<(ThreadMessage & { verifiedCommitSha: string | null }) | null>
   markAdmitted(owner: string, jobId: string): Promise<void>
   membership(owner: string, threadId: string): Promise<{ storyId: string; archivedAt: string | null; creativePolicyJson: string }>
   read(owner: string, threadId: string): Promise<ChatReadModel>

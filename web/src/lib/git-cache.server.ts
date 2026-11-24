@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { startStoryJob, type JobStartResult } from '../../../src/job'
 import { prepareRecoveryFork } from '../../../src/recovery-fork'
@@ -122,13 +122,15 @@ export function allowedGitRemote(url: string): boolean {
   return github || gitlab || url.startsWith('file://')
 }
 
-function assertInput(input: CachedStoryRequest) {
+type CachedSourceRequest = Omit<CachedStoryRequest, 'jobId' | 'allowAbsentStory' | 'requireExistingJob'>
+
+function assertInput(input: CachedSourceRequest & Partial<Pick<CachedStoryRequest, 'jobId'>>) {
   if (!isAbsolute(input.cacheDirectory)) throw new GitCacheError(503, 'Git cache root must be absolute and configured by the server.')
   if (!input.ownerId || !input.repositoryId || !SHA.test(input.commit) ||
       !SAFE_DIRECTORY.test(input.directory) || input.directory.endsWith('/') ||
       input.directory.split('/').some(part => (!part && input.directory !== '') ||
         part === '.git' || ['*', '?', '[', ']', '!'].some(char => part.includes(char))) ||
-      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(input.jobId) || input.jobId.includes('..')) {
+      (input.jobId !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(input.jobId) || input.jobId.includes('..')))) {
     throw new GitCacheError(400, 'Invalid cached Story identity, revision, or directory.')
   }
   if (!allowedGitRemote(input.remoteUrl)) {
@@ -335,7 +337,9 @@ export async function forkCachedStory(parent: JobStartResult, bundle: RecoveryFo
     () => withRepositoryLock(parent.cacheRoot!, () => prepareRecoveryFork(parent, bundle)))
 }
 
-export async function acquireCachedStory(input: CachedStoryRequest) {
+async function withPinnedCachedSource<T>(input: CachedSourceRequest &
+  Partial<Pick<CachedStoryRequest, 'jobId' | 'allowAbsentStory' | 'requireExistingJob'>>,
+  inspect: (base: string, repositoryRoot: string, environment: NodeJS.ProcessEnv) => Promise<T>) {
   assertInput(input)
   const cache = resolve(input.cacheDirectory)
   const scoped = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -386,6 +390,44 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
         (input.verifiedBlobCount !== undefined && sizes.count !== input.verifiedBlobCount)) {
       throw new GitCacheError(422, 'Acquired Git tree does not match the Story API preflight size/count.')
     }
+    return inspect(base, repositoryRoot, environment)
+  }))
+}
+
+/** A detached, bounded source inspection has no Job manifest, branch, queue
+ * identity or Git commit. Hold the cache lock until the temporary checkout is
+ * removed so quota accounting cannot evict it while native validation reads. */
+export async function inspectCachedStory<T>(input: CachedSourceRequest,
+  inspect: (view: { worktreeRoot: string; worktreeStoryRoot: string; baseSha: string }) => Promise<T>) {
+  return withPinnedCachedSource(input, async (base, repositoryRoot, environment) => {
+    const root = await mkdtemp(join(repositoryRoot, 'source-inspection-'))
+    let added = false
+    try {
+      git(base, environment, 'worktree', 'add', '--detach', '--no-checkout', root, input.commit)
+      added = true
+      git(root, environment, 'sparse-checkout', 'set', '--no-cone', '--',
+        input.directory ? `/${input.directory}/**` : '/**')
+      git(root, environment, 'reset', '--hard', input.commit)
+      const storyRoot = join(root, input.directory)
+      if (await realpath(storyRoot) !== storyRoot ||
+          git(root, environment, 'rev-parse', 'HEAD') !== input.commit ||
+          git(root, environment, 'status', '--porcelain=v1', '--untracked-files=all'))
+        throw new GitCacheError(409, 'Pinned source inspection is not clean.')
+      const result = await inspect({ worktreeRoot: root, worktreeStoryRoot: storyRoot,
+        baseSha: input.commit })
+      if (git(root, environment, 'rev-parse', 'HEAD') !== input.commit ||
+          git(root, environment, 'status', '--porcelain=v1', '--untracked-files=all'))
+        throw new GitCacheError(409, 'Pinned source changed during inspection.')
+      return result
+    } finally {
+      if (added) git(base, environment, 'worktree', 'remove', '--force', root)
+      else await rm(root, { recursive: true, force: true })
+    }
+  })
+}
+
+export async function acquireCachedStory(input: CachedStoryRequest) {
+  return withPinnedCachedSource(input, async (base, repositoryRoot, environment) => {
     const storyRoot = join(base, input.directory)
     await mkdir(storyRoot, { recursive: true })
     if (await realpath(storyRoot) !== storyRoot) throw new GitCacheError(409, 'Cached Story path resolves through a symlink.')
@@ -405,5 +447,5 @@ export async function acquireCachedStory(input: CachedStoryRequest) {
       // intact for explicit recovery; do not overwrite or reset another job.
       throw new GitCacheError(409, 'Git job worktree could not be created or reopened safely. Inspect saved job state and cache.')
     }
-  }))
+  })
 }

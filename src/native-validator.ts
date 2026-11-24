@@ -5,7 +5,8 @@ import { nativeExecutable } from "./native-cli-version.js";
 
 type ObjectValue = Record<string, any>;
 const gitVars = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"];
-function invoke(executable: string, job: JobStartResult, command: string[]): {
+type SourceView = Pick<JobStartResult, "worktreeRoot" | "worktreeStoryRoot" | "baseSha">;
+function invoke(executable: string, job: SourceView, command: string[]): {
   exit: number; result: ObjectValue;
 } {
   const env = { ...process.env };
@@ -27,8 +28,14 @@ function invoke(executable: string, job: JobStartResult, command: string[]): {
   return { exit: run.status!, result: value };
 }
 export function nativeValidate(job: JobStartResult, pin: NativeValidatorPin): ValidationResult {
+  return { jobId: job.jobId, ...nativeValidateSource(job, pin) };
+}
+
+/** Native inspection of a pinned, read-only source does not need a Generation
+ * Job manifest or identity. The caller establishes the exact Git revision. */
+export function nativeValidateSource(job: SourceView, pin: NativeValidatorPin): Omit<ValidationResult, "jobId"> {
   const envelope = { contract: "noveltea-validator/v1" as const,
-    jobId: job.jobId, baseSha: job.baseSha, worktreeStoryRoot: job.worktreeStoryRoot,
+    baseSha: job.baseSha, worktreeStoryRoot: job.worktreeStoryRoot,
     validator: pin };
   try {
     const { exit, result: response } = invoke(nativeExecutable(), job,

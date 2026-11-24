@@ -40,7 +40,14 @@ and the existing source-bound Job/approval controls.
   changes do not resume the graph; only an authenticated, exact submission
   resumes a pending interrupt. A durable claim precedes inference, and a
   settled receipt can be reconciled without invoking Pi again. Uncertain
-  invocations require explicit reconciliation before retry. Older incomplete
+  invocations require explicit reconciliation before retry. Reserved or
+  claimed approval receipts settle the exact submitted proposal deterministically
+  after explicit reconciliation; a settled approval whose graph checkpoint
+  was interrupted is replayed as a receipt only. Initial source inspection
+  uses a detached, temporary, bounded checkout and native validation without
+  creating a Generation Job or commit; only previously verified Creative
+  Direction can bypass Discovery. The first Turn's saved source and current
+  Story source must agree before a graph is created. Older incomplete
   sessions require explicit restart; their prior evidence is retained in a
   reserved read-only archive, not imported into the new execution. No old
   execution path is available.
@@ -57,6 +64,8 @@ and the existing source-bound Job/approval controls.
 | Scenario | Test evidence |
 | --- | --- |
 | Baseline (SQLite and PostgreSQL): sparse first Turn, durable graph interrupt, independent OS-process resume and database reopening, draft without resume, concurrent and repeated resume fencing, recommended multi-question set, explicit and delegated answers, next question round, exact original objective, normalized provenance, native approval, blocked/retry recovery | `web/test/story-chat-discovery.test.ts` |
+| Approval interruption before claim, after claim and after receipt persistence, independent-connection recovery without a writer or new model call | `web/test/story-chat-discovery.test.ts` (SQLite and PostgreSQL) |
+| Detached pre-Discovery source inspection, approved and invalid native Foundation readiness, no Job manifest/branch or unrelated asset hydration, cleanup after interruption | `web/test/github-acquisition.test.ts` |
 | Repository discovery and Story Chat UI; compact radio/checkbox/Other, recommendation tooltip, free-text placeholder, default delegation, submitted answer history and summary | `web/test/pi-story-discovery-ui.test.tsx`, `web/test/story-chat-baseline-ui.test.tsx`, `web/test/author-question-set-ui.test.tsx`, `web/test/author-question-affordances.test.tsx` |
 | Approved baseline continues the exact original Story Turn once, resumes after a web/server restart, queues a single owner-scoped execution and commits the reviewed foundation once | `web/test/story-approved-continuation.test.ts`, `web/test/new-story-resume.test.ts`, `test/chat-approved-commit.test.ts` |
 | Specialist: owner-scoped question response/delegation, immutable receipt, invalid identity or forged approval rejection, saved drafts, failure recovery | `web/test/author-decisions-api.test.ts`, `test/specialist-choice.test.ts`, `web/test/specialist-question-drafts.test.ts` |

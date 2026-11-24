@@ -27,6 +27,8 @@ export async function storyChatDiscoveryRequest(
       (message.jobId && message.jobId !== firstTurnId) || message.phase === 'cancelled' || !story.headSha ||
       message.content.length > 4000)
     return Response.json({ error: 'This Story has no eligible saved first Turn.' }, { status: 404 })
+  if (membership?.archivedAt || (!message.jobId && message.verifiedCommitSha !== story.headSha))
+    return Response.json({ error: 'Saved Story discovery identity or source revision changed' }, { status: 409 })
   const binding: ChatDiscoveryBinding = {
     storyId, firstTurnId, repositoryId: story.repositoryId, directory: story.directory,
     sourceSha: story.headSha, originalObjective: message.content,
