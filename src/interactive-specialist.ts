@@ -7,7 +7,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS } from "./sandbox-pi-tools.js";
 import { lastSpecialistManifest } from "./specialist-manifest.js";
-import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
 import { requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
@@ -196,7 +196,8 @@ export async function authorInteractive(
   verifyDraft: (evidence: InteractiveEvidence) => Promise<string[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
-): Promise<InteractiveEvidence> {
+  round: AssignmentRoundCommand,
+): Promise<InteractiveEvidence | { round: AssignmentRoundResult }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const selected = SPECIALISTS[domain];
   const required = boundedPinnedSources(selected.name);
@@ -268,7 +269,7 @@ export async function authorInteractive(
     await onSession(sessionFile, session.sessionId);
     const pinned = pinnedSourcePaths(snapshot, required);
     let accepted: InteractiveEvidence | undefined;
-    const invocationProof = await recoverSubmittedAssignment({
+    const result = await executeAssignmentRound({
       session, directory: interactiveInvocationDirectory(job, assignment.workItemId, domain, session.sessionId),
       sourceDigest: original.sourceDigest, sessionRoots: [dir],
       initialPrompt: context.contextNote + interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools)),
@@ -311,7 +312,9 @@ export async function authorInteractive(
           code: createHash("sha256").update(detail).digest("hex"), detail,
         }));
       },
-    });
+    }, round);
+    if (result.status !== "accepted") return { round: result };
+    const invocationProof = result.proof;
     if (!accepted) throw Error("Original Interactive invocation has no independently checked result");
     await context.completed(sessionFile, session.sessionId);
     return { ...accepted, invocationProof };

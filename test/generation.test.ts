@@ -23,7 +23,6 @@ import { pendingDigest } from "../src/pending-work-amendments.js";
 import { selectStoryOrchestrator } from "../src/orchestrator-selection.js";
 import { parseStoryPlanning } from "../src/story-planning.js";
 import { nativeStoryMetrics, reviewArchitectureMetrics } from "../src/story-metrics.js";
-import { runCharacterWorldJob } from "../src/character-world.js";
 import { renderFoundation } from "../src/demo.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { startStoryJob } from "../src/job.js";
@@ -5143,12 +5142,6 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
   Object.assign(process.env, f.env);
   const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
   try {
-    const produced = await withJobModelRuntime(runtime, () => runCharacterWorldJob({
-      story: f.story, job: "single", action: "run", fixture: false,
-      task: f.start[3]!, turnPlanDigest: turnDigest,
-      skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id }));
-    assert.equal(produced.status, "foundations-conflict-reported");
-    assert.equal(observed.length, 2);
     const saver = SqliteSaver.fromConnString(paused.checkpointPath);
     try {
       const graph = createGenerationGraph(saver, "cli");
@@ -5161,7 +5154,7 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
         request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest,
           provider: scriptedModel.provider, model: scriptedModel.id },
       }, "author_update_intake");
-      const admitted = await graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] });
+      const admitted = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
       assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "specialist-result",
         JSON.stringify({ status: admitted.status, reason: admitted.reason,
           recovery: admitted.recoveryLifecycle, sources: admitted.recoverySources,
@@ -5280,19 +5273,56 @@ test("R05 World and Character metadata and independent Review corrections resume
   const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
   Object.assign(process.env, f.env);
   const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
-  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let saver = SqliteSaver.fromConnString(paused.checkpointPath);
   try {
-    const graph = createGenerationGraph(saver, "cli");
+    let graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
     const initial = (await graph.getState(cfg)).values;
     const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "foundations");
     await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
       request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
     }, "author_update_intake");
+    async function crashAtSubmission(status: string, calls: number, options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
+      const abort = new AbortController();
+      const put = saver.put.bind(saver);
+      const putWrites = saver.putWrites.bind(saver);
+      let crashed = false;
+      const error = Error("R14C injected SQLite loss after " + status);
+      saver.put = async (...args) => {
+        if (crashed) throw error;
+        return put(...args);
+      };
+      saver.putWrites = async (config, writes, task) => {
+        if (crashed) throw error;
+        const submission = writes.find(([channel]) => channel === "submission")?.[1] as
+          { status?: string } | undefined;
+        if (config.configurable?.checkpoint_ns?.includes("assignment-") && submission?.status === status) {
+          crashed = true;
+          abort.abort(error);
+          throw error;
+        }
+        return putWrites(config, writes, task);
+      };
+      await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(null, {
+        ...cfg, ...options, signal: abort.signal, durability: "sync",
+      })), err => { if (!crashed) throw err; return true; });
+      assert.ok(crashed, "Actual child SQLite checkpoint must be lost");
+      assert.equal(observed.length, calls);
+      saver.db.close();
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      graph = createGenerationGraph(saver, "cli");
+    }
+    await crashAtSubmission("review-handoff", 5, { interruptBefore: ["assess_recovery"] });
+    const firstCommit = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const firstPoint = (await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === firstCommit);
+    assert.equal(firstPoint?.workItem, "world-foundations");
+    assert.equal(firstPoint?.semanticReview, "required-pending", "No independent Review before the native publication is checkpointed");
     const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
     assert.equal(failed.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: failed.reason, recovery: failed.recoveryLifecycle, calls: observed.length}));
     const original = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
     assert.equal(original.units[1].phase, "pending");
+    assert.equal(original.units[0].invocationProof.ordinal, 1);
+    assert.match(original.units[0].assignmentKey, /^[a-f0-9]{64}$/);
     const preceding = (await inspectRecoveryCheckpoints(f.job)).filter(point =>
       ["foundation", "global-architecture"].includes(point.workItem));
     const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
@@ -5312,15 +5342,26 @@ test("R05 World and Character metadata and independent Review corrections resume
     assert.equal(reviewed.find(point => point.commitSha === correctedHead)?.semanticReview, "passed");
     assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), corrected.recoveryLifecycle);
     assert.equal(JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8")).units[1].phase, "pending");
+    // Reopen the actual parent and child journal after passing World Review.
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    graph = createGenerationGraph(saver, "cli");
     const resumed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
     assert.equal(resumed.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: resumed.reason, recovery: resumed.recoveryLifecycle, sources: resumed.recoverySources.slice(-1), calls: observed.length}));
     const after = JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
     assert.deepEqual(after.units[0], original.units[0]);
     assert.equal(after.units[1].beforeHead, correctedHead);
     assert.equal(after.units[1].phase, "committed");
+    assert.equal(after.units[1].invocationProof.ordinal, 1);
+    assert.notEqual(after.units[1].assignmentKey, original.units[0].assignmentKey);
+    assert.notEqual(after.units[1].piSessionFile, original.units[0].piSessionFile);
     assert.equal(observed.length, 17);
     const characterSelected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(characterSelected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(characterSelected.recoveryLifecycle));
+    await crashAtSubmission("repair-round", 19, { interruptAfter: ["independent_assignment_review"] });
+    const repairedCharacterHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(repairedCharacterHead, after.units[1].commitSha);
+    assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === repairedCharacterHead)?.semanticReview, "required-pending");
     const characterCorrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
     assert.equal(characterCorrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: characterCorrected.reason, recovery: characterCorrected.recoveryLifecycle, calls: observed.length}));
     assert.equal(characterCorrected.result?.status, "foundations-committed");
@@ -5467,6 +5508,179 @@ for (const domain of ["event", "composition"] as const) test(`R07 ${domain} comm
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
 });
 
+test("R14C Choice and Puzzle native and independent Review corrections preserve their distinct original assignments", { skip: !available, timeout: 120_000 }, async () => {
+  // The fixture supplies valid native record bytes, not the authority or
+  // recovery behavior of the production writer under test.
+  async function prepare(name: string) {
+    const f = setup(name);
+    f.env.NT_EVENT_FIXTURE_CASE = "decision-pending";
+    const contract = JSON.parse(readFileSync(f.contract, "utf8"));
+    contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
+    writeFileSync(f.contract, JSON.stringify(contract));
+    saveFixtureTurn(f.job, contract, f.start[3]!, ["The player must make a consequential local Choice."]);
+    assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
+    await sealFixtureGenerationCheckpoint(f, "foundation");
+    assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
+    await sealFixtureGenerationCheckpoint(f, "global-architecture");
+    assert.match(f.cli(["foundations", "run", "--fixture", "--skills-source", source], false), /review|independent/i);
+    await sealFixtureGenerationCheckpoint(f, "world-foundations");
+    assert.equal(f.cli(["foundations", "run", "--fixture", "--skills-source", source]).status, "foundations-committed");
+    await sealFixtureGenerationCheckpoint(f, "character-foundations");
+    const paused = f.cli(["generate", "resume", "--pause-after", "event"]);
+    assert.equal(paused.status, "paused");
+    await sealFixtureGenerationCheckpoint(f, "event-disclosure");
+    return { f, paused };
+  }
+  const template = (await prepare("r14c-interactive-template")).f;
+  const fixture = template.cli(["generate", "resume", "--pause-after", "interactive"]);
+  assert.equal(fixture.status, "blocked");
+  await sealFixtureGenerationCheckpoint(template, "interactive-choice-disclosure");
+  const fixturePuzzle = template.cli(["generate", "resume", "--pause-after", "interactive"]);
+  assert.ok(["paused", "blocked"].includes(fixturePuzzle.status), JSON.stringify(fixturePuzzle));
+  const saved = JSON.parse(readFileSync(join(template.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+  const records = saved.units.map((u: { commitSha: string }) => {
+    const paths = git(template.job.worktreeRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", u.commitSha).split("\n")
+      .map(path => path.replace(/^story\//, ""));
+    return Object.fromEntries(paths.map(path => [path, git(template.job.worktreeRoot, "show", u.commitSha + ":story/" + path) + "\n"]));
+  }) as Record<string, string>[];
+  const { f, paused } = await prepare("r14c-interactive-real");
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const paths = ["choice-points/loyalty.md", "puzzles/ledger-proof.md"];
+  const quote = ["The player recognizes the friendship cost before making the selection.",
+    "The clue comparison makes the two proof routes intelligible before either is chosen."];
+  const write = (path: string, content: string, id: string) => ({
+    type: "toolCall" as const, name: "write", id, arguments: { path, content },
+  });
+  const { runtime, observed } = await scriptedStoryRuntime((i, context) => {
+    const n = i < 10 ? 0 : 1, step = i % 10;
+    const domain = n === 0 ? "nt-interactive-narrative" : "nt-puzzle-design";
+    const path = paths[n]!, bytes = records[n]![path]!;
+    assert.ok(bytes, path);
+    const manifest = { modifiedRecords: Object.keys(records[n]!), architecturalConflicts: [],
+      laterObligations: ["Conditional player-facing prose must be reviewed for choice and clue visibility"] };
+    if (step === 0) return { content: scriptedReadCalls(boundedPinnedSources(domain).map(p => "skill://" + p), i), reason: "toolUse" };
+    if (step === 1) return { content: Object.entries(records[n]!).map(([p, content], k) =>
+      write(p, p === path ? content.replace("status: draft", "status: draft\nunknown_field: true") : content, "r14c-initial-" + i + "-" + k)), reason: "toolUse" };
+    if (step === 2 || step === 4) return { content: scriptedText(manifest), reason: "stop" };
+    if (step === 3) return { content: [write(path, bytes, "r14c-metadata-" + i)], reason: "toolUse" };
+    if (step === 5) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), i), reason: "toolUse" };
+    if (step === 7) return { content: [write(path, bytes + "\n" + quote[n] + "\n", "r14c-review-" + i)], reason: "toolUse" };
+    if (step === 8) return { content: scriptedText("Clarified the source-linked obligation."), reason: "stop" };
+    if (step === 6 || step === 9) {
+      const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+      const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+        .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+      assert.ok(prompt);
+      const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+      const item = packet.items[0];
+      const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1 };
+      return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: step === 6 ? "fail" : "pass",
+        findings: step === 6 ? [{ ...ref, kind: "missing-requirement", message: "The player-facing evidence is insufficiently explicit.",
+          requiredCorrection: quote[n], affectedPaths: [path] }] : [],
+        evidence: step === 9 ? [{ ...ref, explanation: quote[n] }] : [],
+        ...(step === 9 ? { progressDiagnosis: { status: "material", reason: "The added prose addresses the original gap.",
+          evidence: { path, quote: quote[n], change: "added" } } } : {}),
+      }), reason: "stop" };
+    }
+    throw Error("Unexpected Interactive model call " + i);
+  });
+  const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  let saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  try {
+    let graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const initial = (await graph.getState(cfg)).values;
+    const item = paused.inventory.items.find((entry: { id: string }) => entry.id === "interactive:milestone.disclosure");
+    assert.ok(item);
+    await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null,
+      request: { ...initial.request, fixture: false, turnPlanDigest: turnDigest, provider: scriptedModel.provider, model: scriptedModel.id },
+    }, "author_update_intake");
+    async function crashAtSubmission(status: string, calls: number, options: { interruptBefore?: string[]; interruptAfter?: string[] }) {
+      const abort = new AbortController();
+      const put = saver.put.bind(saver);
+      const putWrites = saver.putWrites.bind(saver);
+      let crashed = false;
+      const error = Error("R14C injected SQLite loss after " + status);
+      saver.put = async (...args) => {
+        if (crashed) throw error;
+        return put(...args);
+      };
+      saver.putWrites = async (config, writes, task) => {
+        if (crashed) throw error;
+        const submission = writes.find(([channel]) => channel === "submission")?.[1] as
+          { status?: string } | undefined;
+        if (config.configurable?.checkpoint_ns?.includes("assignment-") && submission?.status === status) {
+          crashed = true;
+          abort.abort(error);
+          throw error;
+        }
+        return putWrites(config, writes, task);
+      };
+      await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(null, {
+        ...cfg, ...options, signal: abort.signal, durability: "sync",
+      })), err => { if (!crashed) throw err; return true; });
+      assert.ok(crashed, "Actual child SQLite checkpoint must be lost");
+      assert.equal(observed.length, calls);
+      saver.db.close();
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      graph = createGenerationGraph(saver, "cli");
+    }
+    await crashAtSubmission("interactive-choice-committed", 5, { interruptBefore: ["assess_recovery"] });
+    const firstCommit = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    const firstPoint = (await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === firstCommit);
+    assert.equal(firstPoint?.workItem, "interactive-choice-disclosure");
+    assert.equal(firstPoint?.semanticReview, "required-pending");
+    const original = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(original.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: original.reason, calls: observed.length}));
+    assert.equal(observed.length, 7);
+    const choice = JSON.parse(readFileSync(join(f.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+    assert.equal(choice.units[1].phase, "pending");
+    assert.equal(choice.units[0].invocationProof.ordinal, 1);
+    const decision = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(decision.recoveryLifecycle.decision?.action, "known-correction");
+    const corrected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
+    assert.equal(corrected.recoveryLifecycle.phase, "idle", JSON.stringify({reason: corrected.reason, calls: observed.length}));
+    assert.equal(corrected.result, null);
+    assert.equal(observed.length, 10);
+    const choiceHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(choiceHead, choice.units[0].commitSha);
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    graph = createGenerationGraph(saver, "cli");
+    const negative = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(negative.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: negative.reason, calls: observed.length}));
+    assert.equal(observed.length, 17);
+    const both = JSON.parse(readFileSync(join(f.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
+    assert.deepEqual(both.units[0], choice.units[0]);
+    assert.equal(both.units[1].beforeHead, choiceHead);
+    assert.equal(both.units[1].invocationProof.ordinal, 1);
+    assert.notEqual(both.units[0].assignmentKey, both.units[1].assignmentKey);
+    assert.notEqual(both.units[0].piSessionFile, both.units[1].piSessionFile);
+    const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+    assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction");
+    await crashAtSubmission("repair-round", 19, { interruptAfter: ["independent_assignment_review"] });
+    const repairedPuzzleHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+    assert.notEqual(repairedPuzzleHead, both.units[1].commitSha);
+    assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === repairedPuzzleHead)?.semanticReview, "required-pending");
+    const complete = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
+    assert.equal(complete.recoveryLifecycle.phase, "idle", JSON.stringify({reason: complete.reason, calls: observed.length}));
+    assert.equal(complete.result?.status, "interactive-slice-committed");
+    assert.equal(observed.length, 20);
+    assert.equal(complete.result?.headSha, git(f.job.worktreeRoot, "rev-parse", "HEAD"));
+    for (let i = 0; i < 2; i++) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, paths[i]!), "utf8").includes(quote[i]!));
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  } finally {
+    saver.db.close();
+    restoreSandbox();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("R06 real Interactive Pi manifest correction preserves the original session and zero-write dependency", {
   skip: !available, timeout: 120_000,
 }, async () => {
@@ -5505,7 +5719,20 @@ test("R06 real Interactive Pi manifest correction preserves the original session
       skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id,
       generationObjective: f.start[3]!, turnPlanDigest: turn.digest };
     const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
-    const result = await withJobModelRuntime(runtime, () => runInteractiveWorkItem(opts));
+    const assignmentKey = "a".repeat(64);
+    const initial = await withJobModelRuntime(runtime, () => runInteractiveWorkItem({
+      ...opts, round: { assignmentKey, command: { phase: "invoke" } },
+    }));
+    assert.equal(initial.status, "writer-round");
+    assert.equal(initial.round?.status, "settled");
+    assert.ok(initial.round);
+    await assert.rejects(withJobModelRuntime(runtime, () => runInteractiveWorkItem({
+      ...opts, round: { assignmentKey: "b".repeat(64), command: { phase: "verify", proof: initial.round!.proof } },
+    })), /Foreign Interactive assignment round/);
+    assert.equal(observed.length, 3);
+    const result = await withJobModelRuntime(runtime, () => runInteractiveWorkItem({
+      ...opts, round: { assignmentKey, command: { phase: "verify", proof: initial.round!.proof } },
+    }));
     assert.equal(result.status, "interactive-conflict-reported");
     assert.equal(observed.length, 3);
     assert.equal(observed[2]!.tools.includes("write"), false);

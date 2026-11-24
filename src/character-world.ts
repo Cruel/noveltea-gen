@@ -22,7 +22,7 @@ import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { CompletionContract, Plan } from "./architecture.js";
-import { nativeMetadataDefects, inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { nativeMetadataDefects, inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { lastSpecialistManifest } from "./specialist-manifest.js";
 import { authorCharacterWorld,
   type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
@@ -50,6 +50,7 @@ interface Unit {
   conflictDigest?: string;
   piSessionSha256?: string;
   invocationProof?: AssignmentInvocationProof;
+  assignmentKey?: string;
   invocationSource?: string;
   invocationTurnDigest?: string | null;
   invocationChoiceId?: string;
@@ -91,6 +92,7 @@ export interface CharacterWorldOptions {
   action: "run" | "inspect" | "reconcile";
   /** Generation dispatches one independently reviewable unit at a time. */
   unit?: FoundationDomain;
+  round?: { assignmentKey: string; command: AssignmentRoundCommand };
   recoveryDigest?: string;
   skillsSource?: string;
   validatorSource?: string;
@@ -298,7 +300,7 @@ function invocationSource(job: JobStartResult, receipt: Receipt, unit: Unit, tur
     base: job.baseSha, source: unit.beforeHead, workItem: unit.id, planVersion: receipt.planVersion,
     contract: receipt.contractDigest, snapshot: receipt.snapshot?.id, provider: receipt.provider,
     model: receipt.model, assignment: unit.assignment, validator: job.validatorVersion,
-    turn, authorChoiceId: unit.invocationChoiceId ?? null }));
+    turn, assignmentKey: unit.assignmentKey, authorChoiceId: unit.invocationChoiceId ?? null }));
 }
 async function ownedEffect(job: JobStartResult, unit: Unit, assign: FoundationAssignment) {
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
@@ -887,6 +889,16 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         (input.model && input.model !== receipt.model)) {
       throw new Error("Foundations specialist worker configuration differs from the saved assignment.");
     }
+    if (input.action === "run" && input.round) {
+      if (!input.unit) throw Error("Checkpointed Foundation round requires an exact subunit.");
+      const selected = receipt.units[input.unit === "world" ? 0 : 1];
+      if (selected.assignmentKey && selected.assignmentKey !== input.round.assignmentKey)
+        throw Error("Foreign Foundation assignment round.");
+      if (selected.invocationProof && input.round.command.phase !== "invoke" &&
+          (input.round.command.phase !== "verify" ||
+           JSON.stringify(input.round.command.proof) !== JSON.stringify(selected.invocationProof)))
+        throw Error("Foundation round differs from its accepted invocation proof.");
+    }
     if (input.action === "run" && receipt.units.every(unit => unit.phase === "committed")) {
       const [world, character] = receipt.units;
       verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha!);
@@ -1023,6 +1035,13 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       if (JSON.stringify(assign?.creativePolicy ?? DEFAULT_CREATIVE_POLICY) !== JSON.stringify(policy))
         throw new Error("Foundation assignment creative policy differs from the original Turn receipt.");
       if (!assign || assign.domain !== unit.domain) throw Error("Saved specialist assignment missing or mismatched.");
+      if (state.worker === "pi" && (unit.phase === "pending" || resumingChoice || resumingInvocation)) {
+        if (!input.round || !/^[a-f0-9]{64}$/.test(input.round.assignmentKey) ||
+            unit.assignmentKey && unit.assignmentKey !== input.round.assignmentKey ||
+            !unit.assignmentKey && (resumingInvocation || input.round.command.phase !== "invoke"))
+          throw Error("World/Character Pi writer requires its original checkpointed assignment round.");
+        unit.assignmentKey = input.round.assignmentKey;
+      }
       if (unit.phase === "pending" || resumingChoice || resumingInvocation) {
         if (resumingInvocation) {
           if (unit.invocationTurnDigest !== (turnEvidence?.digest ?? null))
@@ -1042,7 +1061,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         }
         unit.phase = "writing";
         await persist(file, state);
-        let evidence: SpecialistEvidence | SpecialistChoiceProposal;
+        let evidence: SpecialistEvidence | SpecialistChoiceProposal | { round: AssignmentRoundResult };
         if (state.worker === "fixture") evidence = await fixtureAuthor(job, unit, assign);
         else {
           if (!resumingInvocation) {
@@ -1095,8 +1114,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
               },
               effect: () => ownedEffect(job, unit, assign),
             }, choice ?? (resumingInvocation && unit.invocationChoiceId
-              ? await inspectSpecialistChoice(job, unit.invocationChoiceId) : undefined));
+              ? await inspectSpecialistChoice(job, unit.invocationChoiceId) : undefined), input.round!.command);
         }
+        if ("round" in evidence) return evidence.round;
         if ("authorQuestion" in evidence) {
           // Only an independently audited safe draft can be suspended.
           await auditPaths(job, unit, assign, evidence.claimedPaths, true);
@@ -1180,9 +1200,14 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     // The Generation child owns each invocation/Review boundary. The direct
     // operator command uses the very same serialized unit implementation and
     // cannot cross the native independent Review gate either.
-    if (input.unit !== "character") await executeUnit(receipt.units[0], receipt);
-    if (input.unit !== "world" && receipt.units[0].phase !== "conflicted")
-      await executeUnit(receipt.units[1], receipt);
+    if (input.unit !== "character") {
+      const round = await executeUnit(receipt.units[0], receipt);
+      if (round) return { ...output(job, receipt), status: "writer-round", round };
+    }
+    if (input.unit !== "world" && receipt.units[0].phase !== "conflicted") {
+      const round = await executeUnit(receipt.units[1], receipt);
+      if (round) return { ...output(job, receipt), status: "writer-round", round };
+    }
     if (input.unit === "world" && receipt.units[0].phase === "committed" &&
         receipt.units[1].phase === "pending") {
       return { ...output(job, receipt), status: "review-handoff", headSha: receipt.units[0].commitSha! };

@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { authorInteractive, interactiveInvocationDirectory, parseInteractiveManifest, type InteractiveAssignment, type InteractiveDomain, type InteractiveEvidence } from "./interactive-specialist.js";
-import { inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof, type AssignmentRoundCommand } from "./assignment-metadata-recovery.js";
 import { inspectPiPolicy } from "./job-pi-policy.js";
 import { eventCompletionDigest, currentMilestoneChoiceBinding } from "./event-work.js";
 import { startStoryJob, type JobStartResult } from "./job.js";
@@ -39,6 +39,7 @@ interface Unit {
   id: string; domain: InteractiveDomain; phase: Phase;
   beforeHead?: string; commitSha?: string; paths?: string[]; digest?: string;
   claimedPaths?: string[]; piSessionFile?: string; skillReads?: string[];
+  assignmentKey?: string;
   piSessionId?: string; invocationProof?: AssignmentInvocationProof;
   /** Native pre-writer baseline and exact original assignment, bound to the first grant. */
   invocation?: { baseline: Report; assignment: InteractiveAssignment; sourceDigest: string };
@@ -98,6 +99,7 @@ export interface InteractiveOptions {
   /** Production graph can checkpoint Choice and Puzzle independently; the
    * persisted two-unit receipt and original writer/review gates are shared. */
   unit?: InteractiveDomain;
+  round?: { assignmentKey: string; command: AssignmentRoundCommand };
   /** The composite parent owns the boundary between independently reviewed units. */
   deferBoundary?: boolean;
   interactionInventory?: ExecutionItem[];
@@ -407,7 +409,7 @@ async function interactiveSourceDigest(job: JobStartResult, receipt: Receipt, un
     throw Error("Original Interactive invocation lacks pinned model/source");
   return digest(JSON.stringify({ job: job.jobId, thread: job.threadId, base: job.baseSha,
     branch: job.branch, plan: receipt.planDigest, planVersion: receipt.planVersion,
-    head: unit.beforeHead, unit: unit.id, eventSource: receipt.eventSource,
+    head: unit.beforeHead, unit: unit.id, assignmentKey: unit.assignmentKey, eventSource: receipt.eventSource,
     blueprint: receipt.correctedBlueprintPin, snapshot: receipt.snapshot.id,
     worker: receipt.worker, provider: receipt.provider, model: receipt.model,
     selected: resolved.selected, thinking: resolved.thinking, validator: job.validatorVersion,
@@ -1411,6 +1413,16 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           { id: "interactive-puzzle-" + input.milestone.slice(10), domain: "puzzle", phase: "pending" }] };
       await persist(file, receipt);
     }
+    if (input.action === "run" && input.round) {
+      if (!input.unit) throw Error("Checkpointed Interactive round requires an exact subunit.");
+      const selected = receipt.units[input.unit === "choice" ? 0 : 1];
+      if (selected.assignmentKey && selected.assignmentKey !== input.round.assignmentKey)
+        throw Error("Foreign Interactive assignment round.");
+      if (selected.invocationProof && input.round.command.phase !== "invoke" &&
+          (input.round.command.phase !== "verify" ||
+           JSON.stringify(input.round.command.proof) !== JSON.stringify(selected.invocationProof)))
+        throw Error("Interactive round differs from its accepted invocation proof.");
+    }
     milestoneBlueprint ??= await reviewedMilestoneHandoff(job, event);
     if (JSON.stringify(receipt.correctedBlueprintPin) !== JSON.stringify(consumedCorrection(milestoneBlueprint)))
       throw Error("Interactive receipt lost its consumed Blueprint supersession.");
@@ -1566,6 +1578,13 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       const assign = { ...selected,
         ...(puzzleDecision ? { puzzleObligation: puzzleDecision } : {}),
         ...(input.task ? { authorTask: input.task } : {}) };
+      if (state.worker === "pi" && ["pending", "writing"].includes(unit.phase)) {
+        if (!input.round || !/^[a-f0-9]{64}$/.test(input.round.assignmentKey) ||
+            unit.assignmentKey && unit.assignmentKey !== input.round.assignmentKey ||
+            !unit.assignmentKey && (unit.phase !== "pending" || input.round.command.phase !== "invoke"))
+          throw Error("Interactive Pi writer requires its original checkpointed assignment round.");
+        unit.assignmentKey = input.round.assignmentKey;
+      }
       if (unit.phase === "pending") {
         await preflightPiAssignment(job, "interactive:" + assign.workItemId + ":" + unit.domain,
           state.worker === "pi" ? { provider: state.provider, model: state.model, thinking: state.thinking } : undefined);
@@ -1662,14 +1681,16 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             evidence = await fixtureAuthor(job, unit.domain, assign);
           } else {
             await authorizeInvocation();
-            evidence = await authorInteractive(job, state.snapshot!, unit.domain, assign, state.provider, state.model, state.thinking,
+            const authored = await authorInteractive(job, state.snapshot!, unit.domain, assign, state.provider, state.model, state.thinking,
               async (session, id) => {
                 if (unit.piSessionFile && (unit.piSessionFile !== session || unit.piSessionId !== id))
                   throw Error("Interactive invocation session changed");
                 unit.piSessionFile = session; unit.piSessionId = id; await persist(file, state);
               }, verifyDraft, { sourceDigest: unit.invocation!.sourceDigest,
                 sessionFile: unit.piSessionFile, sessionId: unit.piSessionId,
-                authorize: authorizeInvocation, effect: () => interactiveEffect(job, before) });
+                authorize: authorizeInvocation, effect: () => interactiveEffect(job, before) }, input.round!.command);
+            if ("round" in authored) return authored.round;
+            evidence = authored;
             unit.invocationProof = evidence.invocationProof;
             if (!unit.invocationProof || !unit.piSessionId || !unit.piSessionFile)
               throw Error("Interactive result lacks its original settled invocation");
@@ -1809,9 +1830,14 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     }
     // The production parent checkpoints each subunit using the shared child.
     // The standalone domain command is only a serial adapter over the same receipts.
-    if (input.unit !== "puzzle") await executeUnit(receipt.units[0]!, receipt);
-    if (input.unit !== "choice" && receipt.units[0].phase !== "conflicted")
-      await executeUnit(receipt.units[1]!, receipt);
+    if (input.unit !== "puzzle") {
+      const round = await executeUnit(receipt.units[0]!, receipt);
+      if (round) return { ...output(job, receipt, input.unit), status: "writer-round", round };
+    }
+    if (input.unit !== "choice" && receipt.units[0].phase !== "conflicted") {
+      const round = await executeUnit(receipt.units[1]!, receipt);
+      if (round) return { ...output(job, receipt, input.unit), status: "writer-round", round };
+    }
     if (receipt.units.some(unit => unit.phase === "conflicted")) {
       // No next-stage or deferred-idea authorization follows a negative
       // original assignment. The generation controller owns its disposition.

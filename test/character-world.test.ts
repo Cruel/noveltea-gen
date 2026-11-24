@@ -205,9 +205,16 @@ test("C04 original World Pi transcript settles a no-write contradiction without 
   process.env.NT_SKILL_CACHE_DIR = join(root, "skills");
   const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
   try {
+    const options = { story: f.story, job: "draft", action: "run" as const, fixture: false,
+      unit: "world" as const, skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id };
+    const assignmentKey = "b".repeat(64);
+    const initial = await withJobModelRuntime(runtime, () => runCharacterWorldJob({
+      ...options, round: { assignmentKey, command: { phase: "invoke" } },
+    }));
+    assert.equal(initial.status, "writer-round");
+    assert.ok(initial.round);
     const report = await withJobModelRuntime(runtime, () => runCharacterWorldJob({
-      story: f.story, job: "draft", action: "run", fixture: false,
-      skillsSource: source, provider: scriptedModel.provider, model: scriptedModel.id,
+      ...options, round: { assignmentKey, command: { phase: "verify", proof: initial.round!.proof } },
     }));
     assert.equal(report.status, "foundations-conflict-reported");
     assert.equal(observed.length, 2, "One original specialist turn + mandatory pinned reads");

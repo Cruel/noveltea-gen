@@ -35,7 +35,8 @@ export function usesSharedAssignmentReview(workItem: string | undefined | null):
 /** Cutover registry: only lanes with the actual bounded Review adapter are
  * admitted here; the older policy registry alone is not proof of migration. */
 export function usesCheckpointedReviewRounds(workItem: string): boolean {
-  return workItem === "foundation";
+  return ["foundation", "world-foundations", "character-foundations"].includes(workItem) ||
+    /^interactive-(?:choice|puzzle)-[a-z][a-z0-9-]*$/.test(workItem);
 }
 /** Studio Discovery precedes any Generation job or Git write grant. */
 export type DiscoveryAssignmentIdentity = Readonly<{
@@ -130,7 +131,7 @@ type LifecycleState<I extends LifecycleIdentity> = ReturnType<typeof lifecycleCh
  * Keep its actual committed receipt alongside the outcome for parent replay. */
 export type AssignmentVerifiedSubmission<I extends LifecycleIdentity> = Readonly<{
   submission: AssignmentSubmission;
-} & ({ outcome: AssignmentOutcome<I> } | { correction: AssignmentCorrection })>;
+} & ({ outcome: AssignmentOutcome<I> } | { correction: AssignmentCorrection } | { reviewPending: true })>;
 
 export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> = Readonly<{
   /** Reauthenticate the parent authorization, source and uncertain effects. */
@@ -236,6 +237,12 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
             throw Error("Correction lacks its verified successor submission.");
           return { submission: verified.submission, correction: verified.correction };
         }
+        if ("reviewPending" in verified) {
+          if (!verified.reviewPending || verified.submission.receiptRef === state.submission.receiptRef ||
+              !/^[a-f0-9]{40}$/.test(verified.submission.headSha ?? ""))
+            throw Error("Independent Review requires a distinct native-verified submission.");
+          return { submission: verified.submission, correction: null, outcome: null };
+        }
         assertAssignmentOutcome(state.identity, verified.outcome);
         return { outcome: verified.outcome, submission: verified.submission, correction: null };
       }
@@ -285,8 +292,9 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
       state => state.outcome ? state.outcome.status === "awaiting-author" ? "author_gate" : END : "verify_original",
       ["author_gate", "verify_original", END])
     .addConditionalEdges("verify_original",
-      state => state.correction ? "correct_original" : state.outcome?.status === "awaiting-author" ? "author_gate" : END,
-      ["correct_original", "author_gate", END])
+      state => state.correction ? "correct_original" : state.outcome?.status === "awaiting-author" ? "author_gate" :
+        !state.outcome && state.submission ? "verify_original" : END,
+      ["correct_original", "verify_original", "author_gate", END])
     .addConditionalEdges("correct_original",
       state => state.outcome ? state.outcome.status === "awaiting-author" ? "author_gate" : END : "verify_original",
       ["author_gate", "verify_original", END])

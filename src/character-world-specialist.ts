@@ -14,7 +14,7 @@ import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
-import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentDefect, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { lastSpecialistManifest } from "./specialist-manifest.js";
 import { readJobControl } from "./job-control.js";
 import { StoryCancelledError } from "./story-interruption.js";
@@ -146,7 +146,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     effect: () => Promise<string>;
     savedSession?: { id: string; file: string };
   },
-  resume?: SpecialistChoiceReceipt): Promise<SpecialistEvidence | SpecialistChoiceProposal> {
+  resume: SpecialistChoiceReceipt | undefined, round: AssignmentRoundCommand): Promise<SpecialistEvidence | SpecialistChoiceProposal | { round: AssignmentRoundResult }> {
   const selected = DOMAINS[assignment.domain];
   const required = [selected.name + "/SKILL.md", ...CATALOG];
   const project = await openStoryProject(job.worktreeStoryRoot);
@@ -165,7 +165,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
   const dir = join(job.stateDir, "character-world-sessions", assignment.domain);
   const context = await preparePiContext(job, project, {
     group: "foundations:" + assignment.domain, step: "foundations:" + assignment.domain,
-    paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir,
+    paths: assignment.sourcePaths, snapshot: snapshot.id, provider, model: modelId, directory: dir, insideWriter: true,
     task: { kind: "character", ids: assignment.milestoneIds, scope: "related" },
   }, runtime);
   const sandboxTools = await selectSandboxPiTools(job, snapshot, skills);
@@ -235,7 +235,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       laterObligations: manifest.laterObligations as string[],
       piSessionId: session.sessionId, piSessionFile: sessionFile,
     });
-    const proof = await recoverSubmittedAssignment({
+    const result = await executeAssignmentRound({
       session, directory: invocation.directory(session.sessionId),
       sourceDigest: invocation.sourceDigest, sessionRoots: [dir],
       responseKind: "manifest-or-choice",
@@ -262,7 +262,9 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
         if ("authorDecisionRequest" in manifest) return [];
         return verifyDraft(toEvidence(manifest, skillReads));
       },
-    });
+    }, round);
+    if (result.status !== "accepted") return { round: result };
+    const proof = result.proof;
     const final = session.messages.filter(m => m.role === "assistant").at(-1);
     if (!final || final.role !== "assistant" || final.stopReason !== "stop")
       throw Error("Original foundation specialist response is not settled.");
