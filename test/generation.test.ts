@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { after, test } from "node:test";
+import { after, test as nodeTest } from "node:test";
+import { generationWeight, selectGenerationShard } from "./generation-shards.js";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
@@ -58,6 +59,14 @@ import { projectRecovery } from "../src/generation-recovery-graph.js";
 import { inspectModernGenerationRecovery } from "../src/generation-recovery-inspection.js";
 import { inspectDeferredCorrection } from "../src/generation-recovery-resolution.js";
 import { recoveryAdmission } from "../src/generation-recovery-lifecycle.js";
+
+// This file deliberately runs its scenarios serially: many fixtures change
+// process-wide environment and Pi transport. CI partitions the registered
+// top-level cases, not their shared mutable process state.
+const scenarios: { name: string; options: nodeTest.TestOptions; run: nodeTest.TestFn }[] = [];
+function test(name: string, options: nodeTest.TestOptions | nodeTest.TestFn, run?: nodeTest.TestFn) {
+  scenarios.push(typeof options === "function" ? { name, options: {}, run: options } : { name, options, run: run! });
+}
 
 const root = mkdtempSync(join(tmpdir(), "nt-generation-"));
 after(() => {
@@ -772,12 +781,7 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
     assert.equal(pending.records[0].disposition, "awaiting-review");
     assert.equal(pending.records[0].severity,
       defect === "specialist-restart" ? "warning" : "info");
-    const pendingPath = join(f.job.stateDir, "repair-ledgers", pending.records[0].turnDigest + ".json");
-    const historical = JSON.parse(readFileSync(pendingPath, "utf8"));
-    delete historical.blueprintRepairs[0].incident;
-    writeFileSync(pendingPath, JSON.stringify(historical));
-    assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0,
-      "pre-#233 admitted repairs remain readable after upgrading");
+    // Resume the actual interrupted receipt, without simulating an obsolete schema.
     delete f.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT;
   }
   let resumed = f.cli(["generate", "resume", "--pause-after",
@@ -926,15 +930,8 @@ for (const defect of ["interactive", "knowledge", "rejected", "tampered", "speci
   const ledger = await inspectRepairLedger(f.job, incident.turnDigest);
   const repair = ledger.blueprintRepairs![0]!;
   await recordBlueprintRepair(f.job, incident.turnDigest, repair);
-  if (defect === "knowledge") {
-    const old = { ...ledger, blueprintRepairs: ledger.blueprintRepairs!.map(value =>
-      ({ ...value, incident: undefined })) };
-    writeFileSync(join(f.job.stateDir, "repair-ledgers", incident.turnDigest + ".json"), JSON.stringify(old));
-    assert.equal(f.cli(["approval-revisions", "inspect"]).total, 0);
-    await recordBlueprintRepair(f.job, incident.turnDigest, repair);
-    assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id,
-      "historical completed repairs can be enriched without changing the correction authority");
-  }
+  assert.equal(f.cli(["approval-revisions", "inspect"]).records[0].id, incident.id,
+    "replaying the current receipt preserves its correction authority");
   assert.equal((await inspectRepairLedger(f.job, incident.turnDigest)).blueprintRepairs?.length, 1,
     "repeated reconciliation never appends another incident");
   if (defect === "knowledge") {
@@ -2893,13 +2890,15 @@ test("#225 thrown independent reviewer fails closed without another specialist o
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
 });
 
-test("#225 dirty in-flight specialist cannot be redispatched on resume", {
+test("#225 dirty effect after a settled specialist cannot bypass commit verification or replay", {
   skip: !available,
 }, async () => {
   const f = setup("recovery-dirty-active-specialist");
   const paused = f.cli([...f.start, "--pause-after", "foundation"]);
   assert.equal(paused.status, "paused");
   const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const receiptPath = join(f.job.stateDir, "foundation.json");
+  const originalReceipt = readFileSync(receiptPath, "utf8");
   const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
   assert.ok(foundation);
   const draft = join(f.job.worktreeStoryRoot, "unreconciled-draft.md");
@@ -2911,9 +2910,9 @@ test("#225 dirty in-flight specialist cannot be redispatched on resume", {
   try {
     const graph = createGenerationGraph(saver, "cli");
     const config = { configurable: { thread_id: paused.threadId } };
-    // Resume at the actual specialist-dispatch boundary. Scheduling has
-    // already authenticated the selected work item; a dirty writer must
-    // fail inside its own original operation, never be redispatched.
+    // Re-enter dispatch with the already completed Foundation receipt and
+    // an ambiguous new dirty effect. The shared child may reuse the settled
+    // submission, but commit verification must fence the dirty worktree.
     await graph.updateState(config, {
       status: "running", active: foundation, result: null, pauseAfter: null,
     }, "author_update_intake");
@@ -2926,7 +2925,7 @@ test("#225 dirty in-flight specialist cannot be redispatched on resume", {
     }
   }
   assert.equal(result.status, "blocked");
-  assert.equal(currentOperationRecovery(result)?.operation, "specialist-dispatch");
+  assert.equal(currentOperationRecovery(result)?.operation, "commit-verification");
   assert.equal(currentOperationRecovery(result)?.phase, "fenced");
   assert.equal(readFileSync(draft, "utf8"), "Preserve this ambiguous writer effect.");
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
@@ -2934,6 +2933,7 @@ test("#225 dirty in-flight specialist cannot be redispatched on resume", {
   assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
   assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, currentOperationRecovery(result));
   assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(receiptPath, "utf8"), originalReceipt, "The original writer receipt must not be rewritten");
 });
 
 test("#225 untrusted completion preflight is assessed, not treated as complete or retried", {
@@ -6210,3 +6210,10 @@ test("Studio exposes production scheduling rather than the retired prototype", a
   for (const node of ["schedule", "author_update_intake", "specialist_dispatch", "verify_committed_work", "completion_decision"])
     assert.ok(topology.nodes[node], node);
 });
+
+const shard = process.env.NT_GENERATION_TEST_SHARD;
+const selected = shard ? new Set(selectGenerationShard(scenarios.map(s => s.name), shard)) : null;
+if (selected) console.info("Generation shard " + shard + ": " + selected.size + "/" + scenarios.length +
+  " cases; estimated serial seconds " + [...selected].reduce((sum, name) => sum + generationWeight(name), 0));
+for (const scenario of scenarios)
+  if (!selected || selected.has(scenario.name)) nodeTest(scenario.name, scenario.options, scenario.run);

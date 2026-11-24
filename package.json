@@ -15,7 +15,7 @@
     "format": "prettier --write src test web/src web/test scripts",
     "format:check": "prettier --check .prettierrc.json scripts/check-source-quality.mjs web/test/support/studio-seed.ts",
     "test": "tsx --test test/*.test.ts",
-    "test:offline": "tsx --test test/cli.test.ts test/demo.test.ts test/graph.test.ts test/langsmith-config.test.ts test/local-trace.test.ts test/pi-delegation.test.ts test/pinned-skill-reads.test.ts test/project.test.ts test/recovery-compatibility.test.ts test/resources.test.ts test/sandbox-pi-tools.test.ts test/skills.test.ts test/snapshot.test.ts test/specialist-author-instruction.test.ts test/tracing.test.ts",
+    "test:offline": "tsx --test test/cli.test.ts test/demo.test.ts test/graph.test.ts test/generation-shards.test.ts test/langsmith-config.test.ts test/local-trace.test.ts test/pi-delegation.test.ts test/pinned-skill-reads.test.ts test/project.test.ts test/recovery-compatibility.test.ts test/resources.test.ts test/sandbox-pi-tools.test.ts test/skills.test.ts test/snapshot.test.ts test/specialist-author-instruction.test.ts test/tracing.test.ts",
     "certify": "tsx --test test/certification.test.ts",
     "certify:story": "node scripts/certify-story.mjs",
     "certify:new-story": "tsx scripts/certify-new-story.ts",

@@ -18,6 +18,8 @@ import { startAgentServer } from '../src/agent-service'
 import { runAuthorAction } from '../../src/author-updates'
 import { runArchitectureJob } from '../../src/architecture'
 import { verifyAuthorEvidence } from '../../src/author-evidence'
+import { planWholeStory } from '../src/lib/turn-plan'
+import { saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 
 const config = { baseURL: 'http://localhost:3000', secret: 'approval-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
   github: { clientId: 'github', clientSecret: 'secret' }, gitlab: { clientId: 'gitlab', clientSecret: 'secret' } }
@@ -74,22 +76,31 @@ test('authenticated owner records an exact durable decision; foreign users, inli
       ({ type: 'api_key', key: 'ISOLATED-TEST-KEY-NOT-FOR-NETWORK' }))
     const models = await availableUserPiModels(store, alice.id)
     assert.ok(models.length > 0)
-    const realContract = { scope: { kind: 'full-story', depth: 'composition', targets: [], branches: [] },
+    const realContract = { scope: { kind: 'full-story' as const, depth: 'composition' as const, targets: [], branches: [] },
       constraints: [], envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
     const requestBody = { task: 'Generate a mystery', contract: realContract }
     await store.persistence.generation.jobs.saveConfiguration(alice.id, jobId,
       JSON.stringify({ version: 1, headSha: commit, ...requestBody, limits: { modelCalls: 1 },
         model: { provider: models[0]!.provider, id: models[0]!.id } }), new Date().toISOString())
-    const realStart = await fixtureJobRequest(auth, store, new Request(config.baseURL + '/api/jobs/' + jobId, {
+    const realStart = () => fixtureJobRequest(auth, store, new Request(config.baseURL + '/api/jobs/' + jobId, {
       method: 'POST', headers: { origin: config.baseURL, cookie: aliceCookie, 'content-type': 'application/json' },
       body: JSON.stringify(requestBody),
     }), jobId, config.baseURL)
-    assert.equal(realStart.status, 503, await realStart.clone().text())
+    const missingTurn = await realStart()
+    assert.equal(missingTurn.status, 409, await missingTurn.clone().text())
+    assert.match(await missingTurn.text(), /authenticated current-format Turn plan/)
+    await saveJobTurnPlan(job, planWholeStory(requestBody.task, realContract, commit))
+    const missingRuntime = await realStart()
+    assert.equal(missingRuntime.status, 503, await missingRuntime.clone().text())
+    assert.match(await missingRuntime.text(), /rootless sandbox controller/)
     assert.equal((await store.persistence.generation.jobs.state(alice.id, jobId))?.requestJson, null)
     assert.equal(existsSync(join(job.stateDir, 'generation-server-owner.json')), false)
     assert.equal(existsSync(join(job.stateDir, 'pi-policy.json')), false,
       'failed sandbox admission must not lock a draft to an unstarted model')
     assert.equal(existsSync(join(job.stateDir, 'pi-resolution.json')), false)
+    // Discard the unstarted admission-only fixture before preparing unrelated
+    // plan-approval evidence in this disposable job.
+    rmSync(join(job.stateDir, 'turn-plan.json'))
     ;(await store.testing.records.update('studio_sessions', { id: jobId }, { generationConfigJson: null }))
     const plan = { version: 1, contract: firstContract, items: [] }
     const digest = createHash('sha256').update(JSON.stringify({ plan, head: commit, contract })).digest('hex')

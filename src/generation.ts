@@ -1218,8 +1218,14 @@ async function runCharacterWorldAssignmentChild(
     try {
       const world = saved.units[0];
       const published = points.some(point => point.workItem === world.id && point.commitSha === world.commitSha);
-      const inherited = readRecoveryFork(job)?.reviewCoverage?.some(point =>
-        point.workItem === world.id && point.commitSha === world.commitSha);
+      const fork = readRecoveryFork(job);
+      // The immutable fork bundle also carries native-verified fixture commits
+      // which have no semantic Review entry. Production dependencies still
+      // pass the independent Review gate below before Character can start.
+      const inherited = fork?.checkpoint.completedWorkItems.includes(world.id) &&
+        fork.commits[world.id]?.sha === world.commitSha &&
+        (s.request.fixture || fork.reviewCoverage?.some(point =>
+          point.workItem === world.id && point.commitSha === world.commitSha));
       if (!published && !inherited)
         throw new IndependentReviewGateError("World checkpoint must be finalized before Character dispatch.");
       await assertNativeReviewDependencies(job, "character-foundations");
@@ -1752,8 +1758,10 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           if (!result) throw Error("Interactive child returned no original receipt");
           return { receiptRef: ref, status: result.status, headSha: result.headSha };
         } catch (error) {
-          if (error instanceof AssignmentAuthorPauseError || error instanceof Error &&
-              ["PiBudgetPause", "PiModelUnavailableError"].includes(error.name))
+          // Budget/provider pauses have their own durable policy evidence and
+          // reason. Let the parent handle them without collapsing them into
+          // a job-control pause or finalizing an unfinished child.
+          if (error instanceof AssignmentAuthorPauseError)
             return outcome("paused", { controlRef: "job-control" });
           if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
           const terminal = await inspectInteractiveFailure(job, milestone, domain, sourceHead);
@@ -1794,7 +1802,24 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           p.parentSha === sourceHead && p.validation.status === "passed" &&
           p.planVersion === s.planVersion &&
           (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
-        if (!point) throw Error("Interactive child lacks independently verified native checkpoint");
+        if (!point) {
+          // A fork carries historical native checkpoints in its immutable
+          // admission bundle, not in the child's local checkpoint journal.
+          const fork = readRecoveryFork(job);
+          const historical = fork?.commits[workItem];
+          const originalUnit = fork?.receipts[ref.split("#")[0]!]?.units?.find(
+            (entry: { id: string }) => entry.id === workItem);
+          const inheritedReview = resolvedInheritedRecoveryReviews(fork?.reviewCoverage ?? [])
+            .find(entry => entry.workItem === workItem && entry.commitSha === unit.commitSha);
+          if (correction || !fork?.checkpoint.completedWorkItems.includes(workItem) ||
+              historical?.sha !== unit.commitSha || historical.planVersion !== s.planVersion ||
+              originalUnit?.phase !== "committed" || originalUnit.commitSha !== unit.commitSha ||
+              originalUnit.beforeHead !== sourceHead || originalUnit.digest !== unit.digest ||
+              (!(s.request.fixture && !inheritedReview) &&
+                !["passed", "not-required"].includes(inheritedReview?.status ?? "")))
+            throw Error("Interactive child lacks independently verified native checkpoint");
+          return outcome("verified", { headSha: await trustedHead(job), reviewRef: "recovery-fork:" + unit.commitSha });
+        }
         const covered = await resolvedCheckpointReviews(job, points);
         const pending = !(s.request.fixture && !point.assurance) &&
           !["passed", "not-required"].includes(covered.get(point.commitSha) ?? point.semanticReview);

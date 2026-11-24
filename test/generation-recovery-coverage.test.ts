@@ -42,7 +42,7 @@ const siteNames = [
 /** Explicitly reviewed counts. Changes require a source-linked matrix review
  * in docs/generation-recovery-contract.md rather than silent test regeneration. */
 const approvedExitShape: Record<(typeof siteNames)[number], string> = {
-  schedule: "returns:9,status:6,blocked:3,operationFailure:1,throws:10",
+  schedule: "returns:10,status:6,blocked:3,operationFailure:1,authorBoundary:1,throws:10",
   assess_recovery: "returns:18,status:7,blocked:1,throws:9",
   author_update_intake: "returns:22,status:4,operationFailure:8,authorBoundary:1,reconcile:2,throws:1",
   idea_integration: "returns:5,status:1,operationFailure:1,throws:5",
@@ -202,15 +202,15 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const printer = ts.createPrinter({ removeComments: true });
   const reviewed = [
-    [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
+    [file, "requireGenerationTurn", "4e2cba38f5a0211fef83a9ed6ef9765cb71e6b8aa2e640f13d67e81b5ea0b7f8"],
     [file, "runFoundationAssignmentChild", "329033ddaaf952f13386641642ea670fdf9a4455deeb408cead3bb70a89419a1"],
     [file, "runArchitectureAssignmentChild", "de81c4f2d41329138a92e9d69ec13045b5add3e08edf017078a675143cdd4957"],
-    [file, "runCharacterWorldAssignmentChild", "7009d6ba4919502568060a2a10da49b4150cd03ebe872a27160aba2d36e18d9e"],
+    [file, "runCharacterWorldAssignmentChild", "f1b3495c8dfa2f16ca8c55b027215455e1ccc8863c0ea565b36f0cfcb77ab5f8"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
     [file, "runFocusedAssignmentChild", "692eb56fd45ccc7ae2ad323c14876207b68817086db494098bc18ea7f421028b"],
     [child, "createAssignmentLifecycleGraph", "d190943cd002418ceefd8f158c99baecb2124f470354a4fd5d7950568d6c56cc"],
     [child, "authenticateAssignmentReentry", "90158a424c4a0b1df02b8a4cc77652b4e29cbcb2bca4ffae55127b65350e3cb2"],
-    [file, "runInteractiveAssignmentChildren", "ac74294cdecc51c45fbe621e20cae8aeda6f487ebd4a5fac01905116e666d181"],
+    [file, "runInteractiveAssignmentChildren", "25a44f200883db4f74caa44abec3c67da77a0d49f0a1e2999d4f749c8487e37b"],
   ] as const;
   for (const [source, name, expected] of reviewed) {
     const body = helpers(source).get(name);

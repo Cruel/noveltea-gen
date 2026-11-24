@@ -360,7 +360,8 @@ test('authenticated finalized World fork is isolated from a running dirty parent
         const cfg = { configurable: { thread_id: invalidChild.threadId + ':generation:web' }, recursionLimit: 1000 }
         await badRuntime.graph.updateState(cfg, { request: invalidRequest })
         const rejected = await badRuntime.graph.invoke(null, cfg)
-        assert.equal(rejected.status, 'blocked', 'native validation must reject duplicate Character IDs')
+        assert.equal(rejected.status, 'blocked', rejected.reason ?? 'native validation must reject duplicate Character IDs')
+        assert.match(rejected.reason ?? '', /duplicate|validation/i, 'the original Character writer must reach native validation')
       } finally {
         delete process.env.NT_FOUNDATIONS_FIXTURE_CASE
         badRuntime.saver.db.close()
