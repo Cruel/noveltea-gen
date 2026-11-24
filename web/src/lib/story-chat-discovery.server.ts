@@ -2,6 +2,7 @@ import type { StudioAuth } from './auth'
 import type { StudioStore } from '../persistence/store'
 import { requireUser } from './access.server'
 import { onboardingPiRequest, type ChatDiscoveryBinding, type DiscoveryInference } from './onboarding-pi.server'
+import type { ProviderJobGateways } from './story-approved-continuation.server'
 import { readDefaultModel } from './settings.server'
 import { availableUserPiModels } from './pi-credentials.server'
 
@@ -12,7 +13,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
  * checkpointed Discovery graph supplies CAS, crash fencing and exact approval. */
 export async function storyChatDiscoveryRequest(
   auth: StudioAuth, store: StudioStore, request: Request, baseURL: string,
-  storyId: string, firstTurnId: string, infer?: DiscoveryInference,
+  storyId: string, firstTurnId: string, infer?: DiscoveryInference, gateways?: ProviderJobGateways,
 ): Promise<Response> {
   if (!UUID.test(storyId) || !UUID.test(firstTurnId))
     return Response.json({ error: 'Invalid Story or first Turn identity.' }, { status: 400 })
@@ -33,7 +34,7 @@ export async function storyChatDiscoveryRequest(
     storyId, firstTurnId, repositoryId: story.repositoryId, directory: story.directory,
     sourceSha: story.headSha, originalObjective: message.content,
   }
-  return onboardingPiRequest(auth, store, request, baseURL, infer, binding)
+  return onboardingPiRequest(auth, store, request, baseURL, infer, binding, gateways)
 }
 
 export async function beginStoryChatDiscovery(

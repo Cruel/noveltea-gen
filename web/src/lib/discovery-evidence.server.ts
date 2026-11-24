@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { inspectCompletedProtocolResponse } from '../../../src/response-contract-recovery'
 
 /** Discovery happens before a Story job exists. Store its immutable response
  * evidence in private controller state, not the Git worktree or public logs.
@@ -13,7 +14,7 @@ export async function createDiscoveryEvidence(options: {
   repositoryId: string
   workspace: string
   revision: number
-  stage: 'initial' | 'corrective' | 'opening-questions' | 'semantic-review' | 'semantic-diagnostic'
+  stage: 'initial' | 'corrective' | 'opening-questions' | 'semantic-review' | 'semantic-diagnostic' | 'provenance-diagnostic'
   model: { provider: string; id: string }
   skillId: string
   instructions: string
@@ -38,6 +39,15 @@ export async function createDiscoveryEvidence(options: {
     instructions: options.instructions,
     startedAt: new Date().toISOString(),
   })
+  return discoveryEvidence(dir)
+}
+
+/** Open only a path admitted by the Studio operation claim. */
+export function discoveryEvidence(dir: string) {
+  const piDirectory = join(dir, 'pi')
+  const write = async (name: string, payload: object) =>
+    writeFile(join(dir, name), JSON.stringify(payload, null, 2) + '\n',
+      { flag: 'wx', mode: 0o600 })
   return {
     dir,
     piDirectory,
@@ -48,14 +58,20 @@ export async function createDiscoveryEvidence(options: {
         ...(reference ? { reference } : {}),
         savedAt: new Date().toISOString(),
       })
+      return hash(await readFile(join(dir, 'response.json')))
     },
     async validation(status: 'accepted' | 'rejected', error?: unknown) {
-      await write('validation.json', {
-        version: 1, status,
+      const verdict = { version: 1, status,
         ...(error ? { name: error instanceof Error ? error.name : 'unknown',
-          message: error instanceof Error ? error.message : String(error) } : {}),
-        checkedAt: new Date().toISOString(),
-      })
+          message: error instanceof Error ? error.message : String(error) } : {}) }
+      try {
+        await write('validation.json', { ...verdict, checkedAt: new Date().toISOString() })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        const { checkedAt: _time, ...prior } = JSON.parse(await readFile(join(dir, 'validation.json'), 'utf8'))
+        if (JSON.stringify(prior) !== JSON.stringify(verdict))
+          throw Error('Discovery validation receipt changed on reconciliation.')
+      }
     },
     async inferenceError(error: unknown) {
       await write('inference-error.json', {
@@ -69,6 +85,74 @@ export async function createDiscoveryEvidence(options: {
 }
 
 export type DiscoveryEvidence = Awaited<ReturnType<typeof createDiscoveryEvidence>>
+
+export type DiscoveryAttempt = Readonly<{
+  dir: string
+  requestDigest: string
+  status: 'started' | 'not-started'
+  role: DiscoveryPiReference['role']
+  responseDigest?: string
+}>
+
+/** Verify an immutable response receipt and the original transcript prefix.
+ * Earlier replies remain verifiable after the same conversation appends
+ * corrective turns. No model prompt is permitted on a missing receipt. */
+export async function readDiscoveryResponse(attempt: DiscoveryAttempt, sourceDigest: string,
+  role?: DiscoveryPiReference['role'], requirePi = false) {
+  if (attempt.status !== 'started') throw Error('Discovery attempt never started.')
+  const file = join(attempt.dir, 'response.json')
+  const contract = attempt.role === 'writer' ? 'discovery.writer-response.v1' : 'discovery.review-response.v1'
+  const protocol = join(attempt.dir, 'protocol')
+  // The protocol verifier can settle before the Discovery wrapper writes its
+  // response receipt. Adopt only that exact accepted invocation, never a new
+  // prompt or an unsealed/uncertain format attempt.
+  if (!attempt.responseDigest && requirePi && !await lstat(file).catch(error => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })) {
+    const accepted = JSON.parse(await readFile(protocol + '.initial.json', 'utf8'))
+    if (accepted.status !== 'accepted') throw Error('Original Discovery protocol is not settled.')
+    const raw = await inspectCompletedProtocolResponse({
+      receiptFile: protocol, sourceDigest: attempt.requestDigest, contract,
+      sessionRoots: [dirname(attempt.dir)], validate: () => [], parse: text => text,
+    })
+    const manager = SessionManager.open(accepted.sessionFile, dirname(accepted.sessionFile), '/')
+    const reference = await sealDiscoveryPiReference(manager, sourceDigest, attempt.role)
+    if (reference.id !== accepted.sessionId || reference.file !== accepted.sessionFile)
+      throw Error('Recovered Discovery protocol session changed.')
+    await discoveryEvidence(attempt.dir).response(raw, reference.file, reference)
+  }
+  if (await realpath(file) !== file || !(await lstat(file)).isFile())
+    throw Error('Unsafe original Discovery receipt.')
+  const contents = await readFile(file)
+  if (attempt.responseDigest && hash(contents) !== attempt.responseDigest)
+    throw Error('Discovery response differs from the Studio settlement.')
+  const receipt = JSON.parse(contents.toString('utf8'))
+  if (receipt.version !== 1 || typeof receipt.raw !== 'string' ||
+      receipt.sha256 !== hash(Buffer.from(receipt.raw)))
+    throw Error('Discovery response receipt changed.')
+  const ref = receipt.reference as DiscoveryPiReference | undefined
+  if (requirePi && !ref) throw Error('Discovery response has no original Pi transcript.')
+  if (ref) {
+    if (ref.sourceDigest !== sourceDigest || ref.role !== attempt.role || role && ref.role !== role ||
+        receipt.piSessionFile !== ref.file)
+      throw Error('Discovery response belongs to another source or role.')
+    const { bytes, header } = await exactTranscript(ref.file)
+    if (header.type !== 'session' || header.id !== ref.id || header.cwd !== '/' ||
+        !Number.isSafeInteger(ref.bytes) || ref.bytes <= 0 || bytes.length < ref.bytes ||
+        hash(bytes.subarray(0, ref.bytes)) !== ref.digest)
+      throw Error('Discovery response transcript prefix changed.')
+    const original = await inspectCompletedProtocolResponse({
+      receiptFile: protocol, sourceDigest: attempt.requestDigest, contract,
+      sessionRoots: [dirname(attempt.dir)],
+      sealedPrefix: { transcriptBytes: ref.bytes, transcriptSha256: ref.digest },
+      validate: () => [], parse: text => text,
+    })
+    if (original !== receipt.raw)
+      throw Error('Discovery response differs from its original Pi output.')
+  }
+  return { text: receipt.raw as string, reference: ref, piSessionFile: ref?.file, responseDigest: hash(contents) }
+}
 
 /** Source-bound, private reference to the exact settled Pi conversation.
  * Discovery has no Generation Job or writable Story worktree. */

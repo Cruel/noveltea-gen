@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
-import { createHmac, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { startStoryJob } from '../../src/job'
+import { initialStoryDocument } from '../src/lib/git-cache.server'
+import { openStoryThread } from '../src/lib/story-threads.server'
 import { removeTestTree } from '../../test/helpers'
 import { createStudioAuth } from '../src/lib/auth'
 import { submitFirstStoryTurn } from '../src/lib/story-first-chat.server'
@@ -98,7 +101,8 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-chat-discovery-'))
   const previous = { key: process.env.NT_PI_CREDENTIAL_KEY, source: process.env.NT_STUDIO_SKILLS_SOURCE,
-    cache: process.env.NT_SKILL_CACHE_DIR }
+    cache: process.env.NT_SKILL_CACHE_DIR, evidence: process.env.NT_DISCOVERY_EVIDENCE_DIR }
+  process.env.NT_DISCOVERY_EVIDENCE_DIR = join(root, 'discovery-evidence')
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   process.env.NT_STUDIO_SKILLS_SOURCE = skills(root)
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshots')
@@ -130,10 +134,23 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     await store.persistence.settings.putDefaultModel(alice, model, 'now')
     const storyIds = Array.from({ length: 6 }, () => randomUUID())
     const sourceSha = 'b'.repeat(40)
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex')
+    const cache = join(root, 'git-cache', hash(alice), hash('github:34'))
+    const repository = join(cache, 'base')
+    const correctedStory = join(repository, 'stories/4')
+    mkdirSync(join(correctedStory, 'creative-direction'), { recursive: true })
+    writeFileSync(join(correctedStory, 'creative-direction/foundation.md'), initialStoryDocument('The Last Bell'))
+    const git = (...args: string[]) => execFileSync('git', args, {
+      cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+    git('init', '-q', '--initial-branch=main')
+    git('add', '.')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Unapproved Story')
+    const correctedSource = git('rev-parse', 'HEAD')
     for (const [i, storyId] of storyIds.entries()) {
       await store.persistence.onboarding.importStory({
         id: storyId, owner: alice, repositoryId, directory: 'stories/' + i,
-        title: 'Unapproved Story', createdAt: 'now', commitSha: sourceSha,
+        title: 'Unapproved Story', createdAt: 'now', commitSha: i === 4 ? correctedSource : sourceSha,
       })
     }
     const req = async (storyId: string, firstTurnId: string, method: 'GET' | 'POST',
@@ -623,31 +640,83 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     })
     assert.equal(rejectedDelegation.status, 422)
     let provenanceAttempts = 0
-    const resolvedConflict = await storyChatDiscoveryRequest(auth, store,
-      new Request(url + '/api/story-chat-discovery', { method: 'POST',
-        headers: { cookie: aliceCookie, origin: url },
-        body: JSON.stringify({ action: 'answer', revision: clarified.revision,
-          setId: clarified.questions.id, setRevision: clarified.questions.revision,
-          responses: [{ questionId: 'puzzle-clarification', answer: {
-            kind: 'option', optionId: 'no-puzzles', note: '' } }],
-        }),
-      }), url, storyIds[4]!, conflictId, withFixtureSemanticReview(async (state, instructions) => {
-        provenanceAttempts++
-        const value = JSON.parse(proposalFor(state))
-        if (provenanceAttempts === 1) {
-          value.interpretations.find((i: any) => i.path === 'planning.puzzle_emphasis').source = {
-            kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'puzzle-guidance',
-          }
-        } else if (provenanceAttempts === 2) {
-          assert.match(instructions, /later author clarification/i)
-          value.foundation.decisions.push({ statement: 'The bell is made of silver',
-            authority: 'user-protected', source: { kind: 'turn', index: 0 } })
-        } else {
-          assert.equal(provenanceAttempts, 3)
-          assert.match(instructions, /un-delegated Studio suggestion/i)
+    const lunaTransport = withFixtureSemanticReview(async (state, instructions) => {
+      provenanceAttempts++
+      const value = JSON.parse(proposalFor(state))
+      if (provenanceAttempts === 1) {
+        value.interpretations.find((i: any) => i.path === 'planning.puzzle_emphasis').source = {
+          kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'puzzle-guidance',
         }
-        return JSON.stringify(value)
-      }))
+      } else if (provenanceAttempts === 2) {
+        assert.match(instructions, /later author clarification/i)
+        value.foundation.decisions.push({ statement: 'The bell is made of silver',
+          authority: 'user-protected', source: { kind: 'turn', index: 0 } })
+      } else {
+        assert.equal(provenanceAttempts, 3)
+        assert.match(instructions, /un-delegated Studio suggestion/i)
+      }
+      return JSON.stringify(value)
+    })
+    const lunaRequest = (value: unknown) => storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(value),
+      }), url, storyIds[4]!, conflictId, lunaTransport)
+    const lunaWorkspace = 'story-chat,' + storyIds[4] + ',' + conflictId
+    const persistence = store.persistence.onboarding
+    const originalSave = persistence.saveConversation.bind(persistence)
+    let lunaInterrupted = false
+    // Kill the worker after the first rejected response has been sealed, but
+    // before the corrective model turn can acquire its own durable claim.
+    persistence.saveConversation = async (...args: Parameters<typeof originalSave>) => {
+      const state = args[2] === lunaWorkspace ? JSON.parse(args[4]) : null
+      if (state?.graphOperation?.status === 'claimed' && state.activeAttempts?.length === 2)
+        lunaInterrupted = true
+      if (lunaInterrupted && state) throw Error('synthetic worker exit after settled writer response')
+      return originalSave(...args)
+    }
+    try {
+      const crashed = await lunaRequest({ action: 'answer', revision: clarified.revision,
+        setId: clarified.questions.id, setRevision: clarified.questions.revision,
+        responses: [{ questionId: 'puzzle-clarification', answer: {
+          kind: 'option', optionId: 'no-puzzles', note: '' } }],
+      })
+      assert.equal(crashed.status, 503)
+      assert.equal(lunaInterrupted, true)
+      assert.equal(provenanceAttempts, 1)
+    } finally { persistence.saveConversation = originalSave }
+    const row = (await persistence.conversation(alice, repositoryId, lunaWorkspace))!
+    const interruptedState = JSON.parse(row.state)
+    assert.equal(interruptedState.graphOperation.status, 'claimed')
+    assert.equal(interruptedState.activeAttempts.length, 1)
+    assert.ok(interruptedState.activeAttempts[0].responseDigest)
+    const originalOperation = interruptedState.graphOperation.id
+    const originalStart = Date.now() - 11 * 60_000
+    assert.equal(await originalSave(alice, repositoryId, lunaWorkspace, row.revision + 1,
+      JSON.stringify({ ...interruptedState, revision: row.revision + 1, startedAt: originalStart }),
+      row.revision, 'now'), true)
+    const priorStore = store
+    const recoveryStore = openSharedStudioStore(fixture.databaseOptions)
+    store = recoveryStore
+    auth = createStudioAuth(store, config)
+    let resolvedConflict: Response
+    try {
+      const reconciled = await lunaRequest({ action: 'reconcile', revision: row.revision + 1 })
+      assert.equal(reconciled.status, 200, await reconciled.clone().text())
+      const blocked = (await reconciled.json() as any).session
+      assert.equal(provenanceAttempts, 1, 'reconciliation must not call Pi')
+      const reconciledState = JSON.parse((await store.persistence.onboarding.conversation(
+        alice, repositoryId, lunaWorkspace))!.state)
+      assert.equal(reconciledState.recovery.operationId, originalOperation)
+      assert.equal(reconciledState.startedAt, originalStart)
+      resolvedConflict = await lunaRequest({ action: 'retry', revision: blocked.revision })
+      assert.equal(resolvedConflict.status, 200, await resolvedConflict.clone().text())
+      assert.equal((await resolvedConflict.clone().json() as any).session.startedAt, originalStart,
+        'retry cannot mint a fresh resource allowance')
+    } finally {
+      await recoveryStore.close()
+      store = priorStore
+      auth = createStudioAuth(store, config)
+    }
     assert.equal(resolvedConflict.status, 200)
     assert.equal(provenanceAttempts, 3, 'both distinct source defects must be corrected before Review')
     const resolvedProposal = (await resolvedConflict.json() as any).session
@@ -656,6 +725,58 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.equal(resolvedProposal.proposal.interpretations.find((i: any) =>
       i.path === 'planning.puzzle_emphasis').source.questionId, 'puzzle-clarification')
     assert.match(resolvedProposal.proposal.foundation.body, /Planning interpretations/)
+    const executionEnv = Object.fromEntries(['NT_STATE_DIR', 'NT_GIT_CACHE_DIR',
+      'NT_REQUIRE_USER_PI_RUNTIME', 'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN', 'NT_CONFIG_FILE']
+      .map(name => [name, process.env[name]]))
+    try {
+      process.env.NT_STATE_DIR = join(root, 'generation-state')
+      process.env.NT_GIT_CACHE_DIR = join(root, 'git-cache')
+      process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+      process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:9999'
+      process.env.NT_AGENT_RPC_TOKEN = 'disposable-controller-fixture'
+      const configPath = join(root, 'skills-config.json')
+      writeFileSync(configPath, JSON.stringify({
+        novelteaSkills: process.env.NT_STUDIO_SKILLS_SOURCE, skillDiscovery: 'explicit-only',
+      }))
+      process.env.NT_CONFIG_FILE = configPath
+      let gatewayCalls = 0
+      const gateway = async (_auth: unknown, _store: unknown, request: Request) => {
+        gatewayCalls++
+        const input = await request.json() as { storyId: string; jobId: string; commit: string }
+        assert.deepEqual(input, { storyId: storyIds[4], jobId: conflictId, commit: correctedSource })
+        await startStoryJob({ story: correctedStory, job: conflictId, worktreeCacheRoot: cache })
+        await store.persistence.generation.jobs.register(alice, conflictId, storyIds[4]!,
+          'The Last Bell', correctedSource, new Date().toISOString())
+        await store.persistence.conversations.reconcileRoots(alice, storyIds[4]!)
+        return Response.json({ job: { headSha: correctedSource } })
+      }
+      const continueRequest = (action: 'approve' | 'continue', revision: number, digest: string) =>
+        storyChatDiscoveryRequest(auth, store,
+          new Request(url + '/api/story-chat-discovery', { method: 'POST',
+            headers: { cookie: aliceCookie, origin: url },
+            body: JSON.stringify({ action, revision, digest }),
+          }), url, storyIds[4]!, conflictId,
+          async () => { throw Error('Approval must not dispatch another Discovery writer') }, { github: gateway })
+      const approved = await continueRequest('approve', resolvedProposal.revision, resolvedProposal.digest)
+      const approval = await approved.json() as any
+      assert.equal(approved.status, 200, JSON.stringify(approval))
+      assert.equal(approval.continuation.state, 'queued', JSON.stringify(approval.continuation))
+      assert.equal((await store.persistence.generation.queue.record(conflictId))?.phase, 'queued')
+      const thread = await openStoryThread(store, alice, storyIds[4]!, 'root:' + conflictId)
+      assert.deepEqual(thread.state.turns, [{ id: conflictId, executionIds: [conflictId] }])
+      assert.equal(thread.state.messages[0]?.content, initial)
+      assert.equal(thread.state.messages[0]?.phase, 'running')
+      assert.equal(gatewayCalls, 1)
+      const duplicate = await continueRequest('continue', approval.session.revision, approval.session.digest)
+      assert.equal((await duplicate.json() as any).continuation.state, 'queued')
+      assert.equal(gatewayCalls, 1)
+      assert.equal(git('rev-parse', 'HEAD'), correctedSource)
+    } finally {
+      for (const [name, value] of Object.entries(executionEnv)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
 
     // Reproduce Luna's failure at the production discovery boundary: an
     // otherwise valid Creative Direction carries unqualified interpretation
@@ -707,7 +828,8 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     await reopened?.close()
     await fixture.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', previous.key],
-      ['NT_STUDIO_SKILLS_SOURCE', previous.source], ['NT_SKILL_CACHE_DIR', previous.cache]] as const) {
+      ['NT_STUDIO_SKILLS_SOURCE', previous.source], ['NT_SKILL_CACHE_DIR', previous.cache],
+      ['NT_DISCOVERY_EVIDENCE_DIR', previous.evidence]] as const) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }

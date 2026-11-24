@@ -55,7 +55,8 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'nt-web-pi-onboard-'))
   const env = { key: process.env.NT_PI_CREDENTIAL_KEY, source: process.env.NT_STUDIO_SKILLS_SOURCE,
-    cache: process.env.NT_SKILL_CACHE_DIR }
+    cache: process.env.NT_SKILL_CACHE_DIR, evidence: process.env.NT_DISCOVERY_EVIDENCE_DIR }
+  process.env.NT_DISCOVERY_EVIDENCE_DIR = join(root, 'private-evidence')
   process.env.NT_PI_CREDENTIAL_KEY = randomBytes(32).toString('base64')
   process.env.NT_STUDIO_SKILLS_SOURCE = makeSkills(root)
   process.env.NT_SKILL_CACHE_DIR = join(root, 'snapshot-cache')
@@ -285,6 +286,90 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
       else process.env.NT_DISCOVERY_EVIDENCE_DIR = previousEvidenceRoot
     }
 
+    // Three independently rejected provenance drafts require a fresh
+    // diagnosis; its advice cannot waive the original validator.
+    {
+      const workspace = 'projects/provenance-assessment'
+      let writers = 0, diagnoses = 0, reviews = 0
+      const writer: DiscoveryInference = async (state, prompt, role) => {
+        if (role === 'provenance-diagnostic') {
+          diagnoses++
+          assert.match(prompt, /Independent, read-only Discovery provenance diagnosis/)
+          return JSON.stringify({ action: 'continue', reason: 'Remove the fabricated author citation.' })
+        }
+        writers++
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'ending', kind: 'yes-no', question: 'Should the ending be hopeful?', allowStudioDecision: true },
+        ])
+        if (writers === 5) assert.match(prompt, /Remove the fabricated author citation/)
+        return JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          ...JSON.parse(proposed).foundation, decisions: [{
+            statement: 'A hopeful ending', authority: writers < 5 ? 'user-protected' : 'delegated',
+            source: { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'ending' },
+          }] } })
+      }
+      const review: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
+        reviews++
+        return packet.claims.map(claim => ({ claimId: claim.id,
+          verdict: 'supported' as const, reason: 'Exact submitted ending delegation.' }))
+      }
+      const start = await request('POST', { action: 'start', model, text: 'A short mystery' },
+        own, url, writer, workspace, review)
+      assert.equal(start.status, 200)
+      const qs = start.body.session.questions
+      const result = await request('POST', { action: 'answer', revision: start.body.session.revision,
+        setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, review)
+      assert.equal(result.status, 200, JSON.stringify(result.body))
+      assert.equal(result.body.session.phase, 'proposed')
+      assert.equal(writers, 5)
+      assert.equal(diagnoses, 1)
+      assert.equal(reviews, 1)
+    }
+    // A reviewer flipping its verdict for unchanged source evidence cannot
+    // manufacture a passing proposal, even if a diagnostic agrees with it.
+    {
+      const workspace = 'projects/reviewer-drift'
+      let writers = 0, reviews = 0
+      const writer: DiscoveryInference = async state => {
+        writers++
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'ending', kind: 'yes-no', question: 'Should the ending be hopeful?', allowStudioDecision: true },
+        ])
+        return JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          ...JSON.parse(proposed).foundation, decisions: [{
+            statement: 'A hopeful ending', authority: 'delegated',
+            source: { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'ending' },
+          }] } })
+      }
+      const review: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = packet => {
+        reviews++
+        return packet.claims.map(claim => ({ claimId: claim.id,
+          verdict: reviews === 1 ? 'unsupported' as const : 'supported' as const,
+          reason: 'Fixture changes the verdict without changing the source.' }))
+      }
+      const start = await request('POST', { action: 'start', model, text: 'A short mystery' },
+        own, url, writer, workspace, review)
+      const qs = start.body.session.questions
+      const result = await request('POST', { action: 'answer', revision: start.body.session.revision,
+        setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, review)
+      assert.equal(result.status, 503)
+      assert.equal(writers, 3)
+      assert.equal(reviews, 3)
+      const saved = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(saved.recovery.status, 'fenced')
+      assert.equal(saved.recovery.reason, 'reviewer-drift')
+      assert.equal(saved.proposal, undefined)
+      assert.equal(saved.semanticReview, undefined)
+      assert.equal((await request('POST', { action: 'retry', revision: saved.revision },
+        own, url, writer, workspace, review)).status, 409)
+      assert.equal(writers, 3)
+    }
+
     // Structural correction must not consume subsequent independent semantic review.
     {
       let calls = 0, reviews = 0
@@ -376,6 +461,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         alice.id, repo, workspace))!.state)
       assert.equal(blocked.phase, 'blocked')
       assert.equal(blocked.pendingDiscovery.kind, 'review')
+      assert.deepEqual(blocked.activeAttempts?.map((attempt: {status: string}) => attempt.status), ['started', 'not-started'])
       assert.ok(!JSON.stringify(failed.body).includes(blocked.pendingDiscovery.raw),
         'Private draft cannot leak to public error responses')
       reviewerAvailable = true
@@ -389,6 +475,39 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         alice.id, repo, workspace))!.state)
       assert.equal(accepted.pendingDiscovery, undefined)
       assert.equal(accepted.semanticReview.proposalDigest, accepted.digest)
+    }
+
+    // The original resource window persists across retry. Expired admission
+    // is a resource pause, never a new provider call or an invented proposal.
+    {
+      const workspace = 'projects/expired-original-budget'
+      let calls = 0
+      const writer: DiscoveryInference = async () => {
+        calls++
+        throw new DiscoveryInvocationNotStarted('Unavailable before dispatch')
+      }
+      const started = await request('POST', { action: 'start', model, text: 'A short mystery' },
+        own, url, writer, workspace)
+      assert.equal(started.status, 503)
+      const row = (await store.persistence.onboarding.conversation(alice.id, repo, workspace))!
+      const saved = JSON.parse(row.state)
+      const originalStart = Date.now() - 16 * 60_000
+      assert.equal(await store.persistence.onboarding.saveConversation(alice.id, repo, workspace,
+        row.revision + 1, JSON.stringify({ ...saved, revision: row.revision + 1, startedAt: originalStart }),
+        row.revision, 'now'), true)
+      const retry = await request('POST', { action: 'retry', revision: row.revision + 1 },
+        own, url, writer, workspace)
+      assert.equal(retry.status, 503)
+      const blocked = JSON.parse((await store.persistence.onboarding.conversation(
+        alice.id, repo, workspace))!.state)
+      assert.equal(blocked.recovery.status, 'paused')
+      assert.equal(blocked.recovery.reason, 'budget')
+      assert.equal(blocked.startedAt, originalStart)
+      assert.equal(blocked.proposal, undefined)
+      assert.equal(calls, 1)
+      assert.equal((await request('POST', { action: 'retry', revision: blocked.revision },
+        own, url, writer, workspace)).status, 409)
+      assert.equal(calls, 1)
     }
 
     // The shared contract permits 16 typed questions, each with 4,000 custom
@@ -453,7 +572,7 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
   } finally {
     store.close()
     for (const [key, value] of [['NT_PI_CREDENTIAL_KEY', env.key], ['NT_STUDIO_SKILLS_SOURCE', env.source],
-      ['NT_SKILL_CACHE_DIR', env.cache]] as const) {
+      ['NT_SKILL_CACHE_DIR', env.cache], ['NT_DISCOVERY_EVIDENCE_DIR', env.evidence]] as const) {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }

@@ -28,7 +28,7 @@ import { preflightCompositionBoundary } from "./cross-domain-prerequisite-contro
 import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis,
   operationDiagnosisCase, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
-import { decideRecovery, finishVerifiedRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
+import { assessBoundedAssignmentFailure, decideRecovery, finishVerifiedRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
 import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "./generation-diagnostic-controller.js";
 import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle } from "./generation-recovery-contract.js";
 
@@ -383,7 +383,7 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
     return { ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
       requiredInspection: "Authenticate the original source and invocation; no replacement model call is authorized." };
   const assignmentFailure = await originalAssignmentFailure(job, s, c);
-  if (assignmentFailure?.proof.kind === "protocol-exhausted") {
+  if (assignmentFailure && assessBoundedAssignmentFailure(assignmentFailure.proof.kind) === "exhausted") {
     const proof = { store: "response-contract" as const, ref: assignmentFailure.ref,
       digest: assignmentFailure.proof.receiptDigest };
     return { ...base(c, proof), action: "exhausted", reason: "protocol-exhausted", attemptRefs: [proof] };
@@ -515,7 +515,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         try {
           const result = await withStoryJobLock(job, "assess-foundation-review", () =>
             executeFoundationReviewAssessment(job, c.origin.sourceHeadSha, d.reviewAssessment!));
-          if (result.stop)
+          if (result.stop && assessBoundedAssignmentFailure("nonconverging", "stop") === "exhausted")
             return stop({ ...base(c, d.receipt), evidence: [...c.evidence, d.receipt, result.stop],
               action: "exhausted", reason: "nonconverging", attemptRefs: [result.stop],
               reviewAssessment: d.reviewAssessment }, result.reason ?? "Review requires a new authorized strategy.", "blocked");

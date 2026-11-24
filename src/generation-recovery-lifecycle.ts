@@ -242,6 +242,19 @@ function validAttempt(value: unknown): value is RecoveryAttempt {
   );
 }
 
+/** Shared bounded-assignment assessment before domain-specific execution.
+ * Adapters authenticate the original check and diagnostic receipts; this policy
+ * does not grant a model invocation, invent a Job, or waive a failed check. */
+export function assessBoundedAssignmentFailure(
+  observation: "protocol-exhausted" | "nonconverging" | "reviewer-drift",
+  diagnosis?: "continue" | "stop" | "disputed",
+): "exhausted" | "diagnostic" | "known-correction" | "integrity-fence" {
+  if (observation === "protocol-exhausted") return "exhausted";
+  if (!diagnosis) return "diagnostic";
+  if (observation === "reviewer-drift" || diagnosis === "disputed") return "integrity-fence";
+  return diagnosis === "continue" ? "known-correction" : "exhausted";
+}
+
 export function emptyRecoveryLifecycle(): RecoveryLifecycle {
   return {
     schema,

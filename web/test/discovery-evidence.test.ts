@@ -1,10 +1,76 @@
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
-import { createDiscoveryEvidence, reopenDiscoveryPiReference, sealDiscoveryPiReference } from '../src/lib/discovery-evidence.server'
+import { beginProtocolInvocation, recoverResponseContract } from '../../src/response-contract-recovery'
+import { createDiscoveryEvidence, readDiscoveryResponse, reopenDiscoveryPiReference, sealDiscoveryPiReference, type DiscoveryAttempt } from '../src/lib/discovery-evidence.server'
+
+test('reconcile real Pi protocol receipts and retain append-only writer/reviewer identities', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nt-discovery-protocol-'))
+  try {
+    const source = 'a'.repeat(64)
+    const evidence = async (stage: 'initial' | 'corrective' | 'semantic-review') =>
+      createDiscoveryEvidence({ owner: 'owner', repositoryId: 'repo', workspace: 'first-turn',
+        revision: 1, stage, model: { provider: 'openai', id: 'fixture' },
+        skillId: 'pinned-skill', instructions: stage }, { NT_DISCOVERY_EVIDENCE_DIR: root })
+    let calls = 0
+    const run = async (attempt: Awaited<ReturnType<typeof evidence>>, manager: SessionManager,
+      requestDigest: string, role: 'writer' | 'reviewer', raw: string, correction?: string) => {
+      const contract = role === 'writer' ? 'discovery.writer-response.v1' : 'discovery.review-response.v1'
+      const session = { sessionId: manager.getSessionId(), sessionManager: manager,
+        get messages() { return manager.buildSessionContext().messages },
+        getActiveToolNames: () => [], setActiveToolsByName: (names: string[]) => assert.deepEqual(names, []) }
+      const base = join(attempt.dir, 'protocol')
+      await beginProtocolInvocation({ receiptFile: base, sourceDigest: requestDigest, contract, session })
+      const append = (text: string) => {
+        calls++
+        manager.appendMessage({ role: 'user', content: 'Original source-bound prompt', timestamp: Date.now() })
+        manager.appendMessage({ role: 'assistant', stopReason: 'stop',
+          content: [{ type: 'text', text }],
+        } as Parameters<SessionManager['appendMessage']>[0])
+      }
+      append(raw)
+      await recoverResponseContract({ session, contract, sourceDigest: requestDigest,
+        receiptFile: base + '.initial.json', validate: text => text === 'invalid'
+          ? [{ path: '$', expected: 'JSON' }] : [], parse: text => text,
+        prompt: async () => { assert.ok(correction); append(correction) } })
+      return { dir: attempt.dir, requestDigest, status: 'started', role } as DiscoveryAttempt
+    }
+    const originalEvidence = await evidence('initial')
+    const writer = SessionManager.create('/', originalEvidence.piDirectory)
+    const originalAttempt = await run(originalEvidence, writer, 'b'.repeat(64), 'writer', 'invalid', '{"draft":1}')
+    // Simulate a crash after the accepted protocol receipt but before wrapper
+    // settlement. Inspection reconstructs the exact response with zero prompts.
+    const original = await readDiscoveryResponse(originalAttempt, source, 'writer', true)
+    assert.equal(original.text, '{"draft":1}')
+    assert.equal(calls, 2)
+    const resumed = await reopenDiscoveryPiReference(original.reference!, source, 'writer')
+    const correctiveEvidence = await evidence('corrective')
+    const correctiveAttempt = await run(correctiveEvidence, resumed, 'c'.repeat(64), 'writer', '{"draft":2}')
+    const corrected = await readDiscoveryResponse(correctiveAttempt, source, 'writer', true)
+    assert.equal(corrected.reference?.id, original.reference?.id)
+    assert.equal(corrected.reference?.file, original.reference?.file)
+    assert.equal((await readDiscoveryResponse({ ...originalAttempt, responseDigest: original.responseDigest },
+      source, 'writer', true)).text, original.text, 'Earlier protocol receipt remains verifiable after append')
+    const reviewEvidence = await evidence('semantic-review')
+    const reviewer = SessionManager.create('/', reviewEvidence.piDirectory)
+    const reviewAttempt = await run(reviewEvidence, reviewer, 'd'.repeat(64), 'reviewer', '{"verdict":"pass"}')
+    const reviewed = await readDiscoveryResponse(reviewAttempt, source, 'reviewer', true)
+    assert.notEqual(reviewed.reference?.id, corrected.reference?.id)
+    assert.equal(calls, 4)
+    await assert.rejects(readDiscoveryResponse(reviewAttempt, source, 'writer', true), /another source or role/)
+    const saved = readFileSync(join(correctiveEvidence.dir, 'response.json'), 'utf8')
+    writeFileSync(join(correctiveEvidence.dir, 'response.json'), saved + ' ')
+    await assert.rejects(readDiscoveryResponse({ ...correctiveAttempt, responseDigest: corrected.responseDigest },
+      source, 'writer', true), /Studio settlement/)
+    writeFileSync(join(correctiveEvidence.dir, 'response.json'), saved)
+    appendFileSync(corrected.reference!.file, '{}\n')
+    await assert.rejects(reopenDiscoveryPiReference(corrected.reference!, source, 'writer'), /changed after settlement/)
+    assert.equal(calls, 4, 'Inspection and tamper rejection never call a model')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('failed discovery retains private Pi JSONL, raw reply and exact validation error', async () => {
   const state = mkdtempSync(join(tmpdir(), 'noveltea-discovery-evidence-'))
