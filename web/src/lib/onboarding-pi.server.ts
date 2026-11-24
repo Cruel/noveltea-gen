@@ -122,7 +122,6 @@ class DiscoveryNonconverging extends Error {}
 class DiscoveryFormatError extends Error {
   constructor(readonly original: unknown) { super('Discovery response failed deterministic format validation') }
 }
-class DiscoveryFormatExhausted extends Error {}
 class DiscoveryReviewerDrift extends Error {}
 class DiscoveryBudgetPaused extends Error {
   constructor() { super('Discovery exhausted its original turn resource budget.') }
@@ -262,32 +261,62 @@ async function realInference(store: StudioDatabase, owner: string, session: Sess
   sourceDigest: string, invocationSource: string, role: DiscoveryPiReference['role'], previous?: DiscoveryPiReference,
   payload?: object, validateFormat?: (raw: string) => void,
   beforePrompt?: (current?: { reference: DiscoveryPiReference; startedAt: number }) => Promise<void>,
-  resume?: DiscoveryAttempt['correctionPause']):
+  resume?: DiscoveryAttempt['correctionPause'], scripted?: (feedback?: string) => Promise<string>):
   Promise<{ text: string; piSessionFile: string; reference: DiscoveryPiReference; activeSeconds: number }> {
   const startedAt = Date.now()
-  const { runtime, model } = await (async () => {
-    await assertUserPiSelection(store, owner, session.model)
-    const runtime = await createUserPiRuntime(store, owner)
-    const model = runtime.getModel(session.model.provider, session.model.id)
-    if (!model) throw new Error('Selected model is unavailable')
-    return { runtime, model }
-  })().catch(error => {
-    throw new DiscoveryInvocationNotStarted('Selected model admission failed before dispatch.', { cause: error })
-  })
-  // Each role has its own tool-less Pi conversation. A correction must append
-  // to the verified original transcript, not reconstruct it from Chat prose.
-  const settingsManager = SettingsManager.inMemory()
-  const loader = new DefaultResourceLoader({ cwd: '/', agentDir: '/', settingsManager,
-    systemPrompt: instructions, noExtensions: true, noSkills: true, noContextFiles: true,
-    noPromptTemplates: true, noThemes: true })
-  await loader.reload()
+  // Both live and scripted transport use the same original Pi receipt,
+  // session reopening, protocol correction, budget and validation boundary.
+  // A scripted transport replaces only the actual provider prompt.
   const manager = resume ? await reopenDiscoveryPiReference(resume.reference, sourceDigest, role)
     : previous ? await reopenDiscoveryPiReference(previous, sourceDigest, role)
     : SessionManager.create('/', evidence.piDirectory)
-  const { session: agent } = await createAgentSession({ cwd: '/', agentDir: '/',
-    modelRuntime: runtime, model, thinkingLevel: session.model.thinking,
-    resourceLoader: loader, settingsManager, sessionManager: manager,
-    noTools: 'all', tools: [] })
+  const liveAgent = async () => {
+    const { runtime, model } = await (async () => {
+      await assertUserPiSelection(store, owner, session.model)
+      const runtime = await createUserPiRuntime(store, owner)
+      const model = runtime.getModel(session.model.provider, session.model.id)
+      if (!model) throw new Error('Selected model is unavailable')
+      return { runtime, model }
+    })().catch(error => {
+      throw new DiscoveryInvocationNotStarted('Selected model admission failed before dispatch.', { cause: error })
+    })
+    const settingsManager = SettingsManager.inMemory()
+    const loader = new DefaultResourceLoader({ cwd: '/', agentDir: '/', settingsManager,
+      systemPrompt: instructions, noExtensions: true, noSkills: true, noContextFiles: true,
+      noPromptTemplates: true, noThemes: true })
+    await loader.reload()
+    const { session: agent } = await createAgentSession({ cwd: '/', agentDir: '/',
+      modelRuntime: runtime, model, thinkingLevel: session.model.thinking,
+      resourceLoader: loader, settingsManager, sessionManager: manager,
+      noTools: 'all', tools: [] })
+    return agent
+  }
+  let correctionPrompt = Boolean(resume)
+  const agent = scripted ? {
+    sessionId: manager.getSessionId(), sessionManager: manager,
+    get messages() { return manager.buildSessionContext().messages },
+    getActiveToolNames: () => [] as string[],
+    setActiveToolsByName: (names: string[]) => {
+      if (names.length) throw Error('Scripted Discovery cannot enable tools.')
+    },
+    async prompt(text: string) {
+      const raw = await scripted(correctionPrompt ? text : undefined).catch(error => {
+        // A refusal during a format correction does not prove that the
+        // original invocation never started.
+        if (correctionPrompt && error instanceof DiscoveryInvocationNotStarted)
+          throw Error('Scripted correction did not finish its original invocation.', { cause: error })
+        throw error
+      })
+      correctionPrompt = true
+      manager.appendMessage({ role: 'user', content: text, timestamp: Date.now() })
+      // No provider price or token count is fabricated. An empty usage
+      // record meters one unpriced call through the ordinary Pi meter.
+      manager.appendMessage({ role: 'assistant', stopReason: 'stop',
+        content: [{ type: 'text', text: raw }], timestamp: Date.now(), usage: {},
+      } as Parameters<SessionManager['appendMessage']>[0])
+    },
+    abort: async () => {}, dispose: () => {},
+  } : await liveAgent()
   const timer = setTimeout(() => { void agent.abort().catch(() => {}) }, 4 * 60_000)
   try {
     const contract = role === 'writer' ? 'discovery.writer-response.v1' : 'discovery.review-response.v1'
@@ -818,7 +847,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
             if (attempt.sourceDigest !== source || attempt.fixture !== (infer ? true : undefined) ||
                 attempt.requestReceiptDigest !== await discoveryEvidence(attempt.dir).requestReceiptDigest())
               throw Error('Discovery reconciliation lacks its original request authority.')
-            await readDiscoveryResponse(attempt, source, undefined, !infer)
+            await readDiscoveryResponse(attempt, source, undefined, true)
           }
           resumable = true
         } catch { resumable = false }
@@ -1099,7 +1128,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       // provider exceptions remain in the original evidence, never routing.
       const reason = error instanceof DiscoveryInvocationNotStarted ? 'not-started' as const
         : error instanceof DiscoveryBudgetPaused ? 'budget' as const
-        : error instanceof ProtocolExhaustedError || error instanceof DiscoveryFormatExhausted ? 'protocol-exhausted' as const
+        : error instanceof ProtocolExhaustedError ? 'protocol-exhausted' as const
         : error instanceof DiscoveryNonconverging ? 'nonconverging' as const
         : error instanceof DiscoveryReviewerDrift ? 'reviewer-drift' as const
         : 'uncertain-effect' as const
@@ -1123,7 +1152,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         const opened = await openAttempt(stage, prompt)
         evidence = opened.evidence
         if (opened.prior && !opened.prior.correctionPause) {
-          const result = await readDiscoveryResponse(opened.prior, assignmentSource, 'writer', !infer)
+          const result = await readDiscoveryResponse(opened.prior, assignmentSource, 'writer', true)
           if (writerReference && (!result.reference || writerReference.id !== result.reference.id ||
               writerReference.file !== result.reference.file)) throw Error('Original Discovery writer session changed.')
           writerReference = result.reference
@@ -1131,19 +1160,18 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
           return result.text
         }
         try {
-          const result = infer ? { text: await infer(session, prompt) } :
-            await realInference(store, actor.id, session, prompt, evidence!,
+          const result = await realInference(store, actor.id, session, prompt, evidence!,
               assignmentSource, opened.requestDigest, 'writer', writerReference, undefined, raw => {
                 try { interpret(raw) }
                 catch (error) {
                   if (!(error instanceof PlanningProvenanceError) && !(error instanceof PlanningClarificationRequired))
                     throw error
                 }
-              }, admitPrompt, opened.prior?.correctionPause)
-          if ('reference' in result) writerReference = result.reference
-          const responseDigest = await evidence.response(result.text, 'piSessionFile' in result ? result.piSessionFile : undefined,
-            'reference' in result ? result.reference : undefined)
-          await markSettled(evidence.dir, responseDigest, 'activeSeconds' in result ? result.activeSeconds : undefined)
+              }, admitPrompt, opened.prior?.correctionPause,
+              infer ? feedback => infer(session, feedback ? prompt + '\n' + feedback : prompt) : undefined)
+          writerReference = result.reference
+          const responseDigest = await evidence.response(result.text, result.piSessionFile, result.reference)
+          await markSettled(evidence.dir, responseDigest, result.activeSeconds)
           return result.text
         } catch (error) {
           if (!opened.prior && !(error instanceof DiscoveryBudgetPaused)) await evidence?.inferenceError(error)
@@ -1166,11 +1194,12 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
         const opened = await openAttempt(stage, instructions, packet)
         const receipt = opened.evidence
         try {
-          const result = opened.prior && !opened.prior.correctionPause ? await readDiscoveryResponse(opened.prior, assignmentSource, role, !infer)
-            : infer ? { text: await infer(session, instructions + '\nREVIEW_PACKET_JSON:\n' + JSON.stringify(packet), stage) }
+          const result = opened.prior && !opened.prior.correctionPause ? await readDiscoveryResponse(opened.prior, assignmentSource, role, true)
             : await realInference(store, actor.id, session, instructions, receipt,
               assignmentSource, opened.requestDigest, role, diagnostic || replacement ? undefined : reviewerReference,
-              { reviewPacket: packet, previousReviews: reviewHistory }, validate, admitPrompt, opened.prior?.correctionPause)
+              { reviewPacket: packet, previousReviews: reviewHistory }, validate, admitPrompt, opened.prior?.correctionPause,
+              infer ? feedback => infer(session, instructions + (feedback ? '\n' + feedback : '') +
+                '\nREVIEW_PACKET_JSON:\n' + JSON.stringify(packet), stage) : undefined)
           if ('reference' in result && result.reference) {
             if (writerReference) assertReviewCycleSession(writerReference, result.reference,
               diagnostic || replacement ? undefined : reviewerReference)
@@ -1376,7 +1405,6 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
       let verifiedSession: Session | undefined
       let hydratedSubmission: string | undefined
       let mandatoryQuestion = false
-      let formatCorrections = 0
       let provenanceNonprogress = 0
       const provenanceHistory: Array<{ code: string; sourceDigest: string; checks: readonly PlanningClaimCheck[] }> = []
       let lastProvenanceDiagnosisRound = 0
@@ -1444,7 +1472,7 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
             attempt.sourceDigest !== assignmentSource ||
             attempt.requestReceiptDigest !== await discoveryEvidence(attempt.dir).requestReceiptDigest())
           throw Error('Discovery submission lacks its original response receipt')
-        const original = await readDiscoveryResponse(attempt, assignmentSource, 'writer', !infer)
+        const original = await readDiscoveryResponse(attempt, assignmentSource, 'writer', true)
         if (original.responseDigest !== submissionRef ||
             (writerReference && (!original.reference || original.reference.id !== writerReference.id ||
               original.reference.file !== writerReference.file)))
@@ -1527,11 +1555,9 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
               ' Return ONLY a focused structured Question Set requesting author direction. Do not choose for the author.',
               'corrective', true)
           }
-          if (!(error instanceof DiscoveryFormatError) || !infer) throw error
-          if (++formatCorrections > 2) throw new DiscoveryFormatExhausted('Fixture response contract exhausted.')
-          return scheduleCorrection(raw, instructions + '\nController correction: ' + discoveryCorrectionFeedback(error.original) +
-            ' Return one complete valid structured Question Set or Creative Direction proposal with source-backed ' +
-            'interpretations. Do not invent approvals or substitute prose questions.', 'corrective', mandatoryQuestion)
+          // Protocol-format correction is already settled in the original
+          // Pi invocation; a later validation disagreement is an integrity failure.
+          throw error
         }
         if (chat && session.turns.length === 1 && needsOpeningQuestions(session.brief) && outcome.proposal)
           return scheduleCorrection(raw, instructions + '\nController requirement: the author has only ' +

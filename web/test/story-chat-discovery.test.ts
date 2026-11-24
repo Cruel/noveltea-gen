@@ -11,8 +11,10 @@ import { readDiscoveryHandoff } from '../../src/discovery-generation-handoff'
 import { inspectPiPolicy } from '../../src/job-pi-policy'
 import { requireGenerationTurn } from '../../src/generation'
 import { readHandoffEffect } from '../src/lib/discovery-handoff-effects.server'
+import { readDiscoveryResponse, meterDiscoveryAttempts, type DiscoveryAttempt } from '../src/lib/discovery-evidence.server'
 import { initialStoryDocument } from '../src/lib/git-cache.server'
 import { openStoryThread } from '../src/lib/story-threads.server'
+import { cancelQueuedThreadMessage } from '../src/lib/thread-chat.server'
 import { removeTestTree } from '../../test/helpers'
 import { createStudioAuth } from '../src/lib/auth'
 import { submitFirstStoryTurn } from '../src/lib/story-first-chat.server'
@@ -136,7 +138,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const selected = (await availableUserPiModels(store, alice))[0]!
     const model = { provider: selected.provider, id: selected.id }
     await store.persistence.settings.putDefaultModel(alice, model, 'now')
-    const storyIds = Array.from({ length: 7 }, () => randomUUID())
+    const storyIds = Array.from({ length: 9 }, () => randomUUID())
     const sourceSha = 'b'.repeat(40)
     const hash = (value: string) => createHash('sha256').update(value).digest('hex')
     const cache = join(root, 'git-cache', hash(alice), hash('github:34'))
@@ -729,6 +731,19 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.equal(resolvedProposal.proposal.interpretations.find((i: any) =>
       i.path === 'planning.puzzle_emphasis').source.questionId, 'puzzle-clarification')
     assert.match(resolvedProposal.proposal.foundation.body, /Planning interpretations/)
+    const lunaAttempts: DiscoveryAttempt[] = JSON.parse((await persistence.conversation(
+      alice, repositoryId, lunaWorkspace))!.state).settledAttempts
+    const originalSource = interruptedState.activeAttempts[0].sourceDigest as string
+    const lunaRound = lunaAttempts.filter(attempt => attempt.sourceDigest === originalSource)
+    assert.deepEqual(lunaRound.map(attempt => attempt.role), ['writer', 'writer', 'writer', 'reviewer'])
+    const lunaReceipts = await Promise.all(lunaRound.map(attempt =>
+      readDiscoveryResponse(attempt, originalSource, attempt.role, true)))
+    assert.equal(lunaReceipts[0]!.responseDigest, interruptedState.activeAttempts[0].responseDigest)
+    assert.equal(new Set(lunaReceipts.slice(0, 3).map(receipt => receipt.reference!.id)).size, 1)
+    assert.equal(new Set(lunaReceipts.slice(0, 3).map(receipt => receipt.reference!.file)).size, 1)
+    assert.notEqual(lunaReceipts[3]!.reference!.id, lunaReceipts[0]!.reference!.id)
+    assert.equal((await meterDiscoveryAttempts(lunaRound)).modelCalls, 4)
+
     const executionEnv = Object.fromEntries(['NT_STATE_DIR', 'NT_GIT_CACHE_DIR',
       'NT_REQUIRE_USER_PI_RUNTIME', 'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN', 'NT_CONFIG_FILE']
       .map(name => [name, process.env[name]]))
@@ -777,7 +792,8 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       assert.equal(continued.continuation.state, 'queued', JSON.stringify(continued.continuation))
       const job = await startStoryJob({ story: correctedStory, job: conflictId, worktreeCacheRoot: cache }, false)
       const handoff = await readDiscoveryHandoff(job)
-      assert.ok(handoff && handoff.usage.modelCalls > 1, 'prior Discovery rounds contribute to the shared meter')
+      assert.ok(handoff, 'prior Discovery rounds contribute to the shared meter')
+      assert.deepEqual(handoff.usage, await meterDiscoveryAttempts(lunaAttempts))
       assert.deepEqual((await inspectPiPolicy(job)).budget, handoff.usage)
       assert.equal((await readHandoffEffect(store, alice, repositoryId, storyIds[4]!, conflictId))?.stage, 'queue-settled')
       const request = JSON.parse((await store.persistence.generation.jobs.state(alice, conflictId))!.requestJson!)
@@ -865,7 +881,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
         const interrupted = await pathRequest(body)
         assert.equal(interrupted.status, 503)
         assert.ok(armed && checkpointLost, 'a real graph checkpoint must be lost after settlement')
-        assert.equal(pathResponses, count)
+        assert.equal(pathResponses, count + 1)
       } finally { persistence.saveConversation = originalSave }
       const row = (await persistence.conversation(alice, repositoryId, pathWorkspace))!
       const state = JSON.parse(row.state)
@@ -877,7 +893,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
         row.revision, 'now'), true)
       const reconciled = await pathRequest({ action: 'reconcile', revision: row.revision + 1 })
       assert.equal(reconciled.status, 200, await reconciled.clone().text())
-      assert.equal(pathResponses, count, 'reconciliation never dispatches Pi')
+      assert.equal(pathResponses, count + 1, 'reconciliation never dispatches Pi')
       return (await reconciled.json() as any).session
     }
     const firstLoss = await interruptAfterSettlement(1, { action: 'answer', revision: pathQuestions.revision,
@@ -904,7 +920,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const pathRow = (await persistence.conversation(alice, repositoryId, pathWorkspace))!
     const pathState = JSON.parse(pathRow.state)
     assert.equal(pathState.graphOperation.status, 'claimed')
-    assert.equal(pathState.activeAttempts.length, 7, 'one format repair and four source corrections need no diagnosis')
+    assert.equal(pathState.activeAttempts.length, 6, 'format repair is inside the first Pi receipt; four source corrections need no diagnosis')
     assert.ok(pathState.activeAttempts.every((attempt: any) => attempt.responseDigest))
     assert.equal(await originalSave(alice, repositoryId, pathWorkspace, pathRow.revision + 1,
       JSON.stringify({ ...pathState, revision: pathRow.revision + 1, startedAt: Date.now() - 11 * 60_000 }),
@@ -920,6 +936,20 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.ok(repairedSession.proposal.interpretations.every((item: { path: string }) =>
       item.path.startsWith('planning.')))
     assert.equal(await store.persistence.naturalStory.previousJob(alice, pathTurnId), null)
+    const pathSettled: DiscoveryAttempt[] = JSON.parse((await persistence.conversation(alice,
+      repositoryId, pathWorkspace))!.state).settledAttempts
+    const pathRound = pathSettled.filter(attempt => attempt.sourceDigest === pathState.activeAttempts[0].sourceDigest)
+    assert.deepEqual(pathRound.map(attempt => attempt.responseDigest),
+      pathState.activeAttempts.map((attempt: DiscoveryAttempt) => attempt.responseDigest),
+      'all original settlements are retained across child and parent checkpoint loss')
+    const pathReceipts = await Promise.all(pathRound.map(attempt =>
+      readDiscoveryResponse(attempt, attempt.sourceDigest!, attempt.role, true)))
+    assert.equal(new Set(pathReceipts.slice(0, 5).map(receipt => receipt.reference!.id)).size, 1)
+    assert.equal(new Set(pathReceipts.slice(0, 5).map(receipt => receipt.reference!.file)).size, 1)
+    assert.notEqual(pathReceipts[5]!.reference!.id, pathReceipts[0]!.reference!.id)
+    assert.equal((await meterDiscoveryAttempts(pathRound)).modelCalls, 7,
+      'one format repair, four source corrections and one independent review are each charged once')
+
     // Exercise resource admission, known provider refusal and independent
     // replacement at the actual authenticated Story Chat entry.
     const controlStory = storyIds[6]!, controlTurn = randomUUID()
@@ -957,6 +987,12 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const budgetState = (await req(controlStory, controlTurn, 'GET')).body.session
     assert.equal(budgetState.recoveryReason, 'budget')
     assert.equal(providerRefused, false, 'exhaustion must precede provider admission')
+    // A preparing first Turn is not a queued instruction. The existing
+    // author cancellation endpoint cannot abandon an admitted operation.
+    await assert.rejects(cancelQueuedThreadMessage(store, alice, 'root:' + controlTurn, controlTurn),
+      /entered execution/)
+    assert.equal((await req(controlStory, controlTurn, 'GET')).body.session.recoveryReason, 'budget')
+
     const providerPause = await controlRequest({ action: 'retry', revision: budgetState.revision,
       limits: { modelCalls: 8 } })
     assert.equal(providerPause.status, 503)
@@ -973,6 +1009,18 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       'story-chat,' + controlStory + ',' + controlTurn))!.state)
     assert.equal(controlPrivate.settledAttempts.filter((attempt: any) => attempt.responseDigest).length, 7)
     assert.equal(controlPrivate.settledAttempts.filter((attempt: any) => attempt.status === 'not-started').length, 1)
+    const controlRound: DiscoveryAttempt[] = controlPrivate.settledAttempts.filter((attempt: DiscoveryAttempt) =>
+      attempt.status === 'started' && attempt.sourceDigest === controlPrivate.settledAttempts.at(-1).sourceDigest)
+    assert.deepEqual(controlRound.map(attempt => attempt.role),
+      ['writer', 'reviewer', 'writer', 'reviewer', 'diagnostic', 'reviewer'])
+    const controlReceipts = await Promise.all(controlRound.map(attempt =>
+      readDiscoveryResponse(attempt, attempt.sourceDigest!, attempt.role, true)))
+    assert.equal(controlReceipts[0]!.reference!.id, controlReceipts[2]!.reference!.id)
+    assert.equal(controlReceipts[1]!.reference!.id, controlReceipts[3]!.reference!.id)
+    assert.equal(new Set([0, 1, 4, 5].map(index => controlReceipts[index]!.reference!.id)).size, 4,
+      'writer, original reviewer, diagnosis and replacement have distinct Pi conversations')
+    assert.equal((await meterDiscoveryAttempts(controlPrivate.settledAttempts)).modelCalls, 7)
+
     assert.equal((await controlRequest({ action: 'approve', revision: controlProposal.revision,
       digest: controlProposal.digest }, storyIds[5]!)).status, 404)
     assert.equal(await store.persistence.conversations.archiveThread(alice, 'root:' + controlTurn, true,
@@ -981,6 +1029,110 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
       digest: controlProposal.digest })).status, 409, 'archived author Thread cannot grant approval or queue work')
     assert.equal(controlWriterCalls, 2)
     assert.equal(await store.persistence.generation.jobs.identity(controlTurn), null)
+    // The same durable cancellation receipt used by queued author controls
+    // must fence every subsequent Discovery action, even if its original
+    // proposal/checkpoint remains intact. Inject the receipt at the storage
+    // boundary, as in the existing approval/continuation conformance tests.
+    assert.equal(await store.persistence.conversations.archiveThread(alice, 'root:' + controlTurn, false,
+      new Date().toISOString()), true)
+    await fixture.records.insert('story_thread_message_cancellations', {
+      messageId: controlTurn, ownerUserId: alice, threadId: 'root:' + controlTurn,
+      cancelledAt: new Date().toISOString(),
+    })
+    const cancelledMessage = await store.persistence.messages.owned(alice, 'root:' + controlTurn, controlTurn)
+    assert.equal(cancelledMessage?.phase, 'cancelled')
+    const cancellationEvidence = await store.persistence.onboarding.conversation(alice, repositoryId,
+      'story-chat,' + controlStory + ',' + controlTurn)
+    for (const action of ['approve', 'retry', 'restart', 'reconcile', 'answer']) {
+      const response = await controlRequest({ action, revision: controlProposal.revision, digest: controlProposal.digest,
+        setId: controlQuestions.questions.id, setRevision: controlQuestions.questions.revision,
+        responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }] })
+      assert.equal(response.status, 404, 'cancelled Turn cannot execute ' + action)
+    }
+    assert.deepEqual(await store.persistence.onboarding.conversation(alice, repositoryId,
+      'story-chat,' + controlStory + ',' + controlTurn), cancellationEvidence)
+    assert.equal(controlWriterCalls, 2)
+    assert.equal(controlReviewRoles.length, 4)
+    assert.equal(await store.persistence.generation.jobs.identity(controlTurn), null)
+    assert.equal(await store.persistence.generation.queue.record(controlTurn), null)
+
+    // A distinct production Story Chat assignment: changing only the words of
+    // the same invalid authority claim is not a new source or entitlement.
+    const stalledStory = storyIds[7]!, stalledTurn = randomUUID()
+    await store.persistence.naturalStory.beginFirstTurn(alice, stalledStory, stalledTurn,
+      initial, new Date().toISOString(), 'autonomous')
+    let stalledWriters = 0, diagnoses = 0, semanticCalls = 0
+    const stalledTransport = withFixtureSemanticReview(async (state, instructions, role) => {
+      if (role === 'provenance-diagnostic') {
+        diagnoses++
+        assert.match(instructions, /Independent, read-only Discovery provenance diagnosis/)
+        return JSON.stringify({ action: 'continue', reason: 'Remove the fabricated author-source citation.' })
+      }
+      if (state.turns.length === 1) return questionsReply([{ id: 'baseline', kind: 'free-text',
+        question: 'May Studio decide the complete planning baseline?', allowStudioDecision: true }])
+      stalledWriters++
+      if (stalledWriters === 4) assert.match(instructions, /Remove the fabricated author-source citation/)
+      const value = JSON.parse(proposalFor(state))
+      value.foundation.decisions.push({ statement: 'Studio suggestion wording ' + stalledWriters,
+        authority: 'user-protected', source: { kind: 'turn', index: 0 } })
+      return JSON.stringify(value)
+    }, () => { semanticCalls++; assert.fail('Deterministically invalid provenance cannot enter independent Review') })
+    const stalledRequest = (body: unknown) => storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(body),
+      }), url, stalledStory, stalledTurn, stalledTransport)
+    const stalledStart = await stalledRequest({ action: 'start', model, text: initial })
+    assert.equal(stalledStart.status, 200)
+    const stalledQuestions = (await stalledStart.json() as any).session
+    const stalledResult = await stalledRequest({ action: 'answer', revision: stalledQuestions.revision,
+      setId: stalledQuestions.questions.id, setRevision: stalledQuestions.questions.revision,
+      responses: [{ questionId: 'baseline', answer: { kind: 'delegate', note: '' } }] })
+    assert.equal(stalledResult.status, 503)
+    const stalledWorkspace = 'story-chat,' + stalledStory + ',' + stalledTurn
+    const stalledState = JSON.parse((await persistence.conversation(alice, repositoryId, stalledWorkspace))!.state)
+    assert.equal(stalledState.recovery.reason, 'nonconverging')
+    assert.equal(stalledState.recovery.status, 'unresolved')
+    assert.equal(stalledWriters, 5)
+    assert.equal(diagnoses, 1)
+    assert.equal(semanticCalls, 0)
+    const stalledAttempts: DiscoveryAttempt[] = stalledState.activeAttempts
+    assert.deepEqual(stalledAttempts.map(attempt => attempt.role),
+      ['writer', 'writer', 'writer', 'diagnostic', 'writer', 'writer'])
+    const stalledReceipts = await Promise.all(stalledAttempts.map(attempt =>
+      readDiscoveryResponse(attempt, attempt.sourceDigest!, attempt.role, true)))
+    assert.equal(new Set(stalledReceipts.filter(receipt => receipt.reference!.role === 'writer')
+      .map(receipt => receipt.reference!.id)).size, 1)
+    assert.notEqual(stalledReceipts[3]!.reference!.id, stalledReceipts[0]!.reference!.id)
+    assert.equal((await meterDiscoveryAttempts(stalledAttempts)).modelCalls, 6)
+    assert.equal((await stalledRequest({ action: 'retry', revision: stalledState.revision })).status, 409)
+    assert.equal(stalledWriters, 5)
+    assert.equal(diagnoses, 1)
+
+    // A transport that actually entered its prompt but has no settled
+    // response is neither a resource pause nor a known pre-dispatch refusal.
+    const uncertainStory = storyIds[8]!, uncertainTurn = randomUUID()
+    await store.persistence.naturalStory.beginFirstTurn(alice, uncertainStory, uncertainTurn,
+      initial, new Date().toISOString(), 'autonomous')
+    let uncertainCalls = 0
+    const uncertainRequest = (body: unknown) => storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(body),
+      }), url, uncertainStory, uncertainTurn, async () => {
+        uncertainCalls++
+        throw Error('simulated interrupted provider response')
+      })
+    assert.equal((await uncertainRequest({ action: 'start', model, text: initial })).status, 503)
+    const uncertainState = JSON.parse((await persistence.conversation(alice, repositoryId,
+      'story-chat,' + uncertainStory + ',' + uncertainTurn))!.state)
+    assert.equal(uncertainState.recovery.status, 'fenced')
+    assert.equal(uncertainState.recovery.reason, 'uncertain-effect')
+    assert.equal(uncertainState.activeAttempts.length, 1)
+    assert.equal(uncertainState.activeAttempts[0].status, 'started')
+    assert.equal(uncertainState.activeAttempts[0].responseDigest, undefined)
+    assert.equal((await uncertainRequest({ action: 'retry', revision: uncertainState.revision })).status, 409)
+    assert.equal(uncertainCalls, 1)
+    assert.equal(await store.persistence.generation.jobs.identity(uncertainTurn), null)
+
   } finally {
     await reopened?.close()
     await fixture.close()

@@ -726,7 +726,7 @@ test('unstarted Pi turns may retry; uncertain started turns remain fenced', {
     const privateScope = join(root, 'private-evidence', 'discovery-sessions', scopedRoots[0]!)
     assert.equal(statSync(privateScope).mode & 0o777, 0o700)
     const attempts = readdirSync(privateScope).map(name => join(privateScope, name))
-    assert.equal(attempts.length, 3, 'Failed inference and both corrective responses are retained')
+    assert.equal(attempts.length, 2, 'Format-only correction stays within the original Pi invocation')
     const privatelySaved = JSON.parse((await store.persistence.onboarding.conversation(
       alice.id, repo, ''))!.state)
     assert.deepEqual(new Set(privatelySaved.discoveryEvidencePaths), new Set(attempts))
@@ -734,20 +734,19 @@ test('unstarted Pi turns may retry; uncertain started turns remain fenced', {
       'Private transcript paths must not appear in the API session')
     const initial = attempts.find(dir => dir.includes('-initial-') &&
       readdirSync(dir).includes('inference-error.json'))!
-    const rejected = attempts.find(dir => dir.includes('-initial-') && dir !== initial)!
-    const accepted = attempts.find(dir => dir.includes('-corrective-'))!
+    const accepted = attempts.find(dir => dir.includes('-initial-') && dir !== initial)!
     const failedCall = JSON.parse(readFileSync(join(initial, 'inference-error.json'), 'utf8'))
     assert.equal(failedCall.message, 'provider secret: NOT-FOR-UI')
     assert.equal(statSync(join(initial, 'inference-error.json')).mode & 0o777, 0o600)
-    const rejectedRaw = JSON.parse(readFileSync(join(rejected, 'response.json'), 'utf8'))
-    const rejectedRule = JSON.parse(readFileSync(join(rejected, 'validation.json'), 'utf8'))
-    assert.match(rejectedRaw.raw, /Prefer a strong personal stake/)
-    assert.equal(rejectedRule.message, 'Invalid author-question recommendation.')
-    assert.equal(rejectedRule.status, 'rejected')
+    const acceptedRaw = JSON.parse(readFileSync(join(accepted, 'response.json'), 'utf8'))
+    const protocol = JSON.parse(readFileSync(join(accepted, 'protocol.initial.json'), 'utf8'))
+    assert.equal(protocol.attempts, 2)
+    assert.equal(protocol.status, 'accepted')
+    const transcript = readFileSync(acceptedRaw.piSessionFile, 'utf8')
+    assert.match(transcript, /Prefer a strong personal stake/)
+    assert.match(transcript, /free-text question omit recommendedId and recommendationReason/)
     assert.equal(JSON.parse(readFileSync(join(accepted, 'validation.json'), 'utf8')).status,
       'accepted')
-    assert.match(readFileSync(join(accepted, 'request.json'), 'utf8'),
-      /free-text question omit recommendedId and recommendationReason/)
     assert.doesNotMatch(JSON.stringify(retry.body), /NOT-FOR-UI|Prefer a strong personal stake/)
     assert.equal((await req({action:'retry', revision}, async () => { throw new Error('unexpected') })).status, 409)
     // Simulate a worker dying after reserving an expensive Pi turn. Recovery

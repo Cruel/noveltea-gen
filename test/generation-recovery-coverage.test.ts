@@ -321,11 +321,11 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
 test("R14 Discovery and handoff retain reviewed source/effect gates", () => {
   const reviewed = [
     ["discovery-graph.server.ts", "discoveryGraph", "29b99596bb982d57721d7197b3975f9f0eb437428a6febf075a499107d4eca3a"],
-    ["onboarding-pi.server.ts", "realInference", "f96db670a6bb0e51ba7b6417d829175652af5bee2fe372a999e20fd076322e8e"],
+    ["onboarding-pi.server.ts", "realInference", "27030cd9a5ff2eeee05161bab2c3c1971294f0635a98929c58e29e7a49dda80c"],
     ["onboarding-pi.server.ts", "openDiscoveryGraph", "af14f5a9776487a27f52a6fa457d700d4c51aa8bfdf582a4c2acc496e2100a26"],
     ["onboarding-pi.server.ts", "settleInterruptedApproval", "6332d0af287a08423108d122c20d5da9503136454566a2a4a2a703aaa1f38412"],
     ["onboarding-pi.server.ts", "reconcileDiscoveryGraph", "df459778be6135cdf996624df0019a2901d0230acdab3c051362f612f3d9dd54"],
-    ["onboarding-pi.server.ts", "onboardingPiRequest", "58f1830c0832106ffa4721ff54693b8ef92cb01420647fb02db6c5db5c470720"],
+    ["onboarding-pi.server.ts", "onboardingPiRequest", "86d90a076a3132e384199dc0b00b28eefae6156686d19203faf2fe2b6020d046"],
     ["onboarding-pi.server.ts", "expectedProposal", "223e0a08045e4f01921b624cb73b1c6d3d3a901b6451a67abff9f020efd074aa"],
     ["onboarding-pi.server.ts", "currentGraph", "51f5e1b73a5d42c4a6d7d39f0b43315b929597b5b944777329e7ae2be6c946e6"],
     ["../../../src/discovery-semantic-review.ts", "parseDiscoverySemanticDiagnostic", "2de55a16f6751be8200839b532327ce05a47c5ec295d5d23dc57c26c620e49b1"],
