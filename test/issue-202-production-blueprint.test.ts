@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -20,14 +20,19 @@ import type { ConvergentReview } from "../src/review-convergence.js";
 import { blueprintDigest } from "../src/architecture-blueprint-patch.js";
 import { evaluateReviewConvergence } from "../src/review-convergence.js";
 import { captureBlueprintReplay } from "../src/execution-replay-blueprint.js";
-import type { Plan } from "../src/architecture.js";
+import type { Plan, CompletionContract } from "../src/architecture.js";
 import { startStoryJob } from "../src/job.js";
-import { runArchitectureJob } from "../src/architecture.js";
+import { runArchitectureJob, verifyArchitectureAssignmentResult } from "../src/architecture.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { configurePiPolicy, inspectPiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { removeTestTree } from "./helpers.js";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { createGenerationGraph } from "../src/generation.js";
+import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
+import { boundedPinnedSources } from "../src/bounded-specialist-prompt.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const model: Model = {
@@ -221,7 +226,7 @@ function promptText(messages: readonly unknown[]): string {
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
 function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-pass" | "continue" | "repeat" = "productive",
-  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean; architectureRecovery?: boolean }): Provider {
+  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean; architectureRecovery?: boolean; architectureStall?: boolean; parentPlan?: ReturnType<typeof planWholeStory> }): Provider {
   let reviewerRound = 0;
   let reviewerCrashed = false;
   let malformedDiagnosticSent = false;
@@ -238,10 +243,14 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
   const oldQuote = "A separately maintained guard shift roster confirms the clerk arrived";
   const orderReport = "CAUSAL_MILESTONE_ORDER: milestone.arrival,milestone.archive";
   const writeVariant = (kind: string): ToolCall[] => {
+    if (kind === "invalid") return writeCalls().map(call => call.arguments.path === archPath ?
+      { ...call, arguments: { ...call.arguments, content: String(call.arguments.content).replace("completeness:", "unsupported_field: true\ncompleteness:") } } : call);
     if (kind === "protection") return writeCalls().map(call => call.arguments.path === archPath ?
       { ...call, arguments: { ...call.arguments, content: String(call.arguments.content).replace("decisions: []",
         "decisions:\n  - id: invented-approval\n    statement: Invented protected approval\n    origin: user\n    authority: user-protected") } } : call);
     if (kind === "canonical") return writeCalls();
+    if (format?.architectureStall) return [{ type: "toolCall", id: "stalled-architecture-" + randomUUID(), name: "write",
+      arguments: { path: archPath, content: canonicalArchitecture[2]!.content + "Cosmetic detail only.\n" } }];
     return [{ type: "toolCall", id: "correct-architecture-" + randomUUID(), name: "write",
       arguments: { path: archPath, content: canonicalArchitecture[2]!.content +
         improvements.slice(0, architectureDraftRound).join("\n") + "\n" } }];
@@ -305,31 +314,64 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
       reviewer || diagnostic) && lastRole !== "toolResult";
     let content: AssistantMessage["content"];
     let reason: "stop" | "toolUse" = "stop";
-    if (needRead) { content = readCalls(); reason = "toolUse"; }
+    if (format?.parentPlan && prompt.includes("read-only NovelTea objective orchestrator")) {
+      const plan = format.parentPlan;
+      if (lastRole !== "toolResult") {
+        content = requiredOrchestratorSkillReads("autonomous").map(path => ({
+          type: "toolCall", id: "objective-read-" + randomUUID(), name: "read", arguments: {path: "skill://" + path}
+        })); reason = "toolUse";
+      } else content = asText(JSON.stringify({sourceSha: plan.source.verifiedSha, turnDigest: plan.digest,
+        assignments: plan.assignments.map(a => ({id: a.id, reason: "Perform authorized source-bound work in causal order."}))}));
+    } else if (format?.parentPlan && prompt.includes("INDEPENDENT READ-ONLY GENERATION RECOVERY DIAGNOSIS")) {
+      const signature = prompt.match(/signature=([a-f0-9]{64})/)?.[1];
+      const sourceRef = prompt.match(/sourceRef=([^;]+); category=/)?.[1];
+      assert.ok(signature && sourceRef);
+      assert.match(prompt, /assignmentDefects/);
+      assert.deepEqual([...active], []);
+      content = asText(JSON.stringify({schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+        category: "defect", diagnosis: "The original writer repeatedly retained the same material Architecture finding.",
+        strategy: "review-adjudication", owner: null, scopeRef: null, prerequisites: [],
+        uncertainty: "No authorized successor write can be inferred."}));
+    } else if (format?.parentPlan && prompt.includes("IMMUTABLE REVIEW PACKET")) {
+      if (lastRole !== "toolResult") {
+        content = boundedPinnedSources("nt-narrative-review").map(path => ({
+          type: "toolCall", id: "postcommit-read-" + randomUUID(), name: "read", arguments: {path: "skill://" + path}
+        })); reason = "toolUse";
+      } else {
+        const user = ctx.messages.findLast(m => m.role === "user")!;
+        const raw = typeof user.content === "string" ? user.content : user.content.filter(c => c.type === "text").map(c => c.text).join("");
+        const packet = JSON.parse(raw.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        content = asText(JSON.stringify({sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+          evidence: packet.items.map((item: any) => ({commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+            path: item.assurance.changedPaths[0], line: 1, explanation: "The verified draft fulfills the bounded Architecture assignment."}))}));
+      }
+    } else if (needRead) { content = readCalls(); reason = "toolUse"; }
     else if (format?.architectureRecovery && prompt.includes("RESPONSE-CONTRACT CORRECTION ONLY (architecture.milestone-order.v1)")) {
       assert.deepEqual([...active], [], "format repair has no tools");
       content = asText(orderReport);
     } else if (format?.architectureRecovery && prompt.includes("SOURCE-BOUND ARCHITECTURE CORRECTION")) {
       const empty = prompt.includes("architecture-empty-draft");
+      const native = prompt.includes("schema");
       const protection = prompt.includes("architecture-new-protection");
       const review = prompt.includes("architecture-precommit-review");
-      if (lastRole !== "toolResult" && (empty || protection || review)) {
-        content = writeVariant(empty ? "protection" : protection ? "canonical" : "review"); reason = "toolUse";
+      if (lastRole !== "toolResult" && (empty || native || protection || review)) {
+        content = writeVariant(empty ? "invalid" : native ? "protection" : protection ? "canonical" : "review"); reason = "toolUse";
       } else content = asText(protection ? "CAUSAL_MILESTONE_ORDER: milestone.arrival" : orderReport);
     } else if (format?.architectureRecovery && draftReviewer) {
       if (lastRole !== "toolResult") { content = draftReadCalls(); reason = "toolUse"; }
       else {
         const round = architectureDraftRound++;
-        const quote = round === 0 ? oldQuote : improvements[round - 1]!;
-        const findings = round < 3 ? [{
+        const quote = round === 0 || format.architectureStall ? oldQuote : improvements[round - 1]!;
+        const findings = round < 3 || format.architectureStall ? [{
           path: archPath, reason: "The arrival evidence requires an independently checkable supporting detail.",
-          correction: improvements[round]!,
+          correction: improvements[format.architectureStall ? 0 : round]!,
           requirement: { source: "task", quote: "independent proof of the missing clerk's refuge" },
-          evidence: { path: archPath, quote }, origin: round === 0 ? "initial" : "introduced",
+          evidence: { path: archPath, quote }, origin: round === 0 ? "initial" : format.architectureStall ? "continuing" : "introduced",
         }] : [];
         const prior = Array.from({ length: round }, (_, i) => ({
-          round: i, findingIndex: 0, status: "resolved", reason: "The revised draft supplies new source evidence.",
-          evidence: { path: archPath, quote: improvements[i]! },
+          round: i, findingIndex: 0, status: format.architectureStall ? "persisting" : "resolved",
+          reason: format.architectureStall ? "The same material gap remains." : "The revised draft supplies new source evidence.",
+          evidence: { path: archPath, quote: format.architectureStall ? oldQuote : improvements[i]! },
         }));
         content = asText(JSON.stringify({schema: "noveltea-architecture-draft-review/v2",
           status: findings.length ? "revise" : "pass", findings, prior}));
@@ -434,7 +476,7 @@ function available() {
 
 test("#202/#203: production Blueprint review converges after three revisions, protocol repair and a safe budget resume", {
   skip: !available() && "Requires registered rootless sandbox and local noveltea-skills",
-  timeout: 240_000,
+  timeout: 360_000,
 }, async () => {
   const tmp = mkdtempSync(join(tmpdir(), "nt-202-production-"));
   const id = randomUUID();
@@ -451,6 +493,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
   let graphJobId: string | undefined;
   let crashGraphJobId: string | undefined;
   let activeGraphJobId: string | undefined;
+  const parentJobIds: string[] = [];
   let server: ReturnType<typeof createControllerServer> | undefined;
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -885,13 +928,13 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     const graphRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
     graphRuntime.registerNativeProvider(scripted(graphCalls, "productive", false, {architectureRecovery: true}));
     await graphRuntime.refresh({ allowNetwork: false });
-    const graphContract = {
+    const graphContract: CompletionContract = {
       scope: { kind: "full-story", depth: "composition", targets: [], branches: [] },
       constraints: [], envelope: { presentation: "Dialogue mystery", hardLimits: [], preferences: [] },
     };
-    const graphRun = (command: import("../src/assignment-metadata-recovery.js").AssignmentRoundCommand = {phase: "invoke"}) => withJobModelRuntime(graphRuntime, () =>
+    const graphRun = (command: import("../src/assignment-metadata-recovery.js").AssignmentRoundCommand = {phase: "invoke"}, assignmentKey = "production-blueprint-architecture") => withJobModelRuntime(graphRuntime, () =>
       runArchitectureJob({ story: graphStory, job: graphJobId!,
-        action: "run", round: { assignmentKey: "production-blueprint-architecture", command }, contract: graphContract, task, provider: model.provider,
+        action: "run", round: { assignmentKey, command }, contract: graphContract, task, provider: model.provider,
         model: model.id, skillsSource: source, validatorSource: source }));
     const graphInspect = () => runArchitectureJob({
       story: graphStory, job: graphJobId!, action: "inspect",
@@ -982,7 +1025,24 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     assert.equal(git(graphJob.worktreeRoot, "status", "--porcelain"), "", "initial empty draft is a real no-write submission");
     const originalWriter = submitted.piSessionId;
     assert.ok(originalWriter);
-    const codes = ["architecture-empty-draft", "architecture-new-protection", "architecture-milestone-order",
+    const initialProof = submitted.round.proof;
+    const initialCalls = graphCalls.length;
+    const replayedInitial = await graphRun();
+    assert.ok("round" in replayedInitial && replayedInitial.round?.status === "settled");
+    assert.deepEqual(replayedInitial.round.proof, initialProof);
+    assert.equal(replayedInitial.piSessionId, originalWriter);
+    assert.equal(graphCalls.length, initialCalls, "loss of initial child checkpoint cannot replay the writer");
+    await assert.rejects(graphRun({phase: "invoke"}, "unrelated-assignment"), /assignment|recovery blocked/i);
+    const initialDir = join(graphJob.stateDir, "architecture-assignment", initialProof.sourceDigest);
+    const submissionPath = join(initialDir, "0.submission.json"), settlementPath = join(initialDir, "0.settled.json");
+    const submissionBytes = readFileSync(submissionPath), settlementBytes = readFileSync(settlementPath);
+    try {
+      unlinkSync(submissionPath); unlinkSync(settlementPath);
+      await assert.rejects(graphRun(), /started without a sealed effect|settled effect|recovery blocked/i);
+      assert.equal(graphCalls.length, initialCalls, "uncertain started original writer must not replay");
+      assert.equal(git(graphJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+    } finally { writeFileSync(submissionPath, submissionBytes); writeFileSync(settlementPath, settlementBytes); }
+    const codes = ["architecture-empty-draft", "schema", "architecture-new-protection", "architecture-milestone-order",
       "architecture-precommit-review", "architecture-precommit-review", "architecture-precommit-review"];
     for (const code of codes) {
       assert.ok("round" in submitted && submitted.round?.status === "settled");
@@ -1003,6 +1063,21 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       submitted = await graphRun({phase: "correct", proof, grantDigest});
       assert.equal(submitted.piSessionId, originalWriter);
       assert.ok("round" in submitted && submitted.round?.status === "settled");
+      const correctionCalls = graphCalls.length;
+      const replayedCorrection = await graphRun({phase: "correct", proof, grantDigest});
+      assert.ok("round" in replayedCorrection && replayedCorrection.round?.status === "settled");
+      assert.deepEqual(replayedCorrection.round.proof, submitted.round.proof);
+      assert.equal(graphCalls.length, correctionCalls, "loss of corrective child checkpoint cannot replay the writer");
+      if (code === "architecture-empty-draft") {
+        const candidate = join(graphJob.worktreeStoryRoot, "milestones/archive.md");
+        const original = readFileSync(candidate);
+        try {
+          writeFileSync(candidate, Buffer.concat([original, Buffer.from("\nUntrusted external edit.\n")]));
+          await assert.rejects(graphRun({phase: "verify", proof: submitted.round.proof}), /effect changed|draft changed/i);
+          assert.equal(graphCalls.length, correctionCalls);
+          assert.equal(git(graphJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+        } finally { writeFileSync(candidate, original); }
+      }
     }
     assert.ok("round" in submitted && submitted.round?.status === "settled");
     const authored = await graphRun({phase: "verify", proof: submitted.round.proof});
@@ -1010,6 +1085,22 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       "global compact planning must hand off to canonical Arc/Milestone authoring");
     assert.notEqual(git(graphJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
     assert.equal(git(graphJob.worktreeRoot, "status", "--porcelain"), "");
+    const committedCalls = graphCalls.length;
+    assert.equal(await verifyArchitectureAssignmentResult(graphJob, {skillsSource: source, validatorSource: source},
+      1, graphBase, authored.headSha), "commit");
+    const reopenedCommit = await graphRun({phase: "verify", proof: submitted.round.proof});
+    assert.equal(reopenedCommit.headSha, authored.headSha);
+    assert.equal(graphCalls.length, committedCalls, "committed effect reconciles without another writer or reviewer");
+    const architectureReceipt = join(graphJob.stateDir, "architecture.json");
+    const sealed = readFileSync(architectureReceipt);
+    try {
+      const forged = JSON.parse(sealed.toString("utf8"));
+      forged.invocationProof.settlementDigest = "0".repeat(64);
+      writeFileSync(architectureReceipt, JSON.stringify(forged));
+      await assert.rejects(graphRun({phase: "verify", proof: submitted.round.proof}), /settled|assignment/i);
+      assert.equal(graphCalls.length, committedCalls);
+      assert.equal(git(graphJob.worktreeRoot, "rev-parse", "HEAD"), authored.headSha);
+    } finally { writeFileSync(architectureReceipt, sealed); }
     for (const { path } of canonicalArchitecture) {
       assert.ok(existsSync(join(graphJob.worktreeStoryRoot, path)),
         "canonical Architecture must create " + path);
@@ -1030,6 +1121,101 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     assert.ok(graphCalls.some(c => c.prompt.includes(
       "INDEPENDENT READ-ONLY early reviewer")),
     "canonical draft must receive an independent source-reading early review");
+
+    // Actual Generation parent, with current-format Turn and real sandbox.
+    for (const stalled of [false, true]) {
+      const parentId = randomUUID();
+      parentJobIds.push(parentId);
+      const parentDb = new DatabaseSync(join(app, "studio.sqlite"));
+      try { parentDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(parentId, owner, "story", graphBase, null); } finally { parentDb.close(); }
+      const parentJob = await startStoryJob({story: graphStory, job: parentId, worktreeCacheRoot: scoped});
+      const turn = planWholeStory(task, graphContract, graphBase);
+      writeFileSync(join(parentJob.stateDir, "turn-plan.json"), JSON.stringify(turn));
+      const calls: Call[] = [];
+      const runtime = await ModelRuntime.create({modelsPath: null, refreshOnCreate: false});
+      runtime.registerNativeProvider(scripted(calls, "productive", false, {
+        parentPlan: turn, architectureRecovery: true, architectureStall: stalled,
+      }));
+      await runtime.refresh({allowNetwork: false});
+      await configurePiPolicy(parentJob, {version: 1, profile: {provider: model.provider, model: model.id},
+        limits: {steps: 50, modelCalls: 250}});
+      const file = join(parentJob.stateDir, "r14f-generation.sqlite");
+      let saver = SqliteSaver.fromConnString(file);
+      let graph = createGenerationGraph(saver, "server");
+      const config = {configurable: {thread_id: parentJob.threadId + ":generation:web"}, recursionLimit: 10000, durability: "sync" as const};
+      const input = {request: {story: graphStory, job: parentId, task, contract: graphContract, turnPlanDigest: turn.digest,
+        fixture: false, skillsSource: source, validatorSource: source, provider: model.provider, model: model.id,
+        orchestrationPolicy: "explicit" as const}};
+      let started = false;
+      const invoke = (extra = {}) => withJobModelRuntime(runtime, () => graph.invoke(started ? null : input, {...config, ...extra}));
+      try {
+        if (!stalled) {
+          const cuts = ["initial", "admitted", "corrected", "accepted", "committed"] as const;
+          let writer: string | undefined;
+          for (const cut of cuts) {
+            const abort = new AbortController();
+            const originalPut = SqliteSaver.prototype.put;
+            const originalWrites = SqliteSaver.prototype.putWrites;
+            let crashed = false;
+            const failure = Error("R14F injected checkpoint loss: " + cut);
+            SqliteSaver.prototype.put = async function (...args) {
+              if (crashed) throw failure;
+              return originalPut.apply(this, args);
+            };
+            SqliteSaver.prototype.putWrites = async function (cfg, writes, taskId) {
+              if (crashed) throw failure;
+              const child = cfg.configurable?.checkpoint_ns?.includes("assignment-");
+              const entry = (key: string) => writes.find(([channel]) => channel === key)?.[1] as any;
+              const submission = entry("submission"), correction = entry("correction"), receipt = entry("receipt");
+              if (cut === "initial" && child && submission?.status === "writer-round" && submission.receiptRef.split(":")[1] === "0" ||
+                  cut === "admitted" && child && correction?.rejectedReceiptRef.split(":")[1] === "0" ||
+                  cut === "corrected" && child && submission?.status === "writer-round" && submission.receiptRef.split(":")[1] === "1" ||
+                  cut === "accepted" && cfg.configurable?.thread_id?.includes(":architecture:") && receipt?.phase === "authored" ||
+                  cut === "committed" && child && entry("outcome")?.status === "verified") {
+                crashed = true; abort.abort(failure); throw failure;
+              }
+              return originalWrites.call(this, cfg, writes, taskId);
+            };
+            try { await assert.rejects(invoke({signal: abort.signal})); }
+            finally { SqliteSaver.prototype.put = originalPut; SqliteSaver.prototype.putWrites = originalWrites; }
+            started = true;
+            assert.ok(crashed, "Must lose the actual checkpoint at " + cut);
+            const receipt = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture.json"), "utf8"));
+            if (writer) assert.equal(receipt.piSessionId, writer);
+            writer = receipt.piSessionId;
+            assert.ok(writer);
+            if (cut !== "committed") assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+            else assert.notEqual(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+            saver.db.close();
+            saver = SqliteSaver.fromConnString(file);
+            graph = createGenerationGraph(saver, "server");
+          }
+          const beforeResume = calls.length;
+          const finished = await invoke({interruptAfter: ["verify_committed_work"]});
+          assert.equal(calls.length, beforeResume, "Committed original child resumes without another model call");
+          assert.ok(finished.completedStages.some(e => e.stage === "architecture" && e.headSha === git(parentJob.worktreeRoot, "rev-parse", "HEAD")),
+            JSON.stringify({reason: finished.reason, lifecycle: finished.recoveryLifecycle}));
+          assert.equal(git(parentJob.worktreeRoot, "status", "--porcelain"), "");
+          const next = await invoke({interruptBefore: ["specialist_dispatch"]});
+          assert.equal(next.active?.stage, "foundations", JSON.stringify({reason: next.reason, active: next.active}));
+        } else {
+          const finished = await invoke();
+          assert.equal(finished.status, "blocked", JSON.stringify({reason: finished.reason, lifecycle: finished.recoveryLifecycle}));
+          assert.equal(finished.recoveryLifecycle.decision?.action, "diagnostic-stop", JSON.stringify(finished.recoveryLifecycle));
+          assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY GENERATION RECOVERY DIAGNOSIS")).length, 1);
+          assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+          assert.equal(finished.completedStages.some(e => e.stage === "architecture"), false);
+          const receipt = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture.json"), "utf8"));
+          const terminal = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture-assignment", receipt.sourceDigest, "terminal.json"), "utf8"));
+          assert.equal(terminal.kind, "nonconverging");
+          const beforeResume = calls.length;
+          started = true;
+          await invoke();
+          assert.equal(calls.length, beforeResume, "Terminal independent diagnosis does not grant another writer");
+        }
+      } finally { saver.db.close(); }
+    }
 
     // Crash after the reviewer is admitted on a resumed initial pause but
     // before any independent verdict is sealed. A fresh reviewer must never
@@ -1156,6 +1342,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       if (old[key] === undefined) delete process.env[key];
       else process.env[key] = old[key];
     }
+    if (controller) for (const parentId of parentJobIds) await controller.dispose(parentId);
     if (controller && activeGraphJobId) await controller.dispose(activeGraphJobId);
     if (controller && crashGraphJobId) await controller.dispose(crashGraphJobId);
     if (controller && graphJobId) await controller.dispose(graphJobId);

@@ -22,7 +22,7 @@ import { authorizedArchitectureRecordPath } from "./architecture-record-path.js"
 import { openSkillSnapshot } from "./snapshot.js";
 import { reviewCycleId, assertReviewCycleSession, sourceReviewConvergence,
   sourceReviewDiagnosticTrigger } from "./review-cycle.js";
-import { beginProtocolInvocation, recoverResponseContract } from "./response-contract-recovery.js";
+import { beginProtocolInvocation, inspectCompletedProtocolResponse, recoverResponseContract } from "./response-contract-recovery.js";
 import { parseArchitectureDraftDiagnosis } from "./architecture-draft-diagnosis.js";
 
 const sha = (input: unknown) =>
@@ -300,6 +300,26 @@ async function sourceDraft(job: JobStartResult, paths: readonly string[], commit
   return result;
 }
 
+/** Reauthenticate the accepted Pi response, not just a digest of the copied
+ * verdict in the domain receipt. Historical rounds use sealed transcript prefixes. */
+async function authenticateDraftVerdict(job: JobStartResult, receipt: RoundReceipt,
+  paths: string[], requirements: ReviewSources, history: ArchitectureDraftRound[]) {
+  const parse = (text: string) => parseArchitectureDraftReview(text, paths, receipt.draft, requirements, history);
+  const verdict = await inspectCompletedProtocolResponse({
+    receiptFile: join(cycleDirectory(job, receipt.cycleId), "round-" + receipt.round + ".protocol"),
+    contract: "architecture.draft-review.v2",
+    sourceDigest: sha({cycleId: receipt.cycleId, round: receipt.round,
+      writerRound: receipt.writerRound, sources: receipt.draft, previous: receipt.previousDigest}),
+    sessionRoots: [join(job.stateDir, "architecture-draft-review-sessions")],
+    sealedPrefix: {transcriptBytes: receipt.transcriptBytes, transcriptSha256: receipt.transcriptDigest},
+    requireSealedTranscript: true,
+    validate: text => { try { parse(text); return []; } catch { return [{path: "$", expected: "exact source-bound independent verdict"}]; } },
+    parse,
+  });
+  if (sha(verdict) !== sha(receipt.verdict)) throw Error("Architecture saved verdict differs from original accepted response.");
+  return verdict;
+}
+
 export async function verifyArchitectureDraftReviewPin(
   job: JobStartResult,
   snapshot: SkillSnapshot,
@@ -312,6 +332,7 @@ export async function verifyArchitectureDraftReviewPin(
   task = "",
   blueprint?: CausalBlueprint,
   committedSourceHead?: string,
+  writerRound?: string,
 ): Promise<void> {
   const cycleId = reviewCycleId(cycleScope(job, snapshot, plan, provider, model, paths, task, blueprint, committedSourceHead));
   if (
@@ -334,6 +355,9 @@ export async function verifyArchitectureDraftReviewPin(
     throw Error("Architecture precommit review admission has wrong session or authorization.");
   assertReviewCycleSession(writer, admitted.reviewer);
   const current = await sourceDraft(job, paths, !!committedSourceHead);
+  const requirements = {foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
+    contract: JSON.stringify(plan.contract), task, blueprint: JSON.stringify(blueprint ?? null)};
+  const history: ArchitectureDraftRound[] = [];
   let prior = "";
   let reviewer: Writer | undefined;
   for (let i = 0; i <= pin.round; i++) {
@@ -377,12 +401,16 @@ export async function verifyArchitectureDraftReviewPin(
       sha(bytes.subarray(0, receipt.transcriptBytes).toString("utf8")) !== receipt.transcriptDigest
     )
       throw Error("Architecture reviewer transcript changed since the sealed verdict.");
+    const verdict = await authenticateDraftVerdict(job, receipt, paths, requirements, history);
+    history.push({sources: receipt.draft, verdict});
     prior = sha(receipt);
     if (
       i === pin.round &&
       (receipt.verdict.status !== "pass" ||
         Object.keys(current).some((path) => sha(current[path]) !== receipt.sources[path]) ||
-        prior !== pin.receiptDigest)
+        prior !== pin.receiptDigest ||
+        writerRound !== undefined && receipt.writerRound !== writerRound ||
+        bytes.length !== receipt.transcriptBytes)
     )
       throw Error("Architecture draft approval differs from exact reviewed Story bytes.");
   }
@@ -513,7 +541,7 @@ export async function createArchitectureDraftReviewCycle(
             bytes.length < saved.transcriptBytes ||
             sha(bytes.subarray(0, saved.transcriptBytes).toString("utf8")) !== saved.transcriptDigest)
           throw Error("Architecture reviewer history changed.");
-        const verdict = parseArchitectureDraftReview(JSON.stringify(saved.verdict), paths, saved.draft, requirements, history);
+        const verdict = await authenticateDraftVerdict(job, saved, paths, requirements, history);
         lastConvergence = architectureDraftConvergence(verdict, saved.draft, history, stalled);
         stalled = lastConvergence.stalled;
         history.push({ sources: saved.draft, verdict });

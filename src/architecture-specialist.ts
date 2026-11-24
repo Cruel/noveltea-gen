@@ -1,5 +1,5 @@
 import { createPiStatusTool } from "./pi-work-status.js";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createJobModelRuntime } from "./model-runtime.js";
@@ -281,9 +281,26 @@ export async function authorArchitecture(
       return execute(...args);
     }};
   });
+  // Pi normally materializes a transcript only on the first user message.
+  // Persist the empty identity before the shared grant: a crash between grant
+  // and started marker must reopen this exact session, not create another.
+  const manager = options.sessionFile && existsSync(options.sessionFile)
+    ? SessionManager.open(options.sessionFile, dirname(options.sessionFile), project.root) : context.manager;
+  const initialGrant = join(job.stateDir, "architecture-assignment", options.sourceDigest, "0.grant.json");
+  if (options.sessionId && manager.getSessionId() !== options.sessionId &&
+      (existsSync(initialGrant) || await options.effect() !== null))
+    throw Error("Original Architecture writer session changed.");
+  const originalFile = manager.getSessionFile();
+  if (!originalFile) throw Error("Architecture writer requires a persistent session.");
+  if (!existsSync(originalFile)) {
+    const header = manager.getHeader();
+    if (!header || manager.getEntries().length) throw Error("Unmaterialized Architecture session contains unexpected history.");
+    await writeFile(originalFile, JSON.stringify(header) + "\n", { flag: "wx", mode: 0o600 });
+    manager.setSessionFile(originalFile);
+  }
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model, thinkingLevel: context.thinking, resourceLoader: loader, settingsManager,
-    sessionManager: options.sessionFile && existsSync(options.sessionFile) ? SessionManager.open(options.sessionFile, dirname(options.sessionFile), project.root) : context.manager,
+    sessionManager: manager,
     customTools: [...permittedTools, createStoryValidateTool(job), context.contextTool, createPiStatusTool()],
     noTools: "all", tools: [...SANDBOX_TOOLS.filter(t => t !== "bash"), "story_context", "story_validate", "report_status"],
   });

@@ -670,9 +670,17 @@ export async function verifyArchitectureAssignmentResult(
   if (verified.status !== "ready" || verified.changes.length)
     throw Error("Architecture result could not be reconciled: " + verified.reason);
   if (state.paths?.length) {
+    const trailers = git(job, "log", "-1", "--format=%B").split("\n");
+    const committedPaths = git(job, "diff-tree", "--no-commit-id", "--name-only", "-r", resultHead)
+      .trim().split("\n").filter(Boolean).sort();
     if (verified.actualHead !== resultHead ||
-        git(job, "rev-parse", resultHead + "^").trim() !== sourceHead)
-      throw Error("Architecture commit does not match the admitted source.");
+        git(job, "rev-parse", resultHead + "^").trim() !== sourceHead ||
+        !state.contentDigest || await contentDigest(job, state.paths) !== state.contentDigest ||
+        JSON.stringify(committedPaths) !== JSON.stringify(state.paths.map(p => repoPath(job, p)).sort()) ||
+        [`NovelTea-Job: ${job.jobId}`, "NovelTea-Work-Item: global-architecture",
+          `NovelTea-Plan-Version: ${version}`, `NovelTea-Architecture: ${state.contentDigest}`]
+          .some(trailer => !trailers.includes(trailer)))
+      throw Error("Architecture commit does not match the admitted source and exact effect.");
     if (state.worker === "pi" && !isFocusedScope(state.plan.contract)) {
       if (!state.snapshot || !state.sourceDigest || architectureRoundSource(job, state, sourceHead) !== state.sourceDigest ||
           !state.invocationProof || state.invocationProof.sourceDigest !== state.sourceDigest ||
@@ -690,7 +698,7 @@ export async function verifyArchitectureAssignmentResult(
       await (await import("./architecture-draft-review.js")).verifyArchitectureDraftReviewPin(
         job, state.snapshot, state.plan, state.provider, state.model, state.paths,
         { id: state.piSessionId, file: state.piSessionFile }, state.draftReview, state.blueprintTask ?? "",
-        approved.blueprint, sourceHead);
+        approved.blueprint, sourceHead, hash(await readFile(state.piSessionFile, "utf8")));
     }
     return "commit";
   }
@@ -721,7 +729,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       throw new Error("Invalid architecture receipt worktree, branch, thread or base identity.");
     }
     if (state) verifyPlanHistory(job, state);
-    if (input.action === "run" && (!state || ["awaiting-author", "ready", "committed"].includes(state.phase))) {
+    if (input.action === "run" && (!state || ["awaiting-author", "ready"].includes(state.phase))) {
       await processAuthorUpdatesAtBoundary(job);
     }
     if (!state) {
@@ -858,7 +866,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
     if (input.action !== "run") throw new Error("Unknown architecture action.");
     const recovery = await reconcile(job, state, input.round?.assignmentKey);
     if (recovery.status === "blocked") throw new Error("Architecture recovery blocked: " + recovery.reason);
-    if (state.assignmentKey && state.phase !== "committed" && state.assignmentKey !== input.round?.assignmentKey)
+    if (state.assignmentKey && (state.phase !== "committed" || input.round) && state.assignmentKey !== input.round?.assignmentKey)
       throw Error("Architecture assignment identity changed.");
     if ((input.fixture === true) !== (state.worker === "fixture") || input.mode && input.mode !== state.mode ||
         input.provider && input.provider !== state.provider || input.model && input.model !== state.model) throw new Error("Architecture worker configuration differs from the persisted assignment.");
@@ -888,10 +896,18 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           throw new Error("Committed architecture provenance changed; refusing verified-head repair.");
         }
         const parent = git(job, "rev-parse", "HEAD^").trim();
+        if (state.worker === "pi" && !isFocusedScope(state.plan.contract))
+          await verifyArchitectureAssignmentResult(job, input, state.plan.version, parent, state.expectedHead);
         await publishVerifiedHead(job, parent, state.expectedHead);
         await finalizeRecoveryCheckpoint(job, "global-architecture", parent, state.expectedHead);
       }
+      await processAuthorUpdatesAtBoundary(job);
       return output(job, state);
+    }
+    if (state.phase === "authored" && state.worker === "pi" && !isFocusedScope(state.plan!.contract)) {
+      if (input.round?.command.phase !== "verify" || !state.invocationProof ||
+          JSON.stringify(input.round.command.proof) !== JSON.stringify(state.invocationProof))
+        throw Error("Architecture publication requires its original accepted verification command.");
     }
     const Channels = Annotation.Root({ receipt: Annotation<Receipt>(), round: Annotation<AssignmentRoundResult | null>() });
     const saver = SqliteSaver.fromConnString(join(job.stateDir, "architecture-workflow.sqlite"));
@@ -1124,7 +1140,8 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
             await verifyArchitectureDraftReviewPin(job, receipt.snapshot, receipt.plan!,
               receipt.provider, receipt.model, receipt.paths,
               { id: receipt.piSessionId, file: receipt.piSessionFile },
-              receipt.draftReview, receipt.blueprintTask ?? "", blueprint?.blueprint, recovering ? workingHead : undefined);
+              receipt.draftReview, receipt.blueprintTask ?? "", blueprint?.blueprint, recovering ? workingHead : undefined,
+              hash(await readFile(receipt.piSessionFile, "utf8")));
           }
           // Reject a stale or invented order BEFORE committing any Story bytes.
           verifiedArchitectureMilestoneOrder(receipt.milestoneOrder,
@@ -1188,7 +1205,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       .addEdge("validate_and_commit_architecture", END).compile({ checkpointer: saver });
     let result: { receipt: Receipt; round: AssignmentRoundResult | null };
     try {
-      result = await graph.invoke({ receipt: state, round: null }, { configurable: {
+      result = await graph.invoke({ receipt: state, round: null }, { durability: "sync", configurable: {
         thread_id: job.threadId + ":architecture:" + state.plan!.version + ":" +
           (state.executionHead ?? state.expectedHead),
       } });

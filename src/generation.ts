@@ -3770,7 +3770,9 @@ export function createGenerationGraph(
           // that effect; no author edits or new assignment can run here.
           if (!s.result && s.inventory && (s.active?.stage === "foundation" &&
               await inspectPendingFoundationInvocation(job, s.inventory.headSha) ||
-              s.active?.stage === "architecture" && await (await import("./architecture.js")).inspectPendingArchitectureInvocation(job, s.inventory.headSha) ||
+              s.active?.stage === "architecture" &&
+              (await (await import("./architecture.js")).inspectPendingArchitectureInvocation(job, s.inventory.headSha) ||
+               await (await import("./architecture.js")).inspectRecoverableArchitectureCommit(job, s.inventory.headSha)) ||
               s.active?.stage === "foundations" &&
               (await inspectPendingCharacterWorldInvocation(job, s.inventory.headSha) ||
                await inspectRecoverableCharacterWorldCommit(job) && !await trustedHead(job).catch(() => null)) ||
