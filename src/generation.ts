@@ -493,15 +493,22 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
   let completedStages = evidence.filter(e => {
     if (e.stage === "foundation" || !plan) return true;
     if (e.stage === "architecture") return receipt.phase === "committed";
+    // While an approved Architecture amendment is pending, keep historical
+    // downstream evidence as candidates, not execution authority. The inventory
+    // below exposes only Foundation and Architecture until the new plan commits.
+    // Dropping these candidates here permanently loses signed carry-forward,
+    // because hasPlanContinuity deliberately requires a committed plan.
     const version = e.planVersion ?? s.planVersion ?? 1;
-    if (e.stage === "review") return version === plan.version && e.headSha === head;
+    if (e.stage === "review") return receipt.phase === "committed" && version === plan.version && e.headSha === head;
     const stage = e.stage === "choice" || e.stage === "puzzle" ? "interactive" : e.stage;
-    return hasPlanContinuity(job, receipt, e.milestone ? `${stage}:${e.milestone}` : stage, version);
+    return receipt.phase !== "committed" ||
+      hasPlanContinuity(job, receipt, e.milestone ? `${stage}:${e.milestone}` : stage, version);
   });
   // A commitless Event-only disposition must be reauthenticated at every
   // scheduler restart, including forks. Completed graph stage flags alone are
   // not authority to skip required Choice/Puzzle writers.
-  for (const item of completedStages.filter(e => e.stage === "interactive" && e.milestone)) {
+  for (const item of completedStages.filter(e => receipt?.phase === "committed" &&
+      e.stage === "interactive" && e.milestone)) {
     const slug = item.milestone!.slice("milestone.".length);
     const path = join(job.stateDir, "interactive-items", slug + ".json");
     if (!existsSync(path)) throw Error("Checkpointed interactive work lost its saved specialist receipt.");

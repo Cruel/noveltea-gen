@@ -5419,7 +5419,10 @@ test("a controller-approved later scope revision adds a cluster without repeatin
   writeFileSync(f.contract, JSON.stringify(contract));
   const first = f.cli([...f.start, "--pause-after", "composition"]);
   assert.equal(first.status, "paused", first.reason);
-  const oldCommit = first.inventory.items.find((i: any) => i.id === "composition:milestone.disclosure").verifiedSha;
+  const carriedIds = ["foundations", "event:milestone.disclosure", "interactive:milestone.disclosure", "composition:milestone.disclosure"];
+  const carriedCommits = Object.fromEntries(carriedIds.map(id =>
+    [id, first.inventory.items.find((i: any) => i.id === id).verifiedSha]));
+  const beforeAmendment = git(f.job.worktreeRoot, "rev-parse", "HEAD");
   contract.scope.targets = ["arc.truth"];
   writeFileSync(f.contract, JSON.stringify(contract));
   const carry = join(root, "carry.json");
@@ -5428,10 +5431,17 @@ test("a controller-approved later scope revision adds a cluster without repeatin
   const payload = { ...proposal.authorSigningRequest, reason: "Test author approves the second Milestone and retains the reviewed first cluster." };
   const evidence = authorApproval(f.story, "single", f.env, root, payload).file;
   f.cli(["architecture", "approve", "--proposal", proposal.proposal.digest, "--approval", evidence]);
+  const pending = f.cli(["generate", "inspect"]);
+  assert.equal(pending.inventory.planVersion, 2);
+  assert.deepEqual(pending.inventory.items.map((i: any) => i.id), ["foundation", "architecture"],
+    "Historical carry-forward candidates must not authorize dispatch before Architecture commits");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), beforeAmendment);
   const result = f.cli(["generate", "resume"]);
   assert.equal(result.reason, "editorial-unverified", JSON.stringify(result));
   assert.equal(result.inventory.planVersion, 2);
-  assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.disclosure").verifiedSha, oldCommit);
+  for (const id of carriedIds)
+    assert.equal(result.inventory.items.find((i: any) => i.id === id).verifiedSha, carriedCommits[id],
+      "The new plan must retain the exact signed predecessor for " + id);
   assert.equal(result.inventory.items.find((i: any) => i.id === "composition:milestone.reckoning").status, "verified");
   assert.equal(git(f.job.worktreeRoot, "log", "--format=%B").split("NovelTea-Work-Item: composition-disclosure").length - 1, 1);
 });
