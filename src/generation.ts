@@ -2936,25 +2936,25 @@ export function createGenerationGraph(
             milestoneId: string; expectedHead: string; reportDigest: string; domain: string };
             conflicts?: string[]; obligations?: string[] };
           const report = evidence.prerequisite;
-          if (!report || report.domain !== "choice" ||
-              s.active?.stage !== "choice" && s.active?.stage !== "interactive" ||
+          if (!report || report.domain !== "choice" && report.domain !== "puzzle" ||
+              s.active?.stage !== report.domain && s.active?.stage !== "interactive" ||
               !s.active.milestone || s.active.milestone !== report.milestoneId ||
-              s.active.id !== "choice:" + report.milestoneId &&
+              s.active.id !== report.domain + ":" + report.milestoneId &&
               s.active.id !== "interactive:" + report.milestoneId ||
               !/^[0-9a-f]{64}$/.test(report.reportDigest) ||
               !evidence.conflicts?.length)
-            throw Error("Choice negative result lacks its original bounded assignment and report");
+            throw Error("Interactive negative result lacks its original bounded assignment and report");
           const job = await openJob(s);
           const { inspectInteractiveConflict } = await import("./interactive-work.js");
           const original = await inspectInteractiveConflict(job, report.milestoneId);
-          if (original.expectedHead !== report.expectedHead ||
+          if (original.domain !== report.domain || original.expectedHead !== report.expectedHead ||
               original.reportDigest !== report.reportDigest ||
               original.worker !== (s.request.fixture ? "fixture" : "pi") ||
               original.planVersion !== s.planVersion ||
               JSON.stringify(original.conflicts) !== JSON.stringify(evidence.conflicts) ||
               JSON.stringify(original.obligations) !== JSON.stringify(evidence.obligations))
             throw Error("Interactive contradiction no longer matches its sealed Pi source");
-          const failure = "Original Choice returned a settled no-write architectural contradiction: " +
+          const failure = "Original " + original.domain + " returned a settled no-write architectural contradiction: " +
             original.conflicts.join("; ") + ". Deferred obligations: " +
             original.obligations.join("; ") +
             ". Controller-owned Repair must inspect the original Blueprint and assignment before authorizing another owner.";
@@ -2962,7 +2962,7 @@ export function createGenerationGraph(
             { reference: "specialist-receipt", assignmentId: s.active.id,
               resultStatus: result.status, interactiveNoWrite: {
                 milestoneId: report.milestoneId, expectedHead: report.expectedHead,
-                reportDigest: report.reportDigest, domain: "choice" } }, "returned-failure");
+                reportDigest: report.reportDigest, domain: original.domain } }, "returned-failure");
           return { ...assessment, failures: { ...s.failures, [s.active.id]: failure },
             inventory: blockedAssignmentInventory(s, failure), active: null, result: null,
             escalation: { kind: "dependency-replan" as const, requiresTrustedApproval: false,
@@ -2970,9 +2970,9 @@ export function createGenerationGraph(
                 source: report.milestoneId + "@" + report.expectedHead,
                 message, repair: "controller-plan-review" })),
               action: "Independently review the original approved Milestone Blueprint, " +
-                "Choice assignment and sealed negative Pi report. Propose a separate, " +
+                "Interactive assignment and sealed negative Pi report. Propose a separate, " +
                 "source-authenticated owner/plan amendment if warranted; no replacement " +
-                "Choice, protected decision or new specialist scope is authorized." } };
+                "Interactive writer, protected decision or new specialist scope is authorized." } };
         }
         if (result.status === "event-prerequisite-reported") {
           let evidence = result as typeof result & {

@@ -691,7 +691,7 @@ function verifyCommit(job: JobStartResult, receipt: Receipt, unit: Unit, parent:
 }
 /** One immutable provenance digest for the negative result, not for an
  * independent approval or a permission to edit. */
-function choiceConflictReportDigest(receipt: Receipt, choice: Unit,
+function interactiveConflictReportDigest(receipt: Receipt, negative: Unit,
   sessionPath: string | null, sessionHash: string | null) {
   return digest(JSON.stringify({
     jobId: receipt.jobId, worker: receipt.worker,
@@ -700,13 +700,13 @@ function choiceConflictReportDigest(receipt: Receipt, choice: Unit,
     planDigest: receipt.planDigest, eventHead: receipt.eventHead,
     provider: receipt.provider, model: receipt.model,
     thinking: receipt.thinking ?? null, eventSource: receipt.eventSource ?? null,
-    head: choice.beforeHead, snapshotId: receipt.snapshot?.id,
-    unitId: choice.id, paths: choice.claimedPaths, conflicts: choice.conflicts,
-    obligations: choice.obligations, skillReads: choice.skillReads,
+    head: negative.beforeHead, snapshotId: receipt.snapshot?.id,
+    unitId: negative.id, paths: negative.claimedPaths, conflicts: negative.conflicts,
+    obligations: negative.obligations, skillReads: negative.skillReads,
     piSessionFile: sessionPath, piSessionSha256: sessionHash,
   }));
 }
-/** Reauthenticate a settled Choice contradiction at the original unchanged
+/** Reauthenticate a settled Interactive contradiction at the original unchanged
  * HEAD. The negative report is evidence, never an authority to revise canon. */
 export async function inspectInteractiveConflict(job: JobStartResult, milestoneId: string,
   allowHistoricalDescendant = false) {
@@ -717,7 +717,7 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
     const ref = receipt.supersededNegative;
     const historical = "interactive-negative-history/" + milestoneId.slice(10) + ".json";
     if (ref.relative !== historical || !/^[0-9a-f]{64}$/.test(ref.digest))
-      throw Error("Original Choice negative history reference is invalid.");
+      throw Error("Original Interactive negative history reference is invalid.");
     const prior = JSON.parse(await readFile(join(job.stateDir, historical), "utf8")) as Receipt;
     if (prior.supersededNegative || digest(JSON.stringify(prior)) !== ref.digest ||
         prior.jobId !== receipt.jobId || prior.eventHead !== receipt.eventHead ||
@@ -725,8 +725,17 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       throw Error("Archived original Choice contradiction was changed after supersession.");
     receipt = prior;
   }
-  const choice = receipt.units?.[0];
-  const puzzle = receipt.units?.[1];
+  const [choice, puzzle] = receipt.units ?? [];
+  const negative = choice?.phase === "conflicted" ? choice :
+    puzzle?.phase === "conflicted" ? puzzle : undefined;
+  const domain = negative?.domain;
+  const precedingUnitValid = receipt.units?.length === 2 &&
+    choice?.domain === "choice" && puzzle?.domain === "puzzle" &&
+    choice.id === "interactive-choice-" + milestoneId.slice(10) &&
+    puzzle.id === "interactive-puzzle-" + milestoneId.slice(10) &&
+    (negative === choice
+      ? puzzle.phase === "pending" && !puzzle.beforeHead && !puzzle.commitSha && !puzzle.paths?.length
+      : choice.phase === "committed" && !!choice.beforeHead && !!choice.commitSha);
   const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as {
     jobId?: string; phase?: string; plan?: Plan };
   const head = await trustedHead(job);
@@ -734,67 +743,73 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       architecture.jobId !== job.jobId || architecture.phase !== "committed" ||
       !architecture.plan || architecture.plan.version !== receipt.planVersion ||
       digest(JSON.stringify(architecture.plan)) !== receipt.planDigest ||
-      !puzzle || puzzle.domain !== "puzzle" || puzzle.phase !== "pending" ||
-      !!puzzle.beforeHead || !!puzzle.commitSha || !!puzzle.paths?.length ||
+      !precedingUnitValid ||
       !["pi", "fixture"].includes(receipt.worker) || !receipt.snapshot?.id ||
-      !choice || choice.phase !== "conflicted" || choice.domain !== "choice" ||
-      choice.id !== "interactive-choice-" + milestoneId.slice(10) ||
-      !choice.beforeHead || choice.beforeHead !== head && !allowHistoricalDescendant ||
+      !negative || negative.phase !== "conflicted" ||
+      negative.id !== "interactive-" + domain + "-" + milestoneId.slice(10) ||
+      !negative.beforeHead || negative.beforeHead !== head && !allowHistoricalDescendant ||
       !receipt.eventHead || !receipt.planDigest || !receipt.planVersion ||
-      choice.paths?.length || choice.claimedPaths?.length || choice.commitSha ||
-      !choice.conflicts?.length || !choice.conflicts.every(x => !!x.trim()) ||
-      !Array.isArray(choice.obligations) ||
-      (receipt.worker === "pi" && (!choice.piSessionFile || !choice.piSessionSha256)) ||
-      (receipt.worker === "fixture" && (choice.piSessionFile || choice.piSessionSha256)) ||
-      !choice.digest || dirty(job).length)
-    throw Error("Original Choice no-write source or receipts cannot be authenticated");
-  const directory = join(job.stateDir, "interactive-sessions", receipt.workItemId, "choice");
-  const sessionPath = receipt.worker === "pi" ? await realpath(choice.piSessionFile!) : null;
+      negative.paths?.length || negative.claimedPaths?.length || negative.commitSha ||
+      !negative.conflicts?.length || !negative.conflicts.every(x => !!x.trim()) ||
+      !Array.isArray(negative.obligations) ||
+      (receipt.worker === "pi" && (!negative.piSessionFile || !negative.piSessionSha256)) ||
+      (receipt.worker === "fixture" && (negative.piSessionFile || negative.piSessionSha256)) ||
+      !negative.digest || dirty(job).length)
+    throw Error("Original Interactive no-write source or receipts cannot be authenticated");
+  const directory = join(job.stateDir, "interactive-sessions", receipt.workItemId, negative.domain);
+  const sessionPath = receipt.worker === "pi" ? await realpath(negative.piSessionFile!) : null;
   if (sessionPath && (!sessionPath.startsWith(directory + "/") ||
-      choice.piSessionFile !== sessionPath || !sessionPath.endsWith(".jsonl")))
-    throw Error("Original Choice session is outside its assigned directory");
+      negative.piSessionFile !== sessionPath || !sessionPath.endsWith(".jsonl")))
+    throw Error("Original Interactive session is outside its assigned directory");
   const sessionStat = sessionPath ? await lstat(sessionPath) : null;
   if (sessionStat && (!sessionStat.isFile() || sessionStat.size > 64 * 1024 * 1024))
-    throw Error("Original Choice Pi session is not a bounded regular file");
+    throw Error("Original Interactive Pi session is not a bounded regular file");
   const sessionBytes = sessionPath ? await readFile(sessionPath) : null;
   const sessionHash = sessionBytes ? digest(sessionBytes) : null;
-  if ((choice.piSessionSha256 ?? null) !== sessionHash) throw Error("Original Choice Pi session changed");
+  if ((negative.piSessionSha256 ?? null) !== sessionHash) throw Error("Original Interactive Pi session changed");
   if (sessionBytes) {
     const records = sessionBytes.toString("utf8").trim().split("\n").map(line =>
       JSON.parse(line) as { type?: string; id?: string;
         message?: { role?: string; stopReason?: string;
           content?: Array<{ type?: string; text?: string }> } });
     if (records[0]?.type !== "session" || !records[0].id)
-      throw Error("Original Choice Pi session lost its identity");
+      throw Error("Original Interactive Pi session lost its identity");
     const messages = records.filter(r => r.type === "message" && r.message?.role === "assistant")
       .map(r => r.message!);
     const last = messages.at(-1);
     if (!last || last.stopReason !== "stop")
-      throw Error("Original Choice Pi report lacks a settled final assistant response");
+      throw Error("Original Interactive Pi report lacks a settled final assistant response");
     const reported = parseInteractiveManifest((last.content ?? [])
-      .filter(c => c.type === "text").map(c => c.text ?? "").join("\n"), "choice");
+      .filter(c => c.type === "text").map(c => c.text ?? "").join("\n"), negative.domain);
     if (reported.paths.length ||
-        JSON.stringify(reported.conflicts) !== JSON.stringify(choice.conflicts) ||
-        JSON.stringify(reported.obligations) !== JSON.stringify(choice.obligations))
-      throw Error("Original Choice report differs from the settled Pi transcript");
+        JSON.stringify(reported.conflicts) !== JSON.stringify(negative.conflicts) ||
+        JSON.stringify(reported.obligations) !== JSON.stringify(negative.obligations))
+      throw Error("Original Interactive report differs from the settled Pi transcript");
   }
   const event = JSON.parse(await readFile(join(job.stateDir,
     "event-items", milestoneId.slice(10) + ".json"), "utf8")) as SourceReceipt;
   if (event.jobId !== receipt.jobId || event.milestoneId !== milestoneId ||
       event.phase !== "committed" || event.commitSha !== receipt.eventHead ||
       event.planVersion !== receipt.planVersion)
-    throw Error("Original Choice source no longer matches its verified Event receipt");
-  git(job, "merge-base", "--is-ancestor", receipt.eventHead, choice.beforeHead);
-  if (allowHistoricalDescendant) git(job, "merge-base", "--is-ancestor", choice.beforeHead, head);
-  const reportHash = choiceConflictReportDigest(receipt, choice, sessionPath, sessionHash);
-  if (choice.digest !== reportHash) throw Error("Original Choice negative report digest changed");
+    throw Error("Original Interactive source no longer matches its verified Event receipt");
+  git(job, "merge-base", "--is-ancestor", receipt.eventHead, negative.beforeHead);
+  if (negative.domain === "puzzle") {
+    verifyCommit(job, receipt, choice!, choice!.beforeHead!, choice!.commitSha!);
+    git(job, "merge-base", "--is-ancestor", choice!.commitSha!, negative.beforeHead);
+    await assertNativeReviewDependencies(job, negative.id);
+  }
+  if (allowHistoricalDescendant) git(job, "merge-base", "--is-ancestor", negative.beforeHead, head);
+  const reportHash = interactiveConflictReportDigest(receipt, negative, sessionPath, sessionHash);
+  if (negative.digest !== reportHash) throw Error("Original Interactive negative report digest changed");
   // Historical inspection authenticates the original no-write revision,
   // not the later descendant currently at HEAD. A post-recovery Composition
   // commit must not rewrite the negative Pi report's source identity.
-  return { relative, reportDigest: reportHash, expectedHead: choice.beforeHead,
+  return { relative, reportDigest: reportHash, expectedHead: negative.beforeHead,
     worker: receipt.worker, planVersion: receipt.planVersion,
-    milestoneId, unitId: choice.id, conflicts: choice.conflicts,
-    obligations: choice.obligations!, piSessionFile: sessionPath };
+    milestoneId, domain: negative.domain, unitId: negative.id,
+    precedingChoiceSource: negative.domain === "puzzle" ? choice!.beforeHead : undefined,
+    conflicts: negative.conflicts,
+    obligations: negative.obligations!, piSessionFile: sessionPath };
 }
 function completed(receipt: Receipt) {
   return (receipt.units[0].phase === "committed" &&
@@ -816,7 +831,7 @@ function output(job: JobStartResult, receipt: Receipt, unit?: InteractiveDomain)
       domain: conflict.domain }, conflicts: conflict.conflicts ?? [],
       obligations: conflict.obligations ?? [] } : {}),
     jobId: job.jobId, milestoneId: receipt.milestoneId,
-    worktreeStoryRoot: job.worktreeStoryRoot, headSha: receipt.units[1].commitSha ??
+    worktreeStoryRoot: job.worktreeStoryRoot, headSha: conflict?.beforeHead ?? receipt.units[1].commitSha ??
       (receipt.units[1].phase === "not-applicable" ? receipt.units[1].beforeHead :
         receipt.units[0].commitSha) ?? receipt.eventHead,
     eventHead: receipt.eventHead, eventSource: receipt.eventSource,
@@ -1286,7 +1301,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       return output(job, receipt, input.unit);
     }
     if (input.action === "inspect") {
-      if (receipt.units[0].phase === "conflicted")
+      if (receipt.units.some(unit => unit.phase === "conflicted"))
         await inspectInteractiveConflict(job, input.milestone);
       return output(job, receipt, input.unit);
     }
@@ -1340,7 +1355,6 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       if (!before) throw new Error("Puzzle specialist is blocked until the Choice work item is committed.");
       if (unit.beforeHead && unit.beforeHead !== before) throw new Error("Interactive unit authority head changed.");
       if (unit.phase === "conflicted") {
-        if (unit.domain !== "choice") throw Error("Only Choice has an unresolved no-write contradiction");
         await inspectInteractiveConflict(job, state.milestoneId);
         return; // No second Pi invocation after a settled negative result.
       }
@@ -1419,13 +1433,14 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         await persist(file, state);
         try {
           const verifyDraft = async (evidence: InteractiveEvidence) => {
-            if (unit.domain === "choice" && evidence.modifiedRecords.length === 0) {
-              if (!evidence.conflicts.length) throw Error("Choice negative report has no explicit conflict");
+            if (evidence.modifiedRecords.length === 0 &&
+                (unit.domain === "choice" || puzzleDecision?.required !== false)) {
+              if (!evidence.conflicts.length) throw Error("Interactive negative report has no explicit conflict");
               assertHead(job, before);
               if (dirty(job).length)
-                throw Error("Negative Choice report disagrees with the actual Story worktree");
+                throw Error("Negative Interactive report disagrees with the actual Story worktree");
               // A truthful claim remains negative until controller review;
-              // the author cannot fill the missing Choice with an invented one.
+              // the writer cannot fill the missing interaction with an invented one.
               return [];
             }
             if (unit.domain === "puzzle" && evidence.modifiedRecords.length === 0) {
@@ -1498,20 +1513,21 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           unit.obligations = evidence.obligations;
           unit.skillReads = evidence.skillReads;
           unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
-          if (unit.domain === "choice" && evidence.modifiedRecords.length === 0) {
+          if (evidence.modifiedRecords.length === 0 &&
+              (unit.domain === "choice" || puzzleDecision?.required !== false)) {
             if (!evidence.conflicts.length || !state.snapshot?.id ||
                 (state.worker === "pi" && !unit.piSessionFile))
-              throw Error("Choice no-write has no original completed worker and pinned assignment");
+              throw Error("Interactive no-write has no original completed worker and pinned assignment");
             assertHead(job, before);
-            if (dirty(job).length) throw Error("Choice negative report left Story edits");
+            if (dirty(job).length) throw Error("Interactive negative report left Story edits");
             const sessionPath = unit.piSessionFile ? await realpath(unit.piSessionFile) : null;
-            const directory = join(job.stateDir, "interactive-sessions", state.workItemId, "choice");
+            const directory = join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain);
             if (sessionPath && (!sessionPath.startsWith(directory + "/") ||
                 unit.piSessionFile !== sessionPath || !sessionPath.endsWith(".jsonl")))
-              throw Error("Choice no-write session is outside its original assignment");
+              throw Error("Interactive no-write session is outside its original assignment");
             unit.piSessionSha256 = sessionPath ? digest(await readFile(sessionPath)) : undefined;
             unit.paths = [];
-            unit.digest = choiceConflictReportDigest(state, unit,
+            unit.digest = interactiveConflictReportDigest(state, unit,
               sessionPath, unit.piSessionSha256 ?? null);
             unit.phase = "conflicted";
             delete unit.failure;
@@ -1609,7 +1625,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
     }
     const result = await graph.invoke({ receipt });
-    if (result.receipt.units[0].phase === "conflicted") {
+    if (result.receipt.units.some(unit => unit.phase === "conflicted")) {
       // No next-stage or deferred-idea authorization follows a negative
       // original assignment. The generation controller owns its disposition.
       await inspectInteractiveConflict(job, input.milestone);

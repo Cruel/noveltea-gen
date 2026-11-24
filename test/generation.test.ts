@@ -5286,6 +5286,29 @@ test("C04 production graph admits a settled Choice contradiction as specialist-r
   assert.equal(git(f.job.worktreeRoot, "status", "--porcelain", "--untracked-files=all"), "");
 });
 
+test("R06 production graph preserves a required Puzzle contradiction after the committed Choice", { skip: !available }, () => {
+  const f = setup("r06-puzzle-negative");
+  Object.assign(f.env, { NT_INTERACTIVE_FIXTURE_CASE: "puzzle-no-write" });
+  const result = f.cli(f.start);
+  assert.equal(result.status, "blocked");
+  const op = currentOperationRecovery(result);
+  assert.equal(op?.operation, "specialist-result");
+  assert.equal(op?.outcome, "returned-failure");
+  assert.equal(op?.evidence.interactiveNoWrite?.domain, "puzzle");
+  const original = join(f.job.stateDir, "interactive-items/disclosure.json");
+  const saved = readFileSync(original, "utf8");
+  const receipt = JSON.parse(saved);
+  assert.equal(receipt.units[0].phase, "committed");
+  assert.equal(receipt.units[1].phase, "conflicted");
+  assert.equal(result.inventory.headSha, receipt.units[0].beforeHead,
+    "The composite inventory is still pinned to the original pre-Choice source");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  assert.equal(op?.evidence.interactiveNoWrite?.expectedHead, head);
+  assert.equal(f.cli(["generate", "resume"]).status, "blocked");
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(original, "utf8"), saved);
+});
+
 test("a clean local cluster block does not stop independent work or spin on resume", { skip: !available }, () => {
   const f = setup("local-block", story => plannedCluster(story, "z-optional", "aaa-optional"));
   Object.assign(f.env, { NT_FOUNDATIONS_FIXTURE_CASE: "one-arc-only" });

@@ -49,9 +49,9 @@ export interface GenerationOperationRecovery {
     eventNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string };
     /** Original final report and eligible checkpoint captured by the controller. */
     completion?: { checkpoint: string; reportStatus: string; scopeStatus: string; planStatus: string };
-    /** Settled Choice contradiction from the original pinned specialist Pi session. */
+    /** Settled Interactive contradiction from the original pinned specialist Pi session. */
     interactiveNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string;
-      domain: "choice" };
+      domain: "choice" | "puzzle" };
     /** Original settled World/Character no-write report; never a replacement writer grant. */
     foundationsNoWrite?: { domain: "world" | "character"; expectedHead: string; reportDigest: string };
     /** Controller-captured verifier input; its source and correction baseline are not model claims. */

@@ -357,11 +357,27 @@ test("approved player-solving obligation blocks a no-write Puzzle report", { ski
     "Players must solve the mystery with a genuinely solvable Puzzle.",
   ]);
   const result = await x.interactiveWithChoiceReview("puzzle-no-write");
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Puzzle|no-write/i);
-  const receipt = JSON.parse(readFileSync(join(x.job.stateDir, "interactive-items/disclosure.json"), "utf8"));
-  assert.notEqual(receipt.units[1].phase, "not-applicable");
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.status, "interactive-conflict-reported");
+  assert.equal(output.prerequisite.domain, "puzzle");
+  assert.equal(output.specialistUnits[0].phase, "committed");
+  assert.equal(output.specialistUnits[1].phase, "conflicted");
+  assert.match(output.prerequisite.reportDigest, /^[a-f0-9]{64}$/);
+  const receiptFile = join(x.job.stateDir, "interactive-items/disclosure.json");
+  const saved = readFileSync(receiptFile, "utf8");
+  const replay = x.interactive("puzzle-no-write");
+  assert.equal(replay.status, 0, replay.stderr);
+  assert.deepEqual(JSON.parse(replay.stdout).prerequisite, output.prerequisite);
+  assert.equal(readFileSync(receiptFile, "utf8"), saved);
   assert.equal(existsSync(join(x.job.stateDir, "interactive-no-write/disclosure.json")), false);
+  const tampered = JSON.parse(saved);
+  tampered.units[1].conflicts[0] = "Fabricated Puzzle finding";
+  writeFileSync(receiptFile, JSON.stringify(tampered));
+  const denied = x.interactive("puzzle-no-write");
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /negative report digest changed/i);
+  assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), output.headSha);
 });
 
 test("optional Puzzle proof rejects stale source, mismatched owner and dirty Story", { skip: !available }, async () => {

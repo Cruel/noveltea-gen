@@ -307,11 +307,11 @@ export async function authorInteractive(
         () => context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined),
       );
       if (data.paths.length === 0) {
-        if (
-          !data.conflicts.length ||
-          (domain === "puzzle" && (assignment.puzzleObligation?.required !== false || edits.length))
-        )
-          throw new Error("A genuine negative Interactive report requires an untouched Story and specific conflicts; only an optional Puzzle can be not-applicable.");
+        if (!data.conflicts.length)
+          throw new Error("A negative Interactive report requires specific conflicts.");
+        // Whether the report is an optional omission or an unmet mandatory
+        // obligation is a controller decision against actual Git and sources,
+        // not a response-contract failure. verifyDraft authenticates no edits.
       } else if (!edits.length) {
         throw new Error("Interactive specialist made no canonical Story edits.");
       }

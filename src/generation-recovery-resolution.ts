@@ -160,10 +160,10 @@ export async function inspectActiveRecoveryResolution(
       return false;
     const originalInput = source.input as unknown as GenerationOperationRecovery;
     const negative = originalInput.evidence?.interactiveNoWrite;
-    if (!negative || negative.milestoneId !== milestone || negative.expectedHead !== correctedHeadSha)
+    if (!negative || negative.domain !== "choice" || negative.milestoneId !== milestone || negative.expectedHead !== correctedHeadSha)
       return false;
     const conflict = await inspectInteractiveConflict(job, milestone, true);
-    if (conflict.reportDigest !== negative.reportDigest || conflict.worker !== "pi") return false;
+    if (conflict.domain !== "choice" || conflict.reportDigest !== negative.reportDigest || conflict.worker !== "pi") return false;
     const saved = JSON.parse(await readFile(join(job.stateDir,
       "interactive-items", milestone.slice(10) + ".json"), "utf8")) as {
       units?: Array<{ phase?: string; eventOnly?: { nonce: string; digest: string } }>;

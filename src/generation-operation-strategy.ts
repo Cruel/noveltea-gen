@@ -103,7 +103,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
   // diagnostician what is missing; never grant a replacement Event writer.
   if (operation === "specialist-result" && c.observation === "returned-failure" &&
       !s.active && !s.result && !s.causalAmendment &&
-      s.inventory?.headSha === head && c.origin.assignmentId) {
+      s.inventory?.headSha === head && c.origin.assignmentId?.startsWith("event:")) {
     const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
     const op = source?.input as GenerationOperationRecovery | undefined;
     const report = op?.evidence.eventNoWrite;
@@ -129,26 +129,30 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
     await authenticateEventNoWrite(job, original);
     return { store: "specialist-receipt", ref: relative, digest: report.reportDigest };
   }
-  // A settled clean Choice contradiction is different from an interrupted
-  // writer or a malformed Pi response. The pinned interactive receipt and
-  // original session prove no edits; diagnosis never authorizes a replacement
-  // Choice or an upstream Plan mutation.
+  // A settled clean Interactive contradiction is different from an interrupted
+  // writer or a malformed Pi response. A composite Puzzle may have advanced
+  // HEAD through its authenticated Choice before the parent inventory updates.
+  // Diagnosis never authorizes a replacement writer or upstream Plan mutation.
   if (operation === "specialist-result" && c.observation === "returned-failure" &&
       !s.active && !s.result && !s.causalAmendment &&
-      s.inventory?.headSha === head && c.origin.assignmentId) {
+      s.inventory && c.origin.assignmentId) {
     const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
     const op = source?.input as GenerationOperationRecovery | undefined;
     const reported = op?.evidence.interactiveNoWrite;
     if (op?.evidence.resultStatus === "interactive-conflict-reported" &&
-        reported?.domain === "choice" && reported.expectedHead === head &&
+        reported && reported.expectedHead === head &&
         op.evidence.assignmentId === c.origin.assignmentId &&
-        c.origin.assignmentId === "interactive:" + reported.milestoneId &&
+        (c.origin.assignmentId === "interactive:" + reported.milestoneId ||
+          c.origin.assignmentId === reported.domain + ":" + reported.milestoneId) &&
         s.inventory.items.some(item => item.id === c.origin.assignmentId && item.status === "blocked") &&
         s.failures[c.origin.assignmentId]) {
       const { inspectInteractiveConflict } = await import("./interactive-work.js");
       const original = await inspectInteractiveConflict(job, reported.milestoneId);
-      if (original.reportDigest === reported.reportDigest &&
+      if (original.domain === reported.domain && original.reportDigest === reported.reportDigest &&
           original.expectedHead === head && original.planVersion === s.planVersion &&
+          (s.inventory.headSha === head ||
+            original.domain === "puzzle" && c.origin.assignmentId === "interactive:" + reported.milestoneId &&
+            s.inventory.headSha === original.precedingChoiceSource) &&
           original.worker === (s.request.fixture ? "fixture" : "pi"))
         return { store: "specialist-receipt", ref: original.relative, digest: original.reportDigest };
     }
@@ -317,7 +321,7 @@ export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
       c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
       s.active || s.result || s.causalAmendment || s.crossDomainCloseout ||
       s.escalation?.kind !== "dependency-replan" ||
-      s.escalation.requiresTrustedApproval || s.inventory?.headSha !== c.origin.sourceHeadSha ||
+      s.escalation.requiresTrustedApproval || !s.inventory ||
       !c.origin.assignmentId || !s.failures[c.origin.assignmentId] ||
       !s.inventory.items.some(item => item.id === c.origin.assignmentId && item.status === "blocked"))
     return null;
@@ -327,19 +331,23 @@ export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
       op.evidence.reference !== "specialist-receipt" ||
       op.evidence.assignmentId !== c.origin.assignmentId)
     return null;
-  const choice = op.evidence.interactiveNoWrite;
-  if (op.evidence.resultStatus === "interactive-conflict-reported" && choice &&
-      choice.domain === "choice" && choice.expectedHead === c.origin.sourceHeadSha &&
-      c.origin.assignmentId === "interactive:" + choice.milestoneId) {
+  const interactive = op.evidence.interactiveNoWrite;
+  if (op.evidence.resultStatus === "interactive-conflict-reported" && interactive &&
+      interactive.expectedHead === c.origin.sourceHeadSha &&
+      (c.origin.assignmentId === "interactive:" + interactive.milestoneId ||
+        c.origin.assignmentId === interactive.domain + ":" + interactive.milestoneId)) {
     const { inspectInteractiveConflict } = await import("./interactive-work.js");
-    const original = await inspectInteractiveConflict(job, choice.milestoneId);
-    if (original.reportDigest !== choice.reportDigest ||
+    const original = await inspectInteractiveConflict(job, interactive.milestoneId);
+    if (original.domain !== interactive.domain || original.reportDigest !== interactive.reportDigest ||
         original.expectedHead !== c.origin.sourceHeadSha ||
-        original.planVersion !== c.origin.planVersion || original.worker !== "pi") return null;
+        original.planVersion !== c.origin.planVersion || original.worker !== "pi" ||
+        (s.inventory.headSha !== original.expectedHead &&
+          !(original.domain === "puzzle" && c.origin.assignmentId === "interactive:" + interactive.milestoneId &&
+            s.inventory.headSha === original.precedingChoiceSource))) return null;
     // The original approved Blueprint belongs to an independently pinned
     // Event review cycle, not to a new Choice plan authored by its reporter.
     const event = JSON.parse(await readFile(join(job.stateDir, "event-items",
-      choice.milestoneId.slice(10) + ".json"), "utf8")) as {
+      interactive.milestoneId.slice(10) + ".json"), "utf8")) as {
         assignment?: import("./event-specialist.js").EventAssignment;
         blueprintPin?: import("./milestone-blueprint.js").MilestoneBlueprintPin };
     if (!event.assignment || !event.blueprintPin) return null;
@@ -350,6 +358,7 @@ export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
   }
   const foundations = op.evidence.foundationsNoWrite;
   if (op.evidence.resultStatus === "foundations-conflict-reported" && foundations &&
+      s.inventory.headSha === c.origin.sourceHeadSha &&
       foundations.expectedHead === c.origin.sourceHeadSha &&
       c.origin.assignmentId === "foundations") {
     const { inspectFoundationConflict } = await import("./character-world.js");
