@@ -26,7 +26,6 @@ import {
   reassessFencedReadOnlyRecovery,
   reassessFencedVerifiedOriginal,
   deferRecoveryForIndependentWork,
-  selectPendingRecovery,
 } from "./generation-recovery-lifecycle.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
 import { independentObligation, operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
@@ -223,6 +222,13 @@ export function assertRecoverySources(state: RecoveryState): void {
   for (const c of cases) {
     const s = state.recoverySources.find((p) => p.caseId === c.id);
     if (!s || !originalMatchesCase(s, c)) throw Error("Missing original source-bound recovery input.");
+  }
+  for (const id of state.recoveryLifecycle.deferredCaseIds ?? []) {
+    const item = state.recoveryLifecycle.pending.find(c => c.id === id);
+    const source = state.recoverySources.find(s => s.caseId === id);
+    if (!item || source?.channel !== "operationRecovery" ||
+        !independentObligation(source.input as unknown as GenerationOperationRecovery, item.origin.sourceHeadSha))
+      throw Error("Deferred case lacks its original independent-work source.");
   }
 }
 function derive(

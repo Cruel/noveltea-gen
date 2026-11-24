@@ -516,14 +516,16 @@ export function recordRecoveryOutcome(
 export function finishRecovery(state: RecoveryLifecycle): RecoveryLifecycle {
   if (state.phase !== "resolved" || !state.active || state.inspectionFences.length)
     throw Error("Recovery has not been independently resolved");
-  const [next, ...rest] = state.pending;
+  const index = state.pending.findIndex(item => !state.deferredCaseIds?.includes(item.id));
+  const next = state.pending[index];
   return {
     ...state,
     active: next ?? null,
-    pending: rest,
+    pending: state.pending.filter((_, i) => i !== index),
     phase: next ? "assessing" : "idle",
     decision: null,
     attempt: null,
+    assessorPending: false,
   };
 }
 
@@ -540,6 +542,8 @@ export function finishVerifiedRecovery(
   const original = verified.active!;
   if (verified.discharged.some(entry => sameAnchor(entry.case, original)))
     throw Error("Verified recovery would duplicate an original failure disposition");
+  // An independently deferred case must remain pending until the original
+  // and later correction receipts prove discharge at the parent boundary.
   const completed = finishRecovery(verified);
   return { ...completed, discharged: [...completed.discharged, {
     case: original, correction: outcome.assurance, correctedHeadSha: outcome.sourceHeadSha,
@@ -562,9 +566,11 @@ export function deferRecoveryForIndependentWork(state: RecoveryLifecycle): Recov
     ...state,
     active: null,
     pending: [...state.pending, state.active],
+    deferredCaseIds: [...(state.deferredCaseIds ?? []), state.active.id],
     phase: "idle",
     decision: null,
     attempt: null,
+    assessorPending: false,
   };
 }
 
@@ -580,10 +586,11 @@ export function dischargePendingRecovery(
       !hex40.test(discharge.correctedHeadSha))
     throw Error("Deferred resolution requires independently verified original and correction receipts");
   const pending = state.pending.find(c => c.id === discharge.case.id);
-  if (!pending || !isDeepStrictEqual(pending, discharge.case) ||
+  if (!pending || !state.deferredCaseIds?.includes(pending.id) || !isDeepStrictEqual(pending, discharge.case) ||
       state.discharged.some(entry => entry.case.id === discharge.case.id))
     throw Error("A deferred resolution cannot replace an unrelated or discharged obligation");
   return { ...state, pending: state.pending.filter(c => c.id !== pending.id),
+    deferredCaseIds: state.deferredCaseIds.filter(id => id !== pending.id),
     discharged: [...state.discharged, discharge] };
 }
 
@@ -602,9 +609,11 @@ export function selectPendingRecovery(
     ...state,
     active: caseFile,
     pending: state.pending.filter((_, i) => i !== index),
+    ...(state.deferredCaseIds ? { deferredCaseIds: state.deferredCaseIds.filter(id => id !== caseFile.id) } : {}),
     phase: "assessing",
     decision: null,
     attempt: null,
+    assessorPending: false,
   };
 }
 
@@ -741,6 +750,9 @@ export async function verifyRecoveryCheckpoint(input: CurrentRecoveryReader): Pr
     value.decision !== undefined &&
     value.attempt !== undefined &&
     value.pending.every(validCase) &&
+    (value.deferredCaseIds === undefined || (Array.isArray(value.deferredCaseIds) &&
+      new Set(value.deferredCaseIds).size === value.deferredCaseIds.length &&
+      value.deferredCaseIds.every(id => value.pending.some(c => c.id === id)))) &&
     value.discharged.every(entry => entry && validCase(entry.case) &&
       validEvidence(entry.correction) && hex40.test(entry.correctedHeadSha) &&
       (entry.disposition === undefined || entry.disposition === "active-verified")) &&

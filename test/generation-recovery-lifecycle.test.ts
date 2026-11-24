@@ -140,7 +140,7 @@ test("C07 verified correction persists original identity and successor proof acr
     caseId: first.id, checkedSourceHeadSha: source, evidence: [evidence],
     action: "reconcile-effects", adapter: "original-specialist", originalRef: evidence });
   lifecycle = finishVerifiedRecovery(lifecycle, correction, true);
-  assert.equal(lifecycle.active?.id, second.id);
+  assert.equal(lifecycle.active?.id, second.id, "An unassessed case still requires assessment before further work");
   assert.equal(lifecycle.phase, "assessing");
   assert.deepEqual(lifecycle.discharged, [{ case: first, correction: correction.assurance,
     correctedHeadSha: correction.sourceHeadSha, disposition: "active-verified" }]);
@@ -379,6 +379,33 @@ test("C02 independently verified no-write work keeps unresolved obligation pendi
   state = selectPendingRecovery(state, (item) => item.id === second.id);
   assert.equal(state.active?.id, second.id);
   assert.equal(state.pending[0]?.id, first.id);
+});
+
+test("R13 another verified correction cannot reacquire the independently deferred case's assessor lane", async () => {
+  const deferred = caseOf(await admitted());
+  const repair = caseOf(await admitted({ ...origin, assignmentId: "event-2",
+    failureAnchor: { ...origin.failureAnchor, failedCheckInstanceId: "other-repair" } }));
+  let state = admitRecovery(emptyRecoveryLifecycle(), { outcome: "admitted", case: deferred });
+  state = decideRecovery(state, { schema: "noveltea-generation-recovery-decision/v1",
+    caseId: deferred.id, checkedSourceHeadSha: source, evidence: [evidence],
+    action: "continue-independent", inventoryRef: evidence, blockedAssignmentId: "event-1" });
+  state = deferRecoveryForIndependentWork(state);
+  state = admitRecovery(state, { outcome: "admitted", case: repair });
+  state = decideRecovery(state, { schema: "noveltea-generation-recovery-decision/v1",
+    caseId: repair.id, checkedSourceHeadSha: source, evidence: [evidence],
+    action: "reconcile-effects", adapter: "original-specialist", originalRef: evidence });
+  const correction = { store: "review-checkpoint" as const, ref: "c".repeat(40) };
+  state = finishVerifiedRecovery({ ...state, assessorPending: true }, { status: "verified",
+    caseId: repair.id, sourceHeadSha: correction.ref, assurance: correction }, true);
+  assert.equal(state.active, null);
+  assert.equal(state.phase, "idle");
+  assert.equal(state.assessorPending, false);
+  assert.deepEqual(state.pending, [deferred]);
+  assert.deepEqual(state.deferredCaseIds, [deferred.id]);
+  state = dischargePendingRecovery(state, { case: deferred, correction,
+    correctedHeadSha: correction.ref }, true);
+  assert.equal(state.pending.length, 0);
+  assert.deepEqual(state.discharged.map(entry => entry.case.id), [repair.id, deferred.id]);
 });
 
 test("C02 later verified correction discharges only its original deferred case and restart authenticates the receipt", async () => {

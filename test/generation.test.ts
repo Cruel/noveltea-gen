@@ -50,7 +50,7 @@ import { appendGenerationEvent, syncApprovalRevisionActivity,
 import type { StudioStore } from "../web/src/persistence/store.js";
 import { openKyselyFeatureFixture } from "../web/test/support/studio-database.js";
 import { readEventOnlyOmission } from "../src/interactive-event-only.js";
-import { createGenerationGraph, dispatchGenerationAssignment, recoveryNode } from "../src/generation.js";
+import { createGenerationGraph, dispatchGenerationAssignment } from "../src/generation.js";
 import { admitAdaptiveAssignments, applyAdaptiveAssignments } from "../src/adaptive-assignments.js";
 import { milestoneFulfillmentProjection } from "../src/milestone-field-scope.js";
 import { reconcileInventory, nextExecutionItem, withCausalEventPriority } from "../src/generation-plan.js";
@@ -384,16 +384,17 @@ test("C02 production deferred idea later placement discharges its original case 
     const graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: deferred.threadId } };
     const saved = await graph.getState(cfg);
-    const step = recoveryNode("schedule", async () => {
-      throw Error("Later placement must not rerun the original failed specialist");
-    });
-    const resolved = await step(saved.values as never, cfg as never);
+    const resolved = await graph.invoke({ request: saved.values.request },
+      { ...cfg, recursionLimit: 10000, interruptAfter: ["author_update_intake"] });
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), correctedHead,
+      "Deferred resolution must not replay an original writer or commit before parent intake");
+    assert.equal(resolved.inventory?.headSha, correctedHead,
+      "Parent intake reconciles the corrected HEAD before any downstream dispatch");
     assert.equal(resolved.status, "running");
     assert.equal(resolved.recoveryLifecycle?.pending.length, 0);
     assert.equal(resolved.recoveryLifecycle?.discharged.length, 1);
     assert.equal(resolved.recoveryLifecycle?.discharged[0]?.case.id, originalCase);
     assert.equal(resolved.recoveryLifecycle?.discharged[0]?.correctedHeadSha, correctedHead);
-    await graph.updateState(cfg, resolved, "schedule");
     const restarted = await inspectModernGenerationRecovery(f.job, saver, deferred.threadId);
     assert.deepEqual(restarted, resolved.recoveryLifecycle,
       "the persisted original case and later placement must both reauthenticate on restart");

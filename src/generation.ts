@@ -26,7 +26,7 @@ import { selectOperationStrategy, executeOperationStrategy,
 import { authorizeDiagnosticStrategy } from "./generation-diagnostic-controller.js";
 import { inspectDiagnosticAttempt } from "./unknown-recovery-diagnostic.js";
 import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryLifecycle, inspectionFence,
-  recordRecoveryOutcome, resumePausedRecovery } from "./generation-recovery-lifecycle.js";
+  recordRecoveryOutcome, resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
   extractDomainPatch, fixtureTurnIdentity, projectRecovery,
@@ -2660,7 +2660,8 @@ export function recoveryNode(
           if (await readJobControl(job) !== "running")
             return prior.recoveryLifecycle;
           let next = prior.recoveryLifecycle;
-          for (const pending of prior.recoveryLifecycle.pending) {
+          for (const pending of prior.recoveryLifecycle.pending.filter(item =>
+            prior.recoveryLifecycle.deferredCaseIds?.includes(item.id))) {
             const source = prior.recoverySources.find(item => item.caseId === pending.id);
             if (!source || !await authenticateRecoveryOrigin(job, state.request, graphThreadId,
               pending.origin, pending.evidence, true))
@@ -2673,8 +2674,13 @@ export function recoveryNode(
           }
           return next;
         });
-        if (lifecycle !== prior.recoveryLifecycle)
-          return { recoveryLifecycle: lifecycle, status: "running", reason: null };
+        // Do not short-circuit the parent boundary: after a discharge the
+        // next authorized assignment and any queued author update must still
+        // be reconciled before choosing a graph edge.
+        const selected = selectPendingRecovery(lifecycle, item => !lifecycle.deferredCaseIds?.includes(item.id));
+        if (selected.active)
+          return { recoveryLifecycle: selected, status: "running", reason: null };
+        prior = { ...prior, recoveryLifecycle: selected };
       } catch {
         return { status: "blocked",
           reason: "Deferred recovery source or correction evidence cannot be authenticated.",
@@ -2731,7 +2737,7 @@ export function recoveryNode(
       const action = await executeOperationStrategy(job, state, prior.recoveryLifecycle);
       if (action) return action;
     }
-    const local = { ...state, ...projectRecovery(prior) } as State;
+    const local = { ...state, ...prior, ...projectRecovery(prior) } as State;
     const outcome = await observeNodeOutcome(node, local, config, execute);
     if (node === "independent_assignment_review" &&
         (outcome.reviewAssessmentRequested || outcome.reviewPauseReason)) {
@@ -4083,7 +4089,7 @@ export function createGenerationGraph(
     .addConditionalEdges("schedule", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END : "author_update_intake"), [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("assess_recovery", s => s.status !== "running" ? END :
-      s.recoveryLifecycle.assessorPending ? "assess_recovery" : "author_update_intake",
+      routeAfterOperationAssessment(s, "author_update_intake"),
       [END, "assess_recovery", "author_update_intake"])
     .addConditionalEdges("author_update_intake", s => routeAfterOperationAssessment(s,
       s.status !== "running" ? END :

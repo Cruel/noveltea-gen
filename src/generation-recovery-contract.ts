@@ -222,6 +222,9 @@ export type RecoveryLifecycle = Readonly<{
   /** Oldest eligible case owns the mutation lane; other cases stay pending. */
   active: RecoveryCase | null;
   pending: readonly RecoveryCase[];
+  /** Pending cases explicitly released by a verified independent-work decision.
+   * They cannot automatically reacquire the assessor lane after another repair. */
+  deferredCaseIds?: readonly string[];
   /** Append-only resolved obligations (deferred and active), with source-bound proof. */
   discharged: readonly RecoveryDischarge[];
   /** No caseId or decision exists for an unauthenticated admission. These

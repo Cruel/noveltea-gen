@@ -173,7 +173,7 @@ function edgeSignatures(source: ts.SourceFile = file): Record<string, string> {
 
 /** Baseline from the current C01 source: any changed route must be audited. */
 const approvedEdgeSignatures: Record<string, string> = {
-  assess_recovery: "68e31ce4e43b0258f559658405c3e616af916e4aba65c0d4d54aee575e12558c",
+  assess_recovery: "4527e910bf03ddb96abfd271a608695760d9e6b753be754d11a130707070ea04",
   author_update_intake: "2693bb4f1cc711f6fed86c0d588b3170958dab1866e059be768639e6b27dd56c",
   completion_decision: "75726d85064f0f9b1eb31b89fad2856bbcdfc7f02748f590116cb30fd2148df5",
   dependency_amendment: "ee38e899f58564bdeb73ea2ee9ddadfa324aae152dc4eb9f156dc21122b6862d",
