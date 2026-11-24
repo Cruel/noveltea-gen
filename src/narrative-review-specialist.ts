@@ -668,7 +668,7 @@ export function assignmentVerdictResponseContract(packet: SemanticReviewPacket) 
  * approval. An accepted protocol and its exact transcript survive restarts;
  * an ambiguous started call is never replayed. The original sealed negative
  * verdict remains authoritative until an ordinary source-bound re-review. */
-async function reviewPostcommitDiagnosis(job: JobStartResult, snapshot: SkillSnapshot,
+export async function reviewPostcommitDiagnosis(job: JobStartResult, snapshot: SkillSnapshot,
   packet: SemanticReviewPacket, verdict: SemanticVerdict,
   cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle,
   provider: string, model: string, thinking: "low" | "high" | undefined) {
@@ -787,6 +787,8 @@ async function diagnoseAcceptedPostcommitRound(job: JobStartResult, snapshot: Sk
   packet: SemanticReviewPacket, verdict: SemanticVerdict,
   cycle: import("./postcommit-review-cycle.js").PostcommitReviewCycle,
   provider: string, model: string, thinking: "low" | "high" | undefined) {
+  // Foundation yields its sealed negative successor to assess_recovery.
+  if (packet.items[0]?.progressScope) return;
   await continueAcceptedPostcommitDiagnostic(job, cycle,
     checked => reviewPostcommitDiagnosis(job, snapshot, packet, verdict,
       checked, provider, model, thinking));

@@ -389,6 +389,9 @@ export async function inspectModernGenerationRecovery(
         case "pause":
           return true; // Never a write permission.
         case "exhausted":
+          if (d.reviewAssessment) return source.channel === "operationRecovery" &&
+            await (await import("./generation-operation-strategy.js")).authenticateFoundationReviewExhaustion(job,
+              values as GenerationGraphState, active, d);
           return source.channel === "recovery" ||
             source.channel === "operationRecovery" &&
             !!(source.input as unknown as GenerationOperationRecovery).evidence.assignmentFailure &&

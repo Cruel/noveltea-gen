@@ -29,12 +29,15 @@ export interface RepairCycleOps<S extends RepairCycleState> {
   shouldYieldForSteering?: (state: S) => Promise<boolean>;
   /** Recheck deterministic source references before one fresh independent read-only review. */
   adjudicate(state: S): Promise<S>;
+  /** A migrated assignment yields before nonlocal Review strategy effects. */
+  requiresAssessment?: (state: S) => Promise<boolean>;
 }
 export type RepairCycleResult<S extends RepairCycleState> =
   | { state: S; next: "completed" }
   | { state: S; next: "author-escalation" }
   | { state: S; next: "steering-boundary" }
   | { state: S; next: "controller-replan" }
+  | { state: S; next: "assess-review" }
   | { state: S; next: "manual-reconcile"; reason: string }
   | { state: S; next: "author-choice"; choice: {
     id: string; proposalSha256: string; question: SpecialistChoiceReceipt["question"] } | null };
@@ -56,6 +59,7 @@ export async function driveRejectedRepairCycle<S extends RepairCycleState>(
     if (seen.has(transition))
       throw Error("Review repair controller repeated a bounded transition without durable progress.");
     seen.add(transition);
+    if (await ops.requiresAssessment?.(state)) return { state, next: "assess-review" };
     switch (state.phase) {
       case "ready":
       case "prepared":
@@ -92,6 +96,7 @@ export async function driveRejectedRepairCycle<S extends RepairCycleState>(
       case "reviewing":
         if (await ops.reviewStatus(state) === "required-pending")
           await ops.rereview(state);
+        if (await ops.requiresAssessment?.(state)) return { state, next: "assess-review" };
         state = await ops.finishReview(state.sourceCommitSha);
         continue;
       case "failed":

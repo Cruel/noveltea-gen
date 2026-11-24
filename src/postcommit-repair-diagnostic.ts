@@ -52,22 +52,7 @@ export function postcommitDiagnosticReason(round: number): PostcommitDiagnosisRe
 export async function foundationDiagnosticReason(job: JobStartResult,
   cycle: PostcommitReviewCycle, paths: string[]): Promise<PostcommitDiagnosisReason | null> {
   const { inspectPostcommitReviewCycle } = await import("./postcommit-review-cycle.js");
-  const { parseSpecialistJson } = await import("./composition-specialist.js");
-  const { normalizeFailedSemanticFindingKinds } = await import("./semantic-assignment-review.js");
-  const readRound = async (owner: PostcommitReviewCycle, round: PostcommitReviewCycle["rounds"][number]) => {
-    const bytes = (await readFile(owner.reviewer.file)).subarray(0, round.transcriptBytes);
-    const records = bytes.toString("utf8").trim().split("\n").map(line => JSON.parse(line));
-    const message = records.filter(r => r.type === "message" && r.message?.role === "assistant" &&
-      r.message.stopReason === "stop").at(-1)?.message;
-    const raw = message?.content?.filter((c: { type: string }) => c.type === "text")
-      .map((c: { text: string }) => c.text).join("\n");
-    if (!raw || createHash("sha256").update(bytes).digest("hex") !== round.transcriptDigest)
-      throw Error("Foundation review progress lost its sealed transcript");
-    const verdict = normalizeFailedSemanticFindingKinds(parseSpecialistJson(raw)) as SemanticVerdict;
-    if (verdict.sourceDigest !== round.packetDigest || digest(verdict) !== round.verdictDigest)
-      throw Error("Foundation review progress differs from its sealed verdict");
-    return verdict;
-  };
+  const readRound = readSealedPostcommitVerdict;
   const blob = (sha: string) => digest(paths.map(path => execFileSync("git", [
     "show", sha + ":" + (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path,
   ], { cwd: job.worktreeRoot, encoding: "utf8" })));
@@ -98,9 +83,31 @@ export async function foundationDiagnosticReason(job: JobStartResult,
     }
     seen.add(source);
     previous = { sha: round.commitSha, verdict };
+    if (stalled >= 2 && round !== cycle.rounds.at(-1)) {
+      const assessed = await readPostcommitDiagnosis(job, cycle, round.commitSha);
+      if (assessed?.diagnosis.action === "continue") stalled = 0;
+      else if (assessed) throw Error("Foundation correction continued after a sealed noncontinuation diagnosis");
+    }
   }
   if (previous?.verdict.verdict !== "fail") return null;
   return stalled >= 2 ? "reassessment" : null;
+}
+
+export async function readSealedPostcommitVerdict(owner: PostcommitReviewCycle, round: PostcommitReviewCycle["rounds"][number]) {
+  const { parseSpecialistJson } = await import("./composition-specialist.js");
+  const { normalizeFailedSemanticFindingKinds } = await import("./semantic-assignment-review.js");
+    const bytes = (await readFile(owner.reviewer.file)).subarray(0, round.transcriptBytes);
+    const records = bytes.toString("utf8").trim().split("\n").map(line => JSON.parse(line));
+    const message = records.filter(r => r.type === "message" && r.message?.role === "assistant" &&
+      r.message.stopReason === "stop").at(-1)?.message;
+    const raw = message?.content?.filter((c: { type: string }) => c.type === "text")
+      .map((c: { text: string }) => c.text).join("\n");
+    if (!raw || createHash("sha256").update(bytes).digest("hex") !== round.transcriptDigest)
+      throw Error("Foundation review progress lost its sealed transcript");
+    const verdict = normalizeFailedSemanticFindingKinds(parseSpecialistJson(raw)) as SemanticVerdict;
+    if (verdict.sourceDigest !== round.packetDigest || digest(verdict) !== round.verdictDigest)
+      throw Error("Foundation review progress differs from its sealed verdict");
+    return verdict;
 }
 
 export async function postcommitDiagnosticAdmissionForSource(job: JobStartResult,

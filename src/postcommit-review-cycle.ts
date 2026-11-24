@@ -119,6 +119,8 @@ export async function inspectPostcommitReviewCycle(
   job: JobStartResult,
   rootSha: string,
   assignmentDigest: string,
+  /** Only the just-bound reviewer callback may inspect an empty, not yet written session. */
+  pendingReviewerFile?: string,
 ): Promise<PostcommitReviewCycle | null> {
   const path = fileFor(job, rootSha, assignmentDigest);
   if (!existsSync(path)) return null;
@@ -163,7 +165,9 @@ export async function inspectPostcommitReviewCycle(
     taskDigest: cycle.turnDigest,
   });
   if (cycle.id !== expected) throw Error("Postcommit reviewer cycle scope changed.");
-  const bytes = await transcript(job, cycle.reviewer);
+  const pending = !cycle.rounds.length && cycle.reviewer.file === pendingReviewerFile &&
+    ownedSession(job, pendingReviewerFile) && !existsSync(pendingReviewerFile);
+  const bytes = pending ? Buffer.alloc(0) : await transcript(job, cycle.reviewer);
   const seen = new Set<string>();
   let previousBytes = 0;
   for (const round of cycle.rounds) {

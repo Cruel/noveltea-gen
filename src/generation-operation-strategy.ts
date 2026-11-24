@@ -18,7 +18,8 @@ import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { readAdaptiveState } from "./adaptive-state.js";
-import { inspectRejectedRepair } from "./rejected-review-repair.js";
+import { inspectRejectedRepair, authenticateFoundationReviewHead, inspectFoundationReviewBoundary,
+  executeFoundationReviewAssessment, inspectFoundationReviewStop } from "./rejected-review-repair.js";
 import { inspectJobReport } from "./job-report.js";
 import { isTrustedFinalVerdictAnomaly } from "./generation-final-verdict.js";
 import { authorizedInventoryComplete } from "./generation-plan.js";
@@ -385,7 +386,8 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   }
   const reviewProof = await originalFailedReviewProof(job, s, c);
   if (reviewProof) {
-    await assertSource(job, s, c);
+    if (c.origin.assignmentId !== "foundation" || !await authenticateFoundationReviewHead(job, c.origin.sourceHeadSha))
+      await assertSource(job, s, c);
     return { ...base(c, reviewProof), action: "known-correction",
       adapter: "review-cycle", receipt: reviewProof };
   }
@@ -420,10 +422,28 @@ export async function authenticateOperationOwnerProof(job: JobStartResult, s: St
 export async function authenticateOperationReviewProof(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   if (d.action !== "known-correction" || d.adapter !== "review-cycle") return false;
+  try {
   const original = await originalFailedReviewProof(job, s, c);
-  return !!original && isDeepStrictEqual(original, d.receipt) &&
-    isDeepStrictEqual(d.evidence, [...c.evidence, original]);
+  if (!original || !isDeepStrictEqual(original, d.receipt) ||
+      !isDeepStrictEqual(d.evidence, [...c.evidence, original])) return false;
+  if (!d.reviewAssessment) return true;
+  return c.origin.assignmentId === "foundation" &&
+    isDeepStrictEqual(d.reviewAssessment,
+      await inspectFoundationReviewBoundary(job, c.origin.sourceHeadSha, d.reviewAssessment));
+  } catch { return false; }
 }
+export async function authenticateFoundationReviewExhaustion(job: JobStartResult, s: State,
+  c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
+  if (d.action !== "exhausted" || d.reason !== "nonconverging" || !d.reviewAssessment ||
+      c.origin.assignmentId !== "foundation" || c.origin.operation !== "independent-review") return false;
+  try {
+  const original = await originalFailedReviewProof(job, s, c);
+  const terminal = await inspectFoundationReviewStop(job, c.origin.sourceHeadSha, d.reviewAssessment);
+  return !!original && !!terminal && isDeepStrictEqual(d.attemptRefs, [terminal]) &&
+    isDeepStrictEqual(d.evidence, [...c.evidence, original, terminal]);
+  } catch { return false; }
+}
+
 export async function authenticateOperationDiagnosticProof(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   const original = await diagnosticEvidence(job, s, c);
@@ -466,12 +486,58 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work"].includes(d.adapter)) &&
         !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
   if (d.action === "known-correction") {
-    await assertSource(job, s, c);
+    const foundation = c.origin.assignmentId === "foundation";
+    try {
+    if (!foundation || !await authenticateFoundationReviewHead(job, c.origin.sourceHeadSha))
+      await assertSource(job, s, c);
     if (!await authenticateOperationReviewProof(job, s, c, d))
       throw Error("Original failed Review source no longer matches the saved correction decision");
-    // The graph will reenter the existing Review controller with the selected
-    // lifecycle. No writer is invoked by assessment itself.
+    if (foundation) {
+      // A returned child boundary is not a new failure or a dispatch grant.
+      // First checkpoint the exact selected assessment, then execute only it.
+      const stop = (decision: RecoveryDecision, reason: string, status: State["status"]) =>
+        ({ recoveryLifecycle: { ...decideRecovery(lifecycle, decision), assessorPending: false }, reason, status });
+      const control = await readJobControl(job);
+      if (control !== "running")
+        return stop({ ...base(c), action: "pause", reason: control === "cancelled" ? "cancelled" : "author-pause" },
+          "Author control precedes Review reassessment.", control);
+      if (d.reviewAssessment) {
+        try {
+          const result = await withStoryJobLock(job, "assess-foundation-review", () =>
+            executeFoundationReviewAssessment(job, c.origin.sourceHeadSha, d.reviewAssessment!));
+          if (result.stop)
+            return stop({ ...base(c, d.receipt), evidence: [...c.evidence, d.receipt, result.stop],
+              action: "exhausted", reason: "nonconverging", attemptRefs: [result.stop],
+              reviewAssessment: d.reviewAssessment }, result.reason ?? "Review requires a new authorized strategy.", "blocked");
+          if (result.protectedApproval)
+            return stop({ ...base(c, d.receipt), action: "pause", reason: "protected-approval", resumeRef: d.receipt },
+              result.reason!, "blocked");
+          const { reviewAssessment: _selected, ...ordinary } = d;
+          return { recoveryLifecycle: { ...decideRecovery(lifecycle, ordinary), assessorPending: false },
+            reason: null, status: "running" };
+        } catch (error) {
+          if (error instanceof PiModelUnavailableError || error instanceof Error && error.name === "PiBudgetPause")
+            return stop({ ...base(c, d.receipt), action: "pause",
+              reason: error instanceof PiModelUnavailableError ? "provider-unavailable" : "budget", resumeRef: d.receipt },
+              error.message, "paused");
+          throw error;
+        }
+      }
+      const boundary = await inspectFoundationReviewBoundary(job, c.origin.sourceHeadSha);
+      if (boundary)
+        return { recoveryLifecycle: { ...decideRecovery(lifecycle, { ...d, reviewAssessment: boundary }),
+          assessorPending: true }, status: "running", reason: null };
+    }
+    // The graph reenters the original assignment child after shared admission.
     return { recoveryLifecycle: { ...lifecycle, assessorPending: false }, status: "running" };
+    } catch (error) {
+      if (!foundation) throw error;
+      return { recoveryLifecycle: { ...decideRecovery(lifecycle, {
+        ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
+        requiredInspection: "Reconcile the original writer/reviewer session and exact Review assessment; do not replay uncertain effects.",
+      }), assessorPending: false }, status: "blocked",
+        reason: error instanceof Error ? error.message : String(error) };
+    }
   }
   const settled = { ...lifecycle, assessorPending: false };
   const stop = (decision: RecoveryDecision, reason: string, status: State["status"] = "blocked"): Partial<State> => ({

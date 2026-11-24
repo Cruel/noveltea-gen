@@ -5317,13 +5317,17 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
-  skip: !available, timeout: 120_000,
+  skip: !available, timeout: 240_000,
 }, async () => {
   const owner = scenario === "cli" ? "cli" : "server";
   const terminal = scenario === "protocol-exhausted" || scenario === "nonconverging";
-  const realReview = scenario === "review-rejected" || scenario === "review-converges";
+  const realReview = scenario.startsWith("review-");
+  const stalled = scenario === "review-stalled" || scenario === "review-stalled-continue";
+  const dispute = scenario === "review-dispute";
+  const scopeRevision = scenario === "review-scope";
+  const revising = scenario === "review-converges" || stalled;
   const f = setup("r01-real-foundation-pi-" + scenario);
   const contract = JSON.parse(readFileSync(f.contract, "utf8"));
   contract.scope = { kind: "full-story", depth: "composition", targets: [], branches: [] };
@@ -5414,26 +5418,57 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
       if (realReview && i === 9)
         return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
           .map(path => "skill://" + path), i), reason: "toolUse" };
-      const correction = i >= 11 ? Math.floor((i - 11) / 3) + 1 : 0;
-      const correctionStep = (i - 11) % 3;
+      if (scopeRevision && i === 11)
+        return { content: scriptedText("The author must specify whether the witness is complicit or simply an observer."), reason: "stop" };
+      if (scopeRevision && i === 12)
+        return { content: [{ type: "toolCall", name: "write", id: "r03-scope-write",
+          arguments: { path: target, content: authored + "\nThe witness saw the thief use the stolen key.\n" } }], reason: "toolUse" };
+      if (scopeRevision && i === 13)
+        return { content: scriptedText("The witness is an observer, as the author directed."), reason: "stop" };
+      if (scopeRevision && i === 14)
+        return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
+          .map(path => "skill://" + path), i), reason: "toolUse" };
+      if (dispute && i === 11)
+        return { content: scriptedText("DISPUTE_REVIEW: " + target + ":1 | The source already supports the witness motivation."), reason: "stop" };
+      if ((dispute && i === 12) || (stalled && i === 17))
+        return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review")
+          .map(path => "skill://" + path), i), reason: "toolUse" };
+      if (stalled && i === 18) {
+        const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+        const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+          .map(c => c.text ?? "").findLast(t => t.includes("INDEPENDENT POSTCOMMIT DIAGNOSTIC"));
+        assert.ok(prompt);
+        const sourceDigest = prompt.match(/sourceDigest: ([a-f0-9]{64});/)?.[1];
+        assert.ok(sourceDigest);
+        const packet = JSON.parse(prompt.split("IMMUTABLE SOURCE AND REQUIREMENTS: ")[1]!.split("\nORIGINAL ASSIGNMENT OUTCOME:")[0]!);
+        return { content: scriptedText({ schema: "noveltea-postcommit-diagnosis/v1", sourceDigest,
+          action: scenario === "review-stalled-continue" ? "continue" : "replace",
+          explanation: "The prior two corrections have not resolved the substantive witness obligation.",
+          assessments: [{ kind: "cosmetic", reason: "The reviewer has not accepted the actual witness evidence.",
+            requirement: { quote: packet.items[0].assignment.outcome.slice(0, 60) },
+            evidence: { path: target, quote: "The witness took a ledger from the archive before the theft." } }] }), reason: "stop" };
+      }
+      const revisionIndex = stalled && i >= 19 ? i - 2 : i;
+      const correction = revisionIndex >= 11 ? Math.floor((revisionIndex - 11) / 3) + 1 : 0;
+      const correctionStep = (revisionIndex - 11) % 3;
       const revisions = [
         "The witness took a ledger from the archive before the theft.",
         "The ledger records the stolen archive key at midnight.",
         "The witness must identify who used the stolen key.",
       ];
-      if (scenario === "review-converges" && correction && correctionStep === 0)
+      if (revising && correction && correctionStep === 0)
         return { content: [{ type: "toolCall", name: "write", id: "r03-writer-" + correction,
           arguments: { path: target, content: authored + "\n" + revisions.slice(0, correction).join("\n") + "\n" } }], reason: "toolUse" };
-      if (scenario === "review-converges" && correction && correctionStep === 1)
+      if (revising && correction && correctionStep === 1)
         return { content: scriptedText("Corrected the source-linked witness obligation."), reason: "stop" };
-      if (realReview && (i === 10 || scenario === "review-converges" && correctionStep === 2)) {
+      if (realReview && (i === 10 || revising && correctionStep === 2 || dispute && i === 13 || scopeRevision && i === 15)) {
         const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
         const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
           .map(c => c.text ?? "").findLast(text => text.includes("\nIMMUTABLE REVIEW PACKET\n"));
         assert.ok(prompt, "Original reviewer receives the source-bound packet");
         const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
         const item = packet.items[0];
-        const pass = correction === 3;
+        const pass = correction === 3 || dispute && i === 13 || scopeRevision && i === 15;
         const finding = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
           path: target, line: 1, kind: "missing-requirement",
           message: "The witness causal connection still needs the next specific link.",
@@ -5443,9 +5478,9 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
           findings: pass ? [] : [finding],
           evidence: pass ? [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
             path: target, line: 1, explanation: "The corrected source establishes the required causal connection." }] : [],
-          ...(correction ? { progressDiagnosis: { status: "material",
-            reason: "The exact changed line materially addresses the previous causal gap.",
-            evidence: { path: target, quote: revisions[correction - 1], change: "added" } } } : {}),
+          ...(correction && !dispute && !scopeRevision ? { progressDiagnosis: { status: stalled && !pass ? "stalled" : "material",
+            reason: stalled && !pass ? "The new source still fails to resolve the material blocker." : "The exact changed line materially addresses the previous causal gap.",
+            evidence: stalled && !pass ? null : { path: target, quote: revisions[correction - 1], change: "added" } } } : {}),
         }), reason: "stop" };
       }
       throw Error("R01 writer replayed or called another model unexpectedly: " + i);
@@ -5508,6 +5543,104 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction",
           JSON.stringify(selected.recoveryLifecycle));
         assert.equal(observed.length, 13, "Selection cannot start a new Pi writer");
+        if (scenario === "review-session-unavailable") {
+          const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "foundation.json"), "utf8"));
+          const transcript = receipt.piSessionFile;
+          assert.ok(transcript);
+          const { renameSync } = await import("node:fs");
+          renameSync(transcript, transcript + ".unavailable");
+          try {
+            const fenced = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+            assert.equal(fenced.status, "blocked");
+            assert.ok(fenced.recoveryLifecycle.inspectionFences.length || fenced.recoveryLifecycle.decision?.action === "integrity-fence");
+            assert.equal(observed.length, 13, "Missing original session cannot authorize a new writer");
+          } finally { renameSync(transcript + ".unavailable", transcript); }
+        }
+        if (scopeRevision) {
+          const paused = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+          assert.equal(paused.status, "paused", JSON.stringify(paused.recoveryLifecycle));
+          assert.equal(paused.recoveryLifecycle.decision?.action, "pause");
+          assert.equal(observed.length, 14);
+          const { activeSpecialistChoice, answerSpecialistChoice } = await import("../src/specialist-choice.js");
+          const { withStoryJobLock } = await import("../src/job-lock.js");
+          const choice = await activeSpecialistChoice(f.job);
+          assert.ok(choice);
+          const revisedOutcome = "Establish the archive witness as an observer of the thief's use of the stolen key.";
+          await withStoryJobLock(f.job, "test-author-revision", () =>
+            answerSpecialistChoice(f.job, choice.id, choice.proposalSha256,
+              { kind: "option", optionId: "revise", note: revisedOutcome }, "user:r03"));
+          const repaired = await withJobModelRuntime(runtime, () => graph.invoke(input, {
+            ...config, interruptAfter: ["independent_assignment_review"],
+          }));
+          assert.equal(repaired.recoveryLifecycle.phase, "idle",
+            JSON.stringify({ reason: repaired.reason, lifecycle: repaired.recoveryLifecycle, calls: observed.length }));
+          assert.equal(repaired.recoveryLifecycle.discharged.at(-1)?.case.id, original.id);
+          assert.equal(observed.length, 18);
+          const points = await inspectRecoveryCheckpoints(f.job);
+          const old = points.find(p => p.commitSha === head)!;
+          const successor = points.find(p => p.commitSha === repaired.result?.headSha)!;
+          const { inspectPostcommitReviewCycle } = await import("../src/postcommit-review-cycle.js");
+          const oldCycle = await inspectPostcommitReviewCycle(f.job, head, old.assurance!.assignmentDigest);
+          const newCycle = await inspectPostcommitReviewCycle(f.job, head, successor.assurance!.assignmentDigest);
+          assert.ok(oldCycle && newCycle && newCycle.predecessor);
+          assert.equal(newCycle.predecessor.cycleId, oldCycle.id);
+          assert.equal(newCycle.predecessor.failedCommitSha, head);
+          assert.notEqual(newCycle.reviewer.id, oldCycle.reviewer.id);
+          assert.equal(old.semanticReview, "failed");
+          assert.equal(successor.semanticReview, "passed");
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+            repaired.recoveryLifecycle);
+        }
+        if (stalled || dispute) {
+          const yielded = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["independent_assignment_review"],
+          }));
+          assert.equal(yielded.recoveryLifecycle.phase, "correcting", JSON.stringify(yielded.recoveryLifecycle));
+          assert.equal(yielded.recoveryLifecycle.assessorPending, true);
+          assert.equal(yielded.recoveryLifecycle.active?.id, original.id);
+          const beforeDiagnostic = dispute ? 14 : 19;
+          assert.equal(observed.length, beforeDiagnostic, "Child cannot dispatch a nonlocal Review strategy");
+          const selection = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["assess_recovery"],
+          }));
+          assert.equal(selection.recoveryLifecycle.decision?.action, "known-correction");
+          assert.equal(selection.recoveryLifecycle.decision?.action === "known-correction" &&
+            selection.recoveryLifecycle.decision.reviewAssessment?.kind, dispute ? "dispute" : "diagnostic");
+          assert.equal(selection.recoveryLifecycle.assessorPending, true);
+          assert.equal(observed.length, beforeDiagnostic, "Assessment admission must precede the external call");
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+            selection.recoveryLifecycle, "Selected reassessment reauthenticates after restart");
+          const settled = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...config, interruptAfter: ["assess_recovery"],
+          }));
+          assert.equal(observed.length, beforeDiagnostic + 2);
+          assert.ok(observed.slice(-2).every(o => !o.tools.includes("write") && !o.tools.includes("edit")));
+          assert.equal(settled.recoveryLifecycle.active?.id, original.id);
+          assert.deepEqual(settled.recoveryLifecycle.inspectionFences, []);
+          if (scenario === "review-stalled-continue") {
+            assert.equal(settled.recoveryLifecycle.decision?.action, "known-correction");
+            const repaired = await withJobModelRuntime(runtime, () => graph.invoke(null, {
+              ...config, interruptAfter: ["independent_assignment_review"],
+            }));
+            assert.equal(repaired.recoveryLifecycle.phase, "idle", JSON.stringify(repaired.recoveryLifecycle));
+            assert.equal(repaired.recoveryLifecycle.discharged.at(-1)?.case.id, original.id);
+            assert.equal(observed.length, 24);
+            assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+              repaired.recoveryLifecycle);
+          } else {
+            assert.equal(settled.status, "blocked", JSON.stringify(settled));
+            assert.equal(settled.recoveryLifecycle.decision?.action, "exhausted");
+            assert.equal(settled.recoveryLifecycle.decision?.action === "exhausted" &&
+              settled.recoveryLifecycle.decision.reason, "nonconverging");
+            assert.equal(settled.recoveryLifecycle.discharged.length, 0);
+            assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id),
+              settled.recoveryLifecycle);
+            const resumed = await withJobModelRuntime(runtime, () => graph.invoke(input, config));
+            assert.deepEqual(resumed.recoveryLifecycle, settled.recoveryLifecycle);
+            assert.equal(observed.length, beforeDiagnostic + 2, "A settled read-only assessment must not replay");
+            assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)?.semanticReview, "failed");
+          }
+        }
         if (scenario === "review-converges") {
           const repaired = await withJobModelRuntime(runtime, () => graph.invoke(null, {
             ...config, interruptAfter: ["independent_assignment_review"],
@@ -5524,6 +5657,7 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             .inspectPostcommitReviewCycle(f.job, head, (await inspectRecoveryCheckpoints(f.job))
               .find(p => p.commitSha === head)!.assurance!.assignmentDigest);
           assert.equal(cycle?.rounds.length, 4);
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id), repaired.recoveryLifecycle);
           const completed = await withJobModelRuntime(runtime, () => graph.invoke(null, {
             ...config, interruptAfter: ["verify_committed_work"],
           }));

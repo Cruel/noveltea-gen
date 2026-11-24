@@ -256,7 +256,9 @@ const Channels = Annotation.Root({
 export type GenerationGraphState = typeof Channels.State;
 type CoreState = GenerationGraphState;
 // Local node observations only; never LangGraph channels or resume authority.
-type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict" };
+type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict";
+  reviewAssessmentRequested?: true;
+  reviewPauseReason?: "author-pause" | "author-choice" | "budget" | "provider-unavailable" | "cancelled"; };
 const openJob = async (s: Pick<State, "request">) => {
   const job = await startStoryJob({ story: s.request.story, job: s.request.job }, false);
   assertNativeVersion(job.validatorVersion);
@@ -869,6 +871,8 @@ async function runFoundationAssignmentChild(
       }
       if (reviewPatch.status === "paused")
         return outcome("paused", "review-checkpoints", { controlRef: "review-checkpoints" });
+      if (reviewPatch.reviewAssessmentRequested)
+        return outcome("unresolved", "review-checkpoints", { dispositionRef: "assess-review" });
       if (reviewPatch.status === "blocked" || reviewPatch.status === "cancelled" ||
           reviewPatch.escalation || reviewPatch.operationRecovery || reviewPatch.recovery ||
           reviewPatch.unknownRecovery)
@@ -933,6 +937,16 @@ async function runFoundationAssignmentChild(
   // The existing independent-assignment and commit-verification parent nodes
   // will independently reauthenticate the review, Git and plan before advancing.
   const reviewedState = reviewPatch as Partial<State> | null;
+  if (correction && finished.outcome.status === "unresolved" &&
+      finished.outcome.dispositionRef === "assess-review") {
+    // The callback projection is not persisted. Rebuild a returned child
+    // handoff after a crash from its actual original Repair/Review receipts.
+    if (!await (await import("./rejected-review-repair.js")).inspectFoundationReviewBoundary(job,
+        correction.origin.sourceHeadSha))
+      throw Error("Returned Foundation assessment lost its original boundary.");
+    return { reviewAssessmentRequested: true, reason: "Assessing the sealed Foundation Review boundary.",
+      result: { status: finished.submission!.status, headSha: finished.submission!.headSha } };
+  }
   if (finished.outcome.status === "verified")
     return { ...reviewedState,
       result: { status: finished.submission!.status, headSha: finished.outcome.headSha } };
@@ -941,7 +955,7 @@ async function runFoundationAssignmentChild(
   // to the parent and cause the same Foundation writer to be selected again.
   if (reviewedState && (reviewedState.status || reviewedState.operationRecovery ||
       reviewedState.recovery || reviewedState.unknownRecovery ||
-      reviewedState.escalation || reviewedState.reviewSteeringHandoff))
+      reviewedState.escalation || reviewedState.reviewSteeringHandoff || reviewedState.reviewAssessmentRequested))
     return { ...reviewedState, result: finished.submission
       ? { status: finished.submission.status, headSha: finished.submission.headSha }
       : reviewedState.result };
@@ -1094,6 +1108,7 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
         const progress = await advanceRejectedRepair(job, point.commitSha, {
           skillsSource: s.request.skillsSource, provider: s.request.provider,
           model: s.request.model,
+          sharedAssessment: s.active.stage === "foundation",
           canYieldForSteering: async () => !!s.request.turnPlanDigest &&
             !!s.inventory?.items.some(item => item.stage === "architecture" &&
               item.status === "verified") && !!s.active && !!s.result &&
@@ -1104,6 +1119,8 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
           await withStoryJobLock(job, "event-dependency-review-completion", () =>
             finalizeReviewEventDependency(job, point.commitSha));
         }
+        if (progress.next === "assess-review")
+          return { reviewAssessmentRequested: true, reason: "Assessing the sealed Foundation Review boundary." };
         if (progress.next === "steering-boundary")
           return { reviewSteeringHandoff: true, reason: REPAIR_STEERING_BOUNDARY };
         if (progress.next === "controller-replan" && progress.state.outOfAuthority) {
@@ -1216,6 +1233,8 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
               "and propose a separately controller-authorized bounded assignment; " +
               "do not replay the original writer or expand its file permissions.",
           } } : {}),
+          ...(s.active.stage === "foundation" && progress.next === "author-choice" ?
+            { reviewPauseReason: "author-choice" as const } : {}),
           status: progress.next === "author-choice" ? "paused" : "blocked",
           reason: progress.next === "author-choice"
             ? "Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending."
@@ -1238,6 +1257,14 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
     }
     return { result: { ...s.result, headSha: await trustedHead(job) } };
   } catch (error) {
+    if (correctionSelected && s.active?.stage === "foundation" && error instanceof Error) {
+      const reason = error.name === "PiBudgetPause" ? "budget" :
+        error.name === "PiModelUnavailableError" ? "provider-unavailable" :
+        error.name === "StoryCancelledError" ? "cancelled" :
+        error.name === "SpecialistChoiceRequiredError" ? "author-choice" : null;
+      if (reason) return { status: reason === "cancelled" ? "cancelled" : "paused",
+        reviewPauseReason: reason, reason: error.message };
+    }
     if (error instanceof (await import("./rejected-review-repair.js")).ReviewDependencyRequiredError) {
       const request = error.request;
       if (request.action === "controller-amendment-required" &&
@@ -1459,9 +1486,12 @@ function assignmentFailureEvidence(state: RecoveryState, origin: RecoveryOrigin)
 }
 async function recoverySourceHead(job: JobStartResult, state: RecoveryState, origin: RecoveryOrigin) {
   const evidence = assignmentFailureEvidence(state, origin);
-  return evidence?.assignmentFailure
-    ? await authenticateAssignmentFailure(job, evidence, origin.sourceHeadSha) ? origin.sourceHeadSha : null
-    : trustedHead(job);
+  if (evidence?.assignmentFailure)
+    return await authenticateAssignmentFailure(job, evidence, origin.sourceHeadSha) ? origin.sourceHeadSha : null;
+  if (origin.operation === "independent-review" && origin.assignmentId === "foundation" &&
+      await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, origin.sourceHeadSha))
+    return origin.sourceHeadSha;
+  return trustedHead(job);
 }
 type GenerationNode = keyof typeof nodeFailureSource | "assess_recovery";
 
@@ -1535,7 +1565,8 @@ export function recoveryNode(
       return { status: "blocked", reason: state.reason ?? "Original recovery requires inspection.", recoveryLifecycle: prior.recoveryLifecycle };
     if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
         prior.recoveryLifecycle.decision?.action === "exhausted" &&
-        !!prior.recoveryLifecycle.active && assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure) {
+        !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment ||
+          assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure)) {
       const active = prior.recoveryLifecycle.active;
       try {
         const job = await openJob(state);
@@ -1545,7 +1576,9 @@ export function recoveryNode(
             !await authenticateRecoveryOrigin(job, state.request, thread,
               active.origin, active.evidence, false, assignmentFailureEvidence(prior, active.origin)) ||
             !(prior.recoveryLifecycle.decision?.action === "exhausted"
-              ? isDeepStrictEqual(prior.recoveryLifecycle.decision, await selectOperationStrategy(job, state as State, active))
+              ? prior.recoveryLifecycle.decision.reviewAssessment
+                ? await (await import("./generation-operation-strategy.js")).authenticateFoundationReviewExhaustion(job, state as State, active, prior.recoveryLifecycle.decision)
+                : isDeepStrictEqual(prior.recoveryLifecycle.decision, await selectOperationStrategy(job, state as State, active))
               : await authenticateSealedDiagnosticStop(job, state as State, prior.recoveryLifecycle)))
           throw Error("Original diagnostic or invocation receipt is no longer authenticated.");
         return { status: "blocked", reason: state.reason ?? "Original authenticated recovery remains unresolved; inspect its terminal receipt.",
@@ -1677,6 +1710,39 @@ export function recoveryNode(
     }
     const local = { ...state, ...projectRecovery(prior) } as State;
     const outcome = await observeNodeOutcome(node, local, config, execute);
+    if (node === "independent_assignment_review" &&
+        (outcome.reviewAssessmentRequested || outcome.reviewPauseReason)) {
+      const active = prior.recoveryLifecycle.active;
+      const decision = prior.recoveryLifecycle.decision;
+      const job = await openJob(local);
+      try {
+      const { authenticateOperationReviewProof } = await import("./generation-operation-strategy.js");
+      const { inspectFoundationReviewBoundary, authenticateFoundationReviewHead } = await import("./rejected-review-repair.js");
+      if (!active || active.origin.assignmentId !== "foundation" ||
+          decision?.action !== "known-correction" || decision.adapter !== "review-cycle" ||
+          !await authenticateOperationReviewProof(job, local, active, decision) ||
+          !await authenticateFoundationReviewHead(job, active.origin.sourceHeadSha))
+        throw Error("Foundation Review handoff lost its original admitted source.");
+      if (outcome.reviewPauseReason) {
+        return { status: outcome.status, reason: outcome.reason,
+          recoveryLifecycle: { ...decideRecovery(prior.recoveryLifecycle, {
+            schema: "noveltea-generation-recovery-decision/v1", caseId: active.id,
+            checkedSourceHeadSha: active.origin.sourceHeadSha, evidence: decision.evidence,
+            action: "pause", reason: outcome.reviewPauseReason, resumeRef: decision.receipt,
+          }), assessorPending: false } };
+      }
+      if (!await inspectFoundationReviewBoundary(job, active.origin.sourceHeadSha))
+        throw Error("Foundation Review handoff has no authenticated reassessment boundary.");
+      return { status: "running", reason: outcome.reason,
+        recoveryLifecycle: { ...prior.recoveryLifecycle, assessorPending: true } };
+      } catch (error) {
+        return { status: "blocked", reason: error instanceof Error ? error.message : String(error),
+          recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+            fence: inspectionFence("untrusted-receipt", active?.origin ?? {}, active?.evidence ?? [],
+              active ? { store: active.origin.failureAnchor.store, ref: active.origin.failureAnchor.ref } : null,
+              "Authenticate the original Foundation Review handoff before continuing.") }) };
+      }
+    }
     if (outcome.recoveryLifecycle?.inspectionFences.length) return {
       status: "blocked", reason: outcome.reason, recoveryLifecycle: outcome.recoveryLifecycle,
     };
@@ -2661,6 +2727,7 @@ export function createGenerationGraph(
         ? await runFoundationAssignmentChild(s, config, reviewBoundary, true)
         : await reviewBoundary(s, correction);
       if (correction) {
+        if (reviewed.reviewAssessmentRequested) return reviewed;
         if (reviewed.reviewSteeringHandoff)
           return reviewed; // Preserve original Review-to-author intake boundary.
         if (reviewed.status === "paused" || reviewed.status === "cancelled" ||

@@ -119,6 +119,8 @@ export type RecoveryDecision = RecoveryDecisionBase &
         action: "known-correction";
         adapter: "response-contract" | "review-cycle" | "known-verifier-fix" | "native-revalidation";
         receipt: RecoveryEvidence;
+        /** A source-bound Review adapter continuation selected by the shared assessor. */
+        reviewAssessment?: Readonly<{ kind: "diagnostic" | "dispute" | "author-revision" | "scope"; sourceSha: string; digest: string }>;
       }
     | {
         action: "plan-amendment";
@@ -168,6 +170,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
         action: "exhausted";
         reason: "protocol-exhausted" | "nonconverging" | "resource-ceiling";
         attemptRefs: readonly RecoveryEvidence[];
+        reviewAssessment?: NonNullable<Extract<RecoveryDecision, { action: "known-correction" }>["reviewAssessment"]>;
       }
     | {
         action: "integrity-fence";

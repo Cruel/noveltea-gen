@@ -149,7 +149,10 @@ function validDecision(value: unknown): value is RecoveryDecision {
       return (
         ["response-contract", "review-cycle", "known-verifier-fix", "native-revalidation"].includes(
           d.adapter,
-        ) && validEvidence(d.receipt)
+        ) && validEvidence(d.receipt) &&
+        (d.reviewAssessment === undefined || d.adapter === "review-cycle" &&
+          ["diagnostic", "dispute", "author-revision", "scope"].includes(d.reviewAssessment.kind) &&
+          hex40.test(d.reviewAssessment.sourceSha) && hex64.test(d.reviewAssessment.digest))
       );
     case "plan-amendment":
       return (
@@ -209,7 +212,10 @@ function validDecision(value: unknown): value is RecoveryDecision {
       return (
         ["protocol-exhausted", "nonconverging", "resource-ceiling"].includes(d.reason) &&
         Array.isArray(d.attemptRefs) &&
-        d.attemptRefs.every(validEvidence)
+        d.attemptRefs.every(validEvidence) &&
+        (d.reviewAssessment === undefined || d.reason === "nonconverging" &&
+          ["diagnostic", "dispute"].includes(d.reviewAssessment.kind) &&
+          hex40.test(d.reviewAssessment.sourceSha) && hex64.test(d.reviewAssessment.digest))
       );
     case "integrity-fence":
       return (

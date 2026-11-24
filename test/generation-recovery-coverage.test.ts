@@ -49,18 +49,18 @@ const approvedExitShape: Record<(typeof siteNames)[number], string> = {
   verify_idea_integration: "returns:5,status:1,operationFailure:3,reconcile:1,throws:4",
   specialist_dispatch: "returns:16,status:1,blocked:1,operationFailure:6,throws:7",
   dependency_amendment: "returns:4,blocked:1,operationFailure:1,authorBoundary:1,throws:2",
-  independent_assignment_review: "returns:6,status:2,operationFailure:1,throws:1",
+  independent_assignment_review: "returns:7,status:2,operationFailure:1,throws:1",
   verify_committed_work: "returns:8,status:6,blocked:1,operationFailure:2,reconcile:2,throws:5",
   completion_decision:
     "returns:10,status:2,blocked:1,operationFailure:3,authorBoundary:2,reconcile:1,throws:2",
   reconcile: "returns:13,status:6,operationFailure:2,throws:9",
   authorBoundary: "returns:4,status:1,blocked:1,operationFailure:1",
-  independentAssignmentBoundary: "returns:19,status:8,operationFailure:2,throws:9",
+  independentAssignmentBoundary: "returns:21,status:9,operationFailure:2,throws:9",
   operationFailure: "returns:3,status:1,blocked:1",
   blocked: "returns:1,status:1",
   runStoryGeneration: "returns:5,status:7,blocked:6,reconcile:1,throws:15",
   observeNodeOutcome: "returns:3,status:2,blocked:1,operationFailure:1,throws:1",
-  recoveryNode: "returns:21,status:15,throws:11",
+  recoveryNode: "returns:24,status:18,throws:13",
 };
 const operations = [
   "adaptive-admission",
@@ -203,7 +203,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
   const printer = ts.createPrinter({ removeComments: true });
   const reviewed = [
     [file, "requireGenerationTurn", "8baffb20a762139ae0f91b3a6eb1fd3da4e5200076139160f74a6db26661de67"],
-    [file, "runFoundationAssignmentChild", "8889eadf91ddf63385dc773bd6a7618458d311579e848796e2ed6ef708826bb4"],
+    [file, "runFoundationAssignmentChild", "7d87aa711348f21360594d3eb523c1fb4bb4524c4e5a09f0b03ed9e811b1789f"],
     [child, "createAssignmentLifecycleGraph", "9fa13f1f13a3729ec1fd9253f553483222c06492c7d1b490c59ccf5f225d7701"],
     [child, "authenticateAssignmentReentry", "5b24030609f9d19c2cd5c001a29dbcb865388377cfd865ee6c176b4996a2e135"],
   ] as const;
@@ -230,7 +230,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["generation-operation-recovery.ts", "authenticateAssignmentFailure", "bb892a67ef0eb4e86df44369763cb56d9dd159b00eaaae4ebd926e7bb49dc35b"],
     ["generation-operation-strategy.ts", "originalAssignmentFailure", "9c6670e50947297267867f372f38c27beb62c107c235d0ff90da0ec9b7a31fe7"],
     ["generation.ts", "authenticateRecoveryOrigin", "b65569bb1936afe4551d9059ba17653368b74e7de41ba3101481e4e20e689c3b"],
-    ["generation.ts", "recoverySourceHead", "3eb183b685c6693ea4aaa938f6fe20e901c675c87f32cf88854118790c5e0b05"],
+    ["generation.ts", "recoverySourceHead", "0b23bfbd098202d14a40a33ac80b78f7ac05f2f02c9427ee818f0d8437d8b3fe"],
   ] as const;
   const printer = ts.createPrinter({ removeComments: true });
   for (const [path, name, expected] of reviewed) {
@@ -525,10 +525,10 @@ const reviewedDirectStopFamilies = {
       "completion_decision/return#6", "completion_decision/status#1",
       "observeNodeOutcome/return#3",
       "recoveryNode/return#3", "recoveryNode/return#4", "recoveryNode/return#6",
-      "recoveryNode/return#14", "recoveryNode/return#16", "recoveryNode/return#19",
+      "recoveryNode/return#14", "recoveryNode/return#16", "recoveryNode/return#22",
       "recoveryNode/status#2", "recoveryNode/status#3", "recoveryNode/status#4",
       "recoveryNode/status#5", "recoveryNode/status#11",
-      "recoveryNode/status#13", "recoveryNode/status#15",
+      "recoveryNode/status#13", "recoveryNode/status#18",
     ],
   },
   "current-turn-admission": {
@@ -560,10 +560,16 @@ const reviewedDirectStopFamilies = {
     proof: "Independent Review/prerequisite refused cross-owner action without approved owner or author source",
     regression: ["test/generation.test.ts", "C04 Review strategy demands the original sealed failed Pi cycle before any correction attempt"],
     sites: [
-      "independentAssignmentBoundary/return#9", "independentAssignmentBoundary/return#17",
+      "independentAssignmentBoundary/return#10", "independentAssignmentBoundary/return#19",
       "independentAssignmentBoundary/status#1", "independentAssignmentBoundary/status#3",
-      "independentAssignmentBoundary/status#7", "independentAssignmentBoundary/status#8",
+      "independentAssignmentBoundary/status#8", "independentAssignmentBoundary/status#9",
     ],
+  },
+  "foundation-review-handoff": {
+    disposition: "integrity-fence",
+    proof: "Reassessment or pause must authenticate the same original Foundation case and its source-linked Review boundary before continuing",
+    regression: ["test/generation.test.ts", "review-session-unavailable"],
+    sites: ["recoveryNode/return#21", "recoveryNode/status#17"],
   },
   "sealed-diagnostic-stop": {
     disposition: "operator-advisory",

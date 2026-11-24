@@ -9,7 +9,8 @@ import type { RecoveryCase, RecoveryDischarge } from "./generation-recovery-cont
 import type { RecoverySource } from "./generation-recovery-graph.js";
 import { generationStages, type GenerationInventory, type GenerationStage } from "./generation-plan.js";
 import type { IdeaHistoryEntry, GenerationRequest } from "./generation.js";
-import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
+import { inspectCheckpointReview, resolvedCheckpointReviews } from "./checkpoint-assurance.js";
+import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
 import { inspectRejectedRepair } from "./rejected-review-repair.js";
 import { inspectRepairLedger } from "./repair-ledger.js";
 import { assertCompletedSelectiveRevalidation } from "./selective-revalidation-work.js";
@@ -35,8 +36,35 @@ export async function verifyReviewCycleSuccessor(job: JobStartResult, rootSha: s
   if (!successor) return false;
   const receipt = await inspectRejectedRepair(job, successor.workItem.slice("repair-".length));
   const reviews = await resolvedCheckpointReviews(job, points);
-  return receipt.phase === "passed" && receipt.repairedCommitSha === head &&
-    receipt.rootFailureSha === rootSha && reviews.get(rootSha) === "not-required";
+  if (receipt.phase !== "passed" || receipt.repairedCommitSha !== head ||
+      receipt.rootFailureSha !== rootSha || reviews.get(rootSha) !== "not-required") return false;
+  if (receipt.origin.workItem !== "foundation") return true;
+  // A successful new scope must not erase or replace its sealed predecessor.
+  // Reauthenticate each cycle and its committed verdicts on restart.
+  let cycle = await inspectPostcommitReviewCycle(job, rootSha, successor.assurance!.assignmentDigest);
+  if (!cycle || cycle.rounds.at(-1)?.commitSha !== head) return false;
+  const seen = new Set<string>();
+  while (cycle) {
+    if (seen.has(cycle.id)) return false;
+    seen.add(cycle.id);
+    for (const round of cycle.rounds) {
+      const point = points.find(p => p.commitSha === round.commitSha &&
+        p.assurance?.assignmentDigest === cycle!.assignmentDigest &&
+        p.assurance.turnDigest === cycle!.turnDigest);
+      if (!point || point.semanticReview !== (round.commitSha === head ? "passed" : "failed")) return false;
+      const review = await inspectCheckpointReview(job, point);
+      if (review?.result?.reviewer !== "independent-pi-assignment-review" ||
+          JSON.parse(review.result.evidence).sourceDigest !== round.packetDigest) return false;
+    }
+    if (!cycle.predecessor) return cycle.rounds[0]?.commitSha === rootSha;
+    const predecessor = cycle.predecessor;
+    const prior = await inspectPostcommitReviewCycle(job, rootSha, predecessor.assignmentDigest);
+    if (!prior || prior.id !== predecessor.cycleId || prior.turnDigest !== cycle.turnDigest ||
+        prior.reviewer.id === cycle.reviewer.id ||
+        prior.rounds.at(-1)?.commitSha !== predecessor.failedCommitSha) return false;
+    cycle = prior;
+  }
+  return false;
 }
 
 /** C07: authenticate a previously verified ACTIVE case after its controller

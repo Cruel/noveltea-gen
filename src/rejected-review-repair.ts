@@ -38,12 +38,14 @@ import { createStoryValidateTool } from "./validator.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { loadSkillConfig } from "./skills.js";
 import { createSkillSnapshot } from "./snapshot.js";
-import { runPiAssignmentReview } from "./semantic-assignment-review.js";
+import { runPiAssignmentReview, prepareSemanticReview, validateSemanticVerdict, independentReviewResults } from "./semantic-assignment-review.js";
 import { inspectPostcommitReviewCycle } from "./postcommit-review-cycle.js";
-import { foundationDiagnosticReason, postcommitDiagnosticReason, readPostcommitDiagnosis } from "./postcommit-repair-diagnostic.js";
+import { foundationDiagnosticReason, postcommitDiagnosticReason, readPostcommitDiagnosis, readSealedPostcommitVerdict, postcommitDiagnosticAdmissionForSource } from "./postcommit-repair-diagnostic.js";
 import { assertReviewCycleSession } from "./review-cycle.js";
 import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
-import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
+import { ProtocolIntegrityBlockedError, inspectCompletedProtocolResponse, inspectCompletedProtocolReads } from "./response-contract-recovery.js";
+import type { RecoveryDecision, RecoveryEvidence } from "./generation-recovery-contract.js";
+import { isDeepStrictEqual } from "node:util";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { steeringForAssignment } from "./steering-amendments.js";
 import { driveRejectedRepairCycle } from "./rejected-repair-controller.js";
@@ -461,6 +463,21 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
         proposalSha256: state.revision.proposalSha256,
         principal: state.revision.principal, direction: state.revision.direction })))
     throw Error("Author-revised assignment receipt is invalid.");
+  if (state.revision && state.origin.workItem === "foundation") {
+    const revision = state.revision;
+    const choice = await inspectSpecialistChoice(job, revision.choiceId);
+    const answer = choice.answer;
+    const text = answer?.kind === "custom" ? answer.text : answer?.kind === "option" && answer.optionId === "revise" ? answer.note : null;
+    // A crash after the saved revision but before completing the claimed
+    // choice may resume only the exact author receipt, not a new writer.
+    if (!answer || !text?.trim() ||
+        !(choice.phase === "consumed" || choice.phase === "resuming" && state.phase === "ready") ||
+        choice.sessionId !== state.origin.sessionId || choice.sessionFile !== state.origin.sessionFile ||
+        choice.proposalSha256 !== revision.proposalSha256 || answer.principal !== revision.principal ||
+        revision.direction !== authorChoiceDirection(choice.question, answer, choice.delegationAllowed === true) ||
+        !isDeepStrictEqual(revision.assignment, { ...state.assignment, outcome: text.trim() }))
+      throw Error("Foundation assignment revision lacks the exact authenticated author direction.");
+  }
   return state;
 }
 const originalSafePath = (path: string) => /^[a-z][a-z0-9-]*\/[a-z0-9._-]+\.md$/.test(path) &&
@@ -1452,6 +1469,8 @@ export interface RejectedRepairOptions {
   /** The parent Graph owns the safe, native-verified steering admission
    * boundary. Without an eligible inventory, corrections cannot yield. */
   canYieldForSteering?: () => Promise<boolean>;
+  /** Only the migrated assignment child delegates nonlocal strategy to its parent. */
+  sharedAssessment?: boolean;
 }
 async function reviewerFor(job: JobStartResult, sha: string, options: RejectedRepairOptions) {
   const state = await inspectRejectedRepair(job, sha);
@@ -1540,6 +1559,193 @@ export async function adjudicateRejectedRepair(job: JobStartResult, sha: string)
   return current;
 }
 
+type ReviewAssessment = NonNullable<Extract<RecoveryDecision, { action: "known-correction" }>["reviewAssessment"]>;
+
+/** Rebuild the exact latest negative packet from the committed successor and
+ * original Review transcript. The graph stores only a reference to this proof. */
+async function foundationDiagnosticSource(job: JobStartResult, state: RepairReceipt) {
+  if (!state.repairedCommitSha) return null;
+  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    p.eligible && p.commitSha === state.repairedCommitSha && p.semanticReview === "failed");
+  if (!point?.assurance) return null;
+  const cycle = await inspectPostcommitReviewCycle(job, state.rootFailureSha, point.assurance.assignmentDigest);
+  if (!cycle || cycle.rounds.at(-1)?.commitSha !== point.commitSha)
+    throw Error("Foundation Diagnostic lost the latest sealed independent Review");
+  if (!await foundationDiagnosticReason(job, cycle, state.allowedPaths)) return null;
+  const packet = await prepareSemanticReview(job, [point]);
+  const verdict = validateSemanticVerdict(packet, await readSealedPostcommitVerdict(cycle, cycle.rounds.at(-1)!));
+  if (!isDeepStrictEqual(independentReviewResults(packet, verdict, "independent-pi-assignment-review")[0],
+      (await inspectCheckpointReview(job, point))?.result))
+    throw Error("Foundation Diagnostic source differs from its sealed negative verdict");
+  const admission = await postcommitDiagnosticAdmissionForSource(job, cycle, packet, verdict);
+  if (!admission) throw Error("Foundation Diagnostic lacks exact progress admission");
+  const outcome = await readPostcommitDiagnosis(job, cycle, point.commitSha);
+  if (outcome && outcome.sourceDigest !== admission.sourceDigest)
+    throw Error("Foundation Diagnostic receipt differs from its admitted source");
+  return { point, cycle, packet, verdict, admission, outcome };
+}
+
+/** The actual receipt phase determines whether the assignment must yield to the
+ * shared assessor. No model reply or child outcome grants a new strategy. */
+async function foundationReviewBoundary(job: JobStartResult, state: RepairReceipt,
+  selected?: ReviewAssessment): Promise<ReviewAssessment | null> {
+  if (state.origin.workItem !== "foundation") return null;
+  const make = (kind: ReviewAssessment["kind"], evidence: unknown): ReviewAssessment =>
+    ({ kind, sourceSha: state.sourceCommitSha, digest: hash({ root: state.rootFailureSha,
+      source: state.sourceReviewDigest, kind, evidence }) });
+  if (state.phase === "reviewing") {
+    const source = await foundationDiagnosticSource(job, state);
+    if (source && (!source.outcome || source.outcome.diagnosis.action !== "continue" || selected?.kind === "diagnostic"))
+      return make("diagnostic", source.admission.sourceDigest);
+  }
+  if (state.dispute && ["disputing", "adjudicating", "blocked"].includes(state.phase)) {
+    const { path, line, claim } = state.dispute;
+    const bytes = await readFile(state.origin.sessionFile);
+    const last = bytes.toString("utf8").trim().split("\n").map(l => JSON.parse(l))
+      .filter(r => r.type === "message" && r.message?.role === "assistant" && r.message.stopReason === "stop").at(-1)?.message;
+    const reply = last?.content?.filter((c: { type: string }) => c.type === "text")
+      .map((c: { text: string }) => c.text).join("\n");
+    if (hash(bytes) !== state.sessionSha256 ||
+        !reply?.split("\n").some((l: string) => l.trim() === "DISPUTE_REVIEW: " + path + ":" + line + " | " + claim))
+      throw Error("Foundation dispute is not the original settled writer report");
+    return make("dispute", { path, line, claim, writer: state.sessionSha256 });
+  }
+  if (state.choiceId && (state.phase === "awaiting-author" ||
+      state.phase === "ready" && selected?.kind === "author-revision")) {
+    const choice = await inspectSpecialistChoice(job, state.choiceId);
+    if (choice.answer && choice.workItem === "repair-" + state.sourceCommitSha &&
+        choice.headSha === state.baselineHead && choice.sessionId === state.origin.sessionId &&
+        choice.sessionFile === state.origin.sessionFile)
+      return make("author-revision", { id: choice.id, proposal: choice.proposalSha256, answer: choice.answer });
+    if (choice.answer) throw Error("Foundation scope revision has a foreign author receipt");
+  }
+  if (state.phase === "needs-plan" && state.outOfAuthority)
+    return make("scope", state.outOfAuthority);
+  return null;
+}
+
+/** Current HEAD may have advanced through this original correction case,
+ * but never through unrelated work or an unverified replacement writer. */
+export async function authenticateFoundationReviewHead(job: JobStartResult, root: string) {
+  const head = await trustedHead(job);
+  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const original = points.find(p => p.commitSha === root && p.workItem === "foundation" &&
+    p.validation.status === "passed" && p.semanticReview === "failed");
+  if (!original?.assurance) return false;
+  let cursor = head;
+  const seen = new Set<string>();
+  while (cursor !== root) {
+    if (seen.has(cursor)) return false;
+    seen.add(cursor);
+    const point = points.find(p => p.commitSha === cursor && p.workItem.startsWith("repair-") &&
+      p.validation.status === "passed" && p.assurance?.turnDigest === original.assurance!.turnDigest);
+    if (!point) return false;
+    const source = point.workItem.slice("repair-".length);
+    const state = await inspectRejectedRepair(job, source);
+    if (state.rootFailureSha !== root || state.repairedCommitSha !== cursor ||
+        state.origin.workItem !== "foundation" || point.parentSha !== source) return false;
+    cursor = source;
+  }
+  return true;
+}
+
+/** Inspect only the authenticated chain belonging to this original case.
+ * The latest receipt may be at a later Git revision, never a fresh case. */
+export async function inspectFoundationReviewBoundary(job: JobStartResult, root: string,
+  selected?: ReviewAssessment): Promise<ReviewAssessment | null> {
+  let sha = root;
+  const seen = new Set<string>();
+  while (existsSync(pathFor(job, sha))) {
+    if (seen.has(sha)) throw Error("Cyclic Foundation repair source lineage");
+    seen.add(sha);
+    const state = await inspectRejectedRepair(job, sha);
+    if (state.rootFailureSha !== root || state.origin.workItem !== "foundation")
+      throw Error("Foreign Foundation repair lineage");
+    if (state.phase === "failed" && state.repairedCommitSha) {
+      sha = state.repairedCommitSha;
+      continue;
+    }
+    const boundary = await foundationReviewBoundary(job, state, selected);
+    if (boundary && await trustedHead(job) !== (state.repairedCommitSha ?? state.baselineHead))
+      throw Error("Foundation assessment source has moved");
+    return boundary;
+  }
+  return null;
+}
+
+async function inspectFoundationDisputeOutcome(job: JobStartResult, state: RepairReceipt) {
+  const dispute = state.dispute;
+  if (!dispute || !dispute.adjudication || state.phase !== "blocked") return null;
+  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === state.sourceCommitSha);
+  if (!point) throw Error("Disputed Foundation source is no longer eligible");
+  const packet = await prepareSemanticReview(job, [point], { sourceSha: state.sourceCommitSha,
+    reviewDigest: state.sourceReviewDigest, path: dispute.path, line: dispute.line, claim: dispute.claim });
+  const { assignmentVerdictResponseContract } = await import("./narrative-review-specialist.js");
+  const contract = assignmentVerdictResponseContract(packet);
+  const input = { receiptFile: join(job.stateDir, "review-protocol", "assignment-" + packet.sourceDigest),
+    sourceDigest: packet.sourceDigest, contract: "reviewer.assignment-verdict.v1",
+    sessionRoots: [join(job.stateDir, "review-sessions", "assignment-fidelity")] };
+  const verdict = await inspectCompletedProtocolResponse({ ...input, validate: contract.validate, parse: contract.parse });
+  const { sessionFile } = await inspectCompletedProtocolReads(input);
+  if (packet.sourceDigest !== dispute.adjudication.packetDigest ||
+      sessionFile !== dispute.adjudication.sessionFile ||
+      sessionFile === state.origin.sessionFile || sessionFile === state.reviewer?.sessionFiles[0] ||
+      verdict.verdict !== dispute.adjudication.verdict || hash(verdict.findings) !== dispute.adjudication.findingsDigest)
+    throw Error("Foundation adjudication does not match the original independent Pi response");
+  return { store: "response-contract", ref: packet.sourceDigest,
+    digest: hash(dispute.adjudication) } satisfies RecoveryEvidence;
+}
+
+/** A selected reassessment may run one existing read-only adapter or consume a
+ * signed author choice. No new writer, reviewer approval or scope is granted. */
+export async function executeFoundationReviewAssessment(job: JobStartResult, root: string,
+  selected: ReviewAssessment): Promise<{ stop?: RecoveryEvidence; reason?: string; protectedApproval?: true }> {
+  if (!isDeepStrictEqual(await inspectFoundationReviewBoundary(job, root, selected), selected))
+    throw Error("Selected Foundation Review assessment no longer matches its source");
+  const state = await inspectRejectedRepair(job, selected.sourceSha);
+  if (selected.kind === "diagnostic") {
+    const source = await foundationDiagnosticSource(job, state);
+    if (!source) throw Error("Original Diagnostic source disappeared");
+    if (!source.outcome) {
+      const { reviewPostcommitDiagnosis } = await import("./narrative-review-specialist.js");
+      const { cycle } = source;
+      await reviewPostcommitDiagnosis(job, cycle.snapshot, source.packet, source.verdict, cycle,
+        cycle.provider, cycle.model, cycle.thinking);
+    }
+    const settled = await foundationDiagnosticSource(job, state);
+    if (!settled?.outcome) throw Error("Diagnostic did not settle its original receipt");
+    if (settled.outcome.diagnosis.action === "continue") return {};
+    return { stop: { store: "response-contract", ref: settled.admission.sourceDigest,
+      digest: hash(settled.outcome) },
+      reason: "Independent Diagnostic requests " + settled.outcome.diagnosis.action +
+        "; no authorized successor strategy exists for this Foundation scope. " + settled.outcome.diagnosis.explanation };
+  }
+  if (selected.kind === "dispute") {
+    const settled = state.phase === "blocked" ? state : await adjudicateRejectedRepair(job, state.sourceCommitSha);
+    const stop = await inspectFoundationDisputeOutcome(job, settled);
+    if (!stop) throw Error("Independent adjudication did not settle its original receipt");
+    return { stop, reason: settled.failure };
+  }
+  if (selected.kind === "author-revision") {
+    if (state.phase === "awaiting-author" || state.phase === "ready")
+      await consumeRejectedRepairChoice(job, state.sourceCommitSha);
+    return {};
+  }
+  return { protectedApproval: true, reason: "The requested change requires a separately authorized assignment; the negative Review remains sealed." };
+}
+
+/** Terminal disposition authentication is read-only, even on repeated restart. */
+export async function inspectFoundationReviewStop(job: JobStartResult, root: string,
+  selected: ReviewAssessment): Promise<RecoveryEvidence | null> {
+  if (!isDeepStrictEqual(await inspectFoundationReviewBoundary(job, root, selected), selected)) return null;
+  const state = await inspectRejectedRepair(job, selected.sourceSha);
+  if (selected.kind === "dispute") return inspectFoundationDisputeOutcome(job, state);
+  if (selected.kind !== "diagnostic") return null;
+  const source = await foundationDiagnosticSource(job, state);
+  if (!source?.outcome || source.outcome.diagnosis.action === "continue") return null;
+  return { store: "response-contract", ref: source.admission.sourceDigest, digest: hash(source.outcome) };
+}
+
 /** Same-Thread author continuation after a reviewer-confirmed nonconvergence
  * stop. Historical bounded grants remain source-bound and replay-safe. */
 export async function acceptGuidedRepairContinuation(job: JobStartResult,
@@ -1588,6 +1794,9 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
   const point = (await inspectRecoveryCheckpoints(job)).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
+  if (!options.sharedAssessment && (point.workItem === "foundation" ||
+      point.workItem.startsWith("repair-") && (await readRejectedRepairOrigin(job, point)).workItem === "foundation"))
+    throw Error("Foundation Review repair belongs to the authenticated Generation assignment. Resume the original Generation Thread; standalone repair cannot authorize it.");
   return driveRejectedRepairCycle({
     begin: async () => {
       const state = await beginRejectedRepair(job, point);
@@ -1595,7 +1804,15 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
         reviewerFor(job, state.sourceCommitSha, options));
       return state;
     },
-    inspect: sha => inspectRejectedRepair(job, sha),
+    inspect: async sha => {
+      if (sha !== sourceSha) await withStoryJobLock(job, "reconcile-successor-repair", async () => {
+        await reconcileUnpublishedRepairCommit(job, sha);
+        await reconcileCompletedRepairWriter(job, sha);
+      });
+      return inspectRejectedRepair(job, sha);
+    },
+    requiresAssessment: options.sharedAssessment ? async state =>
+      !!await foundationReviewBoundary(job, state) : undefined,
     correct: sha => withStoryJobLock(job, "rejected-review-writer", () =>
       runPiRejectedRepair(job, sha)),
     choice: id => inspectSpecialistChoice(job, id),
@@ -1637,7 +1854,7 @@ export async function advanceRejectedRepair(job: JobStartResult, sourceSha: stri
             if (!current.reviewer || current.phase !== "reviewing")
               throw Error("Reviewer session cannot attach to an unrelated repair.");
             const cycle = await inspectPostcommitReviewCycle(job, current.rootFailureSha,
-              point.assurance!.assignmentDigest);
+              point.assurance!.assignmentDigest, file);
             if (!cycle) throw Error("Independent reviewer cycle disappeared during correction.");
             const identity = { id: cycle.reviewer.id, file };
             if (current.originalSource.assignmentDigest === point.assurance!.assignmentDigest)
