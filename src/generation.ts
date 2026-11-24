@@ -1243,16 +1243,6 @@ async function runArchitectureAssignmentChild(
         throw Error("Architecture source differs from its parent assignment.");
       return null;
   };
-  const roundRef = (proof: AssignmentInvocationProof) =>
-    [proof.sourceDigest, proof.ordinal, proof.settlementDigest].join(":");
-  const roundProof = (submission: AssignmentSubmission): AssignmentInvocationProof => {
-    const [sourceDigest, ordinal, settlementDigest, extra] = submission.receiptRef.split(":");
-    if (submission.status !== "writer-round" || extra !== undefined ||
-        !/^[a-f0-9]{64}$/.test(sourceDigest ?? "") || !/^(0|[1-9][0-9]*)$/.test(ordinal ?? "") ||
-        !/^[a-f0-9]{64}$/.test(settlementDigest ?? "") || !Number.isSafeInteger(Number(ordinal)))
-      throw new ProtocolIntegrityBlockedError("Invalid checkpointed Architecture writer round reference.");
-    return { sourceDigest: sourceDigest!, ordinal: Number(ordinal), settlementDigest: settlementDigest! };
-  };
   const runRound = async (command: AssignmentRoundCommand): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
     // Architecture's own started/settled Pi and Git receipt reconciliation
     // prevents duplicate model turns, charges and commits after a crash.
@@ -1261,15 +1251,9 @@ async function runArchitectureAssignmentChild(
       if (stopped) return stopped;
       const result = await runArchitectureJob({ ...s.request, action: "run",
         round: { assignmentKey: key, command } });
-      if ("round" in result && result.round) {
-        const ref = roundRef(result.round.proof);
-        if (result.round.status === "correction")
-          return { correctionRef: result.round.grantDigest, rejectedReceiptRef: ref };
-        return { receiptRef: ref, status: "writer-round" };
-      }
-      if (!result.status)
+      if (!result.status && !("round" in result && result.round))
         throw Error("Architecture returned no settled specialist status.");
-      return { receiptRef: "architecture.json", status: result.status, headSha: result.headSha };
+      return subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, receiptRef);
     } catch (error) {
       if (error instanceof AssignmentAuthorPauseError)
         return outcome("paused", "job-control", { controlRef: "job-control" });
@@ -1347,13 +1331,13 @@ async function runArchitectureAssignmentChild(
     correct: async state => {
       assertChildIdentity(state.identity, state.continuationRef);
       if (correction) throw Error("Postcommit Review cannot authorize a precommit writer.");
-      return invokeRound({ phase: "correct", proof: roundProof(state.submission!), grantDigest: state.correction!.correctionRef });
+      return invokeRound({ phase: "correct", proof: subunitRoundProof(state.submission!), grantDigest: state.correction!.correctionRef });
     },
     verify: async state => {
       assertChildIdentity(state.identity, state.continuationRef);
       let submission = state.submission!;
       if (submission.status === "writer-round") {
-        const verified = await runRound({ phase: "verify", proof: roundProof(submission) });
+        const verified = await runRound({ phase: "verify", proof: subunitRoundProof(submission) });
         if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
         if (verified.status === "writer-round") throw Error("Architecture verification did not settle the round.");
         submission = verified;
