@@ -14,9 +14,12 @@ import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { createProjectResourceLoader } from "./pi.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, inspectPiPolicy, recordPiSession, registerPendingPiSession } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
-import { parseSpecialistJson } from "./composition-specialist.js";
+import { ideaResponseFailures, parseIdeaResponse, type IdeaResponse } from "./idea-response-contract.js";
+import { reconcileReadOnlyProtocol } from "./non-specialist-protocol.js";
+import { beginProtocolInvocation, inspectCompletedProtocolReads,
+  recoverResponseContract, refuseReplayedProtocolInvocation, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { processAuthorUpdatesAtBoundary } from "./author-updates.js";
 import { readAuthorApproval, verifyAuthorEvidence,
   type AuthorApprovalEvidence } from "./author-evidence.js";
@@ -40,6 +43,13 @@ export interface PlacementOptions {
   approvalFile?: string; record?: boolean;
   /** Parent-only: a private, read-only semantic comparison chooses among eligible targets. */
   autoSelect?: boolean;
+  /** Parent's admitted source boundary; never dispatch after it changes. */
+  expectedHead?: string;
+  /** Parent replay may only reconstruct its sealed read-only operation. */
+  reconcileReadOnly?: boolean;
+  /** Durable parent dispatch transition before any canonical mutation. */
+  beforeWrite?: () => Promise<void>;
+  beforeRead?: () => Promise<void>;
 }
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const entryFile = (job: JobStartResult, id: string, revision: number) =>
@@ -239,8 +249,8 @@ function specialistSkill(kind: string) {
 }
 async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: string,
   instruction: string, provider: string, modelId: string,
-  thinking: "low" | "high" | undefined, writable: boolean, insideWriter = false,
-  selecting = false) {
+  thinking: "low" | "high" | undefined, writable: boolean,
+  selecting = false, requireOriginal = false, beforeRead?: () => Promise<void>) {
   if (await openSkillSnapshot(snapshot.id) !== snapshot.path) throw new Error("Pinned placement skills changed.");
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true, {
@@ -258,15 +268,92 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
   const required = [assignment.target?.path, assignment.relocationFrom?.path,
     ...(assignment.alternatives?.map(c => c.path) ?? [])]
     .filter((p): p is string => !!p).map(p => join(project.root, p));
-  // An idea's original author intent is private. Never share its transcript with
-  // another idea, even if the same specialist and target are selected.
-  const identity = createHash("sha256").update(instruction).digest("hex");
-  const runtime = await createJobModelRuntime();
+  const pinned = [join(snapshot.path, "skills", skill, "SKILL.md"),
+    ...["SKILL.md", "references/records.md", "references/progression.md",
+      "references/authority-and-validation.md", "references/glossary.md"]
+      .map(p => join(snapshot.path, "skills", "nt-catalog", p))];
+  const mustRead = [...new Set([...pinned, ...required])];
+  const sourceHead = await trustedHead(job);
+  const sourceVersions = async () => Promise.all(required.map(async path => {
+    if (!path.startsWith(project.root + sep) || await realpath(path) !== path ||
+        !(await lstat(path)).isFile())
+      throw new ProtocolIntegrityBlockedError("Unsafe idea source");
+    return sha(await readFile(path));
+  }));
+  const sources = await sourceVersions();
+  const draftDigest = () => sha(JSON.stringify({
+    status: gitRaw(job, "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+    diff: gitRaw(job, "diff", "--binary", "HEAD"),
+  }));
+  const sourceDraft = draftDigest();
+  const assertOriginalSource = async () => {
+    if (await trustedHead(job) !== sourceHead || draftDigest() !== sourceDraft ||
+        JSON.stringify(await sourceVersions()) !== JSON.stringify(sources))
+      throw new ProtocolIntegrityBlockedError("Idea proposal source changed");
+  };
+  // Include the complete source grant in the existing protocol identity.
+  // Never share an idea conversation across roles, source revisions or Jobs.
+  const contract = selecting ? "idea-selection.v1" : writable ? "idea-writer.v1" : "idea-review.v1";
+  const operation = sha(JSON.stringify({ jobId: job.jobId, threadId: job.threadId, sourceHead,
+    instruction, contract }));
+  const identity = sha(JSON.stringify({ operation, sources, sourceDraft, snapshot: snapshot.id,
+    provider, modelId, thinking }));
   const dir = join(job.stateDir, "idea-placement-sessions", skill, writable ? "write" : "review");
+  const receiptFile = join(job.stateDir, "idea-protocol", operation);
+  const protocol = { receiptFile, sourceDigest: identity, contract, sessionRoots: [dir],
+    validate: (text: string) => ideaResponseFailures(text, selecting),
+    parse: (text: string) => parseIdeaResponse(text, selecting) };
+  const admitReport = async (response: IdeaResponse, reads: string[], sessionFile: string) => {
+    const completed = new Set(reads.map(path => canonicalPinnedReadPath(path, project.root, snapshot.path)));
+    if (mustRead.some(path => !completed.has(path)))
+      throw new ProtocolIntegrityBlockedError("Idea report lacks verified required source inspection");
+    if (!writable) await assertOriginalSource();
+    if (response.verdict === "pass") {
+      const cited = response.evidence.map(line => /^(events|milestones|authored-content)\/[a-z0-9-]+\.md:[1-9][0-9]*$/.test(line) ? line : null);
+      let verified = false;
+      for (const line of cited) {
+        if (!line) continue;
+        const [path, number] = line.split(":") as [string, string];
+        const file = join(project.root, path);
+        if (required.includes(file) && completed.has(file) &&
+            Number(number) <= (await readFile(file, "utf8")).split("\n").length)
+          verified = true;
+      }
+      if (!verified) throw new Error("Idea report lacks an actual candidate source citation.");
+    }
+    if (selecting ? response.verdict === "pass"
+      ? !assignment.alternatives?.some(c => (c as { id?: string }).id === response.target)
+      : response.target !== null : response.verdict !== "pass")
+      throw new Error("Idea report did not establish the authorized placement or passing independent Review.");
+    return { evidence: response.evidence, reason: response.reason,
+      target: selecting && response.verdict === "pass" ? response.target! : null, sessionFile };
+  };
+  if (existsSync(receiptFile + ".started.json")) {
+    // Only read-only work can be reconstructed here. An interrupted writer's
+    // original Git effects need separate reconciliation, even on a clean tree.
+    if (writable) throw new ProtocolIntegrityBlockedError("Original idea writer was already admitted");
+    await assertOriginalSource();
+    const report = await reconcileReadOnlyProtocol(job, protocol, { provider, model: modelId, thinking },
+      "idea:" + identity + ":review", assertOriginalSource);
+    const provenance = await inspectCompletedProtocolReads(protocol);
+    const manager = SessionManager.open(provenance.sessionFile, dir, project.root);
+    const { resolved } = await inspectPiPolicy(job);
+    const messages = manager.buildSessionContext().messages;
+    const assistants = messages.filter(m => m.role === "assistant");
+    if (!resolved || manager.getHeader()?.cwd !== project.root || !assistants.length ||
+        assistants.some(m => m.provider !== resolved.selected.provider || m.model !== resolved.selected.model))
+      throw new ProtocolIntegrityBlockedError("Original idea report model or Story root differs");
+    await recordPiSession(job, provenance.sessionFile);
+    return await admitReport(report, provenance.reads, provenance.sessionFile);
+  }
+  if (requireOriginal)
+    throw new ProtocolIntegrityBlockedError("Original read-only idea receipt is missing");
+  await refuseReplayedProtocolInvocation(receiptFile);
+  const runtime = await createJobModelRuntime();
   const context = await preparePiContext(job, project, {
     group: "idea:" + identity + ":" + (writable ? "write" : "review"),
     step: "idea:" + identity + ":" + (writable ? "write" : "review"),
-    paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir, insideWriter,
+    paths: required, snapshot: snapshot.id, provider, model: modelId, thinking, directory: dir, insideWriter: false,
   }, runtime);
   const sandboxTools = await selectSandboxPiTools(job, snapshot, loaded.skills, undefined,
     writable ? "writer" : "read-only", writable ? "specialist" : "reviewer");
@@ -278,12 +365,13 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
       ? ["read", "edit", "write", "story_context", "report_status"] : ["read", "story_context", "report_status"],
   });
   try {
-    const pinned = [join(snapshot.path, "skills", skill, "SKILL.md"),
-      ...["SKILL.md", "references/records.md", "references/progression.md",
-        "references/authority-and-validation.md", "references/glossary.md"]
-        .map(p => join(snapshot.path, "skills", "nt-catalog", p))];
-    const mustRead = [...new Set([...pinned, ...required])];
-    await context.beforeTurn(session.sessionManager.getSessionFile() ?? undefined);
+    const sessionFile = session.sessionManager.getSessionFile();
+    if (!sessionFile) throw new ProtocolIntegrityBlockedError("Idea invocation requires a durable session");
+    await context.beforeTurn(sessionFile);
+    await assertOriginalSource();
+    if (!writable) await beforeRead?.();
+    await beginProtocolInvocation({ ...protocol, session });
+    await registerPendingPiSession(job, sessionFile);
     await promptStorySpecialist(session, context.contextNote + "Read ALL pinned skill/catalog files with the read tool, " +
       "then read EVERY canonical candidate record in the assignment, even if you already like " +
       "the target. This task is NOT complete until each individual alternative has actually " +
@@ -300,13 +388,13 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
         : ". Evidence must compare the ORIGINAL author intent and every binding requirement against actual player-facing lines when applicable. Do NOT equate a canonical reference or typed ID alone with semantic fulfillment.") +
       "\nPINNED:\n" + pinned.join("\n") +
       "\nASSIGNMENT:\n" + instruction);
-    const latest = () => {
-      const reply = [...session.messages].reverse().find(m => m.role === "assistant");
-      if (!reply || reply.role !== "assistant" || ["error", "aborted"].includes(reply.stopReason))
-        throw new Error("Idea Pi specialist stopped without a valid response.");
-      return parseSpecialistJson(reply.content.filter(c => c.type === "text")
-        .map(c => c.text).join("\n"));
+    const assertCompleted = () => {
+      const reply = session.messages.at(-1);
+      if (!reply || reply.role !== "assistant" || reply.stopReason !== "stop")
+        throw new ProtocolIntegrityBlockedError("Idea Pi invocation has no completed terminal response");
     };
+    assertCompleted();
+    await recordPiSession(job, sessionFile);
     const completedReads = () => {
       const done = new Set(session.messages.filter(m => m.role === "toolResult" && !m.isError)
         .map(m => m.role === "toolResult" ? m.toolCallId : ""));
@@ -316,33 +404,35 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
         .map(c => typeof c.arguments?.path === "string"
           ? canonicalPinnedReadPath(c.arguments.path, project.root, snapshot.path) : "") : []));
     };
-    let response = latest();
-    for (let retry = 0; retry < 2; retry++) {
-      const missing = mustRead.filter(p => !completedReads().has(p));
-      if (!missing.length) break;
-      await promptStorySpecialist(session, "Your earlier response omitted required source inspection. " +
-        "READ each of the following exact files using the read tool NOW, then compare the " +
-        "candidate locations and reassess whether your integration/fulfillment is sound. " +
-        "Correct the permitted canonical target if necessary (writer only). " +
-        "Return ONE unfenced JSON verdict/evidence/reason object.\nMISSING:\n" +
-        missing.join("\n"));
-      response = latest();
-    }
-    if (mustRead.some(p => !completedReads().has(p)) ||
-        (!selecting || response.verdict !== "block") && response.verdict !== "pass" ||
-        !Array.isArray(response.evidence) ||
-        (response.verdict === "pass" && !response.evidence.some((e: unknown) => typeof e === "string" &&
-          /(?:events|milestones|authored-content)\/[a-z0-9-]+\.md:[1-9][0-9]*/.test(e))) ||
-        (selecting && (response.verdict === "pass"
-          ? !assignment.alternatives?.some(c => (c as { id?: string }).id === response.target)
-          : response.target != null))) {
-      throw new Error("Idea specialist did not provide a passing source-linked semantic verdict: " +
-        JSON.stringify(response));
-    }
-    await context.completed(session.sessionManager.getSessionFile()!, session.sessionId);
-    return { evidence: response.evidence as string[], reason: String(response.reason ?? ""),
-      target: selecting && response.verdict === "pass" ? String(response.target) : null,
-      sessionFile: session.sessionManager.getSessionFile() ?? "" };
+    // Methodology omission is not malformed JSON. A missing read cannot grant
+    // another writer invocation. The original report and source stay fenced.
+    if (mustRead.some(p => !completedReads().has(p)))
+      throw new ProtocolIntegrityBlockedError("Idea invocation omitted required source inspection");
+    if (!writable) await assertOriginalSource();
+    const submittedDraft = draftDigest();
+    const response = await recoverResponseContract({ ...protocol, session,
+      receiptFile: receiptFile + ".initial.json", sealTranscript: true,
+      beforeCorrection: async () => {
+        if (draftDigest() !== submittedDraft || await trustedHead(job) !== sourceHead)
+          throw new ProtocolIntegrityBlockedError("Idea draft changed before format correction");
+        await context.beforeTurn(sessionFile);
+      },
+      prompt: async feedback => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, feedback);
+        assertCompleted();
+        await recordPiSession(job, sessionFile);
+      },
+      feedback: failures => "Correct only the format of your original idea report. Preserve your actual " +
+        "verdict and evidence; do not turn a block into a pass. No tools, new planning or edits. " +
+        "Return one unfenced JSON object. Required fields: verdict, evidence, reason" +
+        (selecting ? ", target" : "") + ". Contract failures: " +
+        failures.map(f => f.path + ": " + f.expected).join("; "),
+    });
+    if (draftDigest() !== submittedDraft || await trustedHead(job) !== sourceHead)
+      throw new ProtocolIntegrityBlockedError("Idea draft changed during format correction");
+    await context.completed(sessionFile, session.sessionId);
+    return await admitReport(response, [...completedReads()], sessionFile);
   } finally { session.dispose(); }
 }
 async function verifyDraft(job: JobStartResult, source: string | undefined, prior: string,
@@ -408,6 +498,8 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     const eligibility = assess(idea, catalog);
     const alternatives = candidatesFor(idea, catalog);
     const prior = await trustedHead(job);
+    if (input.expectedHead && input.expectedHead !== prior)
+      throw new ProtocolIntegrityBlockedError("Parent idea source changed");
     const current = confirmed(idea);
     if (input.action === "reassess") {
       if (!current) return { status: "deferred", reason: "Idea has no realization yet", alternatives };
@@ -429,7 +521,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
           skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"],
         });
         if (!input.fixture && !snapshot) throw new Error("Reassessment requires pinned review skills.");
-        const assignment = JSON.stringify({ original: idea.original, requirements: idea.requirements,
+        const assignment = JSON.stringify({ ideaId: idea.id, original: idea.original, requirements: idea.requirements,
           identities: idea.identities, originalRealizations: current.recordIds,
           target: { id: current.recordIds[0], path: paths[0] },
           alternatives, scopeIds: idea.placement.scopeIds }, null, 2);
@@ -441,7 +533,8 @@ export async function runIdeaPlacement(input: PlacementOptions) {
           reason = "Fixture only; independent editorial reassessment not performed";
         } else {
           const editorial = await piWork(job, snapshot!, "nt-narrative-review", assignment,
-            input.provider ?? "openai", input.model ?? "gpt-6-luna", input.thinking, false);
+            input.provider ?? "openai", input.model ?? "gpt-6-luna", input.thinking, false,
+            false, input.reconcileReadOnly, input.beforeRead);
           evidence = editorial.evidence;
           reason = editorial.reason;
           reviewSession = editorial.sessionFile;
@@ -454,6 +547,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
           sessionFiles: reviewSession ? [reviewSession] : [],
           realizationDigest: currentDigest,
         };
+        await input.beforeWrite?.();
         const path = pathFor(idea.id);
         const updated: PersistedIdea = { ...idea, lifecycle: { ...idea.lifecycle,
           placements: [...idea.lifecycle.placements, entry] } };
@@ -493,6 +587,8 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     if (input.action !== "place" && input.action !== "relocate")
       throw new Error("Unsupported idea placement action.");
     if (!eligibility.eligible) return { status: "deferred", reasons: eligibility.reasons };
+    if (input.action === "place" && current) throw new Error("Already integrated; use reassess/relocate.");
+    assertClean(job);
     let target = input.target;
     let selection: { evidence: string[]; reason: string; sessionFile: string } | undefined;
     if (!target && input.autoSelect && input.action === "place") {
@@ -510,13 +606,13 @@ export async function runIdeaPlacement(input: PlacementOptions) {
           novelteaSkills: input.skillsSource, skillDirs: [],
           requiredSkills: ["nt-narrative-review", "nt-catalog"] });
         if (!snapshot) throw new Error("Automatic idea selection requires pinned review skills.");
-        const assignment = JSON.stringify({ original: idea.original, requirements: idea.requirements,
+        const assignment = JSON.stringify({ ideaId: idea.id, original: idea.original, requirements: idea.requirements,
           identities: idea.identities, prerequisites: idea.prerequisites,
           alternatives, scopeIds: idea.placement.scopeIds,
           instruction: "Compare ALL candidates and choose one reasonable semantic location, or block with null target if none fits. Do not edit." }, null, 2);
         const decision = await piWork(job, snapshot, "nt-narrative-review", assignment,
           input.provider ?? "openai", input.model ?? "gpt-6-luna", input.thinking,
-          false, false, true);
+          false, true, input.reconcileReadOnly, input.beforeRead);
         if (!decision.target) return { status: "deferred", reason: decision.reason,
           alternatives: alternatives.map(a => ({ recordId: a.id, rationale: a.rationale })) };
         target = decision.target;
@@ -525,7 +621,6 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     }
     const candidate = alternatives.find(c => c.id === target);
     if (!candidate) throw new Error("Choose one of the eligible candidate record IDs; compare ideas plan first.");
-    if (input.action === "place" && current) throw new Error("Already integrated; use reassess/relocate.");
     if (input.action === "relocate" && !current) throw new Error("Relocation requires a previously integrated idea.");
     if (current && current.recordIds.includes(candidate.id))
       throw new Error("Relocation target is already current.");
@@ -576,12 +671,13 @@ export async function runIdeaPlacement(input: PlacementOptions) {
       throw new Error("Relocation source must be a regular canonical Markdown file.");
     const previousText = previousFile ? await readFile(previousFile, "utf8") : "";
     const all = alternatives.map(c => ({ id: c.id, path: c.path, rationale: c.rationale }));
-    const assignment = JSON.stringify({ original: idea.original, requirements: idea.requirements,
+    const assignment = JSON.stringify({ ideaId: idea.id, original: idea.original, requirements: idea.requirements,
       identities: idea.identities, prerequisites: idea.prerequisites, target: candidate,
       relocationFrom: oldRecord ? { id: oldRecord.id, path: oldRecord.path } : null,
       requiredAction: oldRecord ? "Move realization without duplication; preserve source record identity" : "Integrate idea",
       allowedWrites: [candidate.path, ...(oldRecord ? [oldRecord.path] : [])],
       alternatives: all, scopeIds: idea.placement.scopeIds }, null, 2);
+    await input.beforeWrite?.();
     let writerEvidence: string[] = [];
     let writerSession = "";
     if (input.fixture) {
@@ -627,7 +723,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         "requirement against literal canonical prose, NOT merely an ID or reference. " +
         "Consider the alternatives and placement suitability. Report BLOCK if the idea is " +
         "only superficially linked.\n" + assignment, input.provider ?? "openai",
-        input.model ?? "gpt-6-luna", input.thinking, false, true);
+        input.model ?? "gpt-6-luna", input.thinking, false);
       editorialEvidence = independent.evidence;
       reviewSession = independent.sessionFile;
     }

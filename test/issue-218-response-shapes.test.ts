@@ -26,7 +26,7 @@ test("#218 corrects malformed array entries in the original protocol, not in sem
   ]);
   assert.deepEqual(failures({ actions: [{ kind: "omit", item: "event:milestone.one",
     unauthorized: true }] }), [
-    { path: "$.actions[0].unauthorized", expected: "no unknown fields" },
+    { path: "$.actions[0]", expected: "no unknown fields" },
   ]);
   assert.deepEqual(failures({ actions: [{ kind: "add", stage: "event",
     milestone: "milestone.one", dependsOn: ["foundation"] }] }), []);

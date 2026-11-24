@@ -1864,6 +1864,72 @@ test("#240 production closeout cannot promote a fixture Event to a Pi-owned revi
   "Changing the worker invalidates the original independently sealed Event checkpoint");
 });
 
+test("R09 production graph authenticates exhausted idea selection without replay", {
+  skip: !available, timeout: 100_000,
+}, async () => {
+  const f = setup("r09-idea-protocol");
+  captureRecoveryIdea(f, "r09-bell");
+  const paused = f.cli([...f.start, "--pause-after", "event"]);
+  assert.equal(paused.status, "paused");
+  saveFixtureTurn(f.job, JSON.parse(readFileSync(f.contract, "utf8")), f.start[3]!,
+    ["Retain the original approved scope."]);
+  const turnDigest = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8")).digest;
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const task = f.cli(["ideas", "plan"]).tasks.find((entry: any) => entry.id === "r09-bell");
+  assert.ok(task?.candidates?.length);
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  const restore = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const scripted = await scriptedStoryRuntime((index, context) => {
+      if (index === 0) {
+        const messages = context.messages as Array<{role: string; content: unknown}>;
+        const decoded = messages.filter(m => m.role === "user").map(m => JSON.stringify(m.content))
+          .join("\n").replaceAll("\\n", "\n");
+        const paths = decoded.split("READ ALL EXACT FILE PATHS FIRST:\n")[1]!
+          .split("\nRead-only independent semantic assessment")[0]!.split("\n");
+        return { content: scriptedReadCalls(paths, index), reason: "toolUse" };
+      }
+      assert.ok(index <= 3, "must not dispatch a replacement planner or writer");
+      return { content: scriptedText("{not JSON"), reason: "stop" };
+    });
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId } };
+    const values = (await graph.getState(cfg)).values;
+    await graph.updateState(cfg, {
+      request: { ...values.request, fixture: false, turnPlanDigest: turnDigest,
+        provider: scriptedModel.provider, model: scriptedModel.id },
+      status: "running", active: null, result: null, ideaResult: null,
+      ideaTask: { id: task.id, action: "place", signature: task.signature, priorHead: head },
+      escalation: null, causalAmendment: null, pauseAfter: null,
+    }, "author_update_intake");
+    const admitted = await withJobModelRuntime(scripted.runtime,
+      () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+    assert.equal(admitted.recoveryLifecycle.active?.origin.operation, "idea-integration",
+      JSON.stringify({ status: admitted.status, reason: admitted.reason, recovery: admitted.recoveryLifecycle }));
+    assert.equal(admitted.recoveryLifecycle.active?.kind, "protocol");
+    const stopped = await graph.invoke(null, cfg);
+    assert.equal(stopped.status, "blocked");
+    assert.equal(stopped.recoveryLifecycle.decision?.action, "exhausted");
+    assert.equal(scripted.calls(), 4);
+    assert.deepEqual(scripted.observed[2]!.tools, []);
+    assert.deepEqual(scripted.observed[3]!.tools, []);
+    assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), stopped.recoveryLifecycle);
+    const restarted = await graph.invoke({ request: stopped.request }, cfg);
+    assert.equal(restarted.recoveryLifecycle.decision?.action, "exhausted");
+    assert.equal(scripted.calls(), 4);
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  } finally {
+    restore();
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test("C03 production graph diagnoses a source-authenticated unknown scheduling exception once", {
   skip: !available, timeout: 100_000,
 }, async () => {

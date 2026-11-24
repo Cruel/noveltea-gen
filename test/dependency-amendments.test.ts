@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createDependencyTool } from "../src/dependency-tool.js";
 import type { JobStartResult } from "../src/job.js";
 import { authorizeDependency, type DependencyReport } from "../src/dependency-amendments.js";
-import { bindDependencyProposalIdentity, needsDependencyProposalCorrection } from "../src/dependency-planner.js";
+import { bindDependencyProposalIdentity, inspectDependencyProposalResponse } from "../src/dependency-planner.js";
 import type { TurnEvidence } from "../src/turn-plan-evidence.js";
 import { planRevision } from "../web/src/lib/turn-plan.js";
 import { focusedSpecialist, isFocusedRecordType } from "../src/focused-specialist.js";
@@ -36,120 +36,28 @@ const report = { sourceSha: head, turnDigest: plan.digest, assignmentId: plan.as
 const proposal = { sourceSha: head, reportDigest: "d".repeat(64), target: "event.disclosure",
   specialist: "nt-event-design", outcome: report.missing, reason: "Disclosure requires the speaker to know the truth." };
 
-test("dependency proposals with mistyped source SHA or report digest require one fresh model reply", () => {
+test("dependency proposal protocol distinguishes format from source and scope admission", () => {
   const entry = { report, reportDigest: proposal.reportDigest };
-  assert.equal(needsDependencyProposalCorrection(proposal, entry, false), false);
-  assert.equal(
-    needsDependencyProposalCorrection(
-      {
-        ...proposal,
-        reportDigest: "f".repeat(64),
-      },
-      entry,
-      false,
-    ),
-    true,
-    "a single incorrect digest digit must not enter authorization",
-  );
-  assert.equal(
-    needsDependencyProposalCorrection(
-      {
-        ...proposal,
-        sourceSha: "f".repeat(40),
-      },
-      entry,
-      false,
-    ),
-    true,
-  );
-  assert.equal(
-    needsDependencyProposalCorrection(
-      {
-        ...proposal,
-        outcome: "Rewrite another Event",
-      },
-      entry,
-      false,
-    ),
-    true,
-  );
-  assert.equal(
-    needsDependencyProposalCorrection(
-      {
-        ...proposal,
-        target: "events/disclosure.md",
-      },
-      entry,
-      false,
-    ),
-    true,
-  );
+  const inspect = (value: unknown, character = false) =>
+    inspectDependencyProposalResponse(JSON.stringify(value), character);
+  assert.deepEqual(inspect(proposal), []);
+  assert.deepEqual(inspect({ ...proposal, reportDigest: "f".repeat(64) }), []);
+  assert.throws(() => bindDependencyProposalIdentity({ ...proposal, reportDigest: "f".repeat(64) }, entry), /untrusted/);
+  assert.throws(() => bindDependencyProposalIdentity({ ...proposal, sourceSha: "f".repeat(40) }, entry), /untrusted/);
+  assert.deepEqual(inspect({ ...proposal, outcome: "Rewrite another Event" }), []);
+  assert.deepEqual(inspect({ ...proposal, target: "events/disclosure.md" }), []);
+  assert.ok(inspect({ ...proposal, target: [] }).length);
+  assert.ok(inspect({ ...proposal, granted: true }).length);
   const refusal = { rejected: true as const, reason: "Unapproved scope expansion" };
-  assert.equal(
-    needsDependencyProposalCorrection(refusal, entry, true),
-    false,
-    "A model rejection must never be rehabilitated into a write grant",
-  );
+  assert.deepEqual(inspect(refusal, true), []);
   assert.deepEqual(bindDependencyProposalIdentity(refusal, entry), refusal);
-  const semanticOnly = {
-    target: "character.mara",
-    specialist: "nt-character-development",
-    outcome: report.missing,
-    reason: "Mara is needed to testify.",
-    title: "Mara",
-  };
-  assert.equal(needsDependencyProposalCorrection(semanticOnly as typeof proposal, entry, true), false);
-  assert.deepEqual(
-    bindDependencyProposalIdentity(semanticOnly as typeof proposal, entry),
-    {
-      ...semanticOnly,
-      sourceSha: report.sourceSha,
-      reportDigest: entry.reportDigest,
-    },
-    "The controller stamps its own verified identity rather than asking Luna to copy it",
-  );
-  assert.throws(
-    () =>
-      bindDependencyProposalIdentity(
-        {
-          ...semanticOnly,
-          sourceSha: report.sourceSha,
-          reportDigest: "f".repeat(64),
-        },
-        entry,
-      ),
-    /untrusted/,
-    "An explicit, conflicting digest must not be replaced",
-  );
-  assert.throws(
-    () =>
-      bindDependencyProposalIdentity(
-        {
-          ...semanticOnly,
-          sourceSha: report.sourceSha,
-        } as typeof proposal,
-        entry,
-      ),
-    /incomplete/,
-  );
-  const characterProposal = {
-    ...proposal,
-    target: "character.mara",
-    specialist: "nt-character-development",
-    title: "Mara",
-  };
-  assert.equal(needsDependencyProposalCorrection(characterProposal, entry, true), false);
-  assert.equal(
-    needsDependencyProposalCorrection(
-      {
-        ...characterProposal,
-        reportDigest: "f".repeat(64),
-      },
-      entry,
-      true,
-    ),
-    true,
-  );
+  const semanticOnly = { target: "character.mara", specialist: "nt-character-development",
+    outcome: report.missing, reason: "Mara is needed to testify.", title: "Mara" };
+  assert.deepEqual(inspect(semanticOnly, true), []);
+  assert.deepEqual(bindDependencyProposalIdentity(semanticOnly as typeof proposal, entry),
+    { ...semanticOnly, sourceSha: report.sourceSha, reportDigest: entry.reportDigest });
+  assert.throws(() => bindDependencyProposalIdentity({ ...semanticOnly, sourceSha: report.sourceSha } as typeof proposal,
+    entry), /incomplete/);
 });
 
 test("focused planning, authorization and dispatch share one record-type specialist resolver", () => {

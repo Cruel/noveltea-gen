@@ -2,6 +2,9 @@
  * The generation graph checkpoints assessment before this disposition is
  * executed. No receipt here grants a new writer invocation or author consent. */
 import { isDeepStrictEqual } from "node:util";
+import { join, relative, sep } from "node:path";
+import { readFile } from "node:fs/promises";
+import { authenticateSealedProtocolFailure, type SealedProtocolFailure } from "./response-contract-recovery.js";
 import type { JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import type { AssignmentFailureProof } from "./assignment-metadata-recovery.js";
@@ -56,6 +59,9 @@ export interface GenerationOperationRecovery {
       resultHeadSha: string; failureHeadSha: string;
       checkpointWorkItem: string; checkpointDigest: string;
       planVersion: number | null; correctionDigest: string; };
+    /** A completed, exhausted non-specialist response, not an uncertain writer. */
+    protocolFailure?: SealedProtocolFailure;
+    failureKind?: "protocol" | "integrity";
     ideaId?: string; action?: "place" | "reassess"; signature?: string;
     priorHead?: string;
     /** A known verifier fix can expose a *new* admission failure, not
@@ -124,6 +130,35 @@ export async function authenticateAssignmentFailure(job: JobStartResult,
     : (await import("./character-world.js")).inspectCharacterWorldFailure;
   const original = await inspect(job, sourceHead).catch(() => null);
   return original && isDeepStrictEqual(original.proof, failure.proof) ? original : null;
+}
+
+/** Validate the original domain receipt before the shared assessor can
+ * report protocol exhaustion. No model response can create an entitlement. */
+export async function authenticateNonSpecialistProtocolFailure(job: JobStartResult,
+  op: GenerationOperationRecovery) {
+  const proof = op.evidence.protocolFailure;
+  if (!proof || op.source.jobId !== job.jobId || op.source.headSha !== await trustedHead(job)) return null;
+  const path = relative(job.stateDir, proof.receiptFile).split(sep).join("/");
+  if (op.operation === "idea-integration" && /^idea-protocol\/[a-f0-9]{64}$/.test(path) &&
+      ["idea-selection.v1", "idea-review.v1", "idea-writer.v1"].includes(proof.contract)) {
+    const saved = JSON.parse(await readFile(join(job.stateDir, "generation-idea-dispatch.json"), "utf8"));
+    if (saved.jobId !== job.jobId || saved.phase !== "running" ||
+        saved.task?.id !== op.evidence.ideaId || saved.task?.action !== op.evidence.action ||
+        saved.task?.signature !== op.evidence.signature || saved.task?.priorHead !== op.source.headSha ||
+        !isDeepStrictEqual(saved.protocolFailure, proof)) return null;
+    const root = join(job.stateDir, "idea-placement-sessions");
+    await authenticateSealedProtocolFailure(proof, [root]);
+  } else if (proof.contract === "dependency.proposal.v1" &&
+      /^dependency-sessions\/[a-f0-9]{64}\/plan\/response$/.test(path)) {
+    const { inspectDependencyPlan } = await import("./dependency-state.js");
+    const plan = await inspectDependencyPlan(job);
+    const entry = plan?.entries.find(e => path === "dependency-sessions/" + e.reportDigest + "/plan/response");
+    if (!entry || entry.phase !== "planning" || entry.report.sourceSha !== op.source.headSha ||
+        plan?.turnDigest !== op.source.turnDigest || !entry.planner) return null;
+    if (await authenticateSealedProtocolFailure(proof, [join(job.stateDir, path, "..")]) !== entry.planner.sessionFile)
+      return null;
+  } else return null;
+  return { store: "response-contract" as const, ref: path, digest: proof.transcriptDigest };
 }
 
 export async function assessGenerationOperation(input: {

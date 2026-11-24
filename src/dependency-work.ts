@@ -42,8 +42,8 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions) {
       if (entry.commitSha !== head) throw Error("Completed dependency source is stale.");
       return entry.amendment!.assignment;
     }
-    if (entry.phase === "planning" || entry.phase === "reviewing" || entry.phase === "rejected")
-      throw Error("Interrupted or rejected dependency planning/review requires explicit reconciliation; no replay.");
+    if (entry.phase === "reviewing" || entry.phase === "rejected" || entry.phase === "planning" && input.fixture)
+      throw Error("Interrupted or rejected dependency work requires original receipt reconciliation; no replay.");
     if (!entry.amendment) {
       if (head !== report.sourceSha) throw Error("Dependency proposal HEAD is stale.");
       const { policy } = await inspectPiPolicy(job);
@@ -158,9 +158,9 @@ export async function advanceReviewDependency(input: {
     if (entry.phase === "reviewing" && eventSource &&
         entry.review?.verdict === "pass" && entry.commitSha === head)
       return entry.amendment!.assignment;
-    if (entry.phase === "planning" || entry.phase === "reviewing" || entry.phase === "rejected")
+    if (entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected review-dependency work requires exact manual reconciliation; never replay model sessions.");
-    if (entry.phase !== "reported" && entry.phase !== "authorized")
+    if (entry.phase !== "reported" && entry.phase !== "planning" && entry.phase !== "authorized")
       throw Error("Review dependency has an unsupported work-plan phase.");
     if (!entry.amendment) {
       if (head !== request.sourceSha)

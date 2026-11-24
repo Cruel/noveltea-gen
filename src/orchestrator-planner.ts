@@ -15,7 +15,7 @@ import type { StoryOrchestratorSelection } from "./orchestrator-selection.js";
 import { openStoryProject } from "./project.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
 import { requiredOrchestratorSkillReads } from "./story-skill-policy.js";
@@ -270,6 +270,7 @@ export async function runPinnedObjectivePlanner(
       canonicalPinnedReadPath(path, job.worktreeStoryRoot, selection.receipt.skillSnapshot.path));
     if (required.some(path => !readPaths.includes(path)))
       throw new ProtocolIntegrityBlockedError("Recovered planner omitted its original pinned skill reads");
+    await recordPiSession(job, evidence.sessionFile);
     const { digest: _priorDigest, ...original } = saved;
     const finished = seal({ ...original, phase: "planned", sessionFile: evidence.sessionFile,
       proposal, skillReads: readPaths });
@@ -414,7 +415,23 @@ export async function runPinnedObjectivePlanner(
       "each as an object with id and a concise source-grounded reason). No other keys.\n" +
       "Plan digest: " +
       plan.digest;
-    await withStoryJobLock(job, "orchestrator:objective", () => promptStorySpecialist(session, prompt));
+    const promptMetered = async (target: typeof session, workItem: string, instruction: string) => {
+      const sessionFile = target.sessionManager.getSessionFile();
+      if (!sessionFile) throw new ProtocolIntegrityBlockedError("Objective planner has no durable invocation");
+      await withStoryJobLock(job, workItem, async () => {
+        if (await trustedHead(job) !== currentHead)
+          throw new ProtocolIntegrityBlockedError("Objective planning source changed");
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(target, instruction);
+        const last = target.messages.at(-1);
+        if (last?.role !== "assistant" || last.stopReason !== "stop")
+          throw new ProtocolIntegrityBlockedError("Objective planner has no completed response");
+        await recordPiSession(job, sessionFile);
+        if (await trustedHead(job) !== currentHead)
+          throw new ProtocolIntegrityBlockedError("Objective planning source changed");
+      });
+    };
+    await promptMetered(session, "orchestrator:objective", prompt);
     let activeSession = session;
     const completedReads = () => {
       const completed = new Set(activeSession.messages
@@ -430,10 +447,10 @@ export async function runPinnedObjectivePlanner(
     const missingReads = () => required.filter(p => !completedReads().includes(p));
     if (missingReads().length) {
       await context.beforeTurn(file);
-      await withStoryJobLock(job, "orchestrator:objective-reads", () => promptStorySpecialist(session,
+      await promptMetered(session, "orchestrator:objective-reads",
         "Before your proposal can be accepted, read EVERY exact missing pinned skill reference " +
         "with the read tool and return a fresh bounded proposal. This is still read-only and " +
-        "cannot authorize new work.\nMISSING READS:\n" + missingReads().join("\n")));
+        "cannot authorize new work.\nMISSING READS:\n" + missingReads().join("\n"));
     }
     const last = [...session.messages].reverse().find((m) => m.role === "assistant");
     if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
@@ -456,8 +473,7 @@ export async function runPinnedObjectivePlanner(
       initial: {
         session, contract, validate: text => inspectOrchestratorProposal(text, plan),
         parse: text => verifyOrchestratorProposal(parseText(text), plan), feedback,
-        prompt: correction => withStoryJobLock(job, "orchestrator:objective-protocol",
-          () => promptStorySpecialist(session, correction)),
+        prompt: correction => promptMetered(session, "orchestrator:objective-protocol", correction),
         beforeCorrection: () => context.beforeTurn(file),
       },
       fresh: async () => {
@@ -484,13 +500,11 @@ export async function runPinnedObjectivePlanner(
           session: freshSession,
           start: async () => {
             await freshContext.beforeTurn(freshFile);
-            await withStoryJobLock(job, "orchestrator:objective-protocol-fresh",
-              () => promptStorySpecialist(freshSession, prompt));
+            await promptMetered(freshSession, "orchestrator:objective-protocol-fresh", prompt);
             if (missingReads().length)
               throw Error("Fresh planner omitted required pinned methodology reads.");
           },
-          prompt: correction => withStoryJobLock(job, "orchestrator:objective-protocol-fresh",
-            () => promptStorySpecialist(freshSession, correction)),
+          prompt: correction => promptMetered(freshSession, "orchestrator:objective-protocol-fresh", correction),
           beforeCorrection: () => freshContext.beforeTurn(freshFile),
           completed: async () => {
             if (missingReads().length)

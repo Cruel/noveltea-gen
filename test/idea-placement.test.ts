@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { verifiedNarrativeChain } from "../src/job-successor.js";
@@ -8,6 +8,10 @@ import { startStoryJob } from "../src/job.js";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
+import { runIdeaPlacement } from "../src/idea-placement.js";
+import { configurePiPolicy, inspectPiPolicy } from "../src/job-pi-policy.js";
+import { withJobModelRuntime } from "../src/model-runtime.js";
+import { fixtureSandboxClient, scriptedModel, scriptedReadCalls, scriptedStoryRuntime, scriptedText } from "./c03-scripted-story-helpers.js";
 
 const root = mkdtempSync(join(tmpdir(), "nt-idea-placement-"));
 after(() => {
@@ -234,6 +238,73 @@ test("literal protected author dialogue cannot be superficially realized or comm
   assert.equal(git(x.repo, "rev-parse", "HEAD"), x.baseline);
   assert.ok(git(x.job.worktreeRoot, "status", "--porcelain").includes("events/disclose-ledger.md"),
     "Preserve the failed candidate for explicit manual reconciliation");
+});
+
+test("production idea selection corrects format, preserves refusal, and reconciles without another Pi call", {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const x = setup("scripted-selection");
+  const keys = ["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR"] as const;
+  const previous = keys.map(key => process.env[key]);
+  keys.forEach(key => { process.env[key] = x.env[key]; });
+  const restore = fixtureSandboxClient(x.job.jobId, x.job.worktreeStoryRoot);
+  try {
+    const original = git(x.job.worktreeRoot, "rev-parse", "HEAD");
+    const scripted = await scriptedStoryRuntime((index, context) => {
+      if (index === 0) {
+        const messages = context.messages as Array<{role: string; content: unknown}>;
+        const prompt = messages.filter(m => m.role === "user").map(m => JSON.stringify(m.content)).join("\n");
+        const decoded = prompt.replaceAll("\\n", "\n");
+        const paths = decoded.split("READ ALL EXACT FILE PATHS FIRST:\n")[1]!
+          .split("\nRead-only independent semantic assessment")[0]!.split("\n");
+        assert.ok(paths.length >= 6);
+        return { content: scriptedReadCalls(paths, index), reason: "toolUse" };
+      }
+      if (index === 1) return { content: scriptedText("{not JSON"), reason: "stop" };
+      assert.equal(index, 2, "no new planning or writer call");
+      return { content: scriptedText({ verdict: "block", target: null, evidence: [],
+        reason: "No suitable candidate preserves the causal context." }), reason: "stop" };
+    });
+    const request = { story: x.story, job: "scripted-selection", action: "place" as const,
+      id: "bell-concept", autoSelect: true, skillsSource: source,
+      provider: scriptedModel.provider, model: scriptedModel.id, expectedHead: original };
+    const invoke = () => withJobModelRuntime(scripted.runtime, () => runIdeaPlacement(request));
+    const profile = { provider: scriptedModel.provider, model: scriptedModel.id };
+    await configurePiPolicy(x.job, { version: 1, profile, limits: { modelCalls: 2 } });
+    await assert.rejects(invoke(), (error: Error) => error.name === "PiBudgetPause");
+    assert.equal(scripted.calls(), 2);
+    await configurePiPolicy(x.job, { version: 1, profile, limits: { modelCalls: 4 } });
+    const replay = () => withJobModelRuntime(scripted.runtime, () => runIdeaPlacement({
+      ...request, reconcileReadOnly: true,
+    }));
+    const first = await replay();
+    assert.equal(first.status, "deferred");
+    assert.equal(scripted.calls(), 3);
+    assert.deepEqual(scripted.observed[2]!.tools, []);
+    assert.equal((await inspectPiPolicy(x.job)).budget.modelCalls, 3);
+    assert.deepEqual(await replay(), first);
+    assert.equal(scripted.calls(), 3);
+    const protocol = join(x.job.stateDir, "idea-protocol");
+    const initial = join(protocol, readdirSync(protocol).find(p => p.endsWith(".initial.json"))!);
+    const receipt = JSON.parse(readFileSync(initial, "utf8")) as { sessionFile: string };
+    const transcript = readFileSync(receipt.sessionFile, "utf8");
+    writeFileSync(receipt.sessionFile, transcript + "\n");
+    await assert.rejects(replay(), /integrity-blocked/);
+    writeFileSync(receipt.sessionFile, transcript);
+    const started = initial.replace(/\.initial\.json$/, ".started.json");
+    renameSync(started, started + ".missing");
+    await assert.rejects(replay(), /integrity-blocked/);
+    renameSync(started + ".missing", started);
+    assert.equal(scripted.calls(), 3);
+    assert.equal(git(x.job.worktreeRoot, "rev-parse", "HEAD"), original);
+    assert.equal(git(x.job.worktreeRoot, "status", "--porcelain"), "");
+  } finally {
+    restore();
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
 });
 
 test("live pinned Pi craft integration and independent semantic fulfillment review", {

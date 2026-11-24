@@ -150,6 +150,7 @@ function originalMatchesCase(s: RecoverySource, c: RecoveryCase): boolean {
       op.source.headSha === c.origin.sourceHeadSha &&
       (op.evidence?.assignmentId ?? null) === c.origin.assignmentId &&
       op.outcome === c.observation &&
+      (!op.evidence.failureKind || op.evidence.failureKind === c.kind) &&
       (op.evidence.assignmentFailure === undefined ||
         op.operation === "specialist-result" && op.outcome === "returned-failure" &&
         op.evidence.assignmentFailure.sourceHeadSha === c.origin.sourceHeadSha &&
@@ -271,7 +272,7 @@ function derive(
       },
       input: strip(raw),
       kind: op.evidence.assignmentFailure?.proof.kind === "protocol-exhausted"
-        ? "protocol" : op.outcome === "exception" ? "infrastructure" : "semantic",
+        ? "protocol" : op.evidence.failureKind ?? (op.outcome === "exception" ? "infrastructure" : "semantic"),
       observation: op.outcome,
       effect: "writer-effects-uncertain",
     };

@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "./job.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { guardPiBudget, recordPiSession, resolvePiModel } from "./job-pi-policy.js";
+import { guardPiBudget, recordPiSession, registerPendingPiSession, resolvePiModel } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { parseRecoveryDiagnosticProposal, type RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
@@ -237,6 +237,14 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
   const admission = receipt + ".admission.json";
   const parse = (text: string) => decode(text, evidence, chosen);
   const validate = validation(evidence, chosen);
+  const promptMetered = async (session: Parameters<typeof promptStorySpecialist>[0], file: string, text: string) => {
+    await registerPendingPiSession(job, file);
+    await promptStorySpecialist(session, text);
+    const last = session.messages.at(-1);
+    if (last?.role !== "assistant" || last.stopReason !== "stop")
+      throw Error("Diagnostic invocation lacks a completed response.");
+    await recordPiSession(job, file);
+  };
   const correction = (session: Parameters<typeof recoverResponseContract>[0]["session"],
     file: string, resumeOriginal = false) => recoverResponseContract({
       session, contract: chosen, validate, parse, sourceDigest: evidence.signature,
@@ -244,9 +252,12 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
       ...(resumeOriginal ? { resumeOriginal: { base: receipt,
         sessionRoots: [sessionsRoot(job)] } } : {}),
       beforeCorrection: () => guardPiBudget(job, "unknown-diagnosis:" + evidence.signature, file),
-      prompt: prompt => promptStorySpecialist(session as Parameters<typeof promptStorySpecialist>[0], prompt),
-      feedback: () => "FORMAT CORRECTION ONLY: return the strict five-field " +
-        "unknown-failure diagnosis JSON with the original signature. No tools or new diagnosis.",
+      prompt: prompt => promptMetered(session as Parameters<typeof promptStorySpecialist>[0], file, prompt),
+      feedback: () => "FORMAT CORRECTION ONLY: preserve the original diagnosis and source identity. " +
+        (chosen === generalContract
+          ? "Return EXACT keys schema,signature,sourceRef,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. "
+          : "Return EXACT keys schema,signature,category,action,summary. ") +
+        "No tools, new diagnosis, or authorization.",
     });
   if (existsSync(admission)) {
     const stat = await lstat(admission);
@@ -318,7 +329,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
     await writeFile(admission, JSON.stringify(bound) + "\n", { flag: "wx", mode: 0o600 });
     await beginProtocolInvocation({ receiptFile: receipt,
       sourceDigest: evidence.signature, contract: chosen, session });
-    await promptStorySpecialist(session, chosen === generalContract &&
+    await promptMetered(session, file, chosen === generalContract &&
       evidence.schema === "noveltea-operation-diagnosis-case/v1" ?
       "INDEPENDENT READ-ONLY GENERATION RECOVERY DIAGNOSIS. No tools, Story writes, scope " +
       "grants, verdict overrides, new author approvals, or writer dispatch. " +

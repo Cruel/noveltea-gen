@@ -170,7 +170,7 @@ export async function inspectActiveRecoveryResolution(
       entry.sourceSha === correctedHeadSha && isDeepStrictEqual(entry.omission, choice.eventOnly));
   }
   if (correction.store === "response-contract" && source.channel === "recovery" &&
-      original.origin.operation === "adaptive-admission") {
+      original.origin.operation === "adaptive-planner") {
     const input = source.input as unknown as AdaptiveRecovery;
     if (correction.ref !== input.proof.file || correctedHeadSha !== original.origin.sourceHeadSha)
       return false;

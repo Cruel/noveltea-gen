@@ -21,10 +21,17 @@ export interface ResponseContractSession {
   setActiveToolsByName(names: string[]): void;
 }
 
+export interface SealedProtocolFailure {
+  receiptFile: string;
+  sourceDigest: string;
+  contract: string;
+  sessionId: string;
+  transcriptDigest: string;
+}
 export class ProtocolExhaustedError extends Error {
   readonly code = "protocol-exhausted";
   constructor(readonly contract: string, readonly attempts: number,
-    readonly failedPaths: string[], readonly sessionId: string) {
+    readonly failedPaths: string[], readonly sessionId: string, readonly proof?: SealedProtocolFailure) {
     super("protocol-exhausted: response contract " + contract + " exhausted " + attempts +
       " complete responses (" + failedPaths.join(", ") +
       "); no substantive Story defect or review verdict is implied. " +
@@ -52,6 +59,8 @@ interface ContractReceipt {
   sourceDigest?: string;
   /** Index among the original Pi conversation\'s completed assistant turns. */
   responseOrdinal?: number;
+  /** Exact terminal transcript seal for read-only source-bound operations. */
+  transcriptDigest?: string;
 }
 
 async function saveReceipt(file: string, state: unknown): Promise<void> {
@@ -212,6 +221,7 @@ export async function inspectCompletedProtocolResponse<T>(options: {
   sessionRoots: string[];
   /** Inspect an independently sealed historical response in an append-only writer conversation. */
   sealedPrefix?: SealedTranscriptPrefix;
+  requireSealedTranscript?: boolean;
   validate: (text: string) => ResponseContractFailure[];
   parse: (text: string) => T;
 }): Promise<T> {
@@ -244,8 +254,17 @@ export async function inspectCompletedProtocolResponse<T>(options: {
       first.status !== "correction-pending")
     throw new ProtocolIntegrityBlockedError("Protocol retry requires original-session reconciliation");
   const selected = second ?? (first?.status === "accepted" ? first : null);
-  if (first?.status === "protocol-exhausted" && !second)
-    throw new ProtocolExhaustedError(contract, first.attempts, first.failedPaths, first.sessionId);
+  if (first?.status === "protocol-exhausted" && !second) {
+    const proof = first.transcriptDigest && first.sourceDigest ? {
+      receiptFile, sourceDigest: first.sourceDigest, contract, sessionId: first.sessionId,
+      transcriptDigest: first.transcriptDigest,
+    } : undefined;
+    if (options.requireSealedTranscript) {
+      if (!proof) throw new ProtocolIntegrityBlockedError("Exhausted protocol lacks its original seal");
+      await authenticateSealedProtocolFailure(proof, sessionRoots);
+    }
+    throw new ProtocolExhaustedError(contract, first.attempts, first.failedPaths, first.sessionId, proof);
+  }
   if (!selected && !started && !first)
     throw new ProtocolIntegrityBlockedError("No original protocol invocation exists");
   const sessionFile = selected?.sessionFile ?? first?.sessionFile ?? started!.sessionFile;
@@ -253,6 +272,9 @@ export async function inspectCompletedProtocolResponse<T>(options: {
   if (options.sealedPrefix && (!started || !first || first.status !== "accepted" || second || allowance))
     throw new ProtocolIntegrityBlockedError("Historical protocol inspection requires an accepted original invocation");
   const evidence = await transcriptResponses(sessionFile, sessionRoots, sessionId, options.sealedPrefix);
+  if (options.requireSealedTranscript && (!started || !selected?.transcriptDigest ||
+      createHash("sha256").update(evidence.bytes).digest("hex") !== selected.transcriptDigest))
+    throw new ProtocolIntegrityBlockedError("Terminal Pi transcript differs from its exact seal");
   const original = second && first
     ? await transcriptResponses(first.sessionFile, sessionRoots, first.sessionId)
     : evidence;
@@ -345,6 +367,73 @@ export async function inspectCompletedProtocolResponse<T>(options: {
     await saveReceipt(receiptFile + ".initial.json", receipt);
   }
   return result;
+}
+
+/** Read-only admission to an existing, not-yet-dispatched format correction.
+ * No new allowance is minted. Missing or uncertain activity is not resumable. */
+export async function inspectSealedInvalidProtocolResponse(options: {
+  receiptFile: string; sourceDigest: string; contract: string; sessionRoots: string[];
+}): Promise<{ file: string; id: string } | null> {
+  const first = await regularJson<ContractReceipt>(options.receiptFile + ".initial.json");
+  if (!first || first.status !== "invalid-response") return null;
+  const started = await regularJson<StartedInvocation>(options.receiptFile + ".started.json");
+  if (!started || started.version !== 1 || started.sourceDigest !== options.sourceDigest ||
+      started.contract !== options.contract || first.sourceDigest !== options.sourceDigest ||
+      !first.transcriptDigest || first.attempts >= 3 ||
+      await regularJson(options.receiptFile + ".fresh.json") ||
+      await regularJson(options.receiptFile + ".fresh-allowance.json"))
+    throw new ProtocolIntegrityBlockedError("Invalid original correction admission");
+  checkedReceipt(first, options.sourceDigest, options.contract, started, null);
+  const transcript = await transcriptResponses(first.sessionFile, options.sessionRoots, first.sessionId);
+  if (createHash("sha256").update(transcript.bytes).digest("hex") !== first.transcriptDigest ||
+      transcript.complete.length !== first.responseOrdinal ||
+      transcript.messages.at(-1)?.stopReason !== "stop" ||
+      createHash("sha256").update(transcript.complete.at(-1) ?? "").digest("hex") !== first.responseHash)
+    throw new ProtocolIntegrityBlockedError("Original invalid response or transcript changed");
+  return { file: first.sessionFile, id: first.sessionId };
+}
+
+/** Authenticate terminal exhaustion without reinterpreting it as a pass or
+ * opening a model conversation. A caller must independently bind the receipt
+ * path and source digest to its original controller operation. */
+export async function authenticateSealedProtocolFailure(proof: SealedProtocolFailure, roots: string[]) {
+  const started = await regularJson<StartedInvocation>(proof.receiptFile + ".started.json");
+  const first = await regularJson<ContractReceipt>(proof.receiptFile + ".initial.json");
+  if (!hex64.test(proof.sourceDigest) || !started || !first || started.sourceDigest !== proof.sourceDigest ||
+      first.sourceDigest !== proof.sourceDigest || first.sessionId !== proof.sessionId ||
+      first.status !== "protocol-exhausted" || first.attempts !== 3 ||
+      first.transcriptDigest !== proof.transcriptDigest || !hex64.test(proof.transcriptDigest) ||
+      await regularJson(proof.receiptFile + ".fresh.json") ||
+      await regularJson(proof.receiptFile + ".fresh-allowance.json"))
+    throw new ProtocolIntegrityBlockedError("Original exhausted protocol receipt changed");
+  checkedReceipt(first, proof.sourceDigest, proof.contract, started, null);
+  if (started.contract !== proof.contract || started.version !== 1)
+    throw new ProtocolIntegrityBlockedError("Original invocation marker changed");
+  const transcript = await transcriptResponses(first.sessionFile, roots, first.sessionId);
+  if (started.transcriptBytesBeforePrompt !== undefined &&
+      (!hex64.test(started.transcriptSha256BeforePrompt ?? "") ||
+        transcript.bytes.length < started.transcriptBytesBeforePrompt ||
+        createHash("sha256").update(transcript.bytes.subarray(0, started.transcriptBytesBeforePrompt))
+          .digest("hex") !== started.transcriptSha256BeforePrompt))
+    throw new ProtocolIntegrityBlockedError("Original invocation transcript prefix changed");
+  if (createHash("sha256").update(transcript.bytes).digest("hex") !== proof.transcriptDigest ||
+      transcript.complete.length !== first.responseOrdinal ||
+      createHash("sha256").update(transcript.complete.at(-1) ?? "").digest("hex") !== first.responseHash ||
+      !first.failedPaths.length)
+    throw new ProtocolIntegrityBlockedError("Original exhausted transcript changed");
+  let completed = 0, corrections = 0;
+  for (const m of transcript.messages) {
+    if (completed >= first.responseOrdinal! - 2) {
+      if (m?.role === "user") corrections++;
+      if (m?.role === "toolResult" || m?.role === "assistant" &&
+          Array.isArray(m.content) && m.content.some(c => c.type === "toolCall"))
+        throw new ProtocolIntegrityBlockedError("Exhausted correction used tools");
+    }
+    if (m?.role === "assistant" && m.stopReason === "stop") completed++;
+  }
+  if (corrections !== 2 || completed < 3)
+    throw new ProtocolIntegrityBlockedError("Original correction allowance is ambiguous");
+  return first.sessionFile;
 }
 
 /** A known verifier fix may RECHECK the already sealed unsuccessful result,
@@ -535,6 +624,7 @@ export async function recoverResponseContract<T>(options: {
   /** Reopen only the original, source-pinned invocation. The base marker
    * precedes correction; no new allowance is granted on graph restart. */
   resumeOriginal?: { base: string; sessionRoots: string[] };
+  sealTranscript?: boolean;
 }): Promise<T> {
   const { session, contract, validate, parse, prompt, receiptFile } = options;
   const sessionFile = session.sessionManager.getSessionFile();
@@ -562,6 +652,9 @@ export async function recoverResponseContract<T>(options: {
       // the remaining allowance. An uncertain dispatched prompt is never retried.
       const evidence = await transcriptResponses(sessionFile, sessionRoots, session.sessionId);
       const text = response(session);
+      if (options.sealTranscript && (!prior.transcriptDigest ||
+          createHash("sha256").update(evidence.bytes).digest("hex") !== prior.transcriptDigest))
+        throw new ProtocolIntegrityBlockedError("Original invalid transcript changed");
       if (prior.attempts >= 3 || prior.responseOrdinal !== evidence.complete.length ||
           evidence.messages.at(-1)?.role !== "assistant" || evidence.complete.at(-1) !== text ||
           prior.responseHash !== createHash("sha256").update(text).digest("hex") ||
@@ -591,6 +684,8 @@ export async function recoverResponseContract<T>(options: {
       failedPaths: failures.map(f => f.path),
       status: failures.length ? "invalid-response" : "accepted",
     };
+    if (options.sealTranscript)
+      current.transcriptDigest = createHash("sha256").update(await readFile(sessionFile)).digest("hex");
     if (!failures.length) {
       // Structural validity only. Semantic refusal and independent source
       // validation remain outside this policy and are never retried as JSON.
@@ -601,7 +696,10 @@ export async function recoverResponseContract<T>(options: {
     if (index === 2) {
       current.status = "protocol-exhausted";
       if (receiptFile) await saveReceipt(receiptFile, current);
-      throw new ProtocolExhaustedError(contract, 3, current.failedPaths, session.sessionId);
+      const proof = receiptFile?.endsWith(".initial.json") && current.sourceDigest && current.transcriptDigest
+        ? { receiptFile: receiptFile.slice(0, -".initial.json".length), sourceDigest: current.sourceDigest,
+          contract, sessionId: session.sessionId, transcriptDigest: current.transcriptDigest } : undefined;
+      throw new ProtocolExhaustedError(contract, 3, current.failedPaths, session.sessionId, proof);
     }
     // The same job-level Pi budget admission is rechecked before each extra
     // model call. Protocol retries never consume semantic repair counters.

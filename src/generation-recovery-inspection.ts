@@ -394,7 +394,8 @@ export async function inspectModernGenerationRecovery(
               values as GenerationGraphState, active, d);
           return source.channel === "recovery" ||
             source.channel === "operationRecovery" &&
-            !!(source.input as unknown as GenerationOperationRecovery).evidence.assignmentFailure &&
+            !!((source.input as unknown as GenerationOperationRecovery).evidence.assignmentFailure ||
+              (source.input as unknown as GenerationOperationRecovery).evidence.protocolFailure) &&
             isDeepStrictEqual(d, await selectOperationStrategy(job, values as GenerationGraphState, active).catch(() => null));
         default:
           return false; // Unsupported active writer scope from a saved claim.

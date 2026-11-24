@@ -6,34 +6,15 @@ import { loadSelectedStoryOrchestrator } from "./orchestrator-selection.js";
 import { openStoryProject } from "./project.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { preparePiContext } from "./job-pi-policy.js";
+import { preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
+import { reconcileReadOnlyProtocol } from "./non-specialist-protocol.js";
+import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolReads, type ResponseContractFailure } from "./response-contract-recovery.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
-import { dependencyBoundary, dependencyTurn, saveDependencyPlan,
+import { dependencyBoundary, dependencyTurn, dependencyDigest, saveDependencyPlan,
   type DependencyEntry, type DependencyPlan } from "./dependency-state.js";
 import type { DependencyProposal } from "./dependency-amendments.js";
-
-/** A model may mistype a source digest without changing the proposed work.
- * One explicit, fresh-proposal retry is allowed; it cannot modify the signed
- * evidence or bypass the controller's independent authorization gate. */
-export function needsDependencyProposalCorrection(
-  proposal: DependencyProposal | { rejected: true; reason: string },
-  entry: Pick<DependencyEntry, "report" | "reportDigest">,
-  reviewCharacter: boolean,
-): boolean {
-  if ("rejected" in proposal) return false; // Never turn a deliberate scope rejection into a grant.
-  return (
-    (proposal.sourceSha !== undefined && proposal.sourceSha !== entry.report.sourceSha) ||
-    (proposal.reportDigest !== undefined && proposal.reportDigest !== entry.reportDigest) ||
-    (proposal.sourceSha === undefined) !== (proposal.reportDigest === undefined) ||
-    proposal.outcome !== entry.report.missing ||
-    (typeof proposal.target === "string" &&
-      (reviewCharacter
-        ? !/^character\.[a-z][a-z0-9-]*$/.test(proposal.target)
-        : !entry.report.affectedIds.includes(proposal.target)))
-  );
-}
 
 /** The model proposes semantic work, never an opaque source identity. Model
  * output may omit both identity fields; the trusted controller binds the
@@ -53,11 +34,35 @@ export function bindDependencyProposalIdentity(
   return { ...proposal, sourceSha: entry.report.sourceSha, reportDigest: entry.reportDigest };
 }
 
+/** Shape errors alone consume the protocol allowance. Scope and causal
+ * disagreements remain controller admission failures, not format retries. */
+export function inspectDependencyProposalResponse(text: string, reviewCharacter: boolean): ResponseContractFailure[] {
+  let value: unknown;
+  try { value = JSON.parse(text.trim()); } catch { return [{ path: "$", expected: "one complete JSON object" }]; }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return [{ path: "$", expected: "proposal or rejection object" }];
+  const v = value as Record<string, unknown>;
+  const fields = v.rejected === true ? ["rejected", "reason"] :
+    ["target", "specialist", "outcome", "reason", ...(reviewCharacter ? ["title"] : [])];
+  const failures: ResponseContractFailure[] = [];
+  if (Object.keys(v).some(k => !fields.includes(k) && !["sourceSha", "reportDigest"].includes(k)))
+    failures.push({ path: "$", expected: "no undeclared proposal fields" });
+  for (const key of fields.filter(k => k !== "rejected"))
+    if (typeof v[key] !== "string" || !(v[key] as string).trim())
+      failures.push({ path: "$." + key, expected: "nonempty string" });
+  if (v.rejected === true && Object.keys(v).some(k => !fields.includes(k)))
+    failures.push({ path: "$", expected: "rejected and reason only" });
+  for (const key of ["sourceSha", "reportDigest"])
+    if (Object.hasOwn(v, key) && typeof v[key] !== "string")
+      failures.push({ path: "$." + key, expected: "string" });
+  return failures.slice(0, 8);
+}
+
 /** Invoked under the shared writer lock at a clean boundary. Model output is
  * only a proposal; approveDependency independently checks source and scope. */
 export async function proposeDependency(job: JobStartResult, plan: DependencyPlan,
   entry: DependencyEntry, provider: string, model: string): Promise<DependencyProposal> {
-  if (entry.phase !== "reported") throw Error("Interrupted dependency planner; preserve transcript, do not replay.");
+  if (entry.phase !== "reported" && entry.phase !== "planning") throw Error("Dependency planner is not at its original admission boundary.");
   const turn = await dependencyTurn(job);
   if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Stale dependency planning source.");
   const reviewRequest = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
@@ -70,6 +75,33 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
   const selection = await loadSelectedStoryOrchestrator(job, hint.graphThreadId,
     { task: turn.originalRequest, kind: turn.contract.scope.kind, turnPlanDigest: turn.digest });
   const snapshot = selection.receipt.skillSnapshot;
+  const guidance = ["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+    "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"];
+  const dir = join(job.stateDir, "dependency-sessions", entry.reportDigest, "plan");
+  const protocol = { receiptFile: join(dir, "response"), sourceDigest: dependencyDigest({
+    jobId: job.jobId, threadId: job.threadId, turn: turn.digest, report: entry.reportDigest,
+    source: entry.report.sourceSha, version: plan.version, snapshot: snapshot.id, provider, model,
+  }), contract: "dependency.proposal.v1", sessionRoots: [dir],
+    validate: (text: string) => inspectDependencyProposalResponse(text, reviewCharacter),
+    parse: (text: string) => JSON.parse(text.trim()) as DependencyProposal };
+  if (entry.phase === "planning") {
+    if (!entry.planner || entry.planner.snapshot.id !== snapshot.id)
+      throw Error("Original dependency planner snapshot is missing or changed.");
+    const proposal = await reconcileReadOnlyProtocol(job, protocol, { provider, model },
+      "dependency-plan:" + entry.reportDigest, async () => {
+        if (await dependencyBoundary(job) !== entry.report.sourceSha)
+          throw Error("Original dependency source changed.");
+      });
+    const proof = await inspectCompletedProtocolReads(protocol);
+    const reads = proof.reads.map(path => canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
+    if (proof.sessionFile !== entry.planner.sessionFile ||
+        guidance.some(p => !reads.includes(join(snapshot.path, "skills", p))))
+      throw Error("Original dependency planner source inspection changed.");
+    entry.planner.skillReads = reads;
+    await recordPiSession(job, proof.sessionFile);
+    await saveDependencyPlan(job, plan);
+    return bindDependencyProposalIdentity(proposal, entry);
+  }
   const project = await openStoryProject(job.worktreeStoryRoot);
   const { loader, settingsManager } = createProjectResourceLoader(project, undefined, true,
     { discovery: "explicit-only", novelteaSkills: snapshot.path, skillDirs: [],
@@ -80,7 +112,7 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
   const context = await preparePiContext(job, project, {
     group: "orchestrator:dependency", step: "dependency-plan:" + entry.reportDigest,
     paths: entry.report.sources.map(s => s.path), snapshot: snapshot.id, provider, model,
-    directory: join(job.stateDir, "dependency-sessions", entry.reportDigest, "plan"),
+    directory: dir,
   }, runtime);
   const tools = await selectSandboxPiTools(job, snapshot, loader.getSkills().skills, undefined, "read-only", "orchestrator");
   const { session } = await createAgentSession({ cwd: project.root, modelRuntime: runtime,
@@ -90,11 +122,11 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
     const sessionFile = session.sessionManager.getSessionFile();
     if (!sessionFile || context.thinking && context.thinking !== session.thinkingLevel)
       throw Error("Dependency planner lacks a durable session or pinned model policy.");
+    await context.beforeTurn(sessionFile);
     entry.phase = "planning"; entry.planner = { snapshot, sessionFile };
     await saveDependencyPlan(job, plan);
-    await context.beforeTurn(sessionFile);
-    const guidance = ["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
-      "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"];
+    await beginProtocolInvocation({ ...protocol, session });
+    await registerPendingPiSession(job, sessionFile);
     await promptStorySpecialist(session, context.contextNote +
       "You are the READ-ONLY dependency orchestrator. The complete original " +
       "approved author request, NOT its first sentence or a generic summary, " +
@@ -158,51 +190,32 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
     };
     const missingReads = () => guidance.map(p => join(snapshot.path, "skills", p))
       .filter(p => !completedReads().includes(p));
-    if (missingReads().length) {
-      await promptStorySpecialist(session, "You omitted required pinned orchestrator methodology reads. " +
-        "Read EVERY exact file below with the read tool, then independently reconsider the " +
-        "causal necessity and return a fresh JSON proposal or rejection. " +
-        "Do not modify files or assume the previous answer was correct.\nMISSING READS:\n" +
-        missingReads().join("\n"));
-    }
-    const last = [...session.messages].reverse().find(m => m.role === "assistant");
-    if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason))
-      throw Error("Dependency planner was interrupted.");
+
+    const settle = async () => {
+      const last = session.messages.at(-1);
+      if (!last || last.role !== "assistant" || last.stopReason !== "stop")
+        throw Error("Dependency planner was interrupted.");
+      await recordPiSession(job, sessionFile);
+    };
+    await settle();
     const reads = completedReads();
     if (missingReads().length)
       throw Error("Dependency planner did not read pinned methodology.");
     entry.planner.skillReads = reads;
     await saveDependencyPlan(job, plan);
-    const lastJson = () =>
-      JSON.parse(
-        (session.getLastAssistantText() ?? "")
-          .trim()
-          .replace(/^```(?:json)?\s*\n/i, "")
-          .replace(/\n```$/, ""),
-      ) as DependencyProposal;
-    let proposal = lastJson();
-    if (proposal && needsDependencyProposalCorrection(proposal, entry, reviewCharacter)) {
-      await promptStorySpecialist(
-        session,
-        "Your proposal included an incorrect " +
-          "source identity, altered missing-work outcome or invalid target ID. " +
-          "Reassess the report and return one fresh JSON proposal only if necessary. " +
-          "Copy missing EXACTLY as outcome, choose target as a " +
-          (reviewCharacter
-            ? "new typed character.slug ID with a title"
-            : "preexisting typed canonical ID from the affected IDs") +
-          " (NEVER a .md path), and put your causal reasoning in reason. " +
-          "Return a rejection if this cannot be safely done. " +
-          "Do NOT copy or include sourceSha/reportDigest: the trusted controller " +
-          "binds these from the saved source after this proposal. " +
-          "Exact missing work: " +
-          JSON.stringify(entry.report.missing) +
-          "; allowed affected IDs: " +
-          JSON.stringify(entry.report.affectedIds) +
-          ". Do not invent new evidence or permissions.",
-      );
-      proposal = lastJson();
-    }
+    const proposal = await recoverResponseContract({ ...protocol, session,
+      receiptFile: protocol.receiptFile + ".initial.json", sealTranscript: true,
+      beforeCorrection: () => context.beforeTurn(sessionFile),
+      prompt: async feedback => {
+        await registerPendingPiSession(job, sessionFile);
+        await promptStorySpecialist(session, feedback);
+        await settle();
+      },
+      feedback: failures => "Correct only the JSON format of the original dependency proposal or rejection. " +
+        "Preserve the actual decision, scope and causal evidence. No tools or new planning. " +
+        failures.map(f => f.path + ": " + f.expected).join("; "),
+    });
+    if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Dependency source changed.");
     await context.completed(sessionFile, session.sessionId);
     return bindDependencyProposalIdentity(proposal, entry);
   } finally { session.dispose(); }

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { authenticateAssignmentFailure, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { authenticateAssignmentFailure, authenticateNonSpecialistProtocolFailure, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 import type { GenerationGraphState } from "./generation.js";
 import type { JobStartResult } from "./job.js";
 import { git } from "./ideas.js";
@@ -372,6 +372,16 @@ export function matchesOriginalCloseout(s: State, c: RecoveryCase, pending: NonN
 }
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (s.request.fixture || !s.request.turnPlanDigest) return null;
+  const originalOperation = s.recoverySources.find(x => x.caseId === c.id &&
+    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+  if (originalOperation?.evidence.protocolFailure) {
+    const proof = await authenticateNonSpecialistProtocolFailure(job, originalOperation);
+    if (!proof || c.kind !== "protocol") throw Error("Original non-specialist protocol evidence changed");
+    return { ...base(c, proof), action: "exhausted", reason: "protocol-exhausted", attemptRefs: [proof] };
+  }
+  if (originalOperation?.evidence.failureKind === "integrity")
+    return { ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
+      requiredInspection: "Authenticate the original source and invocation; no replacement model call is authorized." };
   const assignmentFailure = await originalAssignmentFailure(job, s, c);
   if (assignmentFailure?.proof.kind === "protocol-exhausted") {
     const proof = { store: "response-contract" as const, ref: assignmentFailure.ref,

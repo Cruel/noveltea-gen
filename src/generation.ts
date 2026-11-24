@@ -33,7 +33,7 @@ import type { RecoveryLifecycle, RecoveryOrigin, RecoveryEvidence } from "./gene
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { captureVerificationFailure, verifyCorrectedOriginalResult, verifiableResultStatus } from "./commit-verification-continuation.js";
 import { authorizedKnownFixDispatch, type KnownFixRequest } from "./known-verifier-fix.js";
-import { ProtocolExhaustedError, ProtocolVerifierRecheckRejectedError } from "./response-contract-recovery.js";
+import { ProtocolExhaustedError, ProtocolIntegrityBlockedError, ProtocolVerifierRecheckRejectedError } from "./response-contract-recovery.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
 import { Annotation, END, START, StateGraph, isGraphBubbleUp } from "@langchain/langgraph";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
@@ -1221,9 +1221,13 @@ async function operationFailure(s: State, job: JobStartResult, operation: Operat
   safeAction?: GenerationOperationRecovery["safeAction"],
   graphThreadId?: string): Promise<Partial<State>> {
   // Execution controls remain resumable controls, not recovery incidents.
-  if (error instanceof Error && ["PiBudgetPause", "FoundationAuthorRequiredError",
+  if (error instanceof Error && ["PiBudgetPause", "PiModelUnavailableError", "FoundationAuthorRequiredError",
     "SpecialistChoiceRequiredError", "StoryCancelledError"].includes(error.name))
     return blocked(error);
+  if (error instanceof ProtocolExhaustedError && error.proof)
+    evidence = { ...evidence, failureKind: "protocol", protocolFailure: error.proof };
+  else if (error instanceof ProtocolIntegrityBlockedError)
+    evidence = { ...evidence, failureKind: "integrity" };
   const reason = error instanceof Error ? error.message : String(error);
   const previous = s.operationRecovery;
   // A completed read-only assessment must not restart the same deterministically
@@ -1247,7 +1251,7 @@ async function operationFailure(s: State, job: JobStartResult, operation: Operat
 }
 function blocked(error: unknown): Partial<State> {
   const e = error as { message?: string; name?: string };
-  return { status: ["PiBudgetPause", "FoundationAuthorRequiredError", "SpecialistChoiceRequiredError", "AssignmentAuthorPauseError"].includes(e.name ?? "") ? "paused" :
+  return { status: ["PiBudgetPause", "PiModelUnavailableError", "FoundationAuthorRequiredError", "SpecialistChoiceRequiredError", "AssignmentAuthorPauseError"].includes(e.name ?? "") ? "paused" :
     e.name === "StoryCancelledError" ? "cancelled" : "blocked",
     reason: e.message ?? String(error), result: null };
 }
@@ -1702,7 +1706,7 @@ function assignmentFailureEvidence(state: RecoveryState, origin: RecoveryOrigin)
   const source = state.recoverySources.find(x => x.caseId === state.recoveryLifecycle.active?.id &&
     x.channel === "operationRecovery");
   const op = source?.input as GenerationOperationRecovery | undefined;
-  return op?.operation === origin.operation && op.evidence.assignmentId === origin.assignmentId
+  return op?.operation === origin.operation && (op.evidence.assignmentId ?? null) === origin.assignmentId
     ? op.evidence : undefined;
 }
 async function recoverySourceHead(job: JobStartResult, state: RecoveryState, origin: RecoveryOrigin) {
@@ -1787,7 +1791,8 @@ export function recoveryNode(
     if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
         prior.recoveryLifecycle.decision?.action === "exhausted" &&
         !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment ||
-          assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure)) {
+          assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure ||
+          assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.protocolFailure)) {
       const active = prior.recoveryLifecycle.active;
       try {
         const job = await openJob(state);
@@ -1897,9 +1902,12 @@ export function recoveryNode(
         const strategy = prior.recoverySources.some(x => x.caseId === active.id && x.channel === "operationRecovery")
           ? await withStoryJobLock(job, "assess-source-bound-operation", () => selectOperationStrategy(job, state, active)) : null;
         const selected = strategy ? decideRecovery(prior.recoveryLifecycle, strategy) : decideExistingRecovery(prior);
-        return { recoveryLifecycle: { ...selected, assessorPending: strategy?.action !== "exhausted" },
-          status: strategy?.action === "exhausted" ? "blocked" : "running",
-          ...(strategy?.action === "exhausted" ? { reason: "Original specialist report protocol exhausted; its submitted draft is preserved." } : {}) };
+        const terminal = strategy?.action === "exhausted" || strategy?.action === "integrity-fence";
+        return { recoveryLifecycle: { ...selected, assessorPending: !terminal },
+          status: terminal ? "blocked" : "running",
+          ...(terminal ? { reason: strategy.action === "exhausted"
+            ? "Original response protocol exhausted; its invocation and source are preserved."
+            : strategy.requiredInspection } : {}) };
       } catch {
         return { status: "blocked", reason: "The original failure cannot admit a recovery decision.",
           recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
@@ -1984,7 +1992,7 @@ export function recoveryNode(
       fixture: local.request.fixture, task: local.request.task, contract: local.request.contract };
     const authenticate = (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) =>
       authenticateRecoveryOrigin(job, local.request, graphThreadId, origin, evidence, false,
-        domain.operationRecovery?.operation === origin.operation && domain.operationRecovery.evidence.assignmentId === origin.assignmentId
+        domain.operationRecovery?.operation === origin.operation && (domain.operationRecovery.evidence.assignmentId ?? null) === origin.assignmentId
           ? domain.operationRecovery.evidence : assignmentFailureEvidence(prior, origin));
     const current = prior.recoveryLifecycle.active;
     const assurance: { originalEffect?: RecoveryEvidence;
@@ -2611,12 +2619,16 @@ export function createGenerationGraph(
       const task = s.ideaTask!;
       const job = await openJob(s);
       const file = ideaDispatchFile(job);
+      const fixture = s.request.fixture && process.env.NT_LIVE_GENERATION_IDEA === "1"
+        ? false : s.request.fixture;
+      let reconciling = false;
+      let resuming = false;
       try {
         // External Git and Pi effects cannot be replayed merely because the
         // LangGraph checkpoint was interrupted. A private receipt fences repeats.
         if (existsSync(file)) {
           const saved = JSON.parse(await readFile(file, "utf8")) as {
-            jobId: string; task: IdeaTask; phase: string; result?: IdeaResult;
+            jobId: string; task: IdeaTask; phase: string; result?: IdeaResult; effectContract?: string; effectPhase?: string;
           };
           if (saved.jobId !== job.jobId) throw new Error("Idea dispatch receipt belongs to another job.");
           if (JSON.stringify(saved.task) === JSON.stringify(task)) {
@@ -2640,25 +2652,43 @@ export function createGenerationGraph(
               await persist(file, { ...saved, phase: "returned", result });
               return { ideaResult: result };
             }
-            throw new Error("Interrupted automated idea selection/writer; inspect its Pi session, placement receipt and Git worktree before manual reconciliation.");
+            if (saved.phase !== "running" || saved.effectContract !== "idea-protocol.v1" ||
+                !["prepared", "read-only"].includes(saved.effectPhase ?? "") || fixture)
+              throw new Error("Interrupted automated idea selection/writer; inspect its Pi session, placement receipt and Git worktree before manual reconciliation.");
+            // Reenter only the original clean-source task. The placement adapter
+            // reconstructs a sealed read-only result, never repeats a started writer.
+            resuming = true;
+            reconciling = saved.effectPhase === "read-only";
           }
-          if (saved.phase !== "verified")
+          if (!resuming && saved.phase !== "verified")
             throw new Error("Previous automated idea dispatch has not been verified; reconcile it manually.");
         }
         if (await trustedHead(job) !== task.priorHead) throw new Error("Idea selection's verified Git base changed.");
-        await persist(file, { jobId: job.jobId, task, phase: "running" });
+        if (!resuming) await persist(file, { jobId: job.jobId, task, phase: "running",
+          ...(!fixture ? { effectContract: "idea-protocol.v1", effectPhase: "prepared" } : {}) });
         const result = await runIdeaPlacement({ ...s.request,
-          // Opt-in integration evaluation: fixture Story generation with real
-          // pinned Pi placement/semantic review, never a fixture-only attestation.
-          fixture: s.request.fixture && process.env.NT_LIVE_GENERATION_IDEA === "1"
-            ? false : s.request.fixture,
+          // Opt-in integration evaluation uses real pinned Pi placement.
+          fixture, expectedHead: task.priorHead,
+          reconcileReadOnly: reconciling,
+          beforeRead: fixture ? undefined : () => persist(file, { jobId: job.jobId, task,
+            phase: "running", effectContract: "idea-protocol.v1", effectPhase: "read-only" }),
+          beforeWrite: fixture ? undefined : () => persist(file, { jobId: job.jobId, task,
+            phase: "running", effectContract: "idea-protocol.v1", effectPhase: "writer" }),
           action: task.action, id: task.id,
           ...(task.action === "place" ? { autoSelect: true } : { record: true }) }) as IdeaResult;
         await persist(file, { jobId: job.jobId, task, phase: "returned", result });
         return { ideaResult: result };
-      } catch (error) { return operationFailure(s, job, "idea-integration", error,
-        { reference: "generation-idea-dispatch", ideaId: task.id, action: task.action,
-          signature: task.signature, priorHead: task.priorHead }); }
+      } catch (error) {
+        if (error instanceof ProtocolExhaustedError && error.proof && existsSync(file)) {
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          if (saved.jobId === job.jobId && saved.phase === "running" &&
+              isDeepStrictEqual(saved.task, task))
+            await persist(file, { ...saved, protocolFailure: error.proof });
+        }
+        return operationFailure(s, job, "idea-integration", error,
+          { reference: "generation-idea-dispatch", ideaId: task.id, action: task.action,
+            signature: task.signature, priorHead: task.priorHead });
+      }
     }))
     .addNode("verify_idea_integration", recoveryNode("verify_idea_integration", async s => {
       const job = await openJob(s);

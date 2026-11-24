@@ -37,6 +37,8 @@ export function adaptiveResponseFailures(text: string): Array<{ path: string; ex
   try { p = parse(text); } catch { return [{ path: "$", expected: "one complete adaptive proposal JSON object" }]; }
   if (!p || typeof p !== "object" || Array.isArray(p)) return [{ path: "$", expected: "a proposal object" }];
   const errors: Array<{ path: string; expected: string }> = [];
+  if (Object.keys(p).some(key => !["sourceSha", "turnDigest", "beforeVersion", "reason", "actions", "order"].includes(key)))
+    errors.push({ path: "$", expected: "no unknown proposal fields" });
   const shape: Record<string, readonly string[]> = {
     add: ["kind", "stage", "milestone", "dependsOn"],
     split: ["kind", "item", "domains"],
@@ -65,7 +67,7 @@ export function adaptiveResponseFailures(text: string): Array<{ path: string; ex
     }
     const record = action as unknown as Record<string, unknown>;
     const kind = record.kind;
-    if (typeof kind !== "string" || !(kind in shape)) {
+    if (typeof kind !== "string" || !Object.hasOwn(shape, kind)) {
       errors.push({ path: path + ".kind", expected: "add|split|depend|narrow|omit" });
       return;
     }
@@ -85,10 +87,10 @@ export function adaptiveResponseFailures(text: string): Array<{ path: string; ex
         if (typeof domain === "string" && !["choice", "puzzle"].includes(domain))
           errors.push({ path: path + ".domains[" + i + "]", expected: "choice|puzzle" });
       });
-    for (const key of Object.keys(record)) if (!keys.includes(key))
-      errors.push({ path: path + "." + key, expected: "no unknown fields" });
+    if (Object.keys(record).some(key => !keys.includes(key)))
+      errors.push({ path, expected: "no unknown fields" });
   });
-  return errors;
+  return errors.slice(0, 8);
 }
 const validate = adaptiveResponseFailures;
 async function transcript(job: JobStartResult, file: string) {
