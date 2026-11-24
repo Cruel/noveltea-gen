@@ -688,6 +688,9 @@ async function input(request: Request): Promise<Record<string, unknown>> {
 export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabase,
   request: Request, baseURL: string, infer?: DiscoveryInference,
   chat?: ChatDiscoveryBinding, gateways: ProviderJobGateways = {}): Promise<Response> {
+  // Repository-only discovery is retained solely as an isolated deterministic
+  // adapter harness. No live model or provider effect may use that namespace.
+  if (!chat && !infer) return reply({ error: 'Start discovery in the original Story Chat Thread.' }, 410)
   if (!['GET', 'POST'].includes(request.method)) return reply({ error: 'Method not allowed' }, 405)
   if (request.method === 'POST' && request.headers.get('origin') !== baseURL)
     return reply({ error: 'Cross-origin write refused' }, 403)
@@ -1488,24 +1491,4 @@ export async function onboardingPiRequest(auth: StudioAuth, store: StudioDatabas
     if (error instanceof DiscoveryError) return reply({ error: error.message }, error.status)
     return reply({ error: 'Story discovery is unavailable. Verify the connected model, discovery skills, validator and application configuration.' }, 503)
   }
-}
-
-/** Server-side approval binding checked immediately before either provider's Git
- * mutation. The browser cannot replace a model-reviewed proposal with a forged
- * canonical record merely by submitting a different foundation object. */
-export async function assertApprovedPiFoundation(store: StudioDatabase, owner: string, repo: string,
-  workspace: string, reference: unknown, foundation: unknown): Promise<void> {
-  if (!reference || typeof reference !== 'object' || Array.isArray(reference))
-    throw new DiscoveryError(409, 'Missing reviewed discovery approval')
-  const ref = reference as Record<string, unknown>
-  const key = onboardingWorkspace(workspace)
-  const session = await load(store, owner, repo, key)
-  if (!session || !currentGraph(session) || session.phase !== 'approved' || session.revision !== ref.revision ||
-      session.digest !== ref.digest || JSON.stringify(session.proposal?.foundation) !== JSON.stringify(foundation)) {
-    throw new DiscoveryError(409, 'Approved discovery proposal does not match the selected repository, workspace or exact foundation')
-  }
-  await reconcileDiscoveryGraph(store, owner, repo, key, session, async () => {
-    if (!await store.persistence.repositories.get(owner, repo))
-      throw new DiscoveryError(409, 'Approved Discovery repository is no longer connected.')
-  })
 }

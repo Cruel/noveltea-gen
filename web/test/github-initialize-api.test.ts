@@ -113,6 +113,9 @@ test('initialization is owner-scoped and commit-pinned; rejects LFS and existing
     assert.equal((await post({ ...base, foundation, discoveryApproval: {
       revision: 1, digest: 'f'.repeat(64),
     } })).status, 409, 'unbound model foundation must be refused before validator or Git writes')
+    assert.equal((await post({ ...base, foundation: { ...foundation, decisions: [
+      { id: 'model', statement: 'Unapproved claim', origin: 'agent', authority: 'delegated' },
+    ] } })).status, 409, 'omitting the retired approval reference must not permit model canon')
     assert.equal((await post({ ...base, foundation: { ...foundation, id: 'BAD' } })).status, 400)
     assert.equal((await post({ ...base, foundation: { ...foundation, title: 'Different title' } })).status, 400)
     const previousNative = process.env.NT_NATIVE_CLI

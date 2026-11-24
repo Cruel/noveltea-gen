@@ -885,7 +885,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
         // now requires explicit reconciliation, never a second foundation writer.
         foundation.writerStarted = true;
         await saveState(stateFile(job), foundation);
-        await writeFile(path, renderFoundation(approval.foundation, approval.canonicalStatus ?? 'draft'), {
+        await writeFile(path, renderFoundation(approval.foundation, 'approved'), {
           mode: 0o600, flag: previousTarget ? "w" : "wx",
         });
         const next = { ...foundation, authoredSha256: await foundationDigest(job, target) };

@@ -6,7 +6,7 @@ import { StudioSchemaError } from '../db/schema-error'
 import { actor, eligible, failure, gitlab, page, ProviderFailure, reply } from './gitlab-repositories.server'
 import { verifyGitlabStorySelection } from './gitlab-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
-import { assertApprovedPiFoundation } from './onboarding-pi.server'
+import { initialStoryDocument } from './git-cache.server'
 import { candidate, validateNewStory, StoryBootstrapError } from './story-foundation.server'
 export { validateNewStory } from './story-foundation.server'
 
@@ -20,7 +20,8 @@ type Initialization = {
   directory: string
   expectedCommit?: string | null
   initialBranch?: string
-  foundation: {
+  title?: string
+  foundation?: {
     id: string; title: string; premise: string; central_conflict: string
     genre: string; tone: string; player_experience: string; scope: string
     decision: string; body: string
@@ -130,19 +131,18 @@ export async function gitlabInitializeRequest(
       throw new ProviderFailure(409, 'This Story directory is already registered. Open it instead of initializing a new Story.')
     }
     if ('discoveryApproval' in input) {
-      try {
-        await assertApprovedPiFoundation(store, current.id, input.repositoryId,
-          directory(input.directory), (input as Initialization & { discoveryApproval: unknown }).discoveryApproval,
-          input.foundation)
-      } catch {
-        throw new ProviderFailure(409, 'Discovery approval is stale or does not match this exact foundation.')
-      }
+      throw new ProviderFailure(409, 'Repository Discovery approval cannot authorize initialization. Continue the original Story Chat Thread.')
     }
-    const { file, title } = candidate(input.foundation)
+    if (input.foundation && Object.hasOwn(input.foundation, 'decisions'))
+      throw new ProviderFailure(409, 'Model-proposed Creative Direction requires the Story Chat approval boundary.')
+    const authored = input.foundation === undefined ? null : candidate(input.foundation)
+    const title = authored?.title ?? input.title
     if (!validStoryTitle(title))
       throw new ProviderFailure(400, 'Story title must be 1–120 printable characters.')
-    // Validate *before* any GitLab mutation. If unavailable, reject safely.
-    await validateNewStory(file)
+    const file = authored?.file ?? initialStoryDocument(title.trim())
+    // A title-only draft grants no creative authority. Authored canon still
+    // requires native validation before any GitLab mutation.
+    if (authored) await validateNewStory(file)
     let baseSha: string | null = null
     let branch: string
     if (empty) {
@@ -212,7 +212,7 @@ export async function gitlabInitializeRequest(
     try {
       story = await store.persistence.onboarding.createStory({
         id: randomUUID(), owner: current.id, repositoryId: data.repositoryId,
-        directory: path, title, createdAt: now, commitSha: created.id,
+        directory: path, title: title.trim(), createdAt: now, commitSha: created.id,
       })
     } catch {
       throw new ProviderFailure(409, `Story commit exists on ${branch} at ${created.id}, but catalog registration conflicted. Reconcile it before retrying.`)

@@ -1,11 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { auth, database } from '../../lib/runtime.server'
-import { readAuthConfig } from '../../lib/auth'
-import { onboardingPiRequest } from '../../lib/onboarding-pi.server'
+
+// Retired entrypoint. Persisted evidence remains available for inspection,
+// but a repository workspace is not a Story Chat/Turn authorization.
+const retired = () => Response.json({ error: 'Start discovery in Story Chat.' }, { status: 410 })
 
 export const Route = createFileRoute('/api/onboarding/pi')({
   server: { handlers: {
-    GET: ({ request }) => onboardingPiRequest(auth, database, request, readAuthConfig().baseURL),
-    POST: ({ request }) => onboardingPiRequest(auth, database, request, readAuthConfig().baseURL),
+    GET: retired,
+    POST: retired,
   } },
 })

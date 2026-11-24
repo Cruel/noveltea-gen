@@ -50,7 +50,7 @@ test("Chat foundation receipt is immutable, source-pinned and safe across retrie
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("legacy pinned draft-status approvals remain valid and exact-idempotent after upgrade", async () => {
+test("R14 obsolete draft-status approval cannot authorize execution or be silently repinned", async () => {
   const root = mkdtempSync(join(tmpdir(), "nt-legacy-chat-"));
   const job = { stateDir: root, jobId: "job-legacy", baseSha: "a".repeat(40) } as JobStartResult;
   const approval = {
@@ -64,13 +64,12 @@ test("legacy pinned draft-status approvals remain valid and exact-idempotent aft
       .update(renderFoundation(foundation)).digest("hex"),
   };
   try {
-    writeFileSync(join(root, "chat-approved-foundation.json"), JSON.stringify(legacy));
-    assert.deepEqual(await readChatApprovedFoundation(job), legacy);
-    await pinChatApprovedFoundation(job, approval);
-    assert.deepEqual(await readChatApprovedFoundation(job), legacy);
-    await assert.rejects(() => pinChatApprovedFoundation(job, {
-      ...approval, foundation: { ...foundation, title: "Changed" },
-    }), /different approved Creative Direction/);
+    const path = join(root, "chat-approved-foundation.json");
+    const bytes = JSON.stringify(legacy);
+    writeFileSync(path, bytes);
+    await assert.rejects(() => readChatApprovedFoundation(job), /differs from its pinned Story foundation/);
+    await assert.rejects(() => pinChatApprovedFoundation(job, approval), /differs from its pinned Story foundation/);
+    assert.equal(readFileSync(path, "utf8"), bytes, "preserve obsolete evidence without upgrading it");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

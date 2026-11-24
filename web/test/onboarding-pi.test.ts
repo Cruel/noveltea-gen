@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from './support/studio-database'
 import { createStudioAuth } from '../src/lib/auth'
-import { onboardingPiRequest, assertApprovedPiFoundation, DiscoveryInvocationNotStarted, type DiscoveryInference } from '../src/lib/onboarding-pi.server'
+import { onboardingPiRequest, DiscoveryInvocationNotStarted, type DiscoveryInference } from '../src/lib/onboarding-pi.server'
 import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credentials.server'
 import { candidate } from '../src/lib/story-foundation.server'
 import { hasUserProtectedDecision } from '../../src/foundation-record'
@@ -205,14 +205,18 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     assert.equal(accepted.body.session.phase, 'approved')
     assert.ok(hasUserProtectedDecision(candidate(foundation).file))
     const ref = { revision: accepted.body.session.revision, digest: accepted.body.session.digest }
-    await assert.doesNotReject(() => assertApprovedPiFoundation(store, alice.id, repo,
-      'projects/demo', ref, foundation))
-    await assert.rejects(() => assertApprovedPiFoundation(store, alice.id, repo,
-      'projects/other', ref, foundation), /does not match/)
-    await assert.rejects(() => assertApprovedPiFoundation(store, alice.id, repo,
-      'projects/demo', ref, {...foundation, title: 'Altered'}), /does not match/)
-    await assert.rejects(() => assertApprovedPiFoundation(store, alice.id, repo,
-      'projects/demo', {...ref, revision: ref.revision - 1}, foundation), /does not match/)
+    // Even a valid saved approval in the retired workspace namespace cannot
+    // execute without an explicit isolated fixture transport or a Chat Turn.
+    const savedBefore = await store.persistence.onboarding.conversation(alice.id, repo, 'projects/demo')
+    for (const data of [{ action: 'start', model, text: 'New Story' },
+      { action: 'approve', ...ref }, { action: 'retry', revision: ref.revision }]) {
+      const refused = await onboardingPiRequest(auth, store,
+        new Request(url + '/api/onboarding/pi?' + new URLSearchParams({
+          repositoryId: repo, workspace: 'projects/demo',
+        }), { method: 'POST', headers: { cookie: own, origin: url }, body: JSON.stringify(data) }), url)
+      assert.equal(refused.status, 410)
+    }
+    assert.deepEqual(await store.persistence.onboarding.conversation(alice.id, repo, 'projects/demo'), savedBefore)
     assert.equal((await request('POST', {action: 'answer', revision: ref.revision, text: 'Late'})).status, 409)
     assert.equal((await request('GET', undefined, foreign)).status, 404)
     assert.equal(calls.length, 3)

@@ -5,6 +5,8 @@ import { requireUser } from './access.server'
 import { storyContentDirectory } from './story-discovery.shared'
 import { parseGenerationContract } from '../../../src/generation'
 import { authorizedStoryJob } from './fixture-jobs.server'
+import { initialStoryDocument } from './git-cache.server'
+import { createHash } from 'node:crypto'
 
 export const questionRounds = [
   ['id', 'title', 'premise', 'central_conflict'],
@@ -112,13 +114,16 @@ export async function onboardingRequest(auth: StudioAuth, store: StudioDatabase,
       let initialized: { kind: 'recoverable'; created: {
         jobId: string; headSha: string; branch: string; commit: string; baseSha: string;
         story: { id: string; directory: string; title: string }; mode: string
-      }; configured: boolean } | { kind: 'unavailable'; storyId: string } | undefined
+      }; configured: boolean; draftOnly: boolean } | { kind: 'unavailable'; storyId: string } | undefined
       if (initial) {
         try {
           const job = await authorizedStoryJob(store, user.id, initial.jobId)
           if (job.jobId !== initial.jobId || job.baseSha !== initial.baseSha ||
               job.storyRelativePath !== target) throw new Error('Saved Story job identity changed')
-          initialized = { kind: 'recoverable', configured: initial.configured, created: {
+          const story = await store.persistence.onboarding.story(user.id, repositoryId, target)
+          const draftOnly = story?.id === initial.storyId && story.contentSha256 ===
+            createHash('sha256').update(initialStoryDocument(initial.title)).digest('hex')
+          initialized = { kind: 'recoverable', configured: initial.configured, draftOnly, created: {
             jobId: job.jobId, headSha: job.headSha, branch: job.branch,
             commit: job.headSha, baseSha: job.baseSha,
             story: { id: initial.storyId, directory: target, title: initial.title },

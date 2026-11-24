@@ -10,6 +10,7 @@ import { migrateStudio } from './support/studio-database'
 import { readUserDashboard } from '../src/lib/catalog'
 import { gitlabInitializeRequest, validateNewStory } from '../src/lib/gitlab-initialize.server'
 import { gitlabStoryRequest } from '../src/lib/gitlab-stories.server'
+import { initialStoryDocument } from '../src/lib/git-cache.server'
 import { renderFoundation } from '../../src/foundation-record'
 
 const origin = 'http://localhost:3000'
@@ -64,6 +65,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
   const store = openStudioDatabase(join(root, 'studio.sqlite'))
   let empty = false, emptyBranchConfigured = false, previousDefault = start,
     filesAlreadyExist = false, remoteRevision: string | null = null
+  let expectedContent = fixtureContent()
   const commits: Array<{ branch: string; start_sha?: string; actions: Array<{ action: string; file_path: string; content: string }> }> = []
   const contacted: string[] = []
   globalThis.fetch = async (input, init) => {
@@ -87,7 +89,7 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
       commits.push(data)
       assert.deepEqual(data.actions.map(a => a.action), ['create'])
       assert.equal(data.actions[0]?.file_path, 'story/creative-direction/foundation.md')
-      assert.equal(data.actions[0]?.content, fixtureContent())
+      assert.equal(data.actions[0]?.content, expectedContent)
       remoteRevision = committed
       return Response.json({ id: committed, parent_ids: data.start_sha ? [data.start_sha] : [] }, { status: 201 })
     }
@@ -113,13 +115,13 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
       const vars = JSON.parse(init?.body as string).variables as { paths: string[]; ref: string }
       assert.equal(vars.ref, committed)
       return Response.json({ data: { project: { repository: { blobs: {
-        nodes: vars.paths.map(path => ({ path, size: Buffer.byteLength(fixtureContent()) })),
+        nodes: vars.paths.map(path => ({ path, size: Buffer.byteLength(expectedContent) })),
       } } } } })
     }
     if (url.includes('/repository/files/')) {
-      return Response.json({ encoding: 'base64', content: Buffer.from(fixtureContent()).toString('base64'),
+      return Response.json({ encoding: 'base64', content: Buffer.from(expectedContent).toString('base64'),
         blob_id: sha('e'), commit_id: committed, file_path: 'story/creative-direction/foundation.md',
-        size: Buffer.byteLength(fixtureContent()) })
+        size: Buffer.byteLength(expectedContent) })
     }
     throw new Error('Unexpected GitLab request: ' + method + ' ' + url)
   }
@@ -164,6 +166,9 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal((await post({ ...payload(), discoveryApproval: {
       revision: 1, digest: 'f'.repeat(64),
     } })).status, 409, 'GitLab must reject an unbound model proposal before any commit')
+    assert.equal((await post({ ...payload(), foundation: { ...foundation, decisions: [
+      { id: 'model', statement: 'Unapproved claim', origin: 'agent', authority: 'delegated' },
+    ] } })).status, 409)
     assert.equal((await post({ ...payload(), foundation: { ...foundation, id: 'BAD' } })).status, 400)
     const invalidTitle = await post({ ...payload(), foundation: { ...foundation, title: '' } })
     assert.equal(invalidTitle.status, 400)
@@ -248,6 +253,22 @@ console.log(JSON.stringify({success: true, exitCode: 0, diagnostics: [],
     assert.equal((await gitlabStoryRequest(auth, store,
       new Request(origin + '/api/gitlab/stories?repositoryId=' + repositoryId +
         '&directory=story&commit=' + committed, { headers: { cookie: alice } }))).status, 200)
+    // A title-only initialization leaves a draft, not an approved Foundation.
+    // The first real Story Chat Turn must obtain its own source-bound approval.
+    for (const row of await store.testing.records.all<{ id: string }>('stories'))
+      await store.testing.records.delete('stories', { id: row.id })
+    empty = false
+    commits.length = 0
+    expectedContent = initialStoryDocument('A Chat Story')
+    process.env.NT_NATIVE_CLI = join(root, 'missing')
+    const placeholder = await post({ repositoryId, directory: '', expectedCommit: start, title: 'A Chat Story' })
+    assert.equal(placeholder.status, 200, JSON.stringify(await placeholder.clone().json()))
+    assert.equal((await placeholder.json()).story.title, 'A Chat Story')
+    assert.equal(commits.length, 1)
+    assert.equal(commits[0]?.actions[0]?.content, expectedContent)
+    assert.match(expectedContent, /decisions: \[\]/)
+    assert.match(expectedContent, /status: draft/)
+    assert.doesNotMatch(expectedContent, /authority: user-protected/)
   } finally {
     store.close()
     globalThis.fetch = oldFetch

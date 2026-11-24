@@ -6,7 +6,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StoryChatBaseline } from '../src/components/story-chat-baseline'
 import { AuthorInteractions } from '../src/routes/_protected/jobs/-AuthorInteractions'
 import { SpecialistUnsentRecovery } from '../src/components/specialist-unsent-recovery'
-import { PiStoryDiscovery } from '../src/routes/_protected/repositories/-PiStoryDiscovery'
 
 const client = new QueryClient({ defaultOptions: {
   queries: { retry: false, refetchOnWindowFocus: false },
@@ -20,9 +19,6 @@ Object.assign(window, {
   }),
   refreshSpecialist: () => client.invalidateQueries({
     queryKey: ['author-interactions', jobId],
-  }),
-  refreshGuided: () => client.invalidateQueries({
-    queryKey: ['pi-discovery', storyId, 'story'],
   }),
 })
 function SpecialistHarness() {
@@ -38,9 +34,7 @@ function SpecialistHarness() {
 }
 const mode = new URLSearchParams(location.search).get('mode')
 const content = mode === 'specialist' ? createElement(SpecialistHarness)
-  : mode === 'guided' ? createElement(PiStoryDiscovery, {
-    repositoryId: storyId, workspace: 'story', initialBrief: 'A brief mystery', onApproved: () => {},
-  }) : createElement(StoryChatBaseline,
+  : createElement(StoryChatBaseline,
     { storyId, threadId: 'root:' + firstTurnId })
 createRoot(document.getElementById('root')!).render(createElement(QueryClientProvider,
   { client }, content))

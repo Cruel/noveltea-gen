@@ -23,7 +23,8 @@ test('Story onboarding URLs contain only repository and folder identity, never t
 
 test('all onboarding server functions use the identity-only query for GET, PUT and POST', () => {
   const source = readFileSync(new URL('../src/lib/story-workflows.functions.ts', import.meta.url), 'utf8')
-  assert.equal((source.match(/onboardingQuery\(data\)/g) ?? []).length, 5,
-    'questionnaire load/save/review and Pi load/act all use the same safe query')
+  assert.equal((source.match(/onboardingQuery\(data\)/g) ?? []).length, 3,
+    'manual questionnaire load/save/review all use the same safe query')
+  assert.doesNotMatch(source, /\/api\/onboarding\/pi/)
   assert.doesNotMatch(source, /\/api\/onboarding(?:\/pi)?\?' \+ params\(data\)/)
 })

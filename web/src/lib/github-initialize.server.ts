@@ -5,7 +5,6 @@ import type { StudioStore as StudioDatabase } from '../persistence/store'
 import { actorFor, errorResponse, GithubError, json, matchingRepository } from './github-repositories.server'
 import { directoryPath, inspectGithubStoryInitialization } from './github-stories.server'
 import { storyContentDirectory } from './story-discovery.shared'
-import { assertApprovedPiFoundation } from './onboarding-pi.server'
 import { candidate, validateNewStory, StoryBootstrapError } from './story-foundation.server'
 import { acquireCachedStory, bootstrapEmptyGithubRepository,
   GitCacheError, initializeStoryBranch, initialStoryDocument } from './git-cache.server'
@@ -59,13 +58,10 @@ export async function githubInitializationRequest(
       throw new GithubError(400, 'A new initialization job UUID is required.')
     }
     if (input.discoveryApproval !== undefined) {
-      try {
-        await assertApprovedPiFoundation(store, actor.id, repositoryId,
-          directory.slice(0, -5).replace(/\/$/, ''), input.discoveryApproval, input.foundation)
-      } catch {
-        throw new GithubError(409, 'Discovery approval is missing, stale, or does not match the exact proposed foundation.')
-      }
+      throw new GithubError(409, 'Repository Discovery approval cannot authorize initialization. Continue the original Story Chat Thread.')
     }
+    if (input.foundation && Object.hasOwn(input.foundation, 'decisions'))
+      throw new GithubError(409, 'Model-proposed Creative Direction requires the Story Chat approval boundary.')
     const foundation = input.foundation === undefined ? null : candidate(input.foundation)
     if (foundation) {
       if (foundation.title !== title.trim()) {

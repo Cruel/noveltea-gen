@@ -21,8 +21,8 @@ export type ChatFoundationApproval = {
   provider: string;
   model: string;
   authoredSha256: string;
-  /** New approvals are canonical approved records; absent on legacy receipts. */
-  canonicalStatus?: 'approved';
+  /** Only the current canonical approved record can authorize execution. */
+  canonicalStatus: 'approved';
 };
 
 const file = (job: JobStartResult) => join(job.stateDir, "chat-approved-foundation.json");
@@ -48,13 +48,7 @@ export async function pinChatApprovedFoundation(job: JobStartResult,
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const existing = await readChatApprovedFoundation(job);
-    const legacy: ChatFoundationApproval = {
-      ...approval, version: 1, authoredSha256: hash(renderFoundation(approval.foundation)),
-    };
-    // Preserve pre-upgrade receipts exactly: a retried write is idempotent
-    // across code versions, but never upgrades canonical status or changes SHA.
-    if (JSON.stringify(existing) !== JSON.stringify(state) &&
-        JSON.stringify(existing) !== JSON.stringify(legacy))
+    if (JSON.stringify(existing) !== JSON.stringify(state))
       throw new Error("This job already has a different approved Creative Direction.");
   }
 }
@@ -74,8 +68,8 @@ export async function readChatApprovedFoundation(job: JobStartResult): Promise<C
       !state.originalObjective?.trim() ||
       !["autonomous", "collaborative"].includes(state.creativeMode) ||
       !state.provider || !state.model || !DIGEST.test(state.authoredSha256) ||
-      (state.canonicalStatus !== undefined && state.canonicalStatus !== 'approved') ||
-      state.authoredSha256 !== hash(renderFoundation(state.foundation, state.canonicalStatus ?? 'draft')))
+      state.canonicalStatus !== 'approved' ||
+      state.authoredSha256 !== hash(renderFoundation(state.foundation, 'approved')))
     throw new Error("Saved Chat approval differs from its pinned Story foundation.");
   return state;
 }

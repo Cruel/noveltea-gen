@@ -140,17 +140,6 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
       '}',
     ].join('\n')],
     ['@/lib/threads.queries', 'export const storyNavigationKey = id => ["story-nav", id];'],
-    ['@/lib/story-workflows.functions', [
-      'export async function loadPiDiscovery() {',
-      '  return JSON.stringify(await (await fetch("/__test/state")).json());',
-      '}',
-      'export async function actPiDiscovery({data}) {',
-      '  const r = await fetch("/__test/action", {method:"POST",',
-      '    headers:{"content-type":"application/json"}, body:data.json});',
-      '  const body = await r.json(); if(!r.ok) throw Error(body.error);',
-      '  return JSON.stringify(body);',
-      '}',
-    ].join('\n')],
     ['@/lib/pi.functions', 'export async function getPiCatalog() { return JSON.stringify({models:[]}); }'],
     ['@/lib/author.functions', [
       'export async function sendAuthorCommand({data}) {',
@@ -365,28 +354,6 @@ test('browser: reloaded Story Chat actions and two-tab unsent answers remain ope
     assert.ok(copies.some((value: string) => value.includes('unsent edit from first tab')))
     assert.equal(actions.filter(action => action.action === 'answer').length, 1,
       'stale first-tab input must never be submitted to the new set')
-
-    session = makeSession('questions', 40)
-    const guidedFirst = await tab('?mode=guided')
-    const guidedSecond = await tab('?mode=guided')
-    await until(guidedFirst, buttonScript('Submit 1 answer'), 'repository discovery questions')
-    await until(guidedSecond, buttonScript('Submit 1 answer'), 'second repository tab')
-    await evaluate(guidedFirst, '(()=>{const t=document.querySelector("textarea");' +
-      't.focus();t.setSelectionRange(t.value.length,t.value.length);return true})()')
-    await guidedFirst.send('Input.insertText', { text: ' — repository unsent change' })
-    await until(guidedFirst,
-      'document.querySelector("textarea")?.value.includes("repository unsent change")',
-      'repository unsent input')
-    await click(guidedSecond, 'Submit 1 answer')
-    await until(guidedSecond, buttonScript('Approve exact Creative Direction'),
-      'repository proposal in another tab')
-    await evaluate(guidedFirst, 'window.refreshGuided()')
-    await until(guidedFirst,
-      '!!document.querySelector("[aria-label=\\"Unsaved Question Set recovery\\"]")',
-      'repository discovery unsent recovery copy')
-    const repositoryCopies = await evaluate(guidedFirst,
-      'Array.from(document.querySelectorAll("textarea[readonly]")).map(t=>t.value)')
-    assert.ok(repositoryCopies.some((value: string) => value.includes('repository unsent change')))
 
     const specialist = await tab('?mode=specialist')
     await until(specialist, buttonScript('Submit 1 answer'), 'paused specialist question')
