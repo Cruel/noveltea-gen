@@ -4549,9 +4549,13 @@ for (const accepted of [true, false]) test(
   }
 });
 
-for (const mode of ["event-only", "required-interactive", "story-wide-required", "event-only-complete", "event-only-incomplete"] as const)
+for (const mode of ["event-only", "required-interactive", "story-wide-required", "event-only-complete", "event-only-incomplete", "event-only-postcommit", "composition-productive", "composition-stalled", "composition-cancel", "composition-budget"] as const)
 test(mode === "event-only-complete"
   ? "#244 C07 original-Thread Event-only correction reaches reviewed Composition and completed Turn"
+  : mode === "event-only-postcommit"
+    ? "R14E Composition separately rejected postcommit Review resumes original writer and reviewer"
+  : mode.startsWith("composition-")
+    ? "R14E Composition " + mode.slice(12) + " shared correction and control"
   : mode === "event-only-incomplete"
     ? "R13 verified original-Thread corrections cannot waive a negative final Turn objective"
     : "#243 C06 original-Thread historical Choice " + mode + " uses independently authenticated owner correction", {
@@ -4560,7 +4564,22 @@ test(mode === "event-only-complete"
   const mandatory = mode === "required-interactive";
   const storyWide = mode === "story-wide-required";
   const incomplete = mode === "event-only-incomplete";
-  const closeout = mode === "event-only-complete" || incomplete;
+  const postcommit = mode === "event-only-postcommit";
+  const productive = mode === "composition-productive";
+  const stalled = mode === "composition-stalled";
+  const cancel = mode === "composition-cancel";
+  const budgetPause = mode === "composition-budget";
+  const closeout = mode === "event-only-complete" || incomplete || postcommit || productive || stalled || cancel || budgetPause;
+  const badClaims = [
+    "Ada quietly recalls the secret archive key she has never discovered.",
+    "Ada already knows the hidden courier code without ever hearing it.",
+    "Ada remembers the private confession she has never witnessed.",
+  ];
+  const fixes = [
+    "Ada knows only what the two signed records establish.",
+    "Ada asks whether the courier code can be learned later.",
+    "Ada waits for testimony before drawing any further conclusion.",
+  ];
   const f = setup("c06-original-negative-choice-" + mode, story => {
     mkdirSync(join(story, "creative-direction"), { recursive: true });
     writeFileSync(join(story, "creative-direction/foundation.md"), [
@@ -4740,7 +4759,8 @@ test(mode === "event-only-complete"
               "events: [event.disclose-ledger]", "revelations: []", "---", "",
               "## Observed discovery", "",
               "Neri opens the preserved transfer ledger on the archive table. Ada compares each dated entry against the independent register and checks the witness attribution. The two signed sources match: the witness was transferred, but Neri concealed who authorized the movement. Ada takes the corroborated record into custody and explains the discovery. Ada quietly recalls the secret archive key she has never discovered. No player Choice or confession beyond the witnessed evidence is enacted.", "",
-            ].join("\n") } }], reason: "toolUse" };
+            ].concat(productive ? badClaims.slice(1) : []).concat(postcommit ? Array.from({length: 150}, (_, n) =>
+              "Ada verifies signed ledger entry " + (n + 1) + " against the independent register.") : []).join("\n") + "\n" } }], reason: "toolUse" };
         if (i === 15) return { content: scriptedText({
           modifiedRecords: ["authored-content/disclose-ledger-scene.md"],
           architecturalConflicts: [], laterObligations: [],
@@ -4750,6 +4770,49 @@ test(mode === "event-only-complete"
           "skill://nt-catalog/references/glossary.md",
           ...currentStory(), "authored-content/disclose-ledger-scene.md",
         ], i), reason: "toolUse" };
+        if ((productive || stalled) && i >= 17 && i <= (productive ? 29 : 26)) {
+          const path = "authored-content/disclose-ledger-scene.md";
+          const manifest = { modifiedRecords: [path], architecturalConflicts: [], laterObligations: [] };
+          if (stalled && i === 26) {
+            const messages = JSON.stringify(ctx.messages);
+            const signature = messages.match(/signature=([0-9a-f]{64})/)?.[1];
+            const sourceRef = messages.match(/sourceRef=([^;]+); category=/)?.[1];
+            assert.ok(signature && sourceRef);
+            assert.match(messages, /assignmentDefects/);
+            return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1",
+              signature, sourceRef, category: "defect", diagnosis: "The original writer retained the impossible knowledge in two attempted repairs.",
+              strategy: "review-adjudication", owner: null, scopeRef: null, prerequisites: [],
+              uncertainty: "No currently authorized successor." }), reason: "stop" };
+          }
+          const round = Math.floor((i - 17) / 4);
+          const phase = (i - 17) % 4;
+          if (phase === 0) {
+            const pass = productive && round === 3;
+            const claim = badClaims[productive ? Math.min(round, 2) : 0]!;
+            return { content: scriptedText({
+              schema: "noveltea-composition-review/v2", status: pass ? "pass" : "revise",
+              findings: pass ? [] : [{ path, reason: "Ada asserts unearned knowledge.",
+                correction: "Ground this claim in witnessed sources.",
+                requirement: { source: "policy", quote: "Shared entry must not assume unavailable route-specific clues" },
+                evidence: { path, quote: claim }, origin: round === 0 ? "initial" : productive ? "overlooked" : "continuing" }],
+              prior: Array.from({ length: round }, (_, n) => ({ round: n, findingIndex: 0,
+                status: productive ? "resolved" : "persisting", reason: productive ? "The unsupported claim was removed." : "The unsupported claim remains.",
+                evidence: { path, quote: productive ? fixes[n]! : badClaims[0]! } })),
+              sourceEvidence: pass ? ["event.disclose-ledger#disclose/inspect: signed ledger and independent register corroborate the transfer"] : [],
+            }), reason: "stop" };
+          }
+          if (phase === 1) {
+            assert.match(JSON.stringify(ctx.messages), /SOURCE-BOUND STORY CORRECTION/);
+            return { content: [{ type: "toolCall", id: "r14e-progress-" + i, name: "edit",
+              arguments: { path, edits: [{
+                oldText: productive ? badClaims[round]! : round === 0 ? "Neri opens the preserved transfer ledger" : "Neri examines the preserved transfer ledger",
+                newText: productive ? fixes[round]! : round === 0 ? "Neri examines the preserved transfer ledger" : "Neri handles the preserved transfer ledger",
+              }] } }], reason: "toolUse" };
+          }
+          if (phase === 2) return { content: scriptedText(manifest), reason: "stop" };
+          return { content: scriptedReadCalls([...boundedPinnedSources("nt-narrative-composition").map(p => "skill://" + p),
+            "skill://nt-catalog/references/glossary.md", ...currentStory(), path], i), reason: "toolUse" };
+        }
         if (i === 17) return { content: scriptedText({
           schema: "noveltea-composition-review/v2", status: "revise",
           findings: [{ path: "authored-content/disclose-ledger-scene.md", reason: "Ada recalls unearned knowledge.",
@@ -4787,13 +4850,37 @@ test(mode === "event-only-complete"
               quote: "Ada knows only what the two signed records establish." } }],
           sourceEvidence: ["event.disclose-ledger#disclose/inspect: signed ledger and independent register corroborate the transfer"],
         }), reason: "stop" };
-        if (i >= 22 && i < 34 && i % 2 === 0) return {
+        const reviewPath = "authored-content/disclose-ledger-scene.md";
+        const repairQuote = "Ada points to the matching signatures before explaining the corroborated transfer.";
+        if (postcommit && (i === 22 || i === 26))
+          return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), i), reason: "toolUse" };
+        if (postcommit && (i === 23 || i === 27)) {
+          const messages = ctx.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+          const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+            .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"));
+          assert.ok(prompt, "Postcommit reviewer has immutable packet, not the precommit editorial prompt");
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: reviewPath, line: 1 };
+          return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: i === 23 ? "fail" : "pass",
+            findings: i === 23 ? [{ ...ref, kind: "missing-requirement", message: "The corroboration needs explicit visible payoff.",
+              requiredCorrection: repairQuote, affectedPaths: [reviewPath] }] : [],
+            evidence: i === 27 ? [{ ...ref, explanation: repairQuote }] : [],
+            ...(i === 27 ? { progressDiagnosis: { status: "material", reason: "Added visible corroboration.",
+              evidence: { path: reviewPath, quote: repairQuote, change: "added" } } } : {}),
+          }), reason: "stop" };
+        }
+        if (postcommit && i === 24) return { content: [{ type: "toolCall", id: "r14e-composition-repair",
+          name: "edit", arguments: { path: reviewPath, edits: [{ oldText: "Ada knows only what the two signed records establish.",
+            newText: "Ada knows only what the two signed records establish. " + repairQuote }] } }], reason: "toolUse" };
+        if (postcommit && i === 25) return { content: scriptedText("Made the visible corroboration explicit."), reason: "stop" };
+        if (i >= 22 && i < 40 && i % 2 === 0) return {
           content: scriptedReadCalls([
             ...boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p),
             "skill://nt-catalog/references/glossary.md", ...currentStory(),
           ], i), reason: "toolUse",
         };
-        if (i >= 23 && i < 34 && i % 2 === 1) {
+        if (i >= 23 && i < 40 && i % 2 === 1) {
           const user = (ctx.messages as any[]).filter(m => m.role === "user")
             .flatMap(m => m.content.map((p: { text?: string }) => p.text ?? ""))
             .findLast((p: string) => p.includes("ASSIGNMENT:\n"));
@@ -4992,9 +5079,25 @@ test(mode === "event-only-complete"
       f.job.threadId + ":generation", { task, kind: "full-story",
         turnPlanDigest: turn.digest }, source);
     assert.equal(originalMethod.receipt.turnPlanDigest, turn.digest);
-    const saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+    // A budget pause re-enters through START, not a suspended child task.
+    // Seed the actual original objective-planning receipt before testing
+    // that path; the earlier fixture-only setup did not run the planner.
+    const planning = budgetPause ? await (async () => {
+      const { runtime: plannerRuntime } = await scriptedStoryRuntime((index) => {
+        if (index === 0) return { content: scriptedReadCalls(requiredOrchestratorSkillReads("autonomous")
+          .map(path => "skill://" + path), index), reason: "toolUse" };
+        assert.equal(index, 1);
+        return { content: scriptedText({ sourceSha: turn.source.verifiedSha, turnDigest: turn.digest,
+          assignments: turn.assignments.map((a: { id: string }) => ({ id: a.id,
+            reason: "Perform the original approved objective in causal order." })) }), reason: "stop" };
+      });
+      const { runPinnedObjectivePlanner } = await import("../src/orchestrator-planner.js");
+      return withJobModelRuntime(plannerRuntime, () => runPinnedObjectivePlanner(f.job, originalMethod,
+        turn, scriptedModel.provider, scriptedModel.id));
+    })() : null;
+    let saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
     try {
-      const graph = createGenerationGraph(saver, "cli");
+      let graph = createGenerationGraph(saver, "cli");
       const cfg = { configurable: { thread_id: f.job.threadId + ":generation" }, recursionLimit: 10000 };
       const initial = (await graph.getState(cfg)).values;
       assert.ok(initial.request);
@@ -5002,6 +5105,9 @@ test(mode === "event-only-complete"
         request: { ...initial.request, task, contract, fixture: false,
           provider: scriptedModel.provider, model: scriptedModel.id,
           turnPlanDigest: turn.digest, orchestrationPolicy: "explicit" },
+        ...(planning ? { orchestratorSnapshotId: originalMethod.receipt.skillSnapshot.id,
+          orchestratorOrder: planning.proposal!.assignments.map(a => a.id),
+          orchestratorPlanningDigest: planning.digest } : {}),
         completedStages, inventory: narrowed, adaptiveVersion: 2,
         planVersion: arch.plan.version, status: "running", reason: null,
         active: narrowed.items.find(i => i.id === "interactive:milestone.disclosure"),
@@ -5146,25 +5252,158 @@ test(mode === "event-only-complete"
       assert.equal(observed.length, 13,
         "retrying the original graph must not start another Choice/Blueprint/reviewer Pi call");
       if (closeout) {
+        if (!incomplete && !postcommit && !productive && !stalled) {
+          const receiptFile = join(f.job.stateDir, "composition-items/disclosure.json");
+          const sourceHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+          let identity: string[] | undefined;
+          const priorUsage = (await inspectPiPolicy(f.job)).budget.modelCalls;
+          for (const cut of [
+            { channel: "correction", ordinal: 0, calls: 18 },
+            { channel: "submission", ordinal: 1, calls: 20 },
+            { channel: "submission", status: "composition-authored", calls: 22 },
+            { channel: "submission", status: "composition-committed", calls: 22 },
+          ]) {
+            const abort = new AbortController();
+            const originalPut = saver.put.bind(saver);
+            const originalWrites = saver.putWrites.bind(saver);
+            const crash = Error("Composition child checkpoint loss: " + cut.channel + ":" + cut.calls);
+            let crashed = false;
+            saver.put = async (...args) => { if (crashed) throw crash; return originalPut(...args); };
+            saver.putWrites = async (config, writes, taskId) => {
+              if (crashed) throw crash;
+              const entry = writes.find(([channel]) => channel === cut.channel)?.[1] as
+                { receiptRef?: string; rejectedReceiptRef?: string; status?: string } | undefined;
+              const ref = entry?.receiptRef ?? entry?.rejectedReceiptRef;
+              if (config.configurable?.checkpoint_ns?.includes("assignment-") && observed.length === cut.calls &&
+                  (cut.status ? entry?.status === cut.status : ref?.split(":")[1] === String(cut.ordinal))) {
+                crashed = true; abort.abort(crash); throw crash;
+              }
+              return originalWrites(config, writes, taskId);
+            };
+            await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(null,
+              { ...cfg, signal: abort.signal, durability: "sync" })));
+            assert.ok(crashed, "Reached the actual nested Composition checkpoint");
+            assert.equal(observed.length, cut.calls, "No duplicate or premature Pi turn");
+            const saved = JSON.parse(readFileSync(receiptFile, "utf8"));
+            const actual = [saved.assignmentKey, saved.writerSessionId, saved.sessionFile, saved.reviewSessionFile];
+            assert.ok(actual.every(Boolean));
+            if (identity) assert.deepEqual(actual, identity);
+            identity = actual;
+            if (cut.status !== "composition-committed") assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), sourceHead);
+            else assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), saved.commitSha);
+            saver.db.close();
+            saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+            graph = createGenerationGraph(saver, "cli");
+            assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, priorUsage + cut.calls - 13,
+              "Checkpoint loss must not double charge writer or reviewer");
+            if (cut.calls === 18 && cancel) {
+              await setJobControl(f.job, "cancelled");
+              const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+              assert.equal(stopped.status, "cancelled");
+              assert.equal(observed.length, 18);
+              assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), sourceHead);
+              return;
+            }
+            if (cut.calls === 18 && budgetPause) {
+              const { configurePiPolicy } = await import("../src/job-pi-policy.js");
+              const policy = await inspectPiPolicy(f.job);
+              await configurePiPolicy(f.job, { ...policy.policy, limits: { ...policy.policy.limits, modelCalls: policy.budget.modelCalls } });
+              const paused = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+              assert.equal(paused.status, "paused", JSON.stringify({ reason: paused.reason, recovery: paused.recoveryLifecycle }));
+              assert.equal(observed.length, 18);
+              assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), sourceHead);
+              await configurePiPolicy(f.job, { ...policy.policy, limits: { ...policy.policy.limits, modelCalls: policy.budget.modelCalls + 100 } });
+              // Resume through the parent; the original settled rejection must be reused.
+              const resumed = await withJobModelRuntime(runtime, () => graph.invoke({ request: paused.request }, { ...cfg, interruptBefore: ["independent_assignment_review"] }));
+              assert.equal(resumed.result?.status, "composition-committed", JSON.stringify({reason: resumed.reason, recovery: resumed.recoveryLifecycle}));
+              assert.equal(observed.length, 22);
+              const result = JSON.parse(readFileSync(receiptFile, "utf8"));
+              assert.deepEqual([result.assignmentKey, result.writerSessionId, result.sessionFile, result.reviewSessionFile], identity);
+              assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, priorUsage + 9);
+              return;
+            }
+          }
+        }
         const composed = await withJobModelRuntime(runtime, () => graph.invoke(null,
-          { ...cfg, interruptBefore: ["independent_assignment_review"] }));
+          { ...cfg, interruptBefore: [postcommit || stalled ? "assess_recovery" : "independent_assignment_review"] }));
+        if (stalled) {
+          assert.equal(observed.length, 26, JSON.stringify({reason: composed.reason, recovery: composed.recoveryLifecycle}));
+          assert.equal(composed.recoveryLifecycle.active?.origin.operation, "specialist-result");
+          const caseId = composed.recoveryLifecycle.active!.id;
+          const saved = JSON.parse(readFileSync(join(f.job.stateDir, "composition-items/disclosure.json"), "utf8"));
+          assert.equal(saved.phase, "writing");
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), saved.beforeHead);
+          const decision = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+          assert.equal(decision.recoveryLifecycle.decision?.action, "diagnostic");
+          assert.equal(observed.length, 26);
+          const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+          assert.equal(stopped.status, "blocked");
+          assert.equal(stopped.recoveryLifecycle.active?.id, caseId);
+          assert.equal(stopped.recoveryLifecycle.decision?.action, "diagnostic-stop", JSON.stringify(stopped.recoveryLifecycle));
+          assert.equal(observed.length, 27);
+          assert.ok(!observed.at(-1)!.tools.includes("write") && !observed.at(-1)!.tools.includes("edit"));
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), saved.beforeHead);
+          const resumed = await withJobModelRuntime(runtime, () => graph.invoke({ request: stopped.request }, cfg));
+          assert.equal(resumed.status, "blocked");
+          assert.equal(resumed.recoveryLifecycle.active?.id, caseId);
+          assert.equal(observed.length, 27);
+          return;
+        }
         assert.equal(composed.result?.status, "composition-committed", JSON.stringify({
           status: composed.status, reason: composed.reason, result: composed.result,
           lifecycle: composed.recoveryLifecycle, modelCalls: observed.length,
         }));
         assert.equal(composed.active?.stage, "composition");
         const composition = JSON.parse(readFileSync(join(f.job.stateDir, "composition-items/disclosure.json"), "utf8"));
-        assert.equal(composition.invocationProof.ordinal, 1);
-        assert.equal(composition.reviewPin.round, 1);
+        assert.equal(composition.invocationProof.ordinal, productive ? 3 : 1);
+        assert.equal(composition.reviewPin.round, productive ? 3 : 1);
+        if (productive) for (const fix of fixes) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, "authored-content/disclose-ledger-scene.md"), "utf8").includes(fix));
         assert.match(readFileSync(join(f.job.worktreeStoryRoot, "authored-content/disclose-ledger-scene.md"), "utf8"),
           /Ada knows only what the two signed records establish/);
-        assert.equal(composed.recoveryLifecycle.active, null);
+        if (!postcommit) assert.equal(composed.recoveryLifecycle.active, null);
         assert.equal((await inspectInteractiveConflict(f.job,
           "milestone.disclosure", true)).expectedHead, head,
           "Historical Pi no-write source remains its original HEAD after later Composition");
-        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
+        if (!postcommit) assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver,
           cfg.configurable.thread_id), composed.recoveryLifecycle,
           "After subsequent Composition, C07 must authenticate the historical no-write correction against actual signed successor commits");
+        if (postcommit) {
+          const original = (await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === composition.commitSha);
+          assert.equal(original?.semanticReview, "failed", JSON.stringify({ reason: composed.reason, calls: observed.length }));
+          const failed = composed;
+          assert.equal(failed.recoveryLifecycle.active?.origin.operation, "independent-review", JSON.stringify({reason: failed.reason, calls: observed.length}));
+          assert.equal(observed.length, 24);
+          const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+          assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction");
+          const abort = new AbortController();
+          const put = saver.put.bind(saver), putWrites = saver.putWrites.bind(saver);
+          let crashed = false;
+          const error = Error("Lost Composition postcommit repair output");
+          saver.put = async (...args) => { if (crashed) throw error; return put(...args); };
+          saver.putWrites = async (config, writes, taskId) => {
+            if (crashed) throw error;
+            const submission = writes.find(([channel]) => channel === "submission")?.[1] as { status?: string } | undefined;
+            if (config.configurable?.checkpoint_ns?.includes("assignment-") && submission?.status === "repair-round" && observed.length === 26) {
+              crashed = true; abort.abort(error); throw error;
+            }
+            return putWrites(config, writes, taskId);
+          };
+          await assert.rejects(withJobModelRuntime(runtime, () => graph.invoke(null, {
+            ...cfg, interruptAfter: ["independent_assignment_review"], signal: abort.signal, durability: "sync" })));
+          assert.ok(crashed, "Reached the actual postcommit correction child publication");
+          assert.equal(observed.length, 26);
+          const successor = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+          assert.notEqual(successor, composition.commitSha);
+          saver.db.close();
+          saver = SqliteSaver.fromConnString(join(f.job.stateDir, "generation.sqlite"));
+          graph = createGenerationGraph(saver, "cli");
+          const passed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
+          assert.equal(passed.result?.headSha, successor, JSON.stringify({reason: passed.reason, calls: observed.length, lifecycle: passed.recoveryLifecycle}));
+          assert.equal(observed.length, 28);
+          await assertSubunitReviewSessions(f.job, {commitSha: composition.commitSha, piSessionFile: composition.sessionFile}, successor);
+          assert.match(readFileSync(join(f.job.worktreeStoryRoot, "authored-content/disclose-ledger-scene.md"), "utf8"), /Ada points to the matching signatures/);
+          assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+        }
         const finalGate = await withJobModelRuntime(runtime, () => graph.invoke(null,
           { ...cfg, interruptBefore: ["completion_decision"] }));
         assert.equal(finalGate.status, "running", JSON.stringify({

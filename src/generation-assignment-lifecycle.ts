@@ -36,7 +36,7 @@ export function usesSharedAssignmentReview(workItem: string | undefined | null):
  * admitted here; the older policy registry alone is not proof of migration. */
 export function usesCheckpointedReviewRounds(workItem: string): boolean {
   return ["foundation", "world-foundations", "character-foundations"].includes(workItem) ||
-    /^(?:interactive-(?:choice|puzzle)|event)-[a-z][a-z0-9-]*$/.test(workItem) ||
+    /^(?:interactive-(?:choice|puzzle)|event|composition)-[a-z][a-z0-9-]*$/.test(workItem) ||
     /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem);
 }
 /** Studio Discovery precedes any Generation job or Git write grant. */
@@ -134,7 +134,7 @@ type LifecycleState<I extends LifecycleIdentity> = ReturnType<typeof lifecycleCh
  * Keep its actual committed receipt alongside the outcome for parent replay. */
 export type AssignmentVerifiedSubmission<I extends LifecycleIdentity> = Readonly<{
   submission: AssignmentSubmission;
-} & ({ outcome: AssignmentOutcome<I> } | { correction: AssignmentCorrection } | { reviewPending: true })>;
+} & ({ outcome: AssignmentOutcome<I> } | { correction: AssignmentCorrection } | { reviewPending: true } | { publicationPending: true })>;
 
 export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> = Readonly<{
   /** Reauthenticate the parent authorization, source and uncertain effects. */
@@ -241,6 +241,12 @@ export function createAssignmentLifecycleGraph<I extends LifecycleIdentity = Ass
               verified.correction.rejectedReceiptRef !== verified.submission.receiptRef)
             throw Error("Correction lacks its verified successor submission.");
           return { submission: verified.submission, correction: verified.correction };
+        }
+        if ("publicationPending" in verified) {
+          if (!verified.publicationPending || verified.submission.receiptRef !== state.submission.receiptRef ||
+              verified.submission.status === state.submission.status || verified.submission.headSha)
+            throw Error("Publication requires the checkpointed verified draft reference.");
+          return { submission: verified.submission, correction: null, outcome: null };
         }
         if ("reviewPending" in verified) {
           if (!verified.reviewPending || verified.submission.receiptRef === state.submission.receiptRef ||

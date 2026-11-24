@@ -7,6 +7,7 @@ import type { JobStartResult } from "./job.js";
 import type { JobReport } from "./job-report.js";
 import { verifyPlanHistory, type Plan } from "./architecture.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
+import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
 import { type TurnEvidence } from "./turn-plan-evidence.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { assertTurnDeliveryHistory, deliveryCriteria, type NarrativeDeliveryCriteria } from "./turn-delivery.js";
@@ -52,7 +53,7 @@ export interface TurnFulfillmentPacket {
     milestonePlans?: Array<{ milestoneId: string; digest: string; eventHead: string;
       historicalDigest?: string; affected?: import("./milestone-obligation-handoff.js").MilestoneRevisionImpact }>;
     checkpoints: Array<{ commitSha: string; assignmentId: string; proofDigest: string;
-      review: string; assignmentDigest: string }> };
+      review: string; historicalReview?: string; assignmentDigest: string }> };
   goal: string;
   originalRequest: string;
   /** The original author promise, unaffected by later approved work amendments. */
@@ -105,10 +106,11 @@ function receiptPath(job: JobStartResult, packet: TurnFulfillmentPacket) {
 export async function assertMilestoneStageClosure(job: JobStartResult, handoff: ReviewedMilestoneHandoff,
   depth: Plan["contract"]["scope"]["depth"], checkpoints: readonly RecoveryInspection[]) {
   const slug = handoff.pin.milestoneId.slice("milestone.".length);
+  const coverage = await resolvedCheckpointReviews(job, [...checkpoints]);
   const reviewedCommit = (workItem: string, sha: unknown) => {
     if (typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha) ||
         !checkpoints.some(point => point.eligible && point.workItem === workItem &&
-          point.commitSha === sha && ["passed", "not-required"].includes(point.semanticReview)))
+          point.commitSha === sha && ["passed", "not-required"].includes(coverage.get(point.commitSha) ?? point.semanticReview)))
       throw Error("Final Milestone stage has no eligible independently reviewed checkpoint: " + workItem);
     git(job, "merge-base", "--is-ancestor", handoff.eventHead, sha);
     git(job, "merge-base", "--is-ancestor", sha, job.headSha);
@@ -299,9 +301,14 @@ export async function prepareTurnFulfillment(job: JobStartResult,
   const inspected = await inspectRecoveryCheckpoints(job);
   if (inspected.some(p => !p.eligible || !p.assurance))
     throw new Error("Turn contains invalid or untracked specialist checkpoints; cannot claim complete.");
-  const checkpoints = inspected.map(p => ({ commitSha: p.commitSha, assignmentId: p.assurance!.assignmentId,
-      proofDigest: p.proofDigest, review: p.semanticReview,
-      assignmentDigest: p.assurance!.assignmentDigest })).sort((a, b) =>
+  const coverage = await resolvedCheckpointReviews(job, inspected);
+  const checkpoints = inspected.map(p => {
+    const review = coverage.get(p.commitSha) ?? p.semanticReview;
+    return { commitSha: p.commitSha, assignmentId: p.assurance!.assignmentId,
+      proofDigest: p.proofDigest, review,
+      ...(review !== p.semanticReview ? { historicalReview: p.semanticReview } : {}),
+      assignmentDigest: p.assurance!.assignmentDigest };
+  }).sort((a, b) =>
       a.commitSha.localeCompare(b.commitSha));
   if (checkpoints.some(p => !["passed", "not-required"].includes(p.review)))
     throw new Error("Independent assignment reviews remain pending or failed; Turn cannot complete.");

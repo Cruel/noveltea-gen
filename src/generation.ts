@@ -729,7 +729,7 @@ async function applyLiveSteeringAtBoundary(job: JobStartResult, request: Generat
   return null;
 }
 
-async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<State, "inventory">>, unit?: InteractiveDomain | "world" | "character", round?: { assignmentKey: string; command: AssignmentRoundCommand }) {
+async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<State, "inventory">>, unit?: InteractiveDomain | "world" | "character", round?: { assignmentKey: string; command: AssignmentRoundCommand; publish?: true }) {
   const foundationUnit = unit === "world" || unit === "character" ? unit : undefined;
   const interactiveUnit = unit === "choice" || unit === "puzzle" ? unit : undefined;
   const input = s.request;
@@ -780,7 +780,7 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
       unit: interactiveUnit ?? (s.active.stage === "interactive" ? undefined : s.active.stage),
       deferBoundary: s.active.stage === "interactive" && interactiveUnit === "choice",
       interactionInventory: s.inventory?.items, round });
-    case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run" });
+    case "composition": return runCompositionWorkItem({ ...input, task: guidedTask, milestone, action: "run", round });
     case "focus": return runFocusedWorkItem({ ...input, target: milestone, task: input.task, steering, round });
     case "review": return runNarrativeReview({ ...input, action: "run" });
     default: throw new Error("Invalid generation stage.");
@@ -1879,7 +1879,10 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     ? await inspectFocusedPrerequisite(job, active.milestone, s.request.turnPlanDigest, s.request.fixture, s.planVersion) : null;
   const pendingEvent = active.stage === "event" && !reroute && !correction
     ? await inspectPendingEventInvocation(job, active.milestone) : null;
-  const sourceHead = focusSource?.report.sourceSha ?? (root ? root.parentSha : pendingEvent?.expectedHead ?? s.inventory.headSha);
+  const pendingComposition = active.stage === "composition" && !correction
+    ? await inspectPendingCompositionInvocation(job, active.milestone) : null;
+  const sourceHead = focusSource?.report.sourceSha ?? (root ? root.parentSha :
+    pendingEvent?.expectedHead ?? pendingComposition?.beforeHead ?? s.inventory.headSha);
   const workItem = active.stage === "focus" ? active.id : active.stage + "-" + active.milestone.slice(10);
   const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
   const identity: AssignmentIdentity = {
@@ -1923,14 +1926,17 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     if (logicalAssignmentKey(saved) !== key || continuationRef !== (correction?.id ?? null))
       throw new ProtocolIntegrityBlockedError("Narrative checkpoint belongs to another admitted logical assignment.");
   };
-  const runRound = async (command: AssignmentRoundCommand): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
+  const runRound = async (command: AssignmentRoundCommand, publish?: true): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
     const stopped = await preflight();
     if (stopped) return stopped;
     try {
-      const round = active.stage === "event" ? { assignmentKey: key, command } : undefined;
+      const round = { assignmentKey: key, command, publish };
       result = reroute ? await runEventWorkItem({ ...s.request, action: "run", milestone,
         task: reroute.task, reroute, round }) : await dispatch(s, undefined, round);
-      return subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, ref);
+      const saved = subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, ref);
+      if (result.status === "composition-authored" && "status" in saved && saved.status === "writer-round")
+        return { ...saved, status: "composition-authored" };
+      return saved;
     } catch (error) {
       if (error instanceof AssignmentAuthorPauseError) return disposition("paused", "job-control");
       if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
@@ -1947,7 +1953,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     if ("correctionRef" in invoked) throw new ProtocolIntegrityBlockedError("Event invocation cannot admit its own correction.");
     return invoked;
   };
-  const checkpointedReview = !!correction && active.stage !== "composition";
+  const checkpointedReview = !!correction;
   const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight,
     (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome);
   const child = (correction ? createAssignmentLifecycleGraph :
@@ -1964,8 +1970,8 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     correct: async state => {
       assertIdentity(state.identity, state.continuationRef);
       if (checkpointedReview) return reviewRounds.correct(state.submission!, state.correction!);
-      if (active.stage !== "event" || correction)
-        throw new ProtocolIntegrityBlockedError("Writer correction has no original Event assignment.");
+      if (!["event", "composition"].includes(active.stage) || correction)
+        throw new ProtocolIntegrityBlockedError("Writer correction has no original narrative assignment.");
       return invokeRound({ phase: "correct", proof: subunitRoundProof(state.submission!),
         grantDigest: state.correction!.correctionRef });
     },
@@ -1975,13 +1981,26 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       if (stopped) return stopped;
       let submission = state.submission!;
       if (checkpointedReview) return reviewRounds.verify(submission);
+      if (submission.status === "composition-authored") {
+        if (active.stage !== "composition")
+          throw new ProtocolIntegrityBlockedError("Foreign Composition publication submission");
+        const published = await runRound({ phase: "verify", proof: subunitRoundProof({ ...submission, status: "writer-round" }) }, true);
+        if ("assignmentKey" in published) return published;
+        if ("correctionRef" in published || published.status !== "composition-committed" || !published.headSha)
+          throw new ProtocolIntegrityBlockedError("Composition publication failed to settle its verified draft");
+        return { submission: published, reviewPending: true as const };
+      }
       if (submission.status === "writer-round") {
-        if (active.stage !== "event" || correction)
-          throw new ProtocolIntegrityBlockedError("Foreign Event round submission.");
+        if (!["event", "composition"].includes(active.stage) || correction)
+          throw new ProtocolIntegrityBlockedError("Foreign narrative round submission.");
         const verified = await runRound({ phase: "verify", proof: subunitRoundProof(submission) });
         if ("assignmentKey" in verified || "correctionRef" in verified) return verified;
+        if (verified.status === "composition-authored") {
+          if (active.stage !== "composition") throw new ProtocolIntegrityBlockedError("Foreign draft acceptance");
+          return { submission: verified, publicationPending: true as const };
+        }
         if (verified.status === "writer-round")
-          throw new ProtocolIntegrityBlockedError("Event verification did not settle the original round.");
+          throw new ProtocolIntegrityBlockedError("Narrative verification did not settle the original round.");
         submission = verified;
         if (accepted[active.stage].includes(submission.status) && submission.headSha)
           return { submission, reviewPending: true as const };
@@ -2035,7 +2054,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     return { result: { ...s.result!, headSha: finished.outcome.headSha } };
   }
   const submission = finished.submission;
-  const candidate = correction ? s.result : submission && submission.status !== "writer-round"
+  const candidate = correction ? s.result : submission && !["writer-round", "composition-authored"].includes(submission.status)
     ? { status: submission.status, headSha: submission.headSha } : null;
   if (patch && (patch.status || patch.operationRecovery || patch.reviewAssessmentRequested ||
       patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest))
@@ -2258,7 +2277,7 @@ async function reviewPrerequisiteIdentity(s: State, config: RunnableConfig,
   const owner = request.classification === "new-full-story-record" ? "nt-character-development" :
     request.classification === "other-owner" && owners.length === 1 ? owners[0]!.specialist : null;
   if (!owner) throw Error("Review prerequisite does not have a unique authorized owner.");
-  const migrated = /^(?:event-|focus:)/.test(request.originalWorkItem);
+  const migrated = /^(?:event-|composition-|focus:)/.test(request.originalWorkItem);
   const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = s.active;
   const focusSource = migrated && s.active.stage === "focus" && s.active.milestone
     ? await inspectFocusedPrerequisite(job, s.active.milestone, request.turnDigest, false, request.basePlanVersion) : null;

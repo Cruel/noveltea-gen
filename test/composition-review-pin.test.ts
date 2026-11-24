@@ -1,3 +1,4 @@
+import { sealCompositionReviewFixture } from "./support/composition-review-protocol.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -106,11 +107,13 @@ test("Composition approval binds original independent transcript, actual prose, 
       writer,
       reviewer,
       sources: { [path]: sha(prose) },
+      sourceText: { [path]: prose },
       verdict,
       transcriptBytes: transcript.length,
       transcriptDigest: sha(transcript.toString()),
     };
     writeFileSync(join(directory, "round-0.json"), JSON.stringify(receipt));
+    await sealCompositionReviewFixture(directory, receipt);
     const pin = { cycleId, round: 0, receiptDigest: sha(JSON.stringify(receipt)) };
     const verify = () =>
       verifyCompositionReviewPin(
@@ -126,6 +129,13 @@ test("Composition approval binds original independent transcript, actual prose, 
         [path],
         pin,
       );
+    const protocolFile = join(directory, "round-0.protocol.initial.json");
+    const savedProtocol = readFileSync(protocolFile, "utf8");
+    const foreignProtocol = JSON.parse(savedProtocol);
+    foreignProtocol.sourceDigest = "0".repeat(64);
+    writeFileSync(protocolFile, JSON.stringify(foreignProtocol));
+    await assert.rejects(verify(), /Receipt contract, source, session or budget differs/);
+    writeFileSync(protocolFile, savedProtocol);
     const passed = await verify();
     assert.equal(passed.verdict, "pass");
     assert.deepEqual(passed.sourceEvidence, verdict.sourceEvidence);

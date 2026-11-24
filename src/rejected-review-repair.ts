@@ -227,7 +227,7 @@ export async function readRejectedRepairOrigin(job: JobStartResult, point: Recov
       !raw.snapshot || !raw.provider || !raw.model)
     throw Error("Failed review cannot be repaired without the original committed Pi writer identity.");
   const sessionFile: string | undefined = unit.piSessionFile ?? unit.sessionFile;
-  let sessionId: string | undefined = unit.piSessionId ?? unit.sessionId;
+  let sessionId: string | undefined = unit.piSessionId ?? unit.sessionId ?? unit.writerSessionId;
   const sessionDir = foundation
     ? join(job.stateDir, "foundation-sessions") + sep
     : point.workItem.startsWith("event-")
@@ -254,6 +254,8 @@ export async function readRejectedRepairOrigin(job: JobStartResult, point: Recov
     await verifyJobPiSession(job, "foundation", sessionFile, sessionId);
   else if (point.workItem.startsWith("event-"))
     await verifyJobPiSession(job, "event", sessionFile, sessionId, point.workItem);
+  else if (point.workItem.startsWith("composition-"))
+    await (await import("./composition-work.js")).verifyCompositionReviewOrigin(job, point);
   else if (point.workItem.endsWith("-foundations"))
     await (await import("./character-world.js")).verifyCharacterWorldReviewOrigin(job, point);
   return { workItem: point.workItem, sessionFile, sessionId, provider: raw.provider,
@@ -2206,7 +2208,7 @@ export async function executeReviewRound(job: JobStartResult,
     const assessment = await foundationReviewBoundary(job, state);
     if (assessment) return { status: "assess", sourceSha, assessment };
     if (state.phase === "needs-plan" && state.outOfAuthority &&
-        /^(?:event-|focus:)/.test(state.origin.workItem)) {
+        /^(?:event-|composition-|focus:)/.test(state.origin.workItem)) {
       // The negative verdict and exact out-of-authority report are evidence,
       // never authority to run the other owner. The parent admits support.
       await attestNegativeReviewRound(job, state, point);

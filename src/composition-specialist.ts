@@ -6,9 +6,9 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
-import { recoverSubmittedAssignment, AssignmentAuthorPauseError, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
-import { reportControllerReviewPhase } from "./controller-review-phase.js";
+import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolResponse, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath, requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
@@ -19,12 +19,11 @@ import { preparePiContext, guardPiBudget, piNarrativeGroup, registerPendingPiSes
 import { completedContextReads } from "./story-context.js";
 import type { SkillConfig } from "./skills.js";
 import { pinnedSkillReferences, type SkillSnapshot } from "./snapshot.js";
-import { reviewCycleId, assertReviewCycleSession, sourceReviewDiagnosticTrigger } from "./review-cycle.js";
+import { reviewCycleId, assertReviewCycleSession } from "./review-cycle.js";
 import {
   compositionReviewConvergence,
   compositionReviewRequirements,
   parseCompositionReview,
-  parseCompositionDiagnosis,
   type CompositionReviewRound,
   type CompositionReviewVerdict,
 } from "./composition-review-policy.js";
@@ -133,7 +132,7 @@ async function createSession(
   provider: string,
   modelId: string,
   thinking: "low" | "high" | undefined,
-  phase: "write" | "review" | "diagnostic",
+  phase: "write" | "review",
   extraPaths: string[] = [],
   insideWriter = false,
   original?: { file: string; id: string },
@@ -164,6 +163,9 @@ async function createSession(
   }
   const runtime = await createJobModelRuntime();
   const dir = join(job.stateDir, "composition-sessions", assignment.workItemId, phase);
+  if (original && (!original.file.startsWith(dir + sep) ||
+      await realpath(original.file) !== original.file || !(await lstat(original.file)).isFile()))
+    throw new ProtocolIntegrityBlockedError("Composition session escaped its original assignment directory");
   const context = await preparePiContext(
     job,
     project,
@@ -226,18 +228,7 @@ async function createSession(
     pinned: guidance.map((p) => join(snapshot.path, "skills", p)),
   };
 }
-function lastReply(session: Awaited<ReturnType<typeof createSession>>["session"]) {
-  const last = [...session.messages].reverse().find((m) => m.role === "assistant");
-  if (!last || last.role !== "assistant" || ["error", "aborted"].includes(last.stopReason)) {
-    throw new Error(
-      "Composition Pi turn failed: " + (last?.role === "assistant" ? last.stopReason : "no response"),
-    );
-  }
-  return last.content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text)
-    .join("\n");
-}
+
 function toolPaths(
   session: Awaited<ReturnType<typeof createSession>>["session"],
   projectRoot: string,
@@ -286,10 +277,11 @@ export async function authorComposition(
   thinking: "low" | "high" | undefined,
   onSession: (file: string, id: string) => Promise<void>,
   verifyDraft: (evidence: CompositionEvidence) => Promise<{ problems: string[]; stage: "pre-review" | "editorial";
-    reviewProgress?: { receiptDigest: string; productive: boolean } }>,
+    reviewProgress?: { receiptDigest: string; productive: boolean }; defects?: AssignmentDefect[] }>,
   original: { sourceDigest: string; authorize: () => Promise<void>; effect: () => Promise<string | null>;
     session?: { file: string; id: string } },
-): Promise<CompositionEvidence> {
+  round: AssignmentRoundCommand,
+): Promise<CompositionEvidence | { round: AssignmentRoundResult }> {
   const { session, project, pinned, context, sandboxed } = await createSession(
     job,
     snapshot,
@@ -352,7 +344,7 @@ export async function authorComposition(
       specialistAuthorInstruction(assignment.authorTask);
     if (!sessionFile) throw Error("Composition writer lacks an original session");
     let accepted: CompositionEvidence | undefined;
-    const invocationProof = await recoverSubmittedAssignment({
+    const settled = await executeAssignmentRound({
       session, directory: compositionInvocationDirectory(job, assignment.workItemId, session.sessionId, original.sourceDigest),
       sourceDigest: original.sourceDigest,
       sessionRoots: [join(job.stateDir, "composition-sessions", assignment.workItemId, "write")],
@@ -386,15 +378,17 @@ export async function authorComposition(
           conflicts: parsed.architecturalConflicts, obligations: parsed.laterObligations,
           skillReads: pinned, piSessionFile: sessionFile, piSessionId: session.sessionId };
         const feedback = await verifyDraft(evidence);
+        if (feedback.defects?.length) return feedback.defects;
         if (!feedback.problems.length) accepted = evidence;
-        return feedback.problems.map(detail => ({ kind: "semantic" as const,
+        return feedback.problems.map(detail => ({ kind: feedback.stage === "editorial" ? "semantic" as const : "requirement" as const,
           path: assignment.milestoneId, code: createHash("sha256").update(feedback.stage + ":" + detail).digest("hex"), detail,
           ...(feedback.reviewProgress ? { reviewProgress: feedback.reviewProgress } : {}) }));
       },
-    });
+    }, round);
+    if (settled.status !== "accepted") return { round: settled };
     if (!accepted) throw Error("Original Composition invocation has no independently checked result");
     await context.completed(sessionFile, session.sessionId);
-    return { ...accepted, invocationProof };
+    return { ...accepted, invocationProof: settled.proof };
   } finally {
     session.dispose();
   }
@@ -522,6 +516,33 @@ function transcriptReviewVerdict(prefix: Buffer): unknown {
   return last;
 }
 
+function compositionReviewRoundSource(cycleId: string, round: number, writer: SessionIdentity,
+  reviewer: SessionIdentity, previousDigest: string | null, sources: Record<string, string>) {
+  return hash(JSON.stringify({ cycleId, round, writer, reviewer, previousDigest, sources }));
+}
+
+async function verifyCompositionRoundAuthority(job: JobStartResult, assignment: CompositionAssignment,
+  receipt: CompositionReviewReceipt, history: CompositionReviewRound[]) {
+  const base = join(reviewDirectory(job, receipt.cycleId), "round-" + receipt.round + ".protocol");
+  const started = JSON.parse(await readFile(base + ".started.json", "utf8"));
+  if (started.sessionId !== receipt.reviewer.id || started.sessionFile !== receipt.reviewer.file)
+    throw new ProtocolIntegrityBlockedError("Composition protocol lost its admitted reviewer");
+  const parse = (raw: string) => parseCompositionReview(raw, Object.keys(receipt.sourceText),
+    receipt.sourceText, { assignment: JSON.stringify(assignment), policy: compositionReviewRequirements }, history);
+  const verdict = await inspectCompletedProtocolResponse({
+    receiptFile: base, contract: "composition.draft-review.v2",
+    sourceDigest: compositionReviewRoundSource(receipt.cycleId, receipt.round, receipt.writer,
+      receipt.reviewer, receipt.previousDigest, receipt.sourceText),
+    sessionRoots: [join(job.stateDir, "composition-sessions", assignment.workItemId, "review")],
+    sealedPrefix: { transcriptBytes: receipt.transcriptBytes, transcriptSha256: receipt.transcriptDigest },
+    requireSealedTranscript: true,
+    validate: raw => { try { parse(raw); return []; } catch { return [{ path: "$", expected: "source-bound editorial verdict" }]; } },
+    parse,
+  });
+  if (JSON.stringify(verdict) !== JSON.stringify(receipt.verdict))
+    throw new ProtocolIntegrityBlockedError("Composition review protocol differs from its round receipt");
+}
+
 export async function verifyCompositionReviewPin(
   job: JobStartResult,
   snapshot: SkillSnapshot,
@@ -534,6 +555,7 @@ export async function verifyCompositionReviewPin(
   writer: SessionIdentity,
   paths: string[],
   pin: CompositionReviewPin,
+  committedSource?: Record<string, string>,
 ) {
   const cycleId = compositionReviewCycleId(
     job,
@@ -567,9 +589,10 @@ export async function verifyCompositionReviewPin(
     throw Error("Composition review admission has wrong writer provenance.");
   assertReviewCycleSession(writer, admitted.reviewer);
   await reviewerTranscript(job, writer);
-  const current = await compositionSource(job.worktreeStoryRoot, paths);
+  const current = committedSource ?? await compositionSource(job.worktreeStoryRoot, paths);
   let previousDigest: string | null = null;
   let sealedReview: SemanticReview | undefined;
+  const history: CompositionReviewRound[] = [];
   for (let round = 0; round <= pin.round; round++) {
     const receipt = JSON.parse(
       await readFile(reviewRoundFile(job, cycleId, round), "utf8"),
@@ -598,6 +621,13 @@ export async function verifyCompositionReviewPin(
       JSON.stringify(receipt.verdict)
     )
       throw Error("Composition review receipt does not match the Pi review response.");
+    const verified = parseCompositionReview(JSON.stringify(receipt.verdict), Object.keys(receipt.sourceText),
+      receipt.sourceText, { assignment: JSON.stringify(assignment), policy: compositionReviewRequirements }, history);
+    if (JSON.stringify(Object.fromEntries(Object.entries(receipt.sourceText).map(([p, v]) => [p, hash(v)]))) !==
+        JSON.stringify(receipt.sources))
+      throw Error("Composition review historical source changed");
+    await verifyCompositionRoundAuthority(job, assignment, receipt, history);
+    history.push({ sources: receipt.sourceText, verdict: verified });
     previousDigest = hash(JSON.stringify(receipt));
     if (
       round === pin.round &&
@@ -617,151 +647,6 @@ export async function verifyCompositionReviewPin(
   }
   if (!sealedReview) throw Error("Composition review has no sealed current pass.");
   return sealedReview;
-}
-
-function compositionDiagnosticEvidence(cycleId: string, trigger: string,
-  sources: Record<string, string>, history: CompositionReviewRound[]) {
-  return hash(JSON.stringify({
-    cycleId, trigger,
-    sources: Object.fromEntries(Object.entries(sources).map(([p, v]) => [p, hash(v)])),
-    history: history.map(r => ({ verdict: r.verdict,
-      sources: Object.fromEntries(Object.entries(r.sources).map(([p, v]) => [p, hash(v)])),
-    })),
-  }));
-}
-
-/** Fresh independent Diagnosis is deliberately unable to approve prose. */
-async function diagnoseComposition(
-  job: JobStartResult,
-  snapshot: SkillSnapshot,
-  assignment: CompositionAssignment,
-  provider: string,
-  model: string,
-  thinking: "low" | "high" | undefined,
-  writer: SessionIdentity,
-  reviewer: SessionIdentity,
-  cycleId: string,
-  paths: string[],
-  sources: Record<string, string>,
-  history: CompositionReviewRound[],
-  trigger: string,
-) {
-  const evidenceDigest = compositionDiagnosticEvidence(cycleId, trigger, sources, history);
-  const file = join(reviewDirectory(job, cycleId), "diagnostic-" + history.length + ".json");
-  const { session, project, pinned, context } = await createSession(
-    job,
-    snapshot,
-    assignment,
-    provider,
-    model,
-    thinking,
-    "diagnostic",
-    paths,
-    true,
-  );
-  try {
-    const diagnostic = { id: session.sessionId, file: session.sessionManager.getSessionFile() ?? "" };
-    if (
-      [writer.id, reviewer.id].includes(diagnostic.id) ||
-      [writer.file, reviewer.file].includes(diagnostic.file)
-    )
-      throw Error("Composition Diagnostic review must have an independent Pi conversation.");
-    const start = session.messages.length;
-    await guardPiBudget(
-      job,
-      "composition:" + assignment.workItemId + ":diagnostic:" + cycleId + ":" + history.length,
-      diagnostic.file,
-    );
-    await reportControllerReviewPhase("diagnosing");
-    await promptStorySpecialist(
-      session,
-      context.contextNote +
-        "You are an INDEPENDENT read-only DIAGNOSTIC, not the regular editorial " +
-        "reviewer, writer or controller. Read ALL pinned skills, actual current Authored " +
-        "Content, Events and route witnesses. Determine whether prior findings are " +
-        "material, cosmetic, deferred downstream, or outside this exact assignment. " +
-        "A diagnosis may recommend continue, replace the reviewer, split authorized " +
-        "scope or escalate. It CANNOT approve current prose, waive a blocker, authorize " +
-        "new edits or alter protected decisions.\nTRIGGER: " +
-        trigger +
-        "\nPINNED SKILLS:\n" +
-        pinnedSkillReferences(snapshot, pinned) +
-        "\nMANDATORY FILES:\n" +
-        [...new Set([...assignment.mandatoryReads, ...paths])].join("\n") +
-        "\nREQUIREMENTS:\n" +
-        compositionReviewRequirements +
-        "\nASSIGNMENT:\n" +
-        JSON.stringify(assignment) +
-        "\nPRIOR REVIEW ROUNDS AND ACTUAL SOURCE:\n" +
-        JSON.stringify(history) +
-        "\nRETURN strict JSON {schema:'noveltea-composition-diagnosis/v1'," +
-        "action:'continue'|'replace'|'split'|'escalate',explanation,assessments:[]} " +
-        "with one or more {kind:'material'|'deferred'|'cosmetic'|'scope',reason," +
-        "requirement:{source:'assignment'|'policy',quote},evidence:{path,quote}}. " +
-        "Quote exact requirement and CURRENT authored prose substrings (8+ chars).",
-    );
-    const missing = () => {
-      const calls = toolPaths(session, project.root, snapshot.path, start);
-      return [
-        ...pinned,
-        ...[...assignment.mandatoryReads, ...paths].map((p) => resolve(project.root, p)),
-      ].filter((p) => !calls.some((c) => c.tool === "read" && c.path === p));
-    };
-    const parse = () => {
-      if (missing().length) throw Error("Composition Diagnostic omitted required current sources.");
-      return parseCompositionDiagnosis(lastReply(session), paths, sources, {
-        assignment: JSON.stringify(assignment),
-        policy: compositionReviewRequirements,
-      });
-    };
-    let diagnosis: ReturnType<typeof parseCompositionDiagnosis>;
-    try {
-      diagnosis = parse();
-    } catch (error) {
-      await guardPiBudget(
-        job,
-        "composition:" + assignment.workItemId + ":diagnostic:" + cycleId + ":" + history.length,
-        diagnostic.file,
-      );
-      await promptStorySpecialist(
-        session,
-        "INDEPENDENT DIAGNOSTIC PROTOCOL CORRECTION. Re-read missing source files, " +
-          "do not alter Story files and return the strict diagnosis JSON with current " +
-          "source citations. Missing: " +
-          JSON.stringify(missing()) +
-          ". Controller reason: " +
-          String(error),
-      );
-      diagnosis = parse();
-    }
-    if (JSON.stringify(await compositionSource(project.root, paths)) !== JSON.stringify(sources))
-      throw Error("Composition Diagnostic source changed during independent assessment.");
-    await context.completed(diagnostic.file, diagnostic.id);
-    const transcript = await reviewerTranscript(job, diagnostic);
-    await writeFile(
-      file,
-      JSON.stringify(
-        {
-          schema: "noveltea-composition-diagnostic-receipt/v1",
-          cycleId,
-          trigger,
-          evidenceDigest,
-          writer,
-          reviewer,
-          diagnostic,
-          diagnosis,
-          transcriptBytes: transcript.length,
-          transcriptDigest: hash(transcript),
-        },
-        null,
-        2,
-      ) + "\n",
-      { flag: "wx", mode: 0o600 },
-    );
-    return { diagnosis, evidenceDigest };
-  } finally {
-    session.dispose();
-  }
 }
 
 export async function createCompositionReviewCycle(
@@ -822,8 +707,6 @@ export async function createCompositionReviewCycle(
     const history: CompositionReviewRound[] = [];
     let stalled = 0;
     let previousDigest: string | null = null;
-    let lastDiagnosedRound = 0;
-    const diagnosedSources = new Set<string>();
     let lastReceipt: CompositionReviewReceipt | undefined;
     let lastProductive = false;
     const projection = (receipt: CompositionReviewReceipt) => ({
@@ -850,30 +733,13 @@ export async function createCompositionReviewCycle(
           throw Error("Composition reviewer history changed");
         const verified = parseCompositionReview(JSON.stringify(receipt.verdict), Object.keys(receipt.sourceText),
           receipt.sourceText, { assignment: JSON.stringify(assignment), policy: compositionReviewRequirements }, history);
+        await verifyCompositionRoundAuthority(job, assignment, receipt, history);
         const convergence = compositionReviewConvergence(verified, receipt.sourceText, history, stalled);
         stalled = convergence.stalled;
         lastProductive = convergence.productive;
         history.push({ sources: receipt.sourceText, verdict: verified });
         previousDigest = hash(JSON.stringify(receipt));
         lastReceipt = receipt;
-        const trigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
-        if (trigger) {
-          const diagnosticPath = join(reviewDirectory(job, cycleId), "diagnostic-" + history.length + ".json");
-          if (!existsSync(diagnosticPath)) throw Error("Original Composition diagnostic requires reconciliation");
-          const saved = JSON.parse(await readFile(diagnosticPath, "utf8"));
-          const bytes = await reviewerTranscript(job, saved.diagnostic);
-          if (saved.schema !== "noveltea-composition-diagnostic-receipt/v1" || saved.cycleId !== cycleId ||
-              saved.trigger !== trigger || saved.evidenceDigest !== compositionDiagnosticEvidence(cycleId, trigger, receipt.sourceText, history) ||
-              saved.writer.id !== writer.id || saved.reviewer.id !== reviewer.id ||
-              hash(bytes.subarray(0, saved.transcriptBytes)) !== saved.transcriptDigest ||
-              JSON.stringify(transcriptReviewVerdict(bytes.subarray(0, saved.transcriptBytes))) !== JSON.stringify(saved.diagnosis) ||
-              saved.diagnosis.action !== "continue")
-            throw Error("Original Composition diagnostic is not a settled continuation");
-          const sourceDigest = hash(JSON.stringify(receipt.sourceText));
-          if (diagnosedSources.has(sourceDigest)) throw Error("Repeated Composition diagnostic source.");
-          diagnosedSources.add(sourceDigest);
-          lastDiagnosedRound = history.length; stalled = 0;
-        }
       }
       if (lastReceipt && transcript.length !== lastReceipt.transcriptBytes ||
           !lastReceipt && session.messages.some(m => m.role === "user" || m.role === "assistant"))
@@ -883,8 +749,14 @@ export async function createCompositionReviewCycle(
       async review(paths: string[], requiredRoutes: string[]) {
         const sources = await compositionSource(project.root, paths);
         const prior = history.at(-1);
-        if (lastReceipt && prior && JSON.stringify(sources) === JSON.stringify(prior.sources))
+        if (lastReceipt && prior && JSON.stringify(sources) === JSON.stringify(prior.sources)) {
+          if (lastReceipt.verdict.status === "pass" && requiredRoutes.some(route =>
+              !lastReceipt!.verdict.sourceEvidence.some(line => line.toLowerCase().includes(route.toLowerCase()))))
+            throw new ProtocolIntegrityBlockedError("Original Composition pass does not cover the required routes");
           return projection(lastReceipt);
+        }
+        if (lastReceipt?.verdict.status === "pass")
+          throw new ProtocolIntegrityBlockedError("Composition source changed after its passing review");
         if (prior && JSON.stringify([...paths].sort()) !== JSON.stringify(Object.keys(prior.sources).sort()))
           throw Error("Composition review draft inventory changed mid-cycle; reconcile scope.");
         if (previousDigest) {
@@ -899,6 +771,14 @@ export async function createCompositionReviewCycle(
           )
             throw Error("Composition reviewer history changed between revisions.");
         }
+        const protocolBase = join(reviewDirectory(job, cycleId), "round-" + history.length + ".protocol");
+        const contract = "composition.draft-review.v2";
+        const sourceDigest = compositionReviewRoundSource(cycleId, history.length, writer, reviewer, previousDigest, sources);
+        if (existsSync(protocolBase + ".started.json"))
+          throw new ProtocolIntegrityBlockedError("Original Composition reviewer invocation is unsettled; never replay");
+        const control = await readJobControl(job);
+        if (control === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (control !== "running") throw new AssignmentAuthorPauseError();
         const start = session.messages.length;
         await guardPiBudget(
           job,
@@ -962,7 +842,13 @@ export async function createCompositionReviewCycle(
           "Current required routes: " +
           JSON.stringify(requiredRoutes) +
           ".";
+        const after = await readJobControl(job);
+        if (after === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+        if (after !== "running") throw new AssignmentAuthorPauseError();
+        await beginProtocolInvocation({ receiptFile: protocolBase, contract, sourceDigest, session });
+        await registerPendingPiSession(job, reviewer.file);
         await promptStorySpecialist(session, prompt);
+        await recordPiSession(job, reviewer.file);
         const mandatory = [
           ...pinned,
           ...[...assignment.mandatoryReads, ...paths].map((path) => resolve(project.root, path)),
@@ -971,11 +857,11 @@ export async function createCompositionReviewCycle(
           const calls = toolPaths(session, project.root, snapshot.path, start);
           return mandatory.filter((path) => !calls.some((c) => c.tool === "read" && c.path === path));
         };
-        const parse = () => {
-          if (missingReads().length)
-            throw Error("Composition review omitted mandatory current-round method/source reads.");
+        if (missingReads().length)
+          throw new ProtocolIntegrityBlockedError("Composition review omitted mandatory current-round method/source reads");
+        const parse = (raw: string) => {
           const result = parseCompositionReview(
-            lastReply(session),
+            raw,
             paths,
             sources,
             {
@@ -994,26 +880,26 @@ export async function createCompositionReviewCycle(
             throw Error("Composition editorial pass omitted source-linked Choice/Puzzle route evidence.");
           return result;
         };
-        let verdict: CompositionReviewVerdict;
-        try {
-          verdict = parse();
-        } catch (error) {
-          await guardPiBudget(
-            job,
-            "composition:" + assignment.workItemId + ":editorial-review:" + history.length,
-            reviewer.file,
-          );
-          await promptStorySpecialist(
-            session,
-            "READ-ONLY PROTOCOL CORRECTION. This is NOT " +
-              "a creative revision. Read missing current files and return complete strict JSON " +
-              "with exact source citations and all historical blocker statuses. Missing reads: " +
-              JSON.stringify(missingReads()) +
-              ". Controller reason: " +
-              String(error),
-          );
-          verdict = parse();
-        }
+        const verdict = await recoverResponseContract({
+          session, contract, sourceDigest, receiptFile: protocolBase + ".initial.json", sealTranscript: true,
+          validate: raw => { try { parse(raw); return []; } catch { return [{ path: "$", expected: "exact source-bound independent verdict" }]; } },
+          parse,
+          beforeCorrection: async () => {
+            if (JSON.stringify(await compositionSource(project.root, paths)) !== JSON.stringify(sources))
+              throw new ProtocolIntegrityBlockedError("Composition source changed before format correction");
+            const control = await readJobControl(job);
+            if (control === "cancelled") throw new StoryCancelledError(assignment.workItemId);
+            if (control !== "running") throw new AssignmentAuthorPauseError();
+            await guardPiBudget(job, "composition:" + assignment.workItemId + ":editorial-review:" + history.length, reviewer.file);
+          },
+          feedback: () => "Return the exact source-linked editorial JSON contract, including every historical finding. " +
+            "No tools or new source claims; correct only the response format.",
+          prompt: async text => {
+            await registerPendingPiSession(job, reviewer.file);
+            await promptStorySpecialist(session, text);
+            await recordPiSession(job, reviewer.file);
+          },
+        });
         if (JSON.stringify(await compositionSource(project.root, paths)) !== JSON.stringify(sources))
           throw Error("Composition prose changed while the independent reviewer read it.");
         const convergence = compositionReviewConvergence(verdict, sources, history, stalled);
@@ -1042,40 +928,6 @@ export async function createCompositionReviewCycle(
         previousDigest = hash(JSON.stringify(receipt));
         history.push({ sources, verdict });
         lastReceipt = receipt;
-        const trigger = sourceReviewDiagnosticTrigger(history, stalled, lastDiagnosedRound);
-        if (trigger) {
-          const sourceDigest = hash(JSON.stringify(sources));
-          if (diagnosedSources.has(sourceDigest))
-            throw Error("Composition diagnosis already assessed this nonconverging source.");
-          const { diagnosis } = await diagnoseComposition(
-            job,
-            snapshot,
-            assignment,
-            provider,
-            modelId,
-            thinking,
-            writer,
-            reviewer,
-            cycleId,
-            paths,
-            sources,
-            history,
-            trigger,
-          );
-          diagnosedSources.add(sourceDigest);
-          lastDiagnosedRound = history.length;
-          if (diagnosis.action !== "continue")
-            throw Error(
-              "Composition Diagnostic review requires author-guided " +
-                (diagnosis.action === "replace"
-                  ? "independent reviewer replacement"
-                  : diagnosis.action === "split"
-                    ? "plan restructuring"
-                    : "escalation") +
-                "; a diagnosis cannot approve or expand a prose assignment.",
-            );
-          stalled = 0;
-        }
         return {
           review: {
             verdict: verdict.status === "pass" ? ("pass" as const) : ("block" as const),

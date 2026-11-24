@@ -1,3 +1,4 @@
+import { sealCompositionReviewFixture } from "./support/composition-review-protocol.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
@@ -121,11 +122,13 @@ test("negative Composition review, corrected refused-clue prose, same reviewer r
       writer,
       reviewer,
       sources: { [path]: sha(oldText) },
+      sourceText: { [path]: oldText },
       verdict: blocked,
       transcriptBytes: firstPrefix.length,
       transcriptDigest: sha(firstPrefix.toString()),
     };
     writeFileSync(join(cycleDir, "round-0.json"), JSON.stringify(first));
+    await sealCompositionReviewFixture(cycleDir, first);
 
     writeFileSync(target, newText);
     const passed = parseCompositionReview(
@@ -165,11 +168,13 @@ test("negative Composition review, corrected refused-clue prose, same reviewer r
       writer,
       reviewer,
       sources: { [path]: sha(newText) },
+      sourceText: { [path]: newText },
       verdict: passed,
       transcriptBytes: finalPrefix.length,
       transcriptDigest: sha(finalPrefix.toString()),
     };
     writeFileSync(join(cycleDir, "round-1.json"), JSON.stringify(second));
+    await sealCompositionReviewFixture(cycleDir, second);
     const pin = { cycleId, round: 1, receiptDigest: sha(JSON.stringify(second)) };
     const verify = () =>
       verifyCompositionReviewPin(
