@@ -4,7 +4,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { startStoryJob, type JobStartResult } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { promptStorySpecialist } from "./story-interruption.js";
@@ -14,7 +14,7 @@ import { trustedHead } from "./revision.js";
 import { validateStoryJob } from "./validator.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { createProjectResourceLoader } from "./pi.js";
-import { preparePiContext, inspectPiPolicy, recordPiSession, registerPendingPiSession } from "./job-pi-policy.js";
+import { preparePiContext, recordPiSession, registerPendingPiSession } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
 import { ideaResponseFailures, parseIdeaResponse, type IdeaResponse } from "./idea-response-contract.js";
 import { reconcileReadOnlyProtocol } from "./non-specialist-protocol.js";
@@ -336,13 +336,6 @@ async function piWork(job: JobStartResult, snapshot: SkillSnapshot, skill: strin
     const report = await reconcileReadOnlyProtocol(job, protocol, { provider, model: modelId, thinking },
       "idea:" + identity + ":review", assertOriginalSource);
     const provenance = await inspectCompletedProtocolReads(protocol);
-    const manager = SessionManager.open(provenance.sessionFile, dir, project.root);
-    const { resolved } = await inspectPiPolicy(job);
-    const messages = manager.buildSessionContext().messages;
-    const assistants = messages.filter(m => m.role === "assistant");
-    if (!resolved || manager.getHeader()?.cwd !== project.root || !assistants.length ||
-        assistants.some(m => m.provider !== resolved.selected.provider || m.model !== resolved.selected.model))
-      throw new ProtocolIntegrityBlockedError("Original idea report model or Story root differs");
     await recordPiSession(job, provenance.sessionFile);
     return await admitReport(report, provenance.reads, provenance.sessionFile);
   }

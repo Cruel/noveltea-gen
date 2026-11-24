@@ -91,7 +91,7 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       "dependency-plan:" + entry.reportDigest, async () => {
         if (await dependencyBoundary(job) !== entry.report.sourceSha)
           throw Error("Original dependency source changed.");
-      });
+      }, entry.planner.sessionFile);
     const proof = await inspectCompletedProtocolReads(protocol);
     const reads = proof.reads.map(path => canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
     if (proof.sessionFile !== entry.planner.sessionFile ||

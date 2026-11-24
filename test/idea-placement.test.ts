@@ -277,6 +277,17 @@ test("production idea selection corrects format, preserves refusal, and reconcil
     const replay = () => withJobModelRuntime(scripted.runtime, () => runIdeaPlacement({
       ...request, reconcileReadOnly: true,
     }));
+    const resolutionFile = join(x.job.stateDir, "pi-resolution.json");
+    const resolutionText = readFileSync(resolutionFile, "utf8");
+    const resolution = JSON.parse(resolutionText);
+    writeFileSync(resolutionFile, JSON.stringify({ ...resolution,
+      selected: { ...resolution.selected, model: "foreign-model" } }));
+    try {
+      await assert.rejects(replay(), /integrity-blocked/);
+      assert.equal(scripted.calls(), 2, "wrong model pin must not reopen the original conversation");
+    } finally {
+      writeFileSync(resolutionFile, resolutionText);
+    }
     const first = await replay();
     assert.equal(first.status, "deferred");
     assert.equal(scripted.calls(), 3);
