@@ -14,7 +14,7 @@ import { deriveReviewDependencyRequest, type EventCharacterRepairGrant,
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
-import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, parseDependencyReport,
+import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, parseDependencyReport,
   type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
   type DependencyAmendment } from "./dependency-amendments.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -31,7 +31,9 @@ export class ProtectedCrossOwnerPrerequisiteError extends Error {
 
 export const dependencyDigest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export const sourceDigest = (value: string) => createHash("sha256").update(value).digest("hex");
+export interface BlueprintDependencySource { milestoneId: string; readinessDigest: string; target: string; arcPath: string }
 export interface DependencyEntry {
+  blueprintSource?: BlueprintDependencySource;
   report: DependencyReport; reportDigest: string;
   /** The separate Event owner's reviewed correction; not part of the Character
    * specialist's new-record write grant. */
@@ -79,6 +81,51 @@ export async function dependencyTurn(job: JobStartResult): Promise<TurnEvidence>
   if (!plan?.objective) throw Error("Dependency amendments require the original source-bound Turn objective.");
   return plan;
 }
+/** Derive the same narrow obligation at each serial predecessor boundary from
+ * the original independently approved Blueprint, never model-supplied paths. */
+export async function blueprintDependencyReport(job: JobStartResult, source: BlueprintDependencySource,
+  head: string, turn: TurnEvidence): Promise<DependencyReport> {
+  const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(
+    job, source.milestoneId, source.readinessDigest);
+  const blockers = original.report.blockers.filter(b => b.characterId === source.target);
+  const arcs = original.assignment.sourcePaths.filter(path => /^arcs\/[a-z][a-z0-9-]*\.md$/.test(path));
+  const cited = [...new Set(blockers.map(b => b.anchorPath).filter(path => arcs.includes(path)))];
+  const arcPath = cited.length === 1 ? cited[0] : cited.length === 0 && arcs.length === 1 ? arcs[0] : undefined;
+  const arcId = arcPath && "arc." + arcPath.slice(5, -3);
+  const obligation = turn.objective?.obligations.find(x => /\bcharacters\b/i.test(x));
+  if (!arcPath || source.arcPath !== arcPath || !arcId || !original.assignment.arcIds.includes(arcId) ||
+      !blockers.length || blockers.some(b => b.readiness !== "unrealized-character") ||
+      !obligation || turn.kind !== "full-story" || turn.objective?.breadth !== "whole-story")
+    throw Error("Blueprint prerequisite lacks one unambiguous delegated Character/Arc owner.");
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const sources = [arcPath, original.assignment.milestonePath].map(path => {
+    const bytes = dependencyGit(job, "show", head + ":" + prefix + path);
+    const id = path === arcPath ? arcId : source.milestoneId;
+    const quote = bytes.split(/\r?\n/).find(line => line.trim() === "id: " + id);
+    if (!quote) throw Error("Blueprint prerequisite source ID differs from the original assignment.");
+    return { path, sha256: sourceDigest(bytes), quote };
+  });
+  return parseDependencyReport({
+    sourceSha: head, turnDigest: turn.digest, assignmentId: "event", obligation,
+    missing: "Realize " + source.target + " for " + source.milestoneId + ": " +
+      [...new Set(blockers.map(b => b.role))].join("; "),
+    affectedIds: [arcId, source.milestoneId], sources,
+    likelySpecialist: "nt-character-development", authorDecisionRequired: false,
+  });
+}
+export async function registerBlueprintDependency(job: JobStartResult,
+  milestoneId: string, readinessDigest: string, target: string) {
+  const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(job, milestoneId, readinessDigest);
+  const arcs = original.assignment.sourcePaths.filter(path => /^arcs\/[a-z][a-z0-9-]*\.md$/.test(path));
+  const cited = [...new Set(original.report.blockers.filter(b => b.characterId === target)
+    .map(b => b.anchorPath).filter(path => arcs.includes(path)))];
+  const arcPath = cited.length === 1 ? cited[0] : cited.length === 0 && arcs.length === 1 ? arcs[0] : undefined;
+  if (!arcPath) throw Error("Blueprint Character prerequisite has ambiguous Arc ownership.");
+  const source = { milestoneId, readinessDigest, target, arcPath };
+  const report = await blueprintDependencyReport(job, source, await dependencyBoundary(job), await dependencyTurn(job));
+  return recordDependency(job, report, false, source);
+}
+
 export async function inspectDependencyPlan(job: JobStartResult): Promise<DependencyPlan | null> {
   if (!existsSync(file(job))) return null;
   const saved = JSON.parse(await readFile(file(job), "utf8")) as DependencyPlan;
@@ -131,6 +178,27 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         entry.report.turnDigest !== turn.digest || typeof entry.fixture !== "boolean" ||
         !["reported", "planning", "authorized", "reviewing", "verified", "rejected"].includes(entry.phase))
       throw Error("Dependency report provenance is corrupt.");
+    if (entry.blueprintSource) {
+      const source = entry.blueprintSource;
+      const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(
+        job, source.milestoneId, source.readinessDigest);
+      const earlier = saved.entries.slice(0, saved.entries.indexOf(entry))
+        .filter(e => e.blueprintSource?.readinessDigest === source.readinessDigest);
+      if (entry.fixture || entry.reviewSourceSha ||
+          earlier.some(e => e.phase !== "verified" || e.blueprintSource!.target === source.target) ||
+          entry.report.sourceSha !== (earlier.at(-1)?.commitSha ?? original.report.expectedHead) ||
+          dependencyDigest(await blueprintDependencyReport(job, source, entry.report.sourceSha, turn)) !== entry.reportDigest)
+        throw Error("Blueprint dependency lost the original reviewed prerequisite or serial predecessor.");
+      if (entry.amendment) {
+        const a = entry.amendment.assignment;
+        if (a.specialist !== "nt-character-development" ||
+            JSON.stringify(a.targets) !== JSON.stringify([source.target]) ||
+            JSON.stringify(a.authority) !== JSON.stringify({ recordTypes: ["arc", "character"],
+              existingPaths: [source.arcPath], newPaths: ["characters/" + source.target.slice(10) + ".md"], mayCreate: true }) ||
+            a.outcome !== entry.report.missing || entry.proposal?.target !== source.target)
+          throw Error("Blueprint dependency grant differs from the exact reviewed predecessor.");
+      }
+    }
     if (entry.reviewSourceSha) {
       const review = saved.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
       if (!review || review.turnDigest !== entry.report.turnDigest ||
@@ -238,6 +306,12 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
           proof.sha256 !== dependencyDigest(paths.map(p => [p,
             sourceDigest(dependencyGit(job, "show", entry.commitSha + ":" + prefix + p))])))
         throw Error("Dependency committed bytes or exact diff differ from the work receipt.");
+      if (entry.blueprintSource) {
+        const { auditArcLink } = await import("./focused-work.js");
+        const arc = prefix + entry.blueprintSource.arcPath;
+        auditArcLink(dependencyGit(job, "show", a.sourceSha + ":" + arc),
+          dependencyGit(job, "show", entry.commitSha + ":" + arc), entry.blueprintSource.target);
+      }
       dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha!, "HEAD");
     }
   }
@@ -436,7 +510,7 @@ export async function registerReviewDependency(
   return { plan, entry };
 }
 
-export async function recordDependency(job: JobStartResult, value: unknown, fixture: boolean) {
+export async function recordDependency(job: JobStartResult, value: unknown, fixture: boolean, blueprintSource?: BlueprintDependencySource) {
   if (fixture) throw Error("Historical dependency fixture execution is retired.");
   const report = parseDependencyReport(value);
   const turn = await dependencyTurn(job);
@@ -449,12 +523,12 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
   const reportDigest = dependencyDigest(report);
   const prior = plan.entries.find(e => e.reportDigest === reportDigest);
   if (prior) {
-    if (prior.fixture !== fixture) throw Error("Dependency worker mode changed.");
+    if (prior.fixture !== fixture || JSON.stringify(prior.blueprintSource) !== JSON.stringify(blueprintSource)) throw Error("Dependency worker mode or source changed.");
     return { plan, entry: prior };
   }
   if (plan.entries.length >= 8 || plan.entries.some(e => e.phase !== "verified"))
     throw Error("Unresolved dependency or amendment limit reached; author reconciliation required.");
-  const entry: DependencyEntry = { report, reportDigest, fixture, phase: "reported" };
+  const entry: DependencyEntry = { report, reportDigest, fixture, phase: "reported", ...(blueprintSource ? { blueprintSource } : {}) };
   plan.entries.push(entry);
   await saveDependencyPlan(job, plan);
   return { plan, entry };
@@ -487,7 +561,12 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     .map(e => e.amendment!.assignment);
   const request = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
     r.sourceSha === entry.reviewSourceSha) : undefined;
-  const amendment = request?.classification === "other-owner"
+  const amendment = entry.blueprintSource
+    ? authorizeBlueprintCharacterDependency({ plan: turn, head, report: entry.report,
+        reportDigest: entry.reportDigest, proposal: proposal as ReviewCharacterProposal,
+        records: report.records, sources, version: plan.version, source: entry.blueprintSource,
+        priorAmendments })
+    : request?.classification === "other-owner"
     ? authorizeReviewOtherOwnerDependency({ plan: turn, head, request,
         proposal, reportDigest: entry.reportDigest, records: report.records,
         version: plan.version, priorAmendments })

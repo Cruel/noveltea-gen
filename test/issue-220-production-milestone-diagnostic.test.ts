@@ -56,7 +56,7 @@ const draft: MilestoneBlueprint = {
     evidence: [{
       anchorPath: milestonePath, source: "The visible gate register",
       observation: "The entry is dated today", access: "The guard can inspect the record",
-      establishes: "A dated register entry exists", limits: "No record of yesterday's visit",
+      establishes: "A dated register entry exists", limits: "No record of yesterday's visit", characterSources: [],
     }],
   }],
   downstream: [{ owner: "composition", obligation: "Present the dated entry in the player-facing scene" }],

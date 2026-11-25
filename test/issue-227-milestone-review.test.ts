@@ -33,7 +33,7 @@ const draft: MilestoneBlueprint = {
           observation: "An entry bears the clerk's alias",
           access: "The ledger is available",
           establishes: "The alias was entered in the gate register",
-          limits: "Does not establish who wrote the entry",
+          limits: "Does not establish who wrote the entry", characterSources: [],
         },
       ],
     },
@@ -432,4 +432,44 @@ test("prospective witness is a legitimate design, but remains a Character predec
   const currentAssignment = { ...assignment, characterIds: [witness.id] };
   assert.deepEqual(milestoneCharacterPrerequisites(
     parseMilestoneBlueprint(JSON.stringify(ready), currentAssignment), currentAssignment), []);
+});
+
+test("#260 new evidence declares Character sources but historical approvals still replay", () => {
+  const omitted = structuredClone(draft);
+  delete omitted.events[0]!.evidence[0]!.characterSources;
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify(omitted), assignment), /characterSources/);
+  assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(omitted), assignment, "sealed-replay"), omitted);
+  const prospective = structuredClone(draft);
+  prospective.events[0]!.participants = ["character.clerk"];
+  prospective.events[0]!.evidence[0]!.characterSources = [{ id: "character.clerk", availability: "prospective", role: "Testifies about the log." }];
+  const approved = parseMilestoneBlueprint(JSON.stringify(prospective), assignment);
+  assert.equal(milestoneCharacterPrerequisites(approved, assignment).length, 1);
+  const successor = { ...assignment, characterIds: ["character.clerk"] };
+  assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(prospective), successor), approved);
+  assert.equal(milestoneCharacterPrerequisites(approved, successor).length, 0);
+});
+
+test("#260 compact Review binds before and after instead of copying escaped evidence", () => {
+  const original = structuredClone(draft);
+  const finding = { ...meta, eventId: "register", evidence: { field: "purpose",
+    quote: original.events[0]!.purpose, repair: "replace" } };
+  const previous = history(original, finding);
+  const corrected = structuredClone(original);
+  corrected.events[0]!.purpose = "Read the dated register without implying testimony";
+  const result = parseMilestoneBlueprintReview(passProof({kind: "revised"}), corrected, assignment, previous);
+  assert.deepEqual(result.prior?.[0]?.evidence, { kind: "revised", eventId: "register",
+    field: "purpose", before: original.events[0]!.purpose, after: corrected.events[0]!.purpose });
+  assert.throws(() => parseMilestoneBlueprintReview(passProof({kind: "revised"}), original, assignment, previous));
+  assert.throws(() => parseMilestoneBlueprintReview(passProof({kind: "revised", eventId: "invented"}), corrected, assignment, previous));
+});
+
+test("#260 missing Interactive obligation can resolve by explicitly removing a mistaken choice implication", () => {
+  const original = structuredClone(draft);
+  original.events[0]!.routes = [{ condition: "The player chooses to investigate", consequence: "The dated log is read" }];
+  const prior = history(original, { ...meta, evidence: { target: "missing-downstream", owner: "interactive", repair: "extend" } });
+  const corrected = structuredClone(original);
+  corrected.events[0]!.routes = [];
+  const proof = { kind: "not-required", eventId: "register", field: "routes" };
+  assert.equal(parseMilestoneBlueprintReview(passProof(proof), corrected, assignment, prior).status, "pass");
+  assert.throws(() => parseMilestoneBlueprintReview(passProof(proof), original, assignment, prior));
 });

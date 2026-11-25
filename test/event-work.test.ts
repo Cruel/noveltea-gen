@@ -8,7 +8,7 @@ import { removeTestTree } from "./helpers.js";
 import { validateStoryJob } from "../src/validator.js";
 import { assignmentDiagnosticDefects } from "../src/generation-operation-strategy.js";
 import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding,
-  currentMilestoneChoiceBinding, eventFulfillmentDefect } from "../src/event-work.js";
+  currentMilestoneChoiceBinding, eventFulfillmentDefect, eventClusterDefects } from "../src/event-work.js";
 import { milestoneBodyOnlyDrift, milestoneBaselineBody,
   assertMilestoneFulfillmentOnly } from "../src/milestone-field-scope.js";
 import { parseMilestoneBlueprint, parseMilestoneBlueprintReview,
@@ -435,7 +435,7 @@ test("#207 Milestone plan validates local causality and rejects invented source/
     events: [{ id: "observe-proof", purpose: "Find inspectable evidence", dependsOn: [],
       evidence: [{ anchorPath: assignment.milestonePath, source: "A witness and recorded trace",
         observation: "Inspect an in-scene trace", access: "Player can reach witness",
-        establishes: "A limited discrepancy", limits: "Timing remains unverified" }],
+        establishes: "A limited discrepancy", limits: "Timing remains unverified", characterSources: [] }],
       participants: ["character.ada"], knowledge: "Only Ada sees the trace",
       routes: [{ condition: "Witness cooperates", consequence: "Later trust becomes possible" }] }],
     downstream: [{ owner: "composition", obligation: "Make evidence visible in player prose" }] };
@@ -472,4 +472,16 @@ test("live Revelation missing fulfillment is a typed local binding defect, not a
   assert.equal(assignmentDiagnosticDefects({ ...terminal, defects: [{ ...defect, code: "generic-semantic-conflict" }] }, "event:milestone.revelation"), false);
   for (const code of ["event-unreachable-binding", "event-local-evidence"])
     assert.equal(assignmentDiagnosticDefects({ ...terminal, defects: [{ ...defect, code }] }, "event:milestone.revelation"), true);
+});
+
+test("#260 player-only inspection is native-valid and cluster diagnostics identify exact offending fields", () => {
+  const assignment = { milestonePath: "milestones/disclosure.md", arcIds: ["arc.truth"], characterIds: ["character.ada"] };
+  const event = { path: "events/inspect.md", metadata: { id: "event.inspect", type: "event", status: "draft",
+    arcs: ["arc.truth"], participants: [], consequences: ["Ada finds a clue"],
+    prerequisites: { any_of: [{ completed: [], not_completed: [] }] } } };
+  assert.deepEqual(eventClusterDefects([event], assignment), []);
+  const invalid = { ...event, metadata: { ...event.metadata, participants: ["character.unknown"], arcs: ["arc.unowned"] } };
+  const defects = eventClusterDefects([invalid], assignment);
+  assert.ok(defects.some(d => d.path === event.path && d.pointer?.includes("participants")));
+  assert.ok(defects.some(d => d.path === event.path && d.pointer?.includes("arcs")));
 });

@@ -83,7 +83,7 @@ const reviewed: Record<string, string> = {
   "src/milestone-blueprint.ts:correctMissingReads": "1:37515b311c7fa3f3394d598f",
   "src/milestone-blueprint.ts:runMilestoneDiagnosis": "1:472d642e08dfedcc4efb5362",
   "src/milestone-blueprint.ts:sessionFor": "1:38a7ae9f654dd9891686776c",
-  "src/milestone-blueprint.ts:ensureMilestoneBlueprint": "2:6f17fc5a0d5606f6542cf756",
+  "src/milestone-blueprint.ts:ensureMilestoneBlueprint": "2:d1275d6b486837008624677b",
   "src/narrative-review-specialist.ts:sessionFor": "1:5766e269693eafad4bf26752",
   "src/narrative-review-specialist.ts:reviewNarrative": "3:7520c967cbb41f7d7155bbd2",
   "src/narrative-review-specialist.ts:reviewPostcommitDiagnosis": "3:ac31c10351cf7fa8109358b5",
@@ -149,12 +149,12 @@ const downstreamProducers = new Set([
 const downstreamReviewed: Record<string, string> = {
   // Parent admission and source-linked proposal / Review gates.
   "src/adaptive-work.ts:reconcileAdaptiveWork": "1:4b7540ae585f448c5ea0ac64",
-  "src/dependency-work.ts:advanceFocusedDependency": "2:f40c2fe0d59059a3efd4a964",
+  "src/dependency-work.ts:advanceFocusedDependency": "1:2db96f736de6cfcc237d46bc",
   "src/dependency-work.ts:advanceReviewDependency": "2:fd8f307545297c9e888fc4be",
   "src/dependency-work.ts:continueReviewDependency": "1:763cf4d2e8040ab5985f92bd",
   "src/generation.ts:independentAssignmentBoundary": "1:cd5885456ac1086a2ab87516",
   "src/generation.ts:createGenerationGraph": "3:fe5138c25fa72c5a69a3c5f9",
-  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:94834060fcd9351a5f2e8399",
+  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:cd9355fc9b2ab841a7278eed",
   // Validated, read-only verdict consumers and sealed evidence re-readers.
   "src/cross-domain-closeout-specialist.ts:authorMilestoneCloseout": "1:6039a9cb83869c2519f4bc80",
   "src/cross-domain-closeout-work.ts:recoveredCloseoutReview": "1:d07d3a0f91e221a2cb34c6d1",
@@ -187,6 +187,7 @@ const downstreamReviewed: Record<string, string> = {
   "web/src/lib/discovery-evidence.server.ts:meterDiscoveryAttempts": "1:e815c68da3ec4e1c0762231d",
   "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
   "web/src/lib/story-chat-discovery.server.ts:storyChatDiscoveryRequest": "1:14222f0213a6d39fc9d6254d",
+  "src/dependency-work.ts:runSupportingDependency": "1:7895ba856901609f7c900120",
 };
 
 test("R14L downstream reply consumers cannot multiply or change their disposition silently", () => {
@@ -242,18 +243,18 @@ const effectReviewed: Record<string, string> = {
   "src/cross-domain-closeout-work.ts:reviewerAssignment": "1:880610212e10fddd54a39ce8",
   "src/cross-domain-prerequisite-controller.ts:preflightCompositionBoundary": "1:93cd9ea2199739db5e6988ea",
   "src/dependency-state.ts:registerReviewDependency": "1:dd782da866472074f06be72f",
-  "src/dependency-state.ts:approveDependency": "1:db11742d41c40144de964cd5",
+  "src/dependency-state.ts:approveDependency": "1:c4f7e8f2c43b12a47a6aec00",
   "src/dependency-work.ts:supportingWriterRounds": "1:cd9fc1f151ce829348909d3b",
   "src/dependent-correction-work.ts:native": "1:c3469e6a1dcc5740024c502c",
   "src/event-manifest.ts:parseEventManifest": "1:9cd665fa6942929e0c38ccd3",
   "src/event-specialist.ts:authorEventCluster": "1:701d1c814dec11399c9b5d87",
   "src/event-work.ts:inspectEventBlueprintPrerequisite": "1:8a40c11de04a80ea1495dd84",
-  "src/event-work.ts:runEventWorkItem": "1:57123258d880a4b58407cadb",
+  "src/event-work.ts:runEventWorkItem": "1:3347ea4eaae14a41001163b1",
   "src/focused-work.ts:focusedSourceCatalog": "2:e6a96d7854b897f588b5b2bb",
-  "src/focused-work.ts:runFocusedWorkItem": "2:b1a71ff508cc137f9da59108",
+  "src/focused-work.ts:runFocusedWorkItem": "2:63eca6d80de4b7bea6eb735d",
   "src/foundation.ts:piAuthor": "1:9e5ed08fab9b974df4cfca50",
   "src/foundation.ts:executeFoundationGraph": "1:c8b2027f7012552fd2c41366",
-  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:94834060fcd9351a5f2e8399",
+  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:cd9355fc9b2ab841a7278eed",
   "src/generation.ts:reconcile": "3:f1a8db03717bd8d2dcc55b88",
   "src/generation.ts:applyLiveSteeringAtBoundary": "1:d3696b97d784629df921bf9a",
   "src/generation.ts:dispatch": "5:2527ecada0aa445518aa2b04",
@@ -301,6 +302,7 @@ const effectReviewed: Record<string, string> = {
   "web/src/lib/thread-restart.server.ts:verifyPreparedStory": "1:cd4062440147a57b2cfa46d1",
   "web/src/lib/thread-restart.server.ts:prepareThreadRestart": "1:3b37dbd6e8197e3a210d7f0c",
   "web/src/lib/thread-review.server.ts:readThreadReview": "1:5cb6f0a4ac899cee24f17c49",
+  "src/event-work.ts:rebindEventAfterBlueprintPredecessors": "1:b0f643f75eea985bbf581948",
 };
 
 test("R14L native, manifest and durable effect consumers retain reviewed source gates", () => {

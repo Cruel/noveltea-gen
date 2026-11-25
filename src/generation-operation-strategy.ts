@@ -1,3 +1,4 @@
+import { isGraphBubbleUp } from "@langchain/langgraph";
 /** Decisions at the existing assessor only. Original adapters retain every
  * receipt, writer lock, validation, independent review and budget check. */
 import { readBlueprintAssessment } from "./blueprint-reassessment.js";
@@ -406,9 +407,10 @@ export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
       c.origin.assignmentId === "event:" + readiness.milestoneId &&
       readiness.expectedHead === c.origin.sourceHeadSha && s.inventory.headSha === readiness.expectedHead &&
       readiness.planVersion === c.origin.planVersion) {
-    const { inspectEventBlueprintPrerequisite } = await import("./event-work.js");
-    const original = await inspectEventBlueprintPrerequisite(job, readiness.milestoneId,
-      s.request.validatorSource ?? s.request.skillsSource);
+    const { inspectEventBlueprintPrerequisite, blueprintReadinessHistory, inspectArchivedEventBlueprintPrerequisite } = await import("./event-work.js");
+    const original = existsSync(blueprintReadinessHistory(job, readiness.milestoneId, readiness.reportDigest))
+      ? (await inspectArchivedEventBlueprintPrerequisite(job, readiness.milestoneId, readiness.reportDigest)).report
+      : await inspectEventBlueprintPrerequisite(job, readiness.milestoneId, s.request.validatorSource ?? s.request.skillsSource);
     if (!isDeepStrictEqual(original, readiness)) return null;
     return { owner: "architecture", proof: { store: "specialist-receipt",
       ref: "event-items/" + readiness.milestoneId.slice(10) + ".json", digest: original.reportDigest } };
@@ -773,7 +775,7 @@ export async function authenticateSealedDiagnosticStop(job: JobStartResult, s: S
       "action" in sealed && d.recommendation === sealed.action && d.advisoryCategory === sealed.category);
 }
 
-export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle): Promise<Partial<State> | null> {
+export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle, config?: import("@langchain/core/runnables").RunnableConfig): Promise<Partial<State> | null> {
   const c = lifecycle.active!, d = lifecycle.decision!;
   if (!lifecycle.assessorPending || !d || !c || !s.recoverySources.some(x => x.caseId === c.id && x.channel === "operationRecovery") ||
       (d.action !== "diagnostic" &&
@@ -898,6 +900,29 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   try {
     const control = await readJobControl(job);
     if (control !== "running") return stop({ ...base(c), action: "pause", reason: control === "paused" ? "author-pause" : "cancelled" }, "Author control precedes corrective work.", control);
+    const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
+      x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+    if (d.action === "plan-amendment" && d.adapter === "dependency-work" && readiness &&
+        readiness.blockers.every(b => b.readiness === "unrealized-character")) {
+      if (!await authenticateOperationOwnerProof(job, s, c, d) ||
+          s.request.turnPlanDigest !== c.origin.turnDigest || s.request.job !== c.origin.jobId ||
+          job.threadId !== c.origin.jobThreadId || s.planVersion !== c.origin.planVersion)
+        throw Error("Blueprint dependency lost its original recovery decision.");
+      const { advanceBlueprintDependency } = await import("./dependency-work.js");
+      const result = await advanceBlueprintDependency(s.request, readiness, config);
+      const failures = { ...s.failures };
+      delete failures[c.origin.assignmentId!];
+      const inventory = { ...s.inventory!, headSha: result.head,
+        items: s.inventory!.items.map(item => item.id === c.origin.assignmentId
+          ? { ...item, status: "pending" as const, blockingReason: undefined }
+          : item) };
+      return { recoveryLifecycle: finishVerifiedRecovery(settled, {
+        status: "verified", caseId: c.id, sourceHeadSha: result.head,
+        assurance: { store: "dependency-plan", ref: readiness.reportDigest, digest: result.digest },
+      }, true), failures, inventory,
+        dependencyHistory: [...s.dependencyHistory.filter(p => !result.history.some(q => q.reportDigest === p.reportDigest)), ...result.history],
+        active: null, result: null, escalation: null, reason: null, status: "running" };
+    }
     const originalDraft = await originalAssignmentFailure(job, s, c);
     // No author-update mutation may run against an uncommitted rejected
     // draft. A settled original failure permits ONLY a tool-free diagnostic;
@@ -1040,10 +1065,12 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           receipt: attempt.settledRef!, recommendation: diagnosis.action, advisoryCategory: diagnosis.category }) };
     });
   } catch (error) {
+    if (config?.signal?.aborted || (error != null && isGraphBubbleUp(error))) throw error;
     if (error instanceof PiModelUnavailableError)
       return stop({ ...base(c), action: "pause", reason: "provider-unavailable" },
         error.message + "; pinned model and original source remain unchanged.", "paused");
     if (error instanceof Error && error.name === "PiBudgetPause") return stop({ ...base(c), action: "pause", reason: "budget" }, error.message, "paused");
+    if (error instanceof Error && error.name === "AssignmentAuthorPauseError") return stop({ ...base(c), action: "pause", reason: "author-pause" }, error.message, "paused");
     if (error instanceof Error && error.name === "StoryCancelledError") return stop({ ...base(c), action: "pause", reason: "cancelled" }, error.message, "cancelled");
     if (error instanceof ProtocolExhaustedError && d.action === "diagnostic") {
       // A failed response contract is not a forged or ambiguous writer receipt.

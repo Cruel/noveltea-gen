@@ -774,24 +774,38 @@ and limitations. No normative ADR or recovery authority has changed;
 paid/live provider certification remains #260.
 
 
-### #260 prospective Character readiness (partial qualification)
+### #260 prospective Character readiness and predecessor realization
 
 A local Milestone Blueprint can declare material evidence Character sources with
 an existing or prospective availability. The declared ID must belong to its
 provisional Event's participants, and an unknown ID must be explicitly
 prospective. Evidence still anchors to existing canonical records. Independent
 Review checks that the declarations faithfully cover the narrative obligations;
-no prose keyword test invents an owner or a grant. Historical plans lacking
-these declarations retain their original interpretation.
+no prose keyword test invents an owner or a grant. New Blueprint admissions require explicit declarations (including empty
+arrays for non-Character evidence). Historical sealed plans lacking them
+retain their original interpretation.
 
 At the Event boundary the controller checks the authenticated approved design
 against the current native catalog and authorized Arc participant set. An
 unrealized Character or an existing Character outside the Event authority
 produces a source-bound pre-dispatch readiness report, not a fabricated Event
 writer invocation or failed commit. The existing C03/C06 dependency-work
-assessment retains the reviewed design and requests owner/plan resolution.
-This is a safe stop, not yet automatic predecessor realization: the existing
-dependency plan must still admit a pre-Event source, independently review the
-supporting Character and any necessary authorized link, and rebind the original
-Event to the verified successor without erasing the original Blueprint.
-Protected changes require the existing author approval boundary.
+assessment retains the reviewed design. For a necessary unrealized Character
+with one unambiguous authorized Arc and a whole-Story delegated creation
+owner, the shared dependency plan admits a source-bound grant for that
+Character and a field-limited Arc link. The existing Focused writer and
+independent Review verify each serial predecessor. The Event receipt is
+rebound to the verified successor while preserving the approved Blueprint pin
+and original source inventory. Restart authenticates the original readiness,
+dependency history and rebind. No Event writer can create the Character.
+Existing out-of-lease Characters, ambiguous ownership, other record kinds
+and protected changes are not implicitly granted. A downstream untyped
+no-write report may still stop for separate plan/Review escalation.
+
+New Review responses may use compact historical finding selectors; the
+controller binds the exact original and revised evidence and authenticates
+normalized replies against the original transcript. Event-only designs may
+remove an implied player choice instead of manufacturing Interactive work.
+Player-only Events may have empty participants. Event cluster violations
+identify their exact record and field, and unresolved in-scope semantic
+conflicts use the existing writer correction ledger.

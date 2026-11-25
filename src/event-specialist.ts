@@ -51,6 +51,8 @@ export interface EventAssignment {
   authorTask?: string;
   /** Reviewed private local plan is a bounded obligation, never canonical authority. */
   milestoneBlueprint?: { digest: string; design: import("./milestone-blueprint.js").MilestoneBlueprint };
+  /** Exact independently approved pre-predecessor source, not a new lease. */
+  blueprintSource?: { reportDigest: string; sourceSha: string; sourcePaths: string[]; characterIds: string[] };
   authority: { existingProtectedChoices: "no-retcon"; delegatedChoices: "draft"; signingRequiredForProtectedChanges: true };
 }
 export interface EventEvidence {

@@ -79,7 +79,9 @@ type DownstreamPriorEvidence =
   | { target: "missing-downstream"; eventId?: never; owner: Owner;
       kind: "added"; before: string; after: string }
   | { target: "missing-downstream"; eventId?: never; owner: Owner;
-      kind: "current"; quote: string };
+      kind: "current"; quote: string }
+  | { target: "missing-downstream"; owner: "interactive"; eventId: string;
+      kind: "not-required"; field: "purpose" | "routes"; before: string; after: string };
 type MilestonePriorEvidence = EventPriorEvidence | DownstreamPriorEvidence;
 export interface MilestoneBlueprintReview {
   /** Historical v1–v4 reviews replay under their original sealed methodology. */
@@ -147,6 +149,20 @@ function downstreamCorrectionEvidence(
   if (claim.target === "missing-downstream") {
     if (proof.target !== "missing-downstream" || claim.owner !== proof.owner)
       return false;
+    if (proof.kind === "not-required") {
+      const before = milestoneEvent(original, proof.eventId);
+      const after = milestoneEvent(current, proof.eventId);
+      // A missing Interactive owner can be resolved by removing an implied
+      // current-stage decision, not by manufacturing unnecessary downstream work.
+      // A completely unchanged draft still needs independent diagnosis/replacement.
+      return claim.owner === "interactive" && proof.owner === "interactive" &&
+        !original.downstream.some(item => item.owner === "interactive") &&
+        !current.downstream.some(item => item.owner === "interactive") &&
+        !!before && !!after && ["purpose", "routes"].includes(proof.field) &&
+        proof.before === milestoneFieldText(before, proof.field) &&
+        proof.after === milestoneFieldText(after, proof.field) &&
+        proof.before !== proof.after;
+    }
     if (proof.kind === "current") return proof.quote === JSON.stringify(current.downstream);
     if (proof.kind !== "added" ||
         proof.before !== JSON.stringify(original.downstream)) return false;
@@ -289,7 +305,8 @@ export function milestoneReviewStagnation(rounds: readonly Round[]): number {
         return current.review.schema === "noveltea-milestone-blueprint-review/v5" &&
           "kind" in p.evidence && p.evidence.kind !== "current" &&
           milestoneCorrectionEvidence(p, finding, source!.draft, current.draft) &&
-          sha(prior.draft.downstream) !== sha(current.draft.downstream);
+          (sha(prior.draft.downstream) !== sha(current.draft.downstream) ||
+            p.evidence.kind === "not-required" && sha(prior.draft.events) !== sha(current.draft.events));
       }
       if (!finding.eventId || p.evidence.eventId !== finding.eventId) return false;
       if (current.review.schema === "noveltea-milestone-blueprint-review/v3" ||
@@ -459,14 +476,16 @@ function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<Eve
     ". Current provisional Event IDs: " + JSON.stringify(draft.events.map(e => e.id)) +
     ". Valid Event fields: " + MILESTONE_FIELDS.join(", ") +
     ". Use a provisional Event ID, not a canonical event.* record ID. " +
-    "If a rejected Event ID was removed or replaced, cite the ORIGINAL eventId and field with kind:'removed' and before:the original rejected quote; omit after. " +
-    "Use kind:'revised' or 'added' only for changes to the same retained Event ID. " +
-    "For a retained Event use the exact original field/quote and a verified new excerpt. " +
-    "For downstream findings use the original zero-based entry index and field; for missing-downstream use the original owner. " +
+    "For prior findings use compact evidence selectors: {kind:'revised|added|removed|current'} for Events; " +
+    "downstream revised/added additionally specify index of the NEW downstream entry. " +
+    "For a missing Interactive owner corrected by revising away an implied choice use " +
+    "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
+    "Controller binds the original rejected identity, before and after values. Do not repeat escaped field arrays. " +
     "Current canonical source paths: " + JSON.stringify(assignment.sourcePaths) + ".";
 }
 export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssignment,
-  "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">): MilestoneBlueprint {
+  "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
+  policy: "admission" | "sealed-replay" = "admission"): MilestoneBlueprint {
   let raw: unknown;
   try { raw = parse(text); } catch { throw Error("Milestone planner returned invalid or oversized JSON."); }
   if (!exact(raw, ["schema", "milestoneId", "events", "downstream"]) ||
@@ -501,6 +520,9 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
           ![e.source, e.observation, e.access, e.establishes, e.limits]
             .every(value => string(value)))
         invalid(path + ".evidence[" + j + "]", "expected exact anchorPath, source, observation, access, establishes, limits; bounded nonempty strings and a canonical anchor from " + JSON.stringify(assignment.sourcePaths));
+      if (policy === "admission" && !("characterSources" in e))
+        invalid(path + ".evidence[" + j + "].characterSources",
+          "required explicit material Character source array; use [] for non-Character evidence");
       if ("characterSources" in e) {
         const sourcePath = path + ".evidence[" + j + "].characterSources";
         if (!Array.isArray(e.characterSources) || e.characterSources.length > 12)
@@ -511,9 +533,9 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
               typeof source.id !== "string" || !event.participants.includes(source.id) ||
               local.has(source.id) || !string(source.role, 400) ||
               (source.availability !== "existing" && source.availability !== "prospective") ||
-              (source.availability === "existing") !== assignment.characterIds.includes(source.id) ||
+              (source.availability === "existing" && !assignment.characterIds.includes(source.id)) ||
               (declared.has(source.id) && declared.get(source.id) !== source.availability))
-            invalid(sourcePath, "expected unique participant IDs, existing only for authorized Characters, otherwise prospective, with a material evidence role");
+            invalid(sourcePath, "expected unique participant IDs, existing only for authorized Characters; prospective is a design declaration independent of later realization, with a material evidence role");
           local.add(source.id);
           declared.set(source.id, source.availability as string);
         }
@@ -548,12 +570,81 @@ export function milestoneCharacterPrerequisites(design: MilestoneBlueprint,
       }))));
 }
 
+/** Compact wire evidence is not a second review contract. Reconstruct the
+ * exact v5 proof from sealed original findings and the current draft, then
+ * apply the existing field-specific validation. Explicit conflicting values
+ * are never overwritten. */
+function bindCompactReviewEvidence(raw: unknown, draft: MilestoneBlueprint,
+  previous: readonly Round[]) {
+  if (!object(raw) || raw.schema !== "noveltea-milestone-blueprint-review/v5") return;
+  if (Array.isArray(raw.findings)) for (const item of raw.findings) {
+    if (!object(item) || !object(item.evidence)) continue;
+    const e = item.evidence;
+    if (e.target === "missing-downstream" &&
+        exact(e, ["target", "owner", "repair"]))
+      e.quote = JSON.stringify(draft.downstream);
+  }
+  if (!Array.isArray(raw.prior)) return;
+  for (const item of raw.prior) {
+    if (!object(item) || !object(item.evidence) ||
+        !Number.isSafeInteger(item.round) || !Number.isSafeInteger(item.findingIndex)) continue;
+    const original = previous[item.round as number];
+    const finding = original?.review.findings[item.findingIndex as number];
+    const claim = finding?.evidence, e = item.evidence;
+    if (!claim || !original || typeof e.kind !== "string") continue;
+    if ("target" in claim && claim.target === "missing-downstream") {
+      if (e.kind === "not-required" && exact(e, ["kind", "eventId", "field"])) {
+        const before = milestoneEvent(original.draft, String(e.eventId));
+        const after = milestoneEvent(draft, String(e.eventId));
+        if (claim.owner === "interactive" && before && after &&
+            (e.field === "routes" || e.field === "purpose"))
+          item.evidence = { target: "missing-downstream", owner: claim.owner, kind: e.kind,
+            eventId: e.eventId, field: e.field, before: milestoneFieldText(before, e.field),
+            after: milestoneFieldText(after, e.field) };
+      } else if (e.kind === "current" && exact(e, ["kind"])) {
+        item.evidence = { target: claim.target, owner: claim.owner, kind: e.kind,
+          quote: JSON.stringify(draft.downstream) };
+      } else if (e.kind === "added" && exact(e, ["kind", "index"]) &&
+          Number.isSafeInteger(e.index) && draft.downstream[e.index as number]) {
+        item.evidence = { target: claim.target, owner: claim.owner, kind: e.kind,
+          before: JSON.stringify(original.draft.downstream),
+          after: JSON.stringify(draft.downstream[e.index as number]) };
+      }
+    } else if ("target" in claim && claim.target === "downstream") {
+      const base = { target: claim.target, index: claim.index, field: claim.field, kind: e.kind };
+      if (e.kind === "current" && exact(e, ["kind"]))
+        item.evidence = { ...base, quote: claim.quote };
+      else if (e.kind === "removed" && exact(e, ["kind"]))
+        item.evidence = { ...base, before: claim.quote };
+      else if (["revised", "added"].includes(e.kind) && exact(e, ["kind", "index"]) &&
+          Number.isSafeInteger(e.index) && draft.downstream[e.index as number])
+        item.evidence = { ...base, before: claim.quote,
+          after: draft.downstream[e.index as number]![claim.field] };
+    } else if (!("target" in claim) && finding.eventId) {
+      const base = { eventId: finding.eventId, field: claim.field, kind: e.kind };
+      const current = milestoneEvent(draft, finding.eventId);
+      if (e.kind === "current" && exact(e, ["kind"]))
+        item.evidence = { ...base, quote: claim.quote };
+      else if (e.kind === "removed" && exact(e, ["kind"]))
+        item.evidence = { ...base, before: claim.quote };
+      else if (["revised", "added"].includes(e.kind) && exact(e, ["kind"]) && current)
+        item.evidence = { ...base, before: claim.quote,
+          after: milestoneFieldText(current, claim.field) };
+    }
+  }
+}
+
 export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlueprint,
   assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">,
   previous: readonly Round[] = [],
   policy: "admission" | "sealed-replay" = "admission"): MilestoneBlueprintReview {
   let raw: unknown;
-  try { raw = parse(text); } catch { throw Error("Independent Milestone review returned invalid JSON."); }
+  try { raw = parse(text); } catch (error) {
+    invalid("$", "Independent Milestone review returned invalid JSON: " +
+      (error instanceof Error ? error.message.slice(0, 240) : "syntax error") +
+      ". Rebuild a compact JSON object without copying escaped evidence arrays.");
+  }
+  bindCompactReviewEvidence(raw, draft, previous);
   const version = object(raw) ? raw.schema : null;
   const fifth = version === "noveltea-milestone-blueprint-review/v5";
   const strict = fifth || version === "noveltea-milestone-blueprint-review/v4";
@@ -651,7 +742,9 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       if (modern) {
         const proof = p.evidence as MilestonePriorEvidence;
         const keys = "target" in proof && proof.target === "missing-downstream"
-          ? proof.kind === "added"
+          ? proof.kind === "not-required"
+            ? ["target", "owner", "kind", "eventId", "field", "before", "after"]
+            : proof.kind === "added"
             ? ["target", "owner", "kind", "before", "after"]
             : ["target", "owner", "kind", "quote"]
           : "target" in proof && proof.target === "downstream"
@@ -671,7 +764,16 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
             ((p.status === "resolved" || p.status === "improved")
               ? proof.kind === "current"
               : proof.kind !== "current"))
-          invalid(path + ".evidence", "Milestone finding correction needs a change to its rejected field or verified Event removal. Original finding: " + JSON.stringify(original) + ". Expected exact keys " + keys.join(", ") + ". For a removed ID use kind removed with original field and before quote, no after. For retained IDs cite the same field with exact original and changed excerpts; honor replace vs extend. Resolved/improved cannot use current, and persisting/regressed require current.");
+          invalid(path + ".evidence", "Milestone finding correction needs a change to its rejected field or verified Event removal. " +
+            "Use compact evidence {kind:'revised|added|removed|current'} for an Event finding; " +
+            "for a downstream replacement/addition include index of the NEW entry. " +
+            "For a missing Interactive owner resolved by removing an implied choice, use " +
+            "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
+            "Resolved/improved cannot use current, and persisting/regressed require current. " +
+            "The controller binds the original rejected field and current exact evidence; do not copy long escaped JSON. " +
+            "Original identity: " + JSON.stringify({round:p.round,findingIndex:p.findingIndex,eventId:original.eventId,
+              target:original.evidence && "target" in original.evidence ? original.evidence.target : undefined}) +
+            ". Full evidence keys if explicitly supplied: " + keys.join(", "));
       } else {
         const proof = p.evidence as { eventId: string; quote: string };
         const event = original.eventId
@@ -729,7 +831,8 @@ async function verifySeal(job: JobStartResult, sealValue: SessionSeal,
 /** A post-approval grant must cite actual independent answers, not just a
  * self-consistent set of hashes copied into a private planning receipt. Pi
  * retains earlier answers in JSONL across compaction and protocol retries. */
-async function assertBlueprintReplies(session: SessionSeal, expected: string[]) {
+async function assertBlueprintReplies(session: SessionSeal, expected: string[],
+  normalize?: (text: string, index: number) => unknown) {
   let matched = 0, last: string | undefined;
   for (const line of (await readFile(session.file, "utf8")).split("\n")) {
     if (!line.trim()) continue;
@@ -739,7 +842,11 @@ async function assertBlueprintReplies(session: SessionSeal, expected: string[]) 
     if (["error", "aborted", "toolUse"].includes(entry.message.stopReason)) continue;
     const text = entry.message.content.filter((c: { type: string }) => c.type === "text")
       .map((c: { text: string }) => c.text).join("");
-    try { last = sha(parse(text)); } catch { continue; } // e.g. the original protocol-error response
+    try {
+      last = sha(parse(text));
+      if (last !== expected[matched] && normalize && matched < expected.length)
+        last = sha(normalize(text, matched));
+    } catch { continue; } // e.g. the original protocol-error response
     if (last === expected[matched]) matched++;
   }
   if (!expected.length || matched !== expected.length || last !== expected.at(-1))
@@ -780,7 +887,7 @@ function pinOf(value: Receipt): MilestoneBlueprintPin {
 function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
   "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">) {
   for (const [index, round] of value.rounds.entries()) {
-    const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment);
+    const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment, "sealed-replay");
     const boundaries = value.reviewStarts ?? (value.reviewStart === undefined
       ? [] : [value.reviewStart]);
     const start = boundaries.filter(boundary => boundary <= index).at(-1) ?? 0;
@@ -789,7 +896,7 @@ function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
     if (round.draftDigest !== sha(draft) || round.reviewDigest !== sha(review))
       throw Error("Milestone review evidence changed after its sealed verdict.");
   }
-  if (value.draft && sha(parseMilestoneBlueprint(JSON.stringify(value.draft), assignment)) !==
+  if (value.draft && sha(parseMilestoneBlueprint(JSON.stringify(value.draft), assignment, "sealed-replay")) !==
       sha(value.draft)) throw Error("Milestone planning draft changed.");
 }
 /** Verify durable independent advice against the sealed negative review and
@@ -959,13 +1066,17 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "skills and the current selected Milestone, its Arc and relevant Character/World sources. " +
     "Do NOT write Story files, claim new canonical records already exist or change protected decisions. " +
     "Design 1–5 causally ordered provisional Events ONLY for " + assignment.milestoneId + ". " +
+    "The selected canonical Milestone's change and explicit limits are the exact stopping boundary. " +
+    "Read relevant already-authored Events before designing: treat their completed occurrences as context or prerequisites, " +
+    "never enact them again. Do not realize a later Milestone's reveal, confrontation, rescue or decision merely because it is described in the Arc. " +
+    "An inspection performed by the player alone may have participants: []; do not invent NPC attendance. " +
     "For each Event state concrete inspectable evidence, source, access/custody, " +
     "what it actually establishes and its uncertainty; Character knowledge/state, local branch " +
     "conditions and lasting consequences. The Event knowledge field MUST be ONE " +
     "nonempty STRING summarizing who learns what and why, NEVER an array, object, " +
     "list of structured state transitions or nested fact mappings. Participants " +
     "MUST include all material Character participants, including testimony, witness or informant sources. " +
-    "Use the exact CHARACTER IDS below for existing authorized Characters. If the intended evidence needs an additional " +
+    "Use the exact CHARACTER IDS below for existing authorized Characters. Reuse a realized Character for the same witness role instead of inventing a duplicate. If the intended evidence needs an additional " +
     "Character not in that inventory, declare a typed character.slug as prospective and include it in participants. " +
     "For every evidence entry include characterSources: [{id,availability:'existing|prospective',role}] " +
     "for all material Character sources, or [] for non-Character sources. A prospective Character is a required " +
@@ -1006,6 +1117,10 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "A positive interactive owner means REQUIRED work for THIS Milestone, never a declaration " +
     "that none is needed, an optional idea, or work deferred to another Milestone. " +
     "Legitimate Event-only Milestones need no interactive owner; do not fabricate a Choice. " +
+    "A Story-wide Interaction profile is not a per-Milestone quota. An investigative commitment or player-directed inspection alone is not a consequential Choice. " +
+    "Check each proposed Event against the selected Milestone's exact canonical change and limits, and relevant already-authored Event records. " +
+    "Reject duplicated prior/later occurrences, advancement beyond this Milestone's promised knowledge or outcomes, and unsupported prerequisites. " +
+    "An inspection performed only by the player can legitimately have participants: []. " +
     "Verify EVERY material witness, informant, testimony provider or other Character evidence source " +
     "is explicitly declared in characterSources and participants. Reject a missing declaration by citing the evidence field; " +
     "do not reject a sound design just because a declared prospective Character is unrealized. " +
@@ -1020,7 +1135,7 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "cites the exact current entry index, owner|obligation field and quote, with anchorPath " +
     "equal to the selected canonical Milestone path. A genuinely MISSING downstream " +
     "requirement instead cites target:'missing-downstream', the required owner and the " +
-    "exact JSON-serialized CURRENT downstream array as quote (even if it is nonempty). " +
+    "controller-bound current downstream array (omit quote for this target). " +
     "These findings do NOT invent an eventId. An empty Event array " +
     "must be cited exactly as '[]'; a short dependency list such as [\"key\"] " +
     "must be cited as its exact whole value. Do not cite just an Event path. " +
@@ -1028,40 +1143,24 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "claim (repair:'replace') or may extend a valid but incomplete field " +
     "(repair:'extend'). This decision is SEALED with the negative finding; " +
     "later rounds CANNOT reinterpret a replace finding as extend. " +
-    "To resolve a prior Event finding, cite the rejected field quote and: " +
-    "(revised) removal plus NEW replacement text in the SAME field; " +
-    "(added) NEW text in the same field that supplies missing context while retaining " +
-    "the original quote ONLY if repair:'extend'; or (removed) the entire defective Event. " +
-    "To resolve a downstream entry finding, use target:'downstream', its ORIGINAL index " +
-    "and field; revised/added cite before and after excerpts, removed cites before and " +
-    "requires the defective entry to be absent, current cites the unchanged rejected quote. " +
-    "To resolve a missing-downstream finding, use target:'missing-downstream', " +
-    "the same owner, kind:'added', before:the ORIGINAL exact serialized downstream array, " +
-    "after:the JSON-serialized NEW {owner,obligation} entry, or kind:'current' with the " +
-    "exact current serialized downstream array if still missing. " +
-    "For an empty array, '[]' disappears when members are added: use revised. " +
+    "For each historical finding return its zero-based round and findingIndex, status and reason. " +
+    "Use compact evidence selectors, NOT repeated exact JSON strings: for an Event finding " +
+    "{kind:'revised|added|removed|current'}; the controller binds the original field and current exact value. " +
+    "For a downstream entry replacement/addition use {kind:'revised|added',index:NEW entry index}; " +
+    "for removal/current use {kind:'removed|current'}. For a missing downstream owner use " +
+    "{kind:'added',index:NEW entry index} or {kind:'current'}. If an Interactive omission finding was " +
+    "addressed by revising away the implied player choice, use {kind:'not-required',eventId:retained revised Event ID," +
+    "field:'purpose|routes'} and explain why the selected canonical Milestone does not need a Choice/Puzzle. " +
+    "This is not permission to waive an unchanged material defect. Resolved/improved cannot use current. " +
     "A replacement Event may be added, but deleting the rejected ID must be verifiable. " +
-    "A pass requires evidence addressing each original defect, not unrelated " +
-    "Event or field edits. For unchanged blockers cite current evidence. " +
-    "Cosmetic rewrites and newly discovered blockers alone are not progress. " +
-    "A concise pass has no findings and every prior finding resolved; revise " +
-    "reports material blockers. Do not enumerate valid fields or review the reviewer. " +
-    "Return ONLY JSON {schema:'noveltea-milestone-blueprint-review/v5'," +
-    "status:'pass|revise',findings:[EITHER " +
+    "A concise pass has no findings and every prior finding resolved; revise reports material blockers. " +
+    "Return ONLY JSON {schema:'noveltea-milestone-blueprint-review/v5',status:'pass|revise',findings:[EITHER " +
     "{eventId,anchorPath,requirement,reason,correction," +
-    "evidence:{field:'purpose|knowledge|dependsOn|participants|evidence|routes'," +
-    "quote,repair:'replace|extend'}} OR " +
+    "evidence:{field:'purpose|knowledge|dependsOn|participants|evidence|routes',quote,repair:'replace|extend'}} OR " +
     "{anchorPath,requirement,reason,correction," +
     "evidence:{target:'downstream',index,field:'owner|obligation',quote,repair:'replace|extend'}} OR " +
-    "{anchorPath,requirement,reason,correction," +
-    "evidence:{target:'missing-downstream',owner:'event|interactive|composition'," +
-    "quote:exact serialized downstream array,repair:'extend'}}]," +
-    "prior:[{round,findingIndex,status:'resolved|improved|persisting|regressed'," +
-    "reason,evidence: a source-bound Event correction {kind,eventId,field,before,after} " +
-    "or {kind:'current',eventId,field,quote}; a downstream correction " +
-    "{target:'downstream',kind,index,field,before,after} or current with quote; " +
-    "a missing-downstream correction {target:'missing-downstream',kind:'added'," +
-    "owner,before,after} or current with owner and quote. Omit inapplicable fields.}]}. " +
+    "{anchorPath,requirement,reason,correction,evidence:{target:'missing-downstream',owner:'event|interactive|composition',repair:'extend'}}]," +
+    "prior:[{round,findingIndex,status:'resolved|improved|persisting|regressed',reason,evidence: compact selector above}]}. " +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
     "\nAUTHOR OBJECTIVE: " + JSON.stringify(task) +
     "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
@@ -1224,7 +1323,7 @@ export async function inspectMilestoneBlueprint(job: JobStartResult, milestoneId
  * treating its private proposal as a canonical Story source. */
 export async function readReviewedMilestoneBlueprint(job: JobStartResult,
   pin: MilestoneBlueprintPin, assignment: Pick<EventAssignment,
-    "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
+    "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds" | "blueprintSource">,
   expected?: Pick<Lineage, "provider" | "model" | "planDigest" | "contractDigest" | "snapshotId">,
 ): Promise<MilestoneBlueprint> {
   const archived = historicalFileFor(job, pin);
@@ -1248,7 +1347,9 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
       if (expected || !inherited || !originalEvent) throw Error("Missing reviewed historical Milestone Blueprint.");
       if (JSON.stringify(inherited.pin) !== JSON.stringify(pin) ||
           inherited.pin.digest !== sha(inherited.design) ||
-          inherited.sourceDigest !== await sourceDigest(job, assignment.sourcePaths, pin.sourceSha))
+          inherited.sourceDigest !== await sourceDigest(job,
+            assignment.blueprintSource?.sourceSha === pin.sourceSha
+              ? assignment.blueprintSource.sourcePaths : assignment.sourcePaths, pin.sourceSha))
         throw Error("Inherited Milestone Blueprint differs from its verified Event source.");
       // The original sealed receipt already passed independent review and
       // historical schema replay at fork admission and again at preparation.
@@ -1261,6 +1362,8 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
     record = JSON.parse(await readFile(archived, "utf8")) as Receipt;
   }
   if (!record) throw Error("Missing reviewed Milestone Blueprint.");
+  if (assignment.blueprintSource?.sourceSha === pin.sourceSha)
+    assignment = await (await import("./event-work.js")).authenticateReboundBlueprint(job, pin, assignment);
   validateReceiptShape(record, pin.milestoneId);
   if (record.lineage.jobId !== job.jobId || record.lineage.threadId !== job.threadId ||
       record.lineage.baseSha !== job.baseSha || record.lineage.executionHead !== pin.sourceSha ||
@@ -1288,8 +1391,12 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
       await assertBlueprintReplies(record.writer, record.rounds.filter((_, i) => !starts.includes(i)).map(r => r.draftDigest));
       const reviewers = [...(record.reviewerHistory ?? []).map(h => h.session), record.reviewer];
       if (reviewers.length !== starts.length + 1) throw Error("Incomplete Blueprint reviewer lineage.");
-      for (const [index, session] of reviewers.entries())
-        await assertBlueprintReplies(session, record.rounds.slice(index ? starts[index - 1] : 0, starts[index]).map(r => r.reviewDigest));
+      for (const [index, session] of reviewers.entries()) {
+        const rounds = record.rounds.slice(index ? starts[index - 1] : 0, starts[index]);
+        await assertBlueprintReplies(session, rounds.map(r => r.reviewDigest),
+          (text, round) => parseMilestoneBlueprintReview(text, rounds[round]!.draft,
+            assignment, record!.rounds.slice(0, (index ? starts[index - 1]! : 0) + round), "sealed-replay"));
+      }
     }
   }
   return record.draft!;
@@ -1323,7 +1430,7 @@ export async function originalBlueprintReviewDigest(job: JobStartResult, pin: Mi
  * never represented as a child review or a new authoring grant. */
 export async function collectInheritedMilestoneBlueprint(job: JobStartResult,
   pin: MilestoneBlueprintPin, assignment: Pick<EventAssignment,
-    "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
+    "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds" | "blueprintSource">,
 ): Promise<InheritedMilestoneBlueprint> {
   const design = await readReviewedMilestoneBlueprint(job, pin, assignment);
   // The existing fork format carries a single historical Event pin. Never
@@ -1334,7 +1441,8 @@ export async function collectInheritedMilestoneBlueprint(job: JobStartResult,
       .blueprintRepairs?.some(repair => repair.original.milestoneId === pin.milestoneId))
     throw Error("Cannot fork pending obligations without the complete Blueprint supersession history.");
   await assertFutureBlueprintActive(job, pin);
-  return { pin, design, sourceDigest: await sourceDigest(job, assignment.sourcePaths, pin.sourceSha) };
+  return { pin, design, sourceDigest: await sourceDigest(job, assignment.blueprintSource?.sourceSha === pin.sourceSha
+    ? assignment.blueprintSource.sourcePaths : assignment.sourcePaths, pin.sourceSha) };
 }
 
 /** After a signed upstream correction, preserve the original whole review
@@ -1466,7 +1574,10 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       for (const [index, session] of reviewers.entries()) {
         if (identities.has(session.id)) throw Error("Milestone Blueprint reused a reviewer identity.");
         identities.add(session.id);
-        await assertBlueprintReplies(session, current.rounds.slice(index ? starts[index - 1] : 0, starts[index]).map(r => r.reviewDigest));
+        const rounds = current.rounds.slice(index ? starts[index - 1] : 0, starts[index]);
+        await assertBlueprintReplies(session, rounds.map(r => r.reviewDigest),
+          (text, round) => parseMilestoneBlueprintReview(text, rounds[round]!.draft,
+            assignment, current.rounds.slice(0, (index ? starts[index - 1]! : 0) + round), "sealed-replay"));
       }
       for (const diagnostic of current.diagnostics ?? [])
         await assertBlueprintReplies(diagnostic.session, [sha(diagnostic.diagnosis)]);

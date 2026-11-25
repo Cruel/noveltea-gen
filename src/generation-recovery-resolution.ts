@@ -100,6 +100,19 @@ export async function inspectActiveRecoveryResolution(
   git(job, "merge-base", "--is-ancestor", resolution.correctedHeadSha, head);
   const { correction, correctedHeadSha } = resolution;
   if (source.channel === "operationRecovery" && original.origin.operation === "specialist-result") {
+    const readiness = (source.input as unknown as GenerationOperationRecovery).evidence?.eventBlueprintPrerequisite;
+    if (readiness) {
+      if (correction.store !== "dependency-plan" || correction.ref !== readiness.reportDigest ||
+          original.origin.assignmentId !== "event:" + readiness.milestoneId ||
+          original.origin.sourceHeadSha !== readiness.expectedHead || original.origin.planVersion !== readiness.planVersion)
+        return false;
+      const { inspectBlueprintPredecessorCompletion } = await import("./event-work.js");
+      const completed = await inspectBlueprintPredecessorCompletion(job, readiness.milestoneId, readiness.reportDigest);
+      const event = JSON.parse(await readFile(join(job.stateDir, "event-items", readiness.milestoneId.slice(10) + ".json"), "utf8"));
+      return isDeepStrictEqual(completed.original.report, readiness) &&
+        completed.head === correctedHeadSha && completed.digest === correction.digest &&
+        event.expectedHead === correctedHeadSha && event.blueprintSource?.reportDigest === readiness.reportDigest;
+    }
     const ref = (source.input as unknown as GenerationOperationRecovery).evidence?.blueprintAssessment;
     if (ref) {
       if (correctedHeadSha !== original.origin.sourceHeadSha) return false;

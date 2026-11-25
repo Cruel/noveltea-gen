@@ -607,15 +607,15 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (dependency && (dependency.amendment!.assignment.targets[0] !== input.target ||
         dependency.report.turnDigest !== input.turnPlanDigest))
       throw Error("Dependency assignment differs from the trusted Turn/target.");
-    const reviewAuthority = dependency?.reviewSourceSha && dependency.amendment?.assignment;
+    const reviewAuthority = (dependency?.reviewSourceSha || dependency?.blueprintSource) && dependency.amendment?.assignment;
     const reviewRequest = dependency?.reviewSourceSha ?
       (await inspectDependencyPlan(job))?.reviewRequests?.find(r => r.sourceSha === dependency.reviewSourceSha) : undefined;
     let reviewCreate: PlannedFocusCreate | undefined;
     let reviewArc: string | undefined;
-    if (reviewAuthority && reviewRequest?.classification === "new-full-story-record") {
+    if (reviewAuthority && (reviewRequest?.classification === "new-full-story-record" || dependency?.blueprintSource)) {
       const grant = reviewAuthority.authority;
       const proposal = dependency!.proposal as ReviewCharacterProposal | undefined;
-      const foundation = dependency!.reviewSourceSha &&
+      const foundation = dependency!.blueprintSource || dependency!.reviewSourceSha &&
         (await inspectDependencyPlan(job))?.reviewRequests?.some(r =>
           r.sourceSha === dependency!.reviewSourceSha &&
           r.originalWorkItem === "character-foundations");

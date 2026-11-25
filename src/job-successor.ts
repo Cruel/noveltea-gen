@@ -207,6 +207,14 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       await verifyDependentCorrectionSuccessor(job, commit, parents[1]!, paths, trailers);
       continue;
     }
+    if (trailers.some(line => /^NovelTea-Work-Item: dependency:[0-9]+:character\.[a-z0-9-]+$/.test(line))) {
+      const { inspectDependencyPlan } = await import("./dependency-state.js");
+      const entry = (await inspectDependencyPlan(job))?.entries.find(e =>
+        e.blueprintSource && e.phase === "verified" && e.commitSha === commit &&
+        e.amendment && e.amendment.sourceSha === parents[1] &&
+        trailers.includes("NovelTea-Work-Item: " + e.amendment.assignment.id));
+      if (entry && trailers.includes("NovelTea-Job: " + job.jobId)) continue;
+    }
     if (await verifyReviewedSpecialistSuccessor(job, commit, parents[1]!, paths, trailers))
       continue;
     if (trailers.includes("NovelTea-Work-Item: idea-placement")) {

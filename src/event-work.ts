@@ -54,6 +54,7 @@ interface EventReceipt {
   blueprintRequired?: boolean; blueprintTask?: string; blueprintPin?: MilestoneBlueprintPin;
   assignment?: EventAssignment;
   blueprintPrerequisite?: EventBlueprintPrerequisite;
+  blueprintSource?: NonNullable<EventAssignment["blueprintSource"]>;
   skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[];
@@ -417,21 +418,39 @@ class EventFulfillmentError extends Error {
   constructor(readonly defect: ReturnType<typeof eventFulfillmentDefect>) { super(defect.detail); }
 }
 
+/** Native schema permits player-only inspection Events with participants: [].
+ * Report the exact record and field for every actual cluster violation. */
+export function eventClusterDefects(authored: Array<Pick<RecordItem, "path" | "metadata">>,
+  assignment: Pick<EventAssignment, "milestonePath" | "arcIds" | "characterIds">) {
+  const defects: Array<ReturnType<typeof eventFulfillmentDefect>> = [];
+  const add = (path: string, pointer: string, detail: string) =>
+    defects.push({ kind: "semantic", path, code: "event-cluster-" + pointer,
+      pointer, detail });
+  if (!authored.length) add(assignment.milestonePath, "events", "No authorized Event record was authored.");
+  for (const { path, metadata: m } of authored) {
+    if (!Array.isArray(m.arcs) || !m.arcs.length || m.arcs.some(id => !assignment.arcIds.includes(id)))
+      add(path, "arcs", m.id + ": arcs must be a nonempty subset of the selected cluster " +
+        JSON.stringify(assignment.arcIds) + "; received " + JSON.stringify(m.arcs));
+    if (!Array.isArray(m.participants) || m.participants.some(id => !assignment.characterIds.includes(id)))
+      add(path, "participants", m.id + ": participants must contain only authorized Character IDs " +
+        JSON.stringify(assignment.characterIds) + "; received " + JSON.stringify(m.participants) +
+        ". An empty array is valid for a player-only occurrence without NPC participants.");
+    if (!Array.isArray(m.consequences) || !m.consequences.length)
+      add(path, "consequences", m.id + ": provide at least one justified causal consequence.");
+    if (!Array.isArray(m.prerequisites?.any_of) || !m.prerequisites.any_of.length)
+      add(path, "prerequisites.any_of", m.id + ": provide a native-valid causal prerequisite route.");
+  }
+  return defects;
+}
+
 function acceptance(report: Report, assignment: EventAssignment, paths: string[], obligations: string[]) {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   if (paths.some(path => !records.some(r => r.path === path))) {
     throw new Error("Canonical catalog did not recognize every authored Event record.");
   }
   const authored = records.filter(r => paths.includes(r.path) && r.metadata.type === "event");
-  if (!authored.length || authored.some(r =>
-    !(r.metadata.arcs as string[] ?? []).some(id => assignment.arcIds.includes(id)) ||
-    (r.metadata.arcs as string[] ?? []).some(id => !assignment.arcIds.includes(id)) ||
-    !(r.metadata.participants as string[] ?? []).length ||
-    (r.metadata.participants as string[] ?? []).some(id => !assignment.characterIds.includes(id)) ||
-    !(r.metadata.consequences as string[] ?? []).length ||
-    !(r.metadata.prerequisites?.any_of as unknown[] ?? []).length)) {
-    throw new Error("Events must be complete, causal and belong only to the selected Arc cluster.");
-  }
+  const defects = eventClusterDefects(authored, assignment);
+  if (defects.length) throw new EventFulfillmentError(defects[0]!);
   const routes = report.coverage.milestoneRoutes.find(m => m.id === assignment.milestoneId)?.routes ?? [];
   const milestone = records.find(r => r.metadata.id === assignment.milestoneId && r.metadata.type === "milestone");
   if (!milestone || !Array.isArray(milestone.metadata.fulfillment?.any_of)) {
@@ -564,7 +583,8 @@ async function blueprintPrerequisite(job: JobStartResult, receipt: EventReceipt,
       receipt.planVersion !== plan.version || receipt.planDigest !== hash(JSON.stringify(plan)) ||
       receipt.expectedHead !== await trustedHead(job) || dirty(job).length)
     throw Error("Blueprint readiness requires the original clean, unstarted Event assignment.");
-  const assignment = selectedAssignment(job, plan, source, receipt.milestoneId, receipt.workItemId);
+  const assignment = { ...selectedAssignment(job, plan, source, receipt.milestoneId, receipt.workItemId),
+    ...(receipt.blueprintSource ? { blueprintSource: receipt.blueprintSource } : {}) };
   const design = await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, assignment);
   const blockers = milestoneCharacterPrerequisites(design, assignment).map(blocker => ({
     ...blocker,
@@ -576,6 +596,138 @@ async function blueprintPrerequisite(job: JobStartResult, receipt: EventReceipt,
   const body = { milestoneId: receipt.milestoneId, expectedHead: receipt.expectedHead,
     planVersion: receipt.planVersion, blueprintDigest: receipt.blueprintPin.digest, blockers };
   return { ...body, reportDigest: hash(JSON.stringify({ jobId: job.jobId, assignment, ...body })) };
+}
+
+export function blueprintReadinessHistory(job: JobStartResult, milestone: string, digest: string) {
+  if (!idPattern.test(milestone) || !/^[a-f0-9]{64}$/.test(digest))
+    throw Error("Invalid historical Blueprint readiness reference.");
+  return join(job.stateDir, "event-blueprint-history", milestone.slice(10) + "-" + digest + ".json");
+}
+
+/** Historical source authentication: no need to replay native validation on
+ * the successor's different catalog. Original native readiness was checked
+ * before this sealed, unstarted receipt could be admitted to the work plan. */
+export async function inspectArchivedEventBlueprintPrerequisite(job: JobStartResult,
+  milestone: string, digest: string) {
+  const path = blueprintReadinessHistory(job, milestone, digest);
+  if (await realpath(path) !== path || !(await lstat(path)).isFile())
+    throw Error("Unsafe archived Blueprint readiness receipt.");
+  const receipt = JSON.parse(await readFile(path, "utf8")) as EventReceipt;
+  const { blueprintPrerequisite: report, assignment, blueprintPin: pin } = receipt;
+  if (!report || !assignment || !pin || receipt.phase !== "ready" ||
+      receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha ||
+      receipt.milestoneId !== milestone || receipt.workItemId !== "event-" + milestone.slice(10) ||
+      receipt.worker !== "pi" || receipt.sessionFile || receipt.invocationSource ||
+      receipt.blueprintSource || receipt.claimedPaths?.length ||
+      report.reportDigest !== digest || report.expectedHead !== receipt.expectedHead ||
+      report.planVersion !== receipt.planVersion || report.milestoneId !== milestone ||
+      pin.sourceSha !== receipt.expectedHead || report.blueprintDigest !== pin.digest ||
+      assignment.milestoneId !== milestone || assignment.workItemId !== receipt.workItemId)
+    throw Error("Archived Blueprint readiness lost its exact unstarted Event source.");
+  if (!receipt.snapshot) throw Error("Archived readiness lacks its pinned skill snapshot.");
+  const design = await readReviewedMilestoneBlueprint(job, pin, assignment, {
+    provider: receipt.provider, model: receipt.model, planDigest: receipt.planDigest,
+    contractDigest: hash(JSON.stringify(assignment.contract)), snapshotId: receipt.snapshot.id,
+  });
+  const { reportDigest, blockers, ...body } = report;
+  if (hash(JSON.stringify({ jobId: job.jobId, assignment, ...body, blockers })) !== reportDigest ||
+      JSON.stringify(milestoneCharacterPrerequisites(design, assignment)) !==
+        JSON.stringify(blockers.map(({ readiness: _, ...blocker }) => blocker)) ||
+      blockers.some(b => !["unrealized-character", "outside-event-authority"].includes(b.readiness)))
+    throw Error("Archived Blueprint readiness differs from its independently reviewed design.");
+  rawGit(job, "merge-base", "--is-ancestor", receipt.expectedHead, "HEAD");
+  return { report, assignment, pin, receipt };
+}
+
+export async function archiveEventBlueprintPrerequisite(job: JobStartResult, report: EventBlueprintPrerequisite,
+  validatorSource?: string) {
+  const original = await inspectEventBlueprintPrerequisite(job, report.milestoneId, validatorSource);
+  if (JSON.stringify(original) !== JSON.stringify(report))
+    throw Error("Blueprint predecessor admission lost the original native readiness.");
+  const receipt = JSON.parse(await readFile(join(job.stateDir, "event-items",
+    report.milestoneId.slice(10) + ".json"), "utf8")) as EventReceipt;
+  const path = blueprintReadinessHistory(job, report.milestoneId, report.reportDigest);
+  if (existsSync(path)) {
+    if (JSON.stringify(JSON.parse(await readFile(path, "utf8"))) !== JSON.stringify(receipt))
+      throw Error("Archived Blueprint readiness was replaced.");
+  } else await persist(path, receipt);
+  return inspectArchivedEventBlueprintPrerequisite(job, report.milestoneId, report.reportDigest);
+}
+
+/** Reauthenticate the complete serial supporting chain from the original
+ * Blueprint. No original Event writer or new Blueprint author is invoked. */
+export async function inspectBlueprintPredecessorCompletion(job: JobStartResult,
+  milestone: string, digest: string) {
+  const original = await inspectArchivedEventBlueprintPrerequisite(job, milestone, digest);
+  const { inspectDependencyPlan, dependencyDigest } = await import("./dependency-state.js");
+  const plan = await inspectDependencyPlan(job);
+  const entries = plan?.entries.filter(e => e.blueprintSource?.readinessDigest === digest) ?? [];
+  const targets = [...new Set(original.report.blockers.map(b => b.characterId))];
+  if (entries.length !== targets.length || original.report.blockers.some(b => b.readiness !== "unrealized-character") ||
+      entries.some(e => e.phase !== "verified" || !e.commitSha || e.review?.verdict !== "pass") ||
+      targets.some(target => !entries.some(e => e.blueprintSource?.target === target)))
+    throw Error("Blueprint predecessor work is not yet independently verified.");
+  let head = original.report.expectedHead;
+  for (const entry of entries) {
+    if (entry.report.sourceSha !== head) throw Error("Blueprint predecessor chain has a substituted source.");
+    head = entry.commitSha!;
+  }
+  return { original, entries, head, digest: dependencyDigest(entries.map(e => dependencyDigest(e))) };
+}
+
+export async function authenticateReboundBlueprint(job: JobStartResult, pin: MilestoneBlueprintPin,
+  assignment: Pick<EventAssignment, "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds" | "blueprintSource">) {
+  const binding = assignment.blueprintSource;
+  if (!binding || binding.sourceSha !== pin.sourceSha) throw Error("Blueprint successor lacks its original source binding.");
+  const completion = await inspectBlueprintPredecessorCompletion(job, pin.milestoneId, binding.reportDigest);
+  const original = completion.original;
+  if (JSON.stringify(original.pin) !== JSON.stringify(pin) ||
+      assignment.milestoneId !== original.assignment.milestoneId ||
+      assignment.milestonePath !== original.assignment.milestonePath ||
+      JSON.stringify(binding.sourcePaths) !== JSON.stringify(original.assignment.sourcePaths) ||
+      JSON.stringify(binding.characterIds) !== JSON.stringify(original.assignment.characterIds) ||
+      binding.sourcePaths.some(path => !assignment.sourcePaths.includes(path)) ||
+      JSON.stringify([...new Set([...binding.characterIds, ...original.report.blockers.map(b => b.characterId)])].sort()) !== JSON.stringify(assignment.characterIds))
+    throw Error("Rebound Event no longer consumes the exact reviewed Blueprint and verified Character predecessors.");
+  return { ...assignment, sourcePaths: binding.sourcePaths, characterIds: binding.characterIds, blueprintSource: undefined };
+}
+
+export async function rebindEventAfterBlueprintPredecessors(job: JobStartResult,
+  milestone: string, digest: string, validatorSource?: string) {
+  const completed = await inspectBlueprintPredecessorCompletion(job, milestone, digest);
+  if (await trustedHead(job) !== completed.head || dirty(job).length)
+    throw Error("Event successor requires the exact independently verified predecessor HEAD.");
+  const file = join(job.stateDir, "event-items", milestone.slice(10) + ".json");
+  const current = JSON.parse(await readFile(file, "utf8")) as EventReceipt;
+  const original = completed.original;
+  const binding = { reportDigest: digest, sourceSha: original.report.expectedHead,
+    sourcePaths: original.assignment.sourcePaths, characterIds: original.assignment.characterIds };
+  const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as ArchitectureReceipt;
+  if (architecture.jobId !== job.jobId || architecture.phase !== "committed" || !architecture.plan ||
+      architecture.plan.version !== original.report.planVersion ||
+      hash(JSON.stringify(architecture.plan)) !== original.receipt.planDigest)
+    throw Error("Event successor lost its original approved Architecture plan.");
+  const source = reportOf(await validateStoryJob(job, validatorSource,
+    { ...job, baseSha: completed.head }), completed.head);
+  const assignment = { ...selectedAssignment(job, architecture.plan, source, milestone, original.receipt.workItemId),
+    blueprintSource: binding };
+  const design = await readReviewedMilestoneBlueprint(job, original.pin, assignment);
+  if (milestoneCharacterPrerequisites(design, assignment).length ||
+      original.report.blockers.some(b => !source.records.some(r => r.metadata.id === b.characterId &&
+        r.metadata.type === "character" && r.metadata.status !== "superseded")))
+    throw Error("Verified supporting work did not realize all Event prerequisites in native canon.");
+  if (current.blueprintSource) {
+    if (current.phase !== "ready" || current.expectedHead !== completed.head ||
+        JSON.stringify(current.blueprintSource) !== JSON.stringify(binding) ||
+        JSON.stringify(current.blueprintPin) !== JSON.stringify(original.pin))
+      throw Error("Original Event successor receipt changed.");
+    return completed;
+  }
+  if (JSON.stringify(current) !== JSON.stringify(original.receipt))
+    throw Error("Original unstarted Event receipt changed before predecessor completion.");
+  const { assignmentKey: _, blueprintPrerequisite: _report, assignment: _assignment, ...base } = current;
+  await persist(file, { ...base, expectedHead: completed.head, blueprintSource: binding, assignment });
+  return completed;
 }
 
 export async function inspectEventBlueprintPrerequisite(job: JobStartResult, milestone: string,
@@ -866,16 +1018,27 @@ export async function runEventWorkItem(input: EventOptions) {
       const source = reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
       const assign = selectedAssignment(job, arch.plan!, source, receipt.milestoneId, receipt.workItemId);
       const task = receipt.blueprintTask ?? "";
-      const local = await ensureMilestoneBlueprint(job, arch.plan!, assign, receipt.snapshot!,
-        receipt.provider, receipt.model, task, receipt.expectedHead, receipt.worker === "fixture",
-        undefined, input.round?.assignmentKey ?? receipt.assignmentKey, input.turnPlanDigest, input.blueprintAssessment);
-      receipt.blueprintPin = local.pin;
+      if (receipt.blueprintSource) {
+        if (!receipt.blueprintPin || input.blueprintAssessment)
+          throw Error("Rebound Event requires the preserved Blueprint approval, not another planning cycle.");
+        await readReviewedMilestoneBlueprint(job, receipt.blueprintPin,
+          { ...assign, blueprintSource: receipt.blueprintSource });
+      } else {
+        const local = await ensureMilestoneBlueprint(job, arch.plan!, assign, receipt.snapshot!,
+          receipt.provider, receipt.model, task, receipt.expectedHead, receipt.worker === "fixture",
+          undefined, input.round?.assignmentKey ?? receipt.assignmentKey, input.turnPlanDigest, input.blueprintAssessment);
+        receipt.blueprintPin = local.pin;
+      }
       receipt.blueprintTask = task;
       const readiness = await blueprintPrerequisite(job, receipt, arch.plan!, source);
       if (receipt.blueprintPrerequisite &&
           JSON.stringify(receipt.blueprintPrerequisite) !== JSON.stringify(readiness))
         throw Error("Original Blueprint readiness changed without an authorized successor.");
-      if (readiness) receipt.blueprintPrerequisite = readiness;
+      if (readiness) {
+        if (receipt.blueprintSource) throw Error("Rebound Event still lacks a verified prerequisite.");
+        receipt.assignment = assign;
+        receipt.blueprintPrerequisite = readiness;
+      }
       await persist(receiptFile, receipt);
     }
     if (input.blueprintAssessment) {
@@ -911,6 +1074,7 @@ export async function runEventWorkItem(input: EventOptions) {
         const prior = resuming || continuing ? null : reportOf(await validate(receipt.expectedHead), receipt.expectedHead);
         const assign: EventAssignment = resuming || continuing ? receipt.assignment! : {
           ...selectedAssignment(job, arch.plan!, prior!, receipt.milestoneId, receipt.workItemId),
+          ...(receipt.blueprintSource ? { blueprintSource: receipt.blueprintSource } : {}),
           ...(receipt.reroutedTask ? { authorTask: receipt.reroutedTask } :
             (receipt.blueprintTask || input.task) ? { authorTask: receipt.blueprintTask ?? input.task } : {}),
         };
@@ -1011,9 +1175,6 @@ export async function runEventWorkItem(input: EventOptions) {
               !currentMilestoneChoiceBinding(candidate.obligations, assign.milestoneId, sourceChange);
             const laterChoiceSetup = candidate.claimedPaths.length > 0 &&
               scopedDecisionSetupConflict(assign, sourceChange, candidate.conflicts);
-            if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral &&
-                !laterChoiceSetup)
-              throw new Error("Architectural conflict: " + candidate.conflicts.join("; "));
             const authoredEventIds = draft.records
               .filter(record => paths!.includes(record.path) &&
                 record.metadata.type === "event" && record.metadata.status !== "superseded")
@@ -1027,7 +1188,20 @@ export async function runEventWorkItem(input: EventOptions) {
             if (laterChoiceSetup)
               return [eventDecisionSetupCorrection(assign, sourceChange, candidate.conflicts)];
             try {
+              const clusterDefects = eventClusterDefects(draft.records.filter(record =>
+                paths!.includes(record.path) && record.metadata.type === "event" &&
+                record.metadata.status !== "superseded"), assign);
+              if (clusterDefects.length) return clusterDefects;
               acceptance(draft, assign, paths!, candidate.obligations);
+              // A native-valid, in-lease unpublished draft with a reported conflict
+              // is a bounded semantic failure, not evidence of an unknown commit.
+              // Keep it in the original writer-round correction/terminal ledger.
+              if (candidate.conflicts.length && !localEvidenceGap && !falseChoiceDeferral &&
+                  !laterChoiceSetup)
+                return [{ kind: "semantic" as const, path: assign.milestonePath,
+                  code: "event-unresolved-conflict", detail:
+                    "Resolve only within the original authorized Event scope, or retain the draft for recovery: " +
+                    candidate.conflicts.join("; ") }];
               const proof = await consequenceProof(job, draft, assign, paths!, candidate.obligations);
               return proof.diagnostics.map(d =>
                 `${d.path}:${d.line} ${d.event}/${d.step}/${d.branch} ${d.slot}: ${d.message}`);

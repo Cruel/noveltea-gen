@@ -295,7 +295,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
             dependsOn: [], participants: ["character.ada", "character.neri"],
             evidence: [{ anchorPath: milestonePath, source: "The signed ledger and independent daily register",
               observation: "The matching dates establish concealment", access: "Neri presents both original records to Ada",
-              establishes: "The concealed entry is corroborated by an independent record", limits: "The records do not prove private motive" }],
+              establishes: "The concealed entry is corroborated by an independent record", limits: "The records do not prove private motive", characterSources: [] }],
             knowledge: "Ada inspects the primary records and knows that the entry was concealed",
             routes: [] }],
           downstream: [...(first ? [{ owner: "interactive", obligation: "Bind protect and challenge as a genuine consequential Choice and preserve distinct payoffs" }] : []),

@@ -786,9 +786,10 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis", "binding-diagnosis"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
+  const prospective = mode === "prospective";
   const needsCharacter = mode === "support";
   const bindingDiagnosis = mode === "binding-diagnosis";
   const diagnosis = mode === "diagnosis" || bindingDiagnosis;
@@ -821,7 +822,7 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis"] as co
           observation: "Ada sees the ledger and the prospective release decision",
           access: "Neri has the preserved original, Ada is present",
           establishes: "The witness knows where the evidence is kept",
-          limits: "The release and withhold consequences still need Choice authorship" }],
+          limits: "The release and withhold consequences still need Choice authorship", characterSources: [] }],
         knowledge: "Ada sees the ledger; only a future player choice determines its release",
         routes: [] }],
       downstream: [{ owner: "interactive",
@@ -854,7 +855,54 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis"] as co
     ] };
     const invalidDraft = bindingDiagnosis ? authored : authored.replace("value: knows", "value: known");
     const invalidManifest = bindingDiagnosis ? { ...manifest, laterObligations: [] } : manifest;
+    if (prospective) {
+      plan.events[0]!.participants.push("character.mara");
+      Object.assign(plan.events[0]!.evidence[0]!, { anchorPath: "arcs/truth.md",
+        characterSources: [{ id: "character.mara", availability: "prospective",
+          role: "The archive night witness identifies the ledger signature." }] });
+    }
     const { runtime, observed } = await scriptedStoryRuntime((index, context) => {
+      if (prospective && index >= 4) {
+        const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+        const raw = JSON.stringify(messages);
+        if (index === 4) return { content: scriptedReadCalls(["nt-character-development/SKILL.md", "nt-catalog/SKILL.md",
+          "nt-catalog/references/records.md"].map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 5) {
+          const arc = readFileSync(join(f.job.worktreeStoryRoot, "arcs/truth.md"), "utf8");
+          const next = arc.replace(/characters: \[([^\]]+)\]/, "characters: [$1, character.mara]")
+            .replace(/(characters:\n(?:  - [^\n]+\n)+)/, "$1  - character.mara\n");
+          assert.notEqual(next, arc);
+          return { content: [
+            { type: "toolCall", id: "prospective-character", name: "write", arguments: { path: supportPath, content: character } },
+            { type: "toolCall", id: "prospective-arc-link", name: "write", arguments: { path: "arcs/truth.md", content: next } },
+          ], reason: "toolUse" };
+        }
+        if (index === 6) return { content: scriptedText({ modifiedRecords: ["arcs/truth.md", supportPath], architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
+        if (index === 7) {
+          const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
+          const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
+          return { content: scriptedReadCalls(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths), index), reason: "toolUse" };
+        }
+        if (index === 8) return { content: scriptedText({ verdict: "pass", findings: [], evidence: [supportPath + ":1: Mara provides the prospective witness role.", "arcs/truth.md:1: The Arc now links Mara."] }), reason: "stop" };
+        if (index === 9) {
+          assert.match(raw, /character.mara/);
+          return { content: scriptedReadCalls(readSources, index), reason: "toolUse" };
+        }
+        if (index === 10) return { content: [{ type: "toolCall", id: "prospective-event", name: "write", arguments: {
+          path, content: authored.replace("participants: [character.ada, character.neri]", "participants: [character.ada, character.neri, character.mara]") + "\n" + quote + "\n",
+        } }], reason: "toolUse" };
+        if (index === 11) return { content: scriptedText(manifest), reason: "stop" };
+        if (index === 12) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 13) {
+          const prompt = messages.flatMap(m => m.content ?? []).map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"))!;
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
+              explanation: "Verified prospective witness." }] }), reason: "stop" };
+        }
+        throw Error("Unexpected prospective call " + index);
+      }
       if ([0, 2, 4].includes(index)) return { content: scriptedReadCalls(readSources, index), reason: "toolUse" };
       if (index === 1) return { content: scriptedText(plan), reason: "stop" };
       if (index === 3) return { content: scriptedText({ schema: "noveltea-milestone-blueprint-review/v5",
@@ -983,6 +1031,36 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis"] as co
       saver.db.close();
       saver = SqliteSaver.fromConnString(paused.checkpointPath);
       graph = createGenerationGraph(saver, "cli");
+    }
+    if (prospective) {
+      const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+      assert.equal(failed.recoveryLifecycle.active?.origin.assignmentId, item.id, JSON.stringify({ reason: failed.reason, lifecycle: failed.recoveryLifecycle, calls: observed.length }));
+      assert.equal(observed.length, 4);
+      const before = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(before.blueprintPrerequisite.blockers[0].characterId, "character.mara");
+      assert.equal(before.sessionFile, undefined);
+      const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.equal(chosen.recoveryLifecycle.decision?.adapter, "dependency-work");
+      await crashAtSubmission("focused-committed", 7, { interruptAfter: ["assess_recovery"] });
+      const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.ok(supported.recoveryLifecycle.discharged?.some(c => c.case.id === failed.recoveryLifecycle.active?.id),
+        JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
+      const { inspectDependencyPlan } = await import("../src/dependency-state.js");
+      const support = (await inspectDependencyPlan(f.job))!.entries[0]!;
+      assert.equal(support.phase, "verified");
+      const rebound = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(rebound.expectedHead, support.commitSha);
+      assert.deepEqual(rebound.blueprintPin, before.blueprintPin);
+      assert.equal(rebound.sessionFile, undefined);
+      assert.equal(observed.length, 9);
+      saver.db.close();
+      saver = SqliteSaver.fromConnString(paused.checkpointPath);
+      graph = createGenerationGraph(saver, "cli");
+      const after = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
+      assert.equal(after.result?.status, "event-cluster-committed", JSON.stringify({ reason: after.reason, lifecycle: after.recoveryLifecycle, calls: observed.length }));
+      assert.equal(observed.length, 14);
+      assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+      return;
     }
     if (diagnosis) {
       const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));

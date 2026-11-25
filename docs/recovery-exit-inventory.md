@@ -628,8 +628,9 @@ round-origin correction and the exhausted-reviewer parent disposition.
   any Event writer is invoked. The new throws at #5/#6 reject foreign or changed
   readiness proof; previous exits move by one return and two throws.
   `inspectEventBlueprintPrerequisite` revalidates the exact clean original
-  source. This enters existing C06 owner/plan assessment; it does not yet
-  dispatch a new supporting assignment.
+  source. This enters existing C06 owner/plan assessment; an authenticated
+  unrealized Character with unambiguous delegated authority may dispatch
+  the shared supporting assignment.
 - C05 general diagnostic v3 retains the same four model consumer call sites
   and tool-free original session. Controller binding, field-specific format
   feedback, and sealed exhaustion inspection change their proof gates, not
@@ -639,5 +640,25 @@ round-origin correction and the exhausted-reviewer parent disposition.
   absent/foreign/duplicate declarations), `test/unknown-recovery-diagnostic.test.ts`
   (scripted Pi exact feedback, controller identities, restart, terminal
   exhaustion and tamper), `test/recovery-diagnostic-proposal.test.ts` (schema).
-  Remaining qualification: autonomous pre-Event dependency admission,
-  independent supporting writer/Review and Event restart; live full Story.
+- The pre-Event supporting dependency is admitted through the same plan
+  ledger and Focused writer/Review child as existing supporting work.
+  `advanceFocusedDependency` delegates its former reviewer call to
+  `runSupportingDependency`; no duplicate Review allowance is added.
+  `approveDependency` validates a narrowly scoped Character creation and
+  audited Arc link; `rebindEventAfterBlueprintPredecessors` validates the
+  successor catalog and retains the original Blueprint pin. The active-case
+  discharge reauthenticates the verified dependency chain and Event receipt.
+  The parent recovery node passes its original graph configuration to the
+  existing operation adapter, not a new recovery controller.
+- Review wire selectors bind exact before/after values in the controller,
+  and transcript replay normalizes the same replies. The shared Event
+  acceptance gate permits player-only inspection and returns field-specific
+  semantic defects; generic unresolved in-scope conflicts use the original
+  correction ledger rather than attempting to authenticate a nonexistent
+  commit. Local Blueprint prompts emphasize the selected Milestone's causal
+  limit and independent review of already-authored occurrences.
+- R14D prospective production SQLite regression exercises the complete
+  pre-dispatch Character/Arc writer, Review, rebind and resumed Event path.
+  Remaining qualification includes arbitrary downstream no-write reports,
+  ambiguous/existing out-of-lease or non-Character dependencies, and live
+  full Story certification.

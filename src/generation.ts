@@ -3382,7 +3382,7 @@ export function recoveryNode(
           prior.recoveryLifecycle.decision.adapter === "review-cycle") &&
         prior.recoverySources.some(x => x.caseId === prior.recoveryLifecycle.active?.id && x.channel === "operationRecovery")) {
       const job = await openJob(state);
-      const action = await executeOperationStrategy(job, state, prior.recoveryLifecycle);
+      const action = await executeOperationStrategy(job, state, prior.recoveryLifecycle, config);
       if (action) return action;
     }
     if (node === "assess_recovery" && prior.recoveryLifecycle.assessorPending &&

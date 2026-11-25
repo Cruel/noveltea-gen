@@ -267,3 +267,46 @@ export function authorizeDependency(input: {
       targets: [proposal.target], dependsOn: [], discovery: "canonical-story-read-only",
       authority: { recordTypes: [record.metadata.type], existingPaths: [record.path], mayCreate: false } } };
 }
+
+/** Only the previously reviewed, unrealized Character may be created. The
+ * shared focused writer audits the one appended Arc Character reference. */
+export function authorizeBlueprintCharacterDependency(input: {
+  plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
+  proposal: ReviewCharacterProposal; records: CanonicalScopeRecord[]; sources: DependencySource[];
+  version: number; source: import("./dependency-state.js").BlueprintDependencySource;
+  priorAmendments: TurnAssignmentEvidence[];
+}): DependencyAmendment {
+  const {plan, head, report, proposal, records, source} = input;
+  const target = source.target;
+  const newPath = "characters/" + target.slice(10) + ".md";
+  const arc = records.find(r => r.path === source.arcPath && r.metadata.type === "arc" && r.metadata.status !== "superseded");
+  const milestone = records.find(r => r.metadata.id === source.milestoneId && r.metadata.type === "milestone" && r.metadata.status !== "superseded");
+  const event = plan.assignments.find(a => a.id === "event" && a.specialist === "nt-event-design" && a.authority.recordTypes.includes("event"));
+  const character = plan.assignments.find(a => a.specialist === "nt-worldbuilding + nt-character-development" && a.authority.mayCreate && a.authority.recordTypes.includes("character"));
+  const architecture = plan.assignments.find(a => a.specialist === "nt-story-architecture" && a.authority.recordTypes.includes("arc"));
+  if (plan.kind !== "full-story" || plan.objective?.breadth !== "whole-story" || !event || !character || !architecture ||
+      !arc || !milestone || !Array.isArray(milestone.metadata.arcs) || !milestone.metadata.arcs.includes(arc.metadata.id) ||
+      !Array.isArray(arc.metadata.characters) || arc.metadata.characters.includes(target) ||
+      (arc.metadata.decisions !== undefined && (!Array.isArray(arc.metadata.decisions) ||
+        arc.metadata.decisions.some(d => !d || d.origin !== "agent" || d.authority !== "delegated"))) ||
+      !/^character\.[a-z][a-z0-9-]*$/.test(target) || records.some(r => r.metadata.id === target || r.path === newPath) ||
+      report.assignmentId !== event.id || report.sourceSha !== head || report.turnDigest !== plan.digest ||
+      !plan.objective.obligations.includes(report.obligation) || report.authorDecisionRequired ||
+      report.likelySpecialist !== "nt-character-development" ||
+      JSON.stringify(report.sources) !== JSON.stringify(input.sources) ||
+      !keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason,title") ||
+      proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest || proposal.target !== target ||
+      proposal.specialist !== report.likelySpecialist || proposal.outcome !== report.missing ||
+      !text(proposal.reason) || !text(proposal.title, 120) || /[\r\n]/.test(proposal.title) ||
+      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8 ||
+      [...plan.assignments, ...input.priorAmendments].some(a => a.targets.includes(target) ||
+        a.authority.existingPaths.includes(newPath) || a.authority.newPaths?.includes(newPath)))
+    throw Error("Blueprint predecessor lacks exact whole-Story ownership, safe delegated Arc link or new Character authority.");
+  return { beforeVersion: input.version, afterVersion: input.version + 1, sourceSha: head,
+    turnDigest: plan.digest, reportDigest: input.reportDigest, reason: proposal.reason,
+    objective: structuredClone(plan.objective), resumes: event.id,
+    assignment: { id: "dependency:" + input.version + ":" + target, specialist: proposal.specialist,
+      outcome: proposal.outcome, targets: [target], dependsOn: [], discovery: "canonical-story-read-only",
+      authority: { recordTypes: ["arc", "character"], existingPaths: [source.arcPath],
+        newPaths: [newPath], mayCreate: true } } };
+}

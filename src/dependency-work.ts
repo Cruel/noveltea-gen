@@ -14,7 +14,7 @@ import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
-  recordDependency, registerReviewDependency, approveDependency,
+  recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency,
   inspectDependencyPlan, saveDependencyPlan } from "./dependency-state.js";
 import { proposeDependency } from "./dependency-planner.js";
 import { type DependencyReport, type DependencyProposal } from "./dependency-amendments.js";
@@ -124,7 +124,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     throw Error("Dependency requires the sealed original no-write session.");
   const report = suspension.report;
   const reportDigest = suspension.seal.reportDigest;
-  const assignment = await withStoryJobLock(job, "dependency-authorization", async () => {
+  await withStoryJobLock(job, "dependency-authorization", async () => {
     let plan = await inspectDependencyPlan(job);
     let entry = plan?.entries.find(e => e.reportDigest === reportDigest);
     const head = await supportingBoundary(job, entry);
@@ -155,6 +155,11 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     }
     return entry.amendment!.assignment;
   });
+  return runSupportingDependency(job, input, reportDigest, config);
+}
+
+async function runSupportingDependency(job: import("./job.js").JobStartResult,
+  input: FocusedWorkOptions, reportDigest: string, config?: RunnableConfig) {
   let saved = await inspectDependencyPlan(job);
   if (saved?.entries.find(e => e.reportDigest === reportDigest)?.phase === "verified")
     return { status: "dependency-verified", reportDigest };
@@ -162,6 +167,9 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
   const admitted = saved?.entries.find(e => e.reportDigest === reportDigest);
   if (typeof graphThreadId !== "string" || !admitted?.amendment)
     throw Error("Supporting assignment requires the admitting Generation graph Thread.");
+  const report = admitted.report;
+  const assignment = admitted.amendment.assignment;
+  const authorizedPaths = [...assignment.authority.existingPaths, ...(assignment.authority.newPaths ?? [])].sort();
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
     jobThreadId: job.threadId, graphThreadId, turnDigest: report.turnDigest,
@@ -191,11 +199,11 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     if (proof.phase !== "committed" || proof.commitSha !== head || proof.expectedHead !== report.sourceSha ||
         proof.workItemId !== assignment.id || proof.jobId !== job.jobId ||
         proof.assignmentDigest !== input.turnPlanDigest ||
-        JSON.stringify(proof.paths) !== JSON.stringify(assignment.authority.existingPaths))
+        JSON.stringify(proof.paths) !== JSON.stringify(authorizedPaths))
       throw Error("Dependency work receipt is stale or out of scope.");
     const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
     const changed = dependencyGit(job, "diff", "--name-only", report.sourceSha, head).split("\n");
-    if (JSON.stringify(changed) !== JSON.stringify(assignment.authority.existingPaths.map(p => prefix + p)) ||
+    if (JSON.stringify(changed) !== JSON.stringify(authorizedPaths.map(p => prefix + p)) ||
         dependencyGit(job, "rev-parse", head + "^") !== report.sourceSha)
       throw Error("Dependency commit differs from exact authorized work.");
     entry.commitSha = head; entry.phase = "reviewing";
@@ -204,18 +212,19 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     const dependencyContract = { ...turn.contract, scope: { ...turn.contract.scope,
       targets: assignment.targets, supportingTargets: [], creates: [] } };
     const review: ReviewAssignment = { contract: dependencyContract,
-      planVersion: entry.amendment!.afterVersion, scopeIds: entry.report.affectedIds,
-      paths: [...new Set([...assignment.authority.existingPaths, ...report.sources.map(s => s.path)])],
+      planVersion: entry.amendment!.afterVersion, scopeIds: [...new Set([...entry.report.affectedIds, ...assignment.targets])],
+      paths: [...new Set([...authorizedPaths, ...report.sources.map(s => s.path)])],
       routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
       turnGoal: "ONLY review the necessary supporting prerequisite for this original author goal: " + turn.goal +
-        ". The originating author dialogue is suspended and will be written only AFTER this review passes; " +
-        "its current incompleteness is not a failure of the supporting assignment.",
+        (entry.blueprintSource
+          ? ". Verify the new Character's exact prospective role and the limited Arc reference. Do not require the suspended Event to have happened yet."
+          : ". The originating author dialogue is suspended and will be written only AFTER this review passes; its current incompleteness is not a failure of the supporting assignment."),
       specialistAssignments: [assignment],
       dependency: { sourceSha: report.sourceSha, commitSha: head,
         obligation: report.obligation, reason: entry.amendment!.reason,
         sources: report.sources.map(s => ({ path: s.path, quote: s.quote })),
         diff: dependencyGit(job, "diff", report.sourceSha, head, "--",
-          ...assignment.authority.existingPaths.map(p => prefix + p)) } };
+          ...authorizedPaths.map(p => prefix + p)) } };
     {
       if (!proof.snapshot || await openSkillSnapshot(proof.snapshot.id) !== proof.snapshot.path)
         throw Error("Dependency reviewer lacks the original pinned skill snapshot.");
@@ -254,6 +263,56 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
   if (finished.outcome?.status !== "verified" || finished.outcome.assignmentKey !== key)
     throw Error("Supporting child did not independently verify the approved prerequisite.");
   return { status: "dependency-verified", reportDigest };
+}
+
+/** Realize each independently reviewed prospective Character through the
+ * existing dependency child. A later Event consumes the unchanged pin only
+ * after every supporting commit has native and independent review proof. */
+export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions, "target">,
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, config?: RunnableConfig) {
+  const job = await startStoryJob({ story: input.story, job: input.job }, false);
+  const { archiveEventBlueprintPrerequisite, inspectArchivedEventBlueprintPrerequisite,
+    blueprintReadinessHistory, rebindEventAfterBlueprintPredecessors } = await import("./event-work.js");
+  const { existsSync } = await import("node:fs");
+  const original = await withStoryJobLock(job, "blueprint-dependency-admission", async () =>
+    existsSync(blueprintReadinessHistory(job, readiness.milestoneId, readiness.reportDigest))
+      ? inspectArchivedEventBlueprintPrerequisite(job, readiness.milestoneId, readiness.reportDigest)
+      : archiveEventBlueprintPrerequisite(job, readiness, input.validatorSource ?? input.skillsSource));
+  if (input.fixture || JSON.stringify(original.report) !== JSON.stringify(readiness) ||
+      readiness.blockers.some(b => b.readiness !== "unrealized-character") ||
+      (await dependencyTurn(job)).digest !== input.turnPlanDigest)
+    throw Error("Blueprint prerequisite is not an authorized new Character dependency.");
+  for (const target of [...new Set(readiness.blockers.map(b => b.characterId))]) {
+    const admitted = await withStoryJobLock(job, "blueprint-dependency-authorization", async () => {
+      let plan = await inspectDependencyPlan(job);
+      let entry = plan?.entries.find(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
+        e.blueprintSource.target === target);
+      if (entry?.phase === "verified") return entry;
+      if (entry?.phase === "rejected") throw Error("Independent prerequisite review rejected the supporting work.");
+      const head = await supportingBoundary(job, entry);
+      if (!entry) {
+        const { processAuthorUpdatesAfterWork } = await import("./author-updates.js");
+        const author = await processAuthorUpdatesAfterWork(job);
+        if ("error" in author || author.status !== "ready") throw new AssignmentAuthorPauseError();
+        ({ plan, entry } = await registerBlueprintDependency(job, readiness.milestoneId, readiness.reportDigest, target));
+      }
+      if (!plan || !entry) throw Error("Missing Blueprint dependency ledger entry.");
+      if (!entry.amendment) {
+        const proposal = { sourceSha: head, reportDigest: entry.reportDigest, target,
+          specialist: "nt-character-development", outcome: entry.report.missing,
+          reason: "Required by the independently reviewed prospective Milestone Blueprint.",
+          title: target.slice(10).split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ") };
+        await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
+      }
+      return entry;
+    });
+    if (admitted.phase !== "verified")
+      await runSupportingDependency(job, { ...input, target }, admitted.reportDigest, config);
+  }
+  const { head, digest, entries } = await withStoryJobLock(job, "blueprint-dependency-rebind", () =>
+    rebindEventAfterBlueprintPredecessors(job, readiness.milestoneId, readiness.reportDigest,
+      input.validatorSource ?? input.skillsSource));
+  return { head, digest, history: entries.map(e => ({ reportDigest: e.reportDigest, entryDigest: dependencyDigest(e) })) };
 }
 
 /** S14: resume a rejected, *completed* Character Foundations checkpoint with
