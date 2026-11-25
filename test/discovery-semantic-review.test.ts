@@ -129,3 +129,16 @@ test('reviewer replacement diagnosis requires exact material quotes and cannot w
   assert.throws(() => parse([dispute, dispute]), /Invalid Discovery diagnostic (?:dispute|contract)/)
   assert.throws(() => parse([dispute], [{ ...assessment, verdict: 'uncertain' }]), /exact source evidence/)
 })
+
+test('independent Review assesses every individually sourced claim beyond the former count cap', () => {
+  const packet = discoverySemanticPacket('A mystery.', Array.from({ length: 52 }, (_, index) => ({
+    statement: 'Ending detail ' + index, authority: 'delegated', source: ending,
+  })), [], evidence, context)
+  assert.equal(packet.claims.length, 52)
+  const assessments = packet.claims.map(claim => ({
+    claimId: claim.id, verdict: 'supported', reason: 'Fits the delegated ending.',
+  }))
+  assert.equal(parseDiscoverySemanticVerdict(JSON.stringify({ assessments }), packet).assessments.length, 52)
+  assert.throws(() => parseDiscoverySemanticVerdict(JSON.stringify({ assessments: assessments.slice(0, -1) }), packet),
+    /omitted required assessments/)
+})

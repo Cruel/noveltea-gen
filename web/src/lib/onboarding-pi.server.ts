@@ -140,24 +140,36 @@ function scope(input: Session) {
     ...(input.chat ? { chat: input.chat } : {}) }
 }
 export type DiscoverySessionView = ReturnType<typeof scope>
+class DiscoveryProposalFormatError extends Error {}
+
 function expectedProposal(value: unknown, evidence: PlanningEvidence[], newStoryChat: boolean,
   delegationAuthorized: boolean): Proposal {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Malformed discovery reply')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new DiscoveryProposalFormatError('Return a JSON object containing the Creative Direction proposal.')
   const output = value as Record<string, unknown>
   if (!output.foundation || typeof output.foundation !== 'object' || Array.isArray(output.foundation) ||
       typeof output.task !== 'string' || !output.task.trim() || output.task.length > 4000) {
-    throw new Error('Missing proposed foundation or task')
+    throw new DiscoveryProposalFormatError('Return a foundation object and a nonempty task string of at most 4,000 characters.')
   }
   const input = output.foundation as Record<string, unknown>
-  if (!validStoryTitle(input.title)) throw new Error('Invalid proposed Story title')
+  if (!validStoryTitle(input.title)) throw new DiscoveryProposalFormatError('Supply a valid Story title in foundation.title.')
   const fields = ['id', 'title', 'premise', 'central_conflict', 'genre', 'tone', 'player_experience', 'scope', 'body']
-  if (fields.some(field => typeof input[field] !== 'string' || !(input[field] as string).trim() ||
-      (input[field] as string).length > (field === 'body' ? 12000 : field === 'title' ? 120 : 4000)) ||
-      !Array.isArray(input.decisions) || input.decisions.length > 12 ||
-      input.decisions.some(d => !d || typeof d !== 'object' || typeof d.statement !== 'string' ||
-        !d.statement.trim() || d.statement.length > 1000 ||
-        !['user-protected', 'delegated'].includes(String(d.authority)))) {
-    throw new Error('Invalid Creative Direction proposal')
+  for (const field of fields) {
+    const maximum = field === 'body' ? 12000 : field === 'title' ? 120 : 4000
+    const value = input[field]
+    if (typeof value !== 'string' || !value.trim() || value.length > maximum)
+      throw new DiscoveryProposalFormatError('foundation.' + field +
+        ' must be a nonempty string of at most ' + maximum + ' characters.')
+  }
+  if (!Array.isArray(input.decisions))
+    throw new DiscoveryProposalFormatError('foundation.decisions must be an array.')
+  for (const [index, decision] of input.decisions.entries()) {
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision) ||
+        typeof decision.statement !== 'string' || !decision.statement.trim() || decision.statement.length > 1000)
+      throw new DiscoveryProposalFormatError('foundation.decisions[' + index +
+        '].statement must be a nonempty string of at most 1,000 characters.')
+    if (!['user-protected', 'delegated'].includes(String(decision.authority)))
+      throw new DiscoveryProposalFormatError('foundation.decisions[' + index +
+        '].authority must be user-protected or delegated.')
   }
   const checks: PlanningClaimCheck[] = []
   const failures: PlanningProvenanceError[] = []
@@ -218,7 +230,7 @@ function expectedProposal(value: unknown, evidence: PlanningEvidence[], newStory
 function parseResponse(text: string, evidence: PlanningEvidence[], newStoryChat: boolean,
   delegationAuthorized = false):
   { questions: { questions: unknown }; proposal?: never } | { questions?: never; proposal: Proposal } {
-  if (text.length > 24_000) throw new Error('Discovery reply exceeds the bounded conversation size')
+  if (text.length > 24_000) throw new DiscoveryProposalFormatError('Keep the complete Discovery response within 24,000 characters; shorten prose without losing author decisions or sources.')
   const clean = text.trim().replace(/^\x60\x60\x60(?:json)?\s*/i, '').replace(/\s*\x60\x60\x60$/, '')
   const output = JSON.parse(clean) as Record<string, unknown>
   if (output.phase === 'questions') {
@@ -235,7 +247,7 @@ function parseResponse(text: string, evidence: PlanningEvidence[], newStoryChat:
  * include arbitrary provider errors, private session text or exception stacks. */
 function discoveryCorrectionFeedback(error: unknown): string {
   if (error instanceof DiscoverySemanticRejection) return error.correction
-  if (error instanceof PlanningInterpretationContractError) return error.message
+  if (error instanceof PlanningInterpretationContractError || error instanceof DiscoveryProposalFormatError) return error.message
   const reason = error instanceof Error ? error.message : ''
   if (reason === 'Invalid author-question recommendation.' ||
       reason === 'A free-text question cannot force suggested alternatives.') {

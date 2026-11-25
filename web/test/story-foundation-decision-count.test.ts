@@ -14,14 +14,14 @@ const decisions = (length: number) => Array.from({ length }, (_, n) => ({
   authority: n < 18 ? 'user-protected' : 'delegated',
 }))
 
-test('Studio preserves distinct author and agent discovery evidence within its bounded bootstrap', () => {
+test('Studio preserves distinct author and agent discovery evidence without imposing a decision-count ceiling', () => {
   const accepted = candidate({ ...source, decisions: decisions(30) })
   assert.match(accepted.file, /decision-29/)
   assert.match(accepted.file, /origin: user/)
   assert.match(accepted.file, /origin: agent/)
-  assert.throws(() => candidate({ ...source, decisions: decisions(41) }),
-    /Invalid Creative Direction decision provenance/,
-  'The combined source-and-Studio decision count must remain bounded')
+  const expanded = candidate({ ...source, decisions: decisions(64) })
+  assert.match(expanded.file, /decision-63/)
+  assert.equal((expanded.file.match(/  - id: decision-/g) ?? []).length, 64)
   assert.throws(() => candidate({ ...source, decisions: decisions(20).map((item, i) =>
     i === 19 ? { ...item, origin: 'user', authority: 'delegated' } : item) }),
   /Invalid Creative Direction decision provenance/,

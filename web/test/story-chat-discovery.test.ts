@@ -138,7 +138,7 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     const selected = (await availableUserPiModels(store, alice))[0]!
     const model = { provider: selected.provider, id: selected.id }
     await store.persistence.settings.putDefaultModel(alice, model, 'now')
-    const storyIds = Array.from({ length: 9 }, () => randomUUID())
+    const storyIds = Array.from({ length: 10 }, () => randomUUID())
     const sourceSha = 'b'.repeat(40)
     const hash = (value: string) => createHash('sha256').update(value).digest('hex')
     const cache = join(root, 'git-cache', hash(alice), hash('github:34'))
@@ -1132,6 +1132,63 @@ for (const backend of ['sqlite', 'postgres'] as const) test(`${backend}: ordinar
     assert.equal((await uncertainRequest({ action: 'retry', revision: uncertainState.revision })).status, 409)
     assert.equal(uncertainCalls, 1)
     assert.equal(await store.persistence.generation.jobs.identity(uncertainTurn), null)
+
+    // Live R14 regression: correcting a cross-source combined decision can
+    // legitimately produce more than twelve separately authorized decisions.
+    const splitStory = storyIds[9]!, splitTurn = randomUUID()
+    await store.persistence.naturalStory.beginFirstTurn(alice, splitStory, splitTurn,
+      initial, new Date().toISOString(), 'autonomous')
+    const topics = ['branching', 'setting', 'tone', 'cast', 'clues', 'pacing',
+      'ending', 'locations', 'artwork', 'sound', 'viewpoint', 'dialogue', 'puzzles']
+    const splitQuestionList = [{ id: 'baseline', kind: 'free-text',
+      question: 'May Studio decide the complete planning baseline?', allowStudioDecision: true },
+      ...topics.map(topic => ({ id: 'detail-' + topic, kind: 'free-text',
+        question: 'May Studio choose the ' + topic + ' preference?', allowStudioDecision: true }))]
+    let splitWriters = 0, splitReviews = 0
+    const splitTransport = withFixtureSemanticReview(async (state, instructions) => {
+      if (state.turns.length === 1) return questionsReply(splitQuestionList)
+      splitWriters++
+      const value = JSON.parse(proposalFor(state))
+      const source = { kind: 'answer', setId: state.accepted![0]!.setId }
+      if (splitWriters === 1) {
+        value.foundation.decisions = [{ statement: 'Choose all thirteen preferences together',
+          authority: 'delegated', source: { ...source, questionId: 'detail-branching' } }]
+      } else {
+        assert.equal(splitWriters, 2)
+        assert.match(instructions, /Independent read-only scope review rejected/)
+        value.foundation.decisions = topics.map(topic => ({
+          statement: 'Choose the ' + topic + ' preference', authority: 'delegated',
+          source: { ...source, questionId: 'detail-' + topic },
+        }))
+      }
+      return JSON.stringify(value)
+    }, packet => {
+      splitReviews++
+      const decisions = packet.claims.filter(claim => claim.kind === 'creative-decision')
+      assert.equal(decisions.length, splitReviews === 1 ? 1 : 13)
+      if (splitReviews === 2) assert.equal(new Set(decisions.map(claim => claim.sourceDecisionId)).size, 13)
+      return packet.claims.map(claim => ({ claimId: claim.id,
+        verdict: splitReviews === 1 && claim.kind === 'creative-decision' ? 'unsupported' : 'supported',
+        reason: 'Each decision must cite its own delegated topic.' }))
+    })
+    const splitRequest = (body: unknown) => storyChatDiscoveryRequest(auth, store,
+      new Request(url + '/api/story-chat-discovery', { method: 'POST',
+        headers: { cookie: aliceCookie, origin: url }, body: JSON.stringify(body),
+      }), url, splitStory, splitTurn, splitTransport)
+    const splitStarted = await splitRequest({ action: 'start', model, text: initial })
+    assert.equal(splitStarted.status, 200, await splitStarted.clone().text())
+    const splitQuestions = (await splitStarted.json() as any).session
+    const splitResult = await splitRequest({ action: 'answer', revision: splitQuestions.revision,
+      setId: splitQuestions.questions.id, setRevision: splitQuestions.questions.revision,
+      responses: splitQuestionList.map(question => ({ questionId: question.id, answer: { kind: 'delegate', note: '' } })) })
+    assert.equal(splitResult.status, 200, await splitResult.clone().text())
+    const splitProposal = (await splitResult.json() as any).session
+    assert.equal(splitProposal.phase, 'proposed')
+    assert.equal(splitProposal.proposal.foundation.decisions.filter((decision: { origin: string }) =>
+      decision.origin === 'agent').length, 13)
+    assert.equal(splitWriters, 2)
+    assert.equal(splitReviews, 2)
+    assert.equal(await store.persistence.generation.jobs.identity(splitTurn), null)
 
   } finally {
     await reopened?.close()

@@ -55,8 +55,8 @@ export function discoverySemanticPacket(brief: string, decisions: Array<{
   interpretations.forEach((item, index) =>
     append('planning:' + index, 'planning-interpretation', item.source,
       item.path + ' = ' + item.value + '; rationale: ' + item.rationale))
-  if (claims.length > 48 || new Set(claims.map(c => c.id)).size !== claims.length)
-    throw Error('Discovery semantic review exceeds the bounded claim set.')
+  if (new Set(claims.map(c => c.id)).size !== claims.length)
+    throw Error('Discovery semantic review contains duplicate claim IDs.')
   const packet: DiscoverySemanticPacket = { contract: 'discovery-semantic-scope/v1',
     brief, creativeDirection: context,
     authorSources: evidence.map(({ source, decisionId, statement, authorText, delegated, selectedOption }) =>

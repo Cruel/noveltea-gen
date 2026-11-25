@@ -373,7 +373,7 @@ test("R14 Discovery and handoff retain reviewed source/effect gates", () => {
     ["onboarding-pi.server.ts", "settleInterruptedApproval", "6332d0af287a08423108d122c20d5da9503136454566a2a4a2a703aaa1f38412"],
     ["onboarding-pi.server.ts", "reconcileDiscoveryGraph", "df459778be6135cdf996624df0019a2901d0230acdab3c051362f612f3d9dd54"],
     ["onboarding-pi.server.ts", "onboardingPiRequest", "86d90a076a3132e384199dc0b00b28eefae6156686d19203faf2fe2b6020d046"],
-    ["onboarding-pi.server.ts", "expectedProposal", "223e0a08045e4f01921b624cb73b1c6d3d3a901b6451a67abff9f020efd074aa"],
+    ["onboarding-pi.server.ts", "expectedProposal", "ff60c27e64b95cdde78bd17183dd869b87f8675138157ee152accf4ffc7a54d1"],
     ["onboarding-pi.server.ts", "currentGraph", "51f5e1b73a5d42c4a6d7d39f0b43315b929597b5b944777329e7ae2be6c946e6"],
     ["../../../src/discovery-semantic-review.ts", "parseDiscoverySemanticDiagnostic", "2de55a16f6751be8200839b532327ce05a47c5ec295d5d23dc57c26c620e49b1"],
     ["../../../src/planning-interpretation.ts", "parsePlanningInterpretations", "ce3b883e9c3abf410bf8cfb3beb29748184c7bada02a1f523779fa116f1ad4e8"],

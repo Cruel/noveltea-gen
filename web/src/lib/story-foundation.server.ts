@@ -43,11 +43,10 @@ export function candidate(value: unknown): { file: string; title: string } {
   // autonomous agent or grant the agent authority over it.
   let decisions: FoundationDraft['decisions']
   if (withDecisions) {
-    // A discovered Foundation includes each submitted author answer for
-    // provenance PLUS separate authorized Studio decisions. A full 16-question
-    // baseline and 12 proposed details already exceed the demo's 20-item cap.
-    // Keep Studio bounded without dropping or merging author evidence.
-    if (!Array.isArray(input.decisions) || input.decisions.length < 1 || input.decisions.length > 40 ||
+    // Preserve every independently sourced author and Studio decision.
+    // Validate the entries, not an arbitrary cardinality; the enclosing
+    // transport and native validator still bound the actual payload.
+    if (!Array.isArray(input.decisions) || input.decisions.length < 1 ||
         input.decisions.some(d => !d || typeof d !== 'object' || Array.isArray(d) ||
           Object.keys(d).sort().join(',') !== 'authority,id,origin,statement' ||
           typeof d.id !== 'string' || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(d.id) ||
