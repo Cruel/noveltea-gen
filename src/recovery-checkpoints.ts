@@ -65,6 +65,7 @@ function sourceFor(id: string): { path: string; unit?: string } {
   if (repair) return { path: "review-repairs/proofs/" + repair[1] + ".json" };
   const focus = id.match(/^focus:([a-z][a-z0-9.-]*)$/);
   if (focus) return { path: "focused-items/" + focus[1] + ".json" };
+  if (/^dependency:[1-9][0-9]*:[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(id)) return { path: "dependency-items/" + id + ".json" };
   throw new Error("Unsupported specialist work item: " + id);
 }
 type Receipt = Record<string, any>;
@@ -234,6 +235,7 @@ function stageOf(id: string) {
   if (id.startsWith("composition-")) return "composition";
   if (/^repair-[a-f0-9]{40}$/.test(id)) return "repair";
   if (id.startsWith("focus:")) return "focus";
+  if (id.startsWith("dependency:")) return "dependency";
   throw new Error("Unsupported recovery stage.");
 }
 async function planFor(job: JobStartResult, requiredDigest?: string | null) {
@@ -269,7 +271,7 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
   // inventories; verifyFinal separately authenticates inherited baselines and
   // original same-Job Git history, so this cannot fabricate a completion.
   for (const id of historicalRepairs) {
-    if (!/^repair-[a-f0-9]{40}$/.test(id))
+    if (!/^repair-[a-f0-9]{40}$|^dependency:[1-9][0-9]*:[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(id))
       throw Error("Historical review repair has an invalid work-item identity.");
     // Historic repairs are completed provenance, not executable plan tasks.
     // Existing finalized checkpoints never inserted them in the dependency
@@ -278,7 +280,7 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
     else if (!order.includes(id)) order.push(id);
   }
   if (!plan) {
-    if (stageOf(committedItem) === "repair") add(committedItem, []);
+    if (["repair", "dependency"].includes(stageOf(committedItem))) add(committedItem, []);
     return { order, dependencies: deps };
   }
   // A direct specialist command may legitimately extend an architecture-only
@@ -290,7 +292,7 @@ function workPlan(plan: Awaited<ReturnType<typeof planFor>>, committedItem: stri
   const requested = stageRank[stageOf(committedItem)] ?? 0;
   // A repair is a distinct verified correction, not a fabricated completion
   // of an unrelated specialist or a replacement for the rejected checkpoint.
-  if (stageOf(committedItem) === "repair") add(committedItem, []);
+  if (["repair", "dependency"].includes(stageOf(committedItem))) add(committedItem, []);
   const approved = stageRank[plan.contract.scope.depth ?? "composition"] ?? 4;
   const depth = Math.max(approved, requested);
   if (plan.items.some(i => i.id.startsWith("focus-"))) {
@@ -483,7 +485,7 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
     throw new Error("Recovery checkpoint identity, compatibility, or continuation is invalid.");
   }
   const planned = workPlan(point.plan as Awaited<ReturnType<typeof planFor>>, point.workItem,
-    point.completedWorkItems.filter(id => id.startsWith("repair-")));
+    point.completedWorkItems.filter(id => id.startsWith("repair-") || id.startsWith("dependency:")));
   const completed = point.completedWorkItems;
   const omissions = await verifyOmissions(job, point.omittedWorkItems, point.commitSha, sourceMode);
   const remaining = planned.order.filter(id => !completed.includes(id) && !omissions.has(id));
@@ -739,7 +741,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
     isAncestor(job, p.commitSha, commitSha));
   const baseline = verifiedBaselineStages(job, plan, workItem);
   const history = [...baseline, ...previous.flatMap(p => p.completedWorkItems)];
-  const work = workPlan(plan, workItem, history.filter(id => id.startsWith("repair-")));
+  const work = workPlan(plan, workItem, history.filter(id => id.startsWith("repair-") || id.startsWith("dependency:")));
   if (!work.order.includes(workItem))
     throw new Error("Work item does not belong to the authorized continuation plan.");
   const completed = [...new Set([...baseline,

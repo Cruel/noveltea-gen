@@ -688,7 +688,12 @@ round-origin correction and the exhausted-reviewer parent disposition.
 | `recoveryNode/return#12–14`, `status#11–13`, `throw#5` | U/G/F: author control preserves pause/cancel; resume requires the same selected dependency strategy and every intervening committed effect independently attested; a lost original grant fences. R14D prospective-paused crosses a verified first support without replay. Prior subsequent exit ordinals shift by three returns/statuses and one throw. |
 | `inspectModernGenerationRecovery` interrupted Blueprint support publication | Read-only exception for the exact already-admitted writer effect, verified native source and exact Git parent/diff; the prior published parent remains the historical lineage anchor. R14D tests the real committed support with its prior verified-HEAD receipt restored. Unauthenticated effects still fence. |
 
-Negative supporting Review correction, further partial-progress resource qualification and the
-complete affected-consumer/multi-Case qualification remain outstanding under
-#273; unsupported specialist adapters remain in #274. This audit update is
-not certification of those unresolved routes.
+| Supporting assignment checkpoint/Review admission | Direct and nested support now enter ordinary checkpoint assurance and mandatory postcommit Review with the exact approved dependency assignment, not a synthesized Turn assignment. The read-only grant lookup authenticates the dependency plan and original writer/Git proof without recursively reading the Review ledger. |
+| `runSupportingDependency`, `runSupportingChild`, `supportingWriterRounds` | The original logical child uses existing Review-round transitions and original-writer correction; a passing successor must be independently reattested before the ledger becomes verified. The support root stays immutable, the effective successor changes only after verification. A negative requiring unauthorized expansion is unresolved, not a new writer grant. R14D verifies real negative Review correction and interrupted corrective publication, and R04 verifies nested support. |
+| `prepareRepairWriter`, `beginRejectedRepair`, `readRejectedRepairOrigin`, `verifyFinal`, `usesSharedAssignmentReview`, `usesCheckpointedReviewRounds`, `reviewSupportRoot` | Reuse the existing repair skill, sealed transcript, checkpoint and writer lease with the support identity. No new model consumer policy or allowance; Review is mandatory and the original failed checkpoint is not relabeled. |
+| `executeOperationStrategy`, `inspectBlueprintSupportProgress`, `supportingBoundary`, `advanceFocusedDependency` | Carry the original Case into support correction and authenticate verified roots and repair chains on reentry. Original parent authority and dependency closure are unchanged. |
+
+Further cross-owner support Review/diagnostic integration, unresolved planning,
+partial-progress resource qualification, and complete affected-consumer/multi-Case
+qualification remain outstanding. Unsupported specialist adapters remain in
+#274. This audit update is not certification of those unresolved routes.

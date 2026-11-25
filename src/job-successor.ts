@@ -211,7 +211,7 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       const { inspectDependencyPlan, dependencyWriterBase, dependencyAncestors } = await import("./dependency-state.js");
       const plan = await inspectDependencyPlan(job);
       const entry = plan?.entries.find(e =>
-        e.phase === "verified" && e.commitSha === commit && e.amendment &&
+        e.phase === "verified" && (e.supportRootSha ?? e.commitSha) === commit && e.amendment &&
         trailers.includes("NovelTea-Work-Item: " + e.amendment.assignment.id));
       // The existing Blueprint rebind exemption extends only to its authenticated
       // predecessor chain, not arbitrary narrative changes from other callers.

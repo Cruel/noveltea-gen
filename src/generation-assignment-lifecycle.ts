@@ -30,14 +30,14 @@ export function usesSharedAssignmentReview(workItem: string | undefined | null):
     /^interactive-(?:choice|puzzle)-[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
     /^(?:interactive|choice|puzzle|event|composition):milestone\.[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
     /^(?:event|composition)-[a-z][a-z0-9-]*$/.test(workItem ?? "") ||
-    /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem ?? "");
+    /^(?:focus:|dependency:[1-9][0-9]*:)[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem ?? "");
 }
 /** Cutover registry: only lanes with the actual bounded Review adapter are
  * admitted here; the older policy registry alone is not proof of migration. */
 export function usesCheckpointedReviewRounds(workItem: string): boolean {
   return ["foundation", "world-foundations", "character-foundations", "global-architecture"].includes(workItem) ||
     /^(?:interactive-(?:choice|puzzle)|event|composition)-[a-z][a-z0-9-]*$/.test(workItem) ||
-    /^focus:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem);
+    /^(?:focus:|dependency:[1-9][0-9]*:)[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/.test(workItem);
 }
 /** Studio Discovery precedes any Generation job or Git write grant. */
 export type DiscoveryAssignmentIdentity = Readonly<{

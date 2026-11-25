@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { createGenerationQuestionGraph } from "./generation-author-question.js";
 import { focusedChoiceWorkItem } from "./specialist-choice.js";
-import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, type AssignmentIdentity, type AssignmentOutcome, type AssignmentSubmission, type AssignmentPrerequisiteSuspension } from "./generation-assignment-lifecycle.js";
+import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildConfig, type AssignmentIdentity, type AssignmentOutcome, type AssignmentSubmission, type AssignmentPrerequisiteSuspension, type AssignmentCorrection, type AssignmentVerifiedSubmission } from "./generation-assignment-lifecycle.js";
 import { join } from "node:path";
 import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
@@ -16,6 +16,9 @@ import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPen
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency, blueprintSourceOf,
   inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, dependencyAncestors, supportingReviewAssignment, DependencyAuthorizationRefusedError, type DependencyEntry } from "./dependency-state.js";
+import { createReviewRoundTransitions } from "./generation-review-round.js";
+import { reviewSupportRoot, inspectSharedSupportReview } from "./support-review.js";
+import { executeReviewRound } from "./rejected-review-repair.js";
 import { proposeDependency } from "./dependency-planner.js";
 
 /** Authenticate an exact committed, not-yet-published prerequisite effect.
@@ -62,8 +65,26 @@ export async function inspectBlueprintSupportProgress(job: import("./job.js").Jo
   const plan = await inspectDependencyPlan(job);
   if (!plan) return false;
   const roots = plan.entries.filter(e => e.blueprintSource?.readinessDigest === readiness.reportDigest);
-  const verified = new Set(plan.entries.filter(e => e.phase === "verified" && e.commitSha &&
-    roots.some(root => dependencyAncestors(plan.entries, e).has(root.reportDigest))).map(e => e.commitSha!));
+  const relevant = plan.entries.filter(e =>
+    roots.some(root => dependencyAncestors(plan.entries, e).has(root.reportDigest)));
+  const verified = new Set<string>();
+  for (const entry of relevant) {
+    if (entry.phase === "verified" && entry.commitSha) {
+      verified.add(entry.commitSha);
+      if (entry.supportRootSha && entry.supportRootSha !== entry.commitSha) {
+        verified.add(entry.supportRootSha);
+        // The full ledger inspector has already authenticated every Review
+        // and repair predecessor between these exact two receipts.
+        for (const sha of dependencyGit(job, "rev-list", entry.supportRootSha + ".." + entry.commitSha).split("\n"))
+          verified.add(sha);
+      }
+    } else if (entry.phase === "reviewing" && entry.supportRootSha &&
+        await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, entry.supportRootSha)) {
+      verified.add(entry.supportRootSha);
+      for (const sha of dependencyGit(job, "rev-list", entry.supportRootSha + ".." + head).split("\n").filter(Boolean))
+        verified.add(sha);
+    }
+  }
   dependencyGit(job, "merge-base", "--is-ancestor", readiness.expectedHead, head);
   let parent = readiness.expectedHead;
   for (const commit of dependencyGit(job, "rev-list", "--reverse", parent + ".." + head).split("\n")) {
@@ -113,6 +134,9 @@ async function supportingBoundary(job: import("./job.js").JobStartResult,
     if (head !== sourceSha) throw new ProtocolIntegrityBlockedError("Supporting assignment source HEAD changed.");
     return head;
   }
+  if (entry?.phase === "reviewing" && entry.supportRootSha &&
+      await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, entry.supportRootSha))
+    return trustedHead(job);
   return dependencyBoundary(job);
 }
 
@@ -138,7 +162,7 @@ function supportingWriterRounds(job: import("./job.js").JobStartResult, identity
     if (stopped) return stopped;
     const entry = (await currentEntry())!;
     if (entry.phase === "reviewing" || entry.phase === "verified")
-      return { receiptRef: identity.assignmentId, status: "focused-committed", headSha: entry.commitSha };
+      return { receiptRef: identity.assignmentId, status: "focused-committed", headSha: entry.supportRootSha ?? entry.commitSha };
     const result = await runFocusedWorkItem({ ...input, round: { assignmentKey: key, command } });
     if (result.status === "dependency-required") {
       const original = await supportingSuspension(job, entry, identity);
@@ -193,7 +217,9 @@ async function supportingSuspension(job: import("./job.js").JobStartResult, entr
  * support use this exact child runner and the existing dependency ledger. */
 async function runSupportingChild(job: import("./job.js").JobStartResult,
   input: FocusedWorkOptions, identity: AssignmentIdentity, reportDigest: string,
-  verify: (submission: AssignmentSubmission) => Promise<AssignmentOutcome>, config: RunnableConfig) {
+  verify: (submission: AssignmentSubmission) => Promise<AssignmentOutcome | AssignmentCorrection | AssignmentVerifiedSubmission<AssignmentIdentity>>, config: RunnableConfig,
+  correctReview?: (submission: AssignmentSubmission, correction: AssignmentCorrection) => Promise<AssignmentSubmission | AssignmentOutcome>,
+  caseId?: string) {
   const key = logicalAssignmentKey(identity);
   const currentEntry = async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   const rounds = supportingWriterRounds(job, identity, input, currentEntry);
@@ -243,7 +269,7 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
         await admitDependency(job, plan, nested, input);
         return nested;
       });
-      await runSupportingDependency(job, input, childEntry.reportDigest, config);
+      await runSupportingDependency(job, input, childEntry.reportDigest, config, caseId);
       const checked = (await inspectDependencyPlan(job))!.entries.find(e => e.reportDigest === childEntry.reportDigest);
       if (!checked || checked.phase !== "verified" || !checked.commitSha)
         throw new ProtocolIntegrityBlockedError("Nested prerequisite lacks a verified successor.");
@@ -274,7 +300,8 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
       authenticateContinuation: async state => state.continuationRef === continuationRef && await authenticate(),
       invoke: rounds.invoke,
       reenterWriter: rounds.invoke,
-      correct: state => rounds.correct(state.submission!, state.correction!),
+      correct: state => state.submission!.status === "writer-round" || !correctReview
+        ? rounds.correct(state.submission!, state.correction!) : correctReview(state.submission!, state.correction!),
       verify: async state => state.submission!.status === "writer-round"
         ? rounds.verify(state.submission!) : verify(state.submission!),
     }, async head => !!continuationRef && await authenticate() && head === await trustedHead(job));
@@ -369,7 +396,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
       if (entry.commitSha !== head) throw Error("Completed dependency source is stale.");
       return entry.amendment!.assignment;
     }
-    if (entry.phase === "reviewing" && entry.commitSha === head && entry.amendment)
+    if (entry.phase === "reviewing" && (entry.commitSha === head || entry.supportRootSha) && entry.amendment)
       return entry.amendment.assignment;
     if (entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected dependency work requires original receipt reconciliation; no replay.");
@@ -380,7 +407,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
 }
 
 async function runSupportingDependency(job: import("./job.js").JobStartResult,
-  input: FocusedWorkOptions, reportDigest: string, config?: RunnableConfig) {
+  input: FocusedWorkOptions, reportDigest: string, config?: RunnableConfig, caseId?: string) {
   let saved = await inspectDependencyPlan(job);
   if (!config && saved?.entries.find(e => e.reportDigest === reportDigest)?.phase === "verified")
     return { status: "dependency-verified", reportDigest };
@@ -398,8 +425,87 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
     sourceHeadSha: report.sourceSha, scopeDigest: dependencyDigest(assignment),
   };
   const key = logicalAssignmentKey(identity);
+  const sharedReview = !!admitted.supportRootSha || !admitted.reviewerSession;
+  const current = async () => (await inspectDependencyPlan(job))!.entries.find(e => e.reportDigest === reportDigest)!;
+  const settle = async (head: string) => withStoryJobLock(job, "dependency-review-settlement", async () => {
+    const plan = (await inspectDependencyPlan(job))!;
+    const entry = plan.entries.find(e => e.reportDigest === reportDigest)!;
+    if (await dependencyBoundary(job) !== head) throw Error("Support Review successor is stale.");
+    const verdict = await inspectSharedSupportReview(job, entry, head);
+    entry.commitSha = head;
+    entry.review = verdict;
+    entry.reviewerSession = verdict.sessionFile!;
+    entry.reviewerSessionDigest = createHash("sha256").update(await readFile(verdict.sessionFile!)).digest("hex");
+    entry.phase = verdict.verdict === "pass" ? "verified" : "rejected";
+    await saveDependencyPlan(job, plan);
+    return entry;
+  });
+  const transitions = async () => {
+    const entry = await current();
+    if (!entry.supportRootSha) throw Error("Support correction has no committed original root.");
+    const root = entry.supportRootSha;
+    return createReviewRoundTransitions({
+      originalHead: root, originalReceipt: assignment.id,
+      outcome: (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome,
+      run: command => executeReviewRound(job, { rootSha: root, caseId: caseId ?? key,
+        assignmentKey: key, workItem: assignment.id }, command, {
+        skillsSource: input.skillsSource, provider: input.provider, model: input.model,
+      }),
+      verifySuccessor: async head => await trustedHead(job) === head &&
+        (await inspectSharedSupportReview(job, await current(), head)).verdict === "pass",
+    });
+  };
+  const verifyShared = async (submission: AssignmentSubmission) => {
+    if (submission.status === "focused-committed") {
+      await withStoryJobLock(job, "dependency-review-root", async () => {
+        const plan = (await inspectDependencyPlan(job))!;
+        const entry = plan.entries.find(e => e.reportDigest === reportDigest)!;
+        if (!entry.supportRootSha) {
+          const head = await dependencyBoundary(job);
+          if (head !== submission.headSha || submission.receiptRef !== assignment.id)
+            throw Error("Support Review lost its committed writer submission.");
+          entry.supportRootSha = head;
+          entry.commitSha = head;
+          entry.phase = "reviewing";
+          await saveDependencyPlan(job, plan);
+        }
+        if (entry.supportRootSha !== submission.headSha || submission.receiptRef !== assignment.id)
+          throw Error("Support Review lost its original root.");
+        await reviewSupportRoot(job, entry, dependencyWriterBase(plan, entry));
+      });
+      const entry = await current();
+      const root = entry.supportRootSha!;
+      const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === root);
+      if (!point) throw Error("Support Review lost its checkpoint.");
+      if (point.semanticReview === "failed" && await trustedHead(job) === root) {
+        const { inspectCheckpointReview } = await import("./checkpoint-assurance.js");
+        const { reviewNeedsDependency } = await import("./review-repair-amendment.js");
+        const review = await inspectCheckpointReview(job, point);
+        if (point.assurance && review?.result &&
+            reviewNeedsDependency(point.assurance, review.result, assignment.id)) {
+          const terminal = await settle(root);
+          return { status: "unresolved" as const, assignmentKey: key,
+            evidenceRef: dependencyDigest(terminal), dispositionRef: "support-review-negative" };
+        }
+      }
+      if (point.semanticReview === "passed") {
+        const complete = await settle(root);
+        return { status: "verified" as const, assignmentKey: key, evidenceRef: dependencyDigest(complete),
+          reviewRef: reportDigest, headSha: root };
+      }
+    }
+    const result = await (await transitions()).verify(submission);
+    const outcome = "outcome" in result ? result.outcome : "assignmentKey" in result ? result : null;
+    if (outcome?.status === "verified") {
+      const complete = await settle(outcome.headSha);
+      const verified = { status: "verified" as const, assignmentKey: key, evidenceRef: dependencyDigest(complete),
+        reviewRef: reportDigest, headSha: outcome.headSha };
+      return "submission" in result ? { submission: result.submission, outcome: verified } : verified;
+    }
+    return result;
+  };
   await runSupportingChild(job, { ...input, target: assignment.targets[0]!,
-    dependencyAssignmentId: assignment.id }, identity, reportDigest, async result => {
+    dependencyAssignmentId: assignment.id }, identity, reportDigest, sharedReview ? verifyShared : async result => {
       const complete = await withStoryJobLock(job, "dependency-review", async () => {
     const head = await dependencyBoundary(job);
     saved = await inspectDependencyPlan(job);
@@ -455,7 +561,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
       });
       return { status: "verified", assignmentKey: key, evidenceRef: dependencyDigest(complete),
         reviewRef: reportDigest, headSha: complete.commitSha! };
-  }, config!);
+  }, config!, sharedReview ? async (submission, correction) => (await transitions()).correct(submission, correction) : undefined, caseId);
   return { status: "dependency-verified", reportDigest };
 }
 
@@ -463,7 +569,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
  * existing dependency child. A later Event consumes the unchanged pin only
  * after every supporting commit has native and independent review proof. */
 export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions, "target">,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, config?: RunnableConfig) {
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, config?: RunnableConfig, caseId?: string) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const { archiveEventBlueprintPrerequisite, inspectArchivedEventBlueprintPrerequisite,
     blueprintReadinessHistory, rebindEventAfterBlueprintPredecessors } = await import("./event-work.js");
@@ -499,7 +605,7 @@ export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions,
       await admitDependency(job, plan, entry, input);
       return entry;
     });
-    await runSupportingDependency(job, { ...input, target }, admitted.reportDigest, config);
+    await runSupportingDependency(job, { ...input, target }, admitted.reportDigest, config, caseId);
   }
   const { head, digest, entries } = await withStoryJobLock(job, "blueprint-dependency-rebind", () =>
     rebindEventAfterBlueprintPredecessors(job, readiness.milestoneId, readiness.reportDigest,

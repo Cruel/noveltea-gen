@@ -19,7 +19,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { inspectRecoveryCheckpoints, finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
-import { inspectCheckpointReview, readIndependentReview, readRepairCommitProof, repairReviewAssignment,
+import { inspectCheckpointReview, readIndependentReview, readRepairCommitProof, repairReviewAssignment, checkpointOriginalAssignment,
   type IndependentReviewResult, type RepairCommitProof } from "./checkpoint-assurance.js";
 import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
@@ -200,6 +200,7 @@ function specialistSource(job: JobStartResult, workItem: string) {
   if (focus) return join(job.stateDir, "focused-items", focus[1] + ".json");
   if (["world-foundations", "character-foundations"].includes(workItem))
     return join(job.stateDir, "character-world.json");
+  if (/^dependency:[1-9][0-9]*:[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(workItem)) return join(job.stateDir, "dependency-items", workItem + ".json");
   return null;
 }
 /** Establish origin from the *committed writer receipt*, not model-supplied
@@ -239,8 +240,8 @@ export async function readRejectedRepairOrigin(job: JobStartResult, point: Recov
       : point.workItem.startsWith("interactive-")
         ? join(job.stateDir, "interactive-sessions", "interactive-" +
           point.workItem.split("-").slice(2).join("-"), point.workItem.split("-")[1]!) + sep
-        : point.workItem.startsWith("focus:")
-          ? join(job.stateDir, "focused-sessions", point.workItem.slice(6)) + sep
+        : /^(focus:|dependency:)/.test(point.workItem)
+          ? join(job.stateDir, "focused-sessions", point.workItem.split(":").at(-1)!) + sep
           : join(job.stateDir, "character-world-sessions",
             point.workItem === "world-foundations" ? "world" : "character") + sep;
   if (!sessionFile?.startsWith(sessionDir) ||
@@ -290,7 +291,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   if (existsSync(pathFor(job, point.commitSha))) return inspectRejectedRepair(job, point.commitSha);
   const failure = await verifiedFailure(job, point);
   const plan = await readReviewTurnEvidence(job);
-  const original = plan?.assignments.find(a => a.id === point.assurance?.assignmentId);
+  const original = plan && point.assurance ? await checkpointOriginalAssignment(job, plan, point.assurance.assignmentId) : null;
   const assignment = original ? await repairReviewAssignment(job, point.workItem, original) : null;
   if (!assignment || point.assurance?.assignmentDigest !== hash(assignment))
     throw Error("Rejected specialist assignment is not pinned to the original Turn.");
@@ -1394,8 +1395,8 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
 
 /** Reopen the exact original scoped writer for either semantic or native repair. */
 async function prepareRepairWriter(job: JobStartResult, state: RepairReceipt) {
-  const focus = state.origin.workItem.startsWith("focus:")
-    ? state.origin.workItem.slice(6).split(".")[0] : null;
+  const focus = /^(focus:|dependency:)/.test(state.origin.workItem)
+    ? state.origin.workItem.split(":").at(-1)!.split(".")[0] : null;
   const skill = state.origin.workItem === "foundation" ? "nt-story-discovery" :
     state.origin.workItem === "global-architecture" ? "nt-story-architecture" :
     state.origin.workItem.startsWith("event-") || focus === "event"

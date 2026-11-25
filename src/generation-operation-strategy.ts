@@ -1015,7 +1015,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       const { advanceBlueprintDependency } = await import("./dependency-work.js");
       let result: Awaited<ReturnType<typeof advanceBlueprintDependency>>;
       try {
-        result = await advanceBlueprintDependency(s.request, readiness, config);
+        result = await advanceBlueprintDependency(s.request, readiness, config, c.id);
       } catch (error) {
         // Derive the stop from the existing authenticated ledger even if the
         // child graph wrapped the error. Uncertain effects still fail closed.

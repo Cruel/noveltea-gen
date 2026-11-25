@@ -17,7 +17,7 @@ import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { sourceBoundBlueprintChallenge } from "./blueprint-challenge.js";
 import type { MilestoneBlueprint, MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
-import { sealIndependentReview, inspectCheckpointReview, repairReviewAssignment, readRepairCommitProof,
+import { sealIndependentReview, inspectCheckpointReview, repairReviewAssignment, readRepairCommitProof, checkpointOriginalAssignment,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -114,6 +114,7 @@ function packetDigest(items: SemanticReviewItem[], dispute?: SemanticReviewPacke
 /** Review only the work actually authorized at this durable checkpoint.
  * Parent Turn goals still belong to the following units and final Turn review. */
 export function semanticUnitOutcome(workItem: string, specialist?: string): string {
+  if (workItem.startsWith("dependency:")) return "Review only the controller-admitted necessary prerequisite and exact authorized paths; do not require the suspended consumer to be realized yet. Any Arc link is field-only; the writer may not change its prose or other fields.";
   if (workItem.startsWith("repair-") && specialist === "nt-event-design")
     return (
       "Correction of the original Event assignment only: no new paths, owner changes or protected writes. " +
@@ -158,7 +159,7 @@ export async function prepareSemanticReview(job: JobStartResult,
     seen.add(point.commitSha);
     if (assurance.turnDigest !== plan.digest || assurance.baseSha !== job.baseSha)
       throw new Error("Reviewer assignment or source baseline is stale.");
-    const original = plan.assignments.find(a => a.id === assurance.assignmentId);
+    const original = await checkpointOriginalAssignment(job, plan, assurance.assignmentId);
     if (!original) throw new Error("Pinned specialist assignment is absent.");
     const assignment = await repairReviewAssignment(job, point.workItem, original);
     if (hash(JSON.stringify(assignment)) !== assurance.assignmentDigest)
@@ -337,7 +338,7 @@ export async function prepareSemanticReview(job: JobStartResult,
           })));
     }
     let rejectedEventComparison: SemanticReviewItem["rejectedEventComparison"];
-    if (point.workItem.startsWith("repair-") && assignment.specialist === "nt-event-design") {
+    if (point.workItem.startsWith("repair-") && assignment.specialist === "nt-event-design" && !assignment.id.startsWith("dependency:")) {
       const sourceCommitSha = point.workItem.slice("repair-".length);
       if (/^[a-f0-9]{40}$/.test(sourceCommitSha)) {
         const repairFile = join(job.stateDir, "review-repairs", sourceCommitSha + ".json");

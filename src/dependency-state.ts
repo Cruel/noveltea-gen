@@ -83,6 +83,8 @@ export interface DependencyEntry {
   approval?: { authority: "necessary-dependency/v1"; jobId: string; threadId: string;
     sourceSha: string; amendmentDigest: string };
   planner?: { snapshot: SkillSnapshot; sessionFile: string; skillReads?: string[] };
+  /** The original committed support remains immutable when common Review repair advances HEAD. */
+  supportRootSha?: string;
   commitSha?: string; review?: EditorialVerdict; reviewerSession?: string;
   /** Independently sealed focused-support verdict transcript. */
   reviewerSessionDigest?: string;
@@ -212,7 +214,7 @@ export async function registerBlueprintDependency(job: JobStartResult,
   return recordDependency(job, report, false, source);
 }
 
-export async function inspectDependencyPlan(job: JobStartResult): Promise<DependencyPlan | null> {
+async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean): Promise<DependencyPlan | null> {
   if (!existsSync(file(job))) return null;
   const saved = JSON.parse(await readFile(file(job), "utf8")) as DependencyPlan;
   const { digest, ...body } = saved;
@@ -228,7 +230,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
   // A pending review request belongs to the original sealed negative verdict,
   // not to later model statements or a mutable Story catalog. Reconstruct its
   // exact digest on every read and keep it outside the writer grant list.
-  if (saved.reviewRequests?.length) {
+  if (!grantsOnly && saved.reviewRequests?.length) {
     const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.assurance);
     for (const request of saved.reviewRequests) {
       const point = checkpoints.find(p => p.commitSha === request.sourceSha);
@@ -321,7 +323,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
           entry.fixture)
         throw Error("Supporting review-dependency report is not linked to the sealed source.");
     }
-    if (entry.originalReview) {
+    if (!grantsOnly && entry.originalReview) {
       const request = saved.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
       const { inspectPostcommitReviewCycle } = await import("./postcommit-review-cycle.js");
       const cycle = request && await inspectPostcommitReviewCycle(job, request.sourceSha, request.originalAssignmentDigest);
@@ -358,7 +360,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
             /^[a-f0-9]{64}$/.test(entry.eventRepair.proofDigest)
           : entry.originalReview && entry.originalReviewerSession)))
       throw Error("Dependency completion lacks verified work and independent review receipts.");
-    if (entry.phase === "verified" && entry.eventRepair) {
+    if (!grantsOnly && entry.phase === "verified" && entry.eventRepair) {
       const request = saved.reviewRequests?.find(r => r.sourceSha === entry.reviewSourceSha);
       const correction = entry.eventRepair;
       const proof = await readRepairCommitProof(job, "repair-" + correction.sourceSha);
@@ -395,21 +397,22 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
       entry.review?.verdict === "block";
     if (supportRejected && (!entry.amendment || !entry.commitSha || !entry.reviewerSession || entry.fixture))
       throw Error("Negative supporting Review lacks its original committed assignment and reviewer.");
-    if ((supportPassed || supportRejected) && !entry.fixture) {
+    if (!grantsOnly && (supportPassed || supportRejected) && !entry.fixture) {
       const session = entry.reviewerSession!;
       if (!session.startsWith(join(job.stateDir, "review-sessions") + "/") ||
           await realpath(session) !== session || !entry.reviewerSessionDigest ||
           createHash("sha256").update(await readFile(session)).digest("hex") !== entry.reviewerSessionDigest)
         throw Error("Supporting review lost its independently sealed transcript.");
     }
-    if (supportPassed || supportRejected) {
+    if (supportPassed || supportRejected || entry.supportRootSha) {
       const a = entry.amendment!;
       const writerBase = dependencyWriterBase(saved, entry);
+      const committed = entry.supportRootSha ?? entry.commitSha!;
       const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", a.assignment.id + ".json"), "utf8"));
       const authorizedPaths = [...a.assignment.authority.existingPaths,
         ...(a.assignment.authority.newPaths ?? [])].sort();
       if (proof.phase !== "committed" || proof.jobId !== job.jobId || proof.workItemId !== a.assignment.id ||
-          proof.commitSha !== entry.commitSha || proof.expectedHead !== writerBase ||
+          proof.commitSha !== committed || proof.expectedHead !== writerBase ||
           proof.assignmentDigest !== turn.digest || proof.worker !== (entry.fixture ? "fixture" : "pi") ||
           proof.validation?.status !== "passed" || proof.validation.validatorVersion !== job.validatorVersion ||
           proof.validation.baseSha !== writerBase ||
@@ -417,22 +420,29 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         throw Error("Dependency work receipt is missing or no longer matches its native-validated assignment.");
       const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
       const paths = authorizedPaths;
-      if (dependencyGit(job, "rev-parse", entry.commitSha + "^") !== writerBase ||
-          dependencyGit(job, "diff", "--name-only", writerBase, entry.commitSha!).split("\n").join("\n") !==
+      if (dependencyGit(job, "rev-parse", committed + "^") !== writerBase ||
+          dependencyGit(job, "diff", "--name-only", writerBase, committed).split("\n").join("\n") !==
             paths.map(p => prefix + p).join("\n") ||
           proof.sha256 !== dependencyDigest(paths.map(p => [p,
-            sourceDigest(dependencyGit(job, "show", entry.commitSha + ":" + prefix + p))])))
+            sourceDigest(dependencyGit(job, "show", committed + ":" + prefix + p))])))
         throw Error("Dependency committed bytes or exact diff differ from the work receipt.");
       if (entry.blueprintSource) {
         const { auditArcLink } = await import("./focused-work.js");
         for (const path of a.assignment.authority.existingPaths) {
           const arc = prefix + path;
           auditArcLink(dependencyGit(job, "show", writerBase + ":" + arc),
-            dependencyGit(job, "show", entry.commitSha + ":" + arc), entry.blueprintSource.target);
+            dependencyGit(job, "show", committed + ":" + arc), entry.blueprintSource.target);
+          if (entry.commitSha !== committed && dependencyGit(job, "show", committed + ":" + arc) !==
+              dependencyGit(job, "show", entry.commitSha + ":" + arc)) throw Error("Support correction changed the field-only Arc link.");
         }
       }
       dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha!, "HEAD");
-      if (!entry.reviewSourceSha && !entry.fixture) {
+      if (grantsOnly || (!supportPassed && !supportRejected)) continue;
+      if (entry.supportRootSha) {
+        const { inspectSharedSupportReview } = await import("./support-review.js");
+        const checked = await inspectSharedSupportReview(job, entry, entry.commitSha!);
+        if (JSON.stringify(checked) !== JSON.stringify(entry.review)) throw Error("Supporting Review differs from its completed independent transcript.");
+      } else if (!entry.reviewSourceSha && !entry.fixture) {
         const { inspectCompletedPiReviewContext } = await import("./job-pi-policy.js");
         const { recoveredCloseoutReview } = await import("./cross-domain-closeout-work.js");
         const { openSkillSnapshot } = await import("./snapshot.js");
@@ -452,6 +462,20 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
     }
   }
   return saved;
+}
+export function inspectDependencyPlan(job: JobStartResult) {
+  return inspectDependencyLedger(job, false);
+}
+/** Read-only checkpoint assignment lookup: validate the source and controller
+ * grant, not the verdict whose checkpoint is currently being inspected. No
+ * writer can use this lookup instead of the full dependency ledger gate. */
+export async function inspectDependencyCheckpointAssignment(job: JobStartResult, id: string) {
+  const plan = await inspectDependencyLedger(job, true);
+  const entry = plan?.entries.find(e => e.amendment?.assignment.id === id);
+  if (!entry?.amendment || !entry.approval || entry.fixture || entry.reviewSourceSha ||
+      !entry.supportRootSha || !["reviewing", "verified", "rejected"].includes(entry.phase))
+    throw Error("Support checkpoint has no original admitted dependency assignment.");
+  return entry.amendment.assignment;
 }
 /** The original focused support review packet, also used to authenticate a
  * settled negative verdict without starting a new reviewer. */

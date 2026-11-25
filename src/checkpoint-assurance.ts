@@ -100,6 +100,7 @@ export function selectCheckpointReview(input: {
     ...(input.dependencyCount >= 2 ? ["broad-dependencies"] : []),
     ...(input.paths.length >= 4 || input.addedLines + input.removedLines >= 150 ? ["large-diff"] : []),
     ...(input.previousFailure ? ["previous-review-failure"] : []),
+    ...(input.workItem.startsWith("dependency:") ? ["necessary-prerequisite"] : []),
   ];
   return { status: reasons.length ? "required-pending" : "not-required", reasons };
 }
@@ -367,6 +368,13 @@ export async function repairReviewAssignment(job: JobStartResult,
     throw Error("Repair assignment revision lacks a trusted, exact author choice.");
   return revision.assignment;
 }
+/** Normal and controller-admitted dependency assignments share the same
+ * checkpoint assurance and Review repair source lookup. */
+export async function checkpointOriginalAssignment(job: JobStartResult, turn: TurnEvidence, id: string) {
+  if (id.startsWith("dependency:"))
+    return (await import("./dependency-state.js")).inspectDependencyCheckpointAssignment(job, id);
+  return turn.assignments.find(a => a.id === id);
+}
 function assignmentId(workItem: string): string {
   if (workItem === "foundation") return "foundation";
   if (workItem === "global-architecture") return "architecture";
@@ -374,7 +382,7 @@ function assignmentId(workItem: string): string {
   if (workItem.startsWith("event-")) return "event";
   if (workItem.startsWith("interactive-")) return "interactive";
   if (workItem.startsWith("composition-")) return "composition";
-  if (workItem.startsWith("focus:")) return workItem;
+  if (workItem.startsWith("focus:") || workItem.startsWith("dependency:")) return workItem;
   throw new Error("No Turn assignment corresponds to the verified work item.");
 }
 export function executionId(workItem: string): string {
@@ -437,7 +445,7 @@ function exactDiff(job: JobStartResult, parentSha: string, commitSha: string) {
 }
 function assertAuthority(assignment: TurnAssignmentEvidence,
   changes: Array<{ path: string; status: string }>, plan: TurnEvidence, repair: boolean) {
-  if (plan.kind !== "revision") return;
+  if (plan.kind !== "revision" && !assignment.id.startsWith("dependency:")) return;
   if (changes.some(({ path, status }) =>
       !assignment.authority.recordTypes.includes(directories[path.split("/")[0]!]!) ||
       (assignment.authority.existingPaths.includes(path) ? status !== "M" :
@@ -455,7 +463,7 @@ export async function checkpointAssurance(job: JobStartResult,
   const proof = point.workItem.startsWith("repair-")
     ? await readRepairCommitProof(job, point.workItem) : null;
   const id = proof?.assignmentId ?? assignmentId(point.workItem);
-  const original = turn.assignments.find(item => item.id === id);
+  const original = await checkpointOriginalAssignment(job, turn, id);
   const assignment = original ? await repairReviewAssignment(job, point.workItem, original) : null;
   if (!assignment || point.baseSha !== turn.source.verifiedSha || point.jobId !== job.jobId)
     throw new Error("Checkpoint has no original, source-bound specialist assignment.");

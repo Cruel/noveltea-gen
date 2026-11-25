@@ -847,11 +847,30 @@ repeating it. The R04
 nested test asserts the parent pins both receipts, and R14D exercises the
 publication gap with a real committed effect and a restored prior HEAD receipt.
 
+Direct and nested supporting assignments now use the same immutable
+checkpoint assurance, postcommit Review cycle, review-round transitions and
+original-writer repair as ordinary assignments. The controller records the
+exact support root separately from the verified successor; the original
+dependency grant, original failed Review and every repair predecessor remain
+independently inspectable. A root negative Review requiring an out-of-scope
+write is not authorization to expand the grant; it preserves the verified
+source and unresolved disposition. Legacy in-flight support Review receipts
+retain their original inspection path. The existing review-source root
+adapter remains unchanged.
+
+The executable path is: supporting writer settles → native/Git checkpoint
+and mandatory independent Review → bounded original-session correction (if
+admissible) → original reviewer verifies successor → dependency ledger
+attests final HEAD → parent reauthenticates subtree and reenters the original
+Event or Focused assignment. R14D exercises a negative support Review with a
+real Character correction, checkpoint loss after both the original support
+commit and corrective commit, and no repeated model calls.
+
 Remaining #273 acceptance is not established by these changes alone:
-negative supporting Review and refused planning still require executable
-bounded common-policy correction when safe, not merely an authenticated
-terminal disposition; multi-Case pending scheduling, affected-only consumer
-reconciliation, and resource controls beyond the tested author-pause path
-need further production qualification. #274 owns the remaining specialist adapter
-integration, not a replacement parent or a new retry budget. #275 owns the
-compositional qualification across those integrations.
+unresolved planning and cross-owner support Review findings, recovery of
+support-specific diagnostic/author/nonprogress exits, multi-Case pending
+scheduling, affected-only consumer reconciliation, and resource controls
+beyond the tested author-pause path need further production qualification.
+#274 owns the remaining specialist adapter integration, not a replacement
+parent or a new retry budget. #275 owns the compositional qualification
+across those integrations.

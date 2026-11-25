@@ -93,7 +93,7 @@ const reviewed: Record<string, string> = {
   "src/orchestrator-planner.ts:runPinnedObjectivePlanner": "4:79fed5aeac43bc983bc607f6",
   "src/pi.ts:createPiDelegationAdapters": "5:d00e9236dc0a8845bbe5cf01",
   "src/pinned-skill-reads.ts:requirePinnedSkillReads": "1:049ca497e7263fdf90c97429",
-  "src/rejected-review-repair.ts:prepareRepairWriter": "1:52f1f643330c2a372e4ddc25",
+  "src/rejected-review-repair.ts:prepareRepairWriter": "1:e9a5ae2ec204525c446bbf75",
   "src/rejected-review-repair.ts:runPiRejectedRepair": "1:9f9f3d313ce50c2af115b14f",
   "src/rejected-review-repair.ts:runNativeRepairRound": "2:b3ec9253814377867544b7d0",
   "src/response-contract-recovery.ts:recoverResponseContract": "1:6393a4841b024e58ff33f038",
@@ -154,7 +154,7 @@ const downstreamReviewed: Record<string, string> = {
   "src/dependency-work.ts:continueReviewDependency": "1:763cf4d2e8040ab5985f92bd",
   "src/generation.ts:independentAssignmentBoundary": "1:cd5885456ac1086a2ab87516",
   "src/generation.ts:createGenerationGraph": "3:a5c12e54fe496e53c328f1a9",
-  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:bff2390374766711a9dffc8f",
+  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:63e89e55bfeed83298e6c46a",
   // Validated, read-only verdict consumers and sealed evidence re-readers.
   "src/cross-domain-closeout-specialist.ts:authorMilestoneCloseout": "1:6039a9cb83869c2519f4bc80",
   "src/cross-domain-closeout-work.ts:recoveredCloseoutReview": "1:d07d3a0f91e221a2cb34c6d1",
@@ -187,7 +187,8 @@ const downstreamReviewed: Record<string, string> = {
   "web/src/lib/discovery-evidence.server.ts:meterDiscoveryAttempts": "1:e815c68da3ec4e1c0762231d",
   "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
   "web/src/lib/story-chat-discovery.server.ts:storyChatDiscoveryRequest": "1:14222f0213a6d39fc9d6254d",
-  "src/dependency-work.ts:runSupportingDependency": "1:0acb25e34f1674486a1bc2f0",
+  "src/dependency-work.ts:runSupportingDependency": "1:277f5374c93c33da490eb519",
+  "src/support-review.ts:reviewSupportRoot": "1:3d6cecfac750e4d860307532",
 };
 
 test("R14L downstream reply consumers cannot multiply or change their disposition silently", () => {
@@ -245,7 +246,7 @@ const effectReviewed: Record<string, string> = {
   "src/dependency-state.ts:registerReviewDependency": "1:dd782da866472074f06be72f",
   "src/dependency-state.ts:inspectDependencyAdmission": "1:c7cb61e2d443a0f3965d3c7f",
   "src/dependency-state.ts:registerBlueprintDependency": "1:cb1ade2913b7acad17b3b7b9",
-  "src/dependency-work.ts:supportingWriterRounds": "1:6ed19e6419c733f06d8cb2ed",
+  "src/dependency-work.ts:supportingWriterRounds": "1:a06050ae71cd0cb2932e0435",
   "src/dependent-correction-work.ts:native": "1:c3469e6a1dcc5740024c502c",
   "src/event-manifest.ts:parseEventManifest": "1:9cd665fa6942929e0c38ccd3",
   "src/event-specialist.ts:authorEventCluster": "1:701d1c814dec11399c9b5d87",
@@ -255,7 +256,7 @@ const effectReviewed: Record<string, string> = {
   "src/focused-work.ts:runFocusedWorkItem": "2:bcb1461b0edc2ee89ad1575b",
   "src/foundation.ts:piAuthor": "1:9e5ed08fab9b974df4cfca50",
   "src/foundation.ts:executeFoundationGraph": "1:c8b2027f7012552fd2c41366",
-  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:bff2390374766711a9dffc8f",
+  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:63e89e55bfeed83298e6c46a",
   "src/generation.ts:reconcile": "3:f1a8db03717bd8d2dcc55b88",
   "src/generation.ts:applyLiveSteeringAtBoundary": "1:d3696b97d784629df921bf9a",
   "src/generation.ts:dispatch": "5:2527ecada0aa445518aa2b04",

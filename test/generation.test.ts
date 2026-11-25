@@ -788,15 +788,16 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
   const refused = mode === "prospective-refused";
   const unauthorized = mode === "prospective-unauthorized";
   const negativeSupport = mode === "prospective-review-negative";
+  const outsideSupport = mode === "prospective-review-outside";
   const partialPause = mode === "prospective-paused";
-  const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport;
+  const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport || outsideSupport;
   const prospective = mode === "prospective" || sourceRecovery || multi;
   const needsCharacter = mode === "support";
   const bindingDiagnosis = mode === "binding-diagnosis";
@@ -932,6 +933,20 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
         const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
         const stop = (value: unknown) => ({ content: scriptedText(value), reason: "stop" as const });
+        if (negativeSupport && index >= 11 && index <= 13) {
+          if (index === 11) {
+            assert.match(prompt, /SOURCE-LINKED REVIEW FEEDBACK/);
+            return { content: [{ type: "toolCall", id: "support-review-repair", name: "write",
+              arguments: { path: supportPath, content: character + "\nMara witnessed Neri sign the concealed ledger and can identify the signature.\n" } }], reason: "toolUse" };
+          }
+          if (index === 12) return stop("Established the prospective witness role.");
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1,
+              explanation: "The original witness obligation is now established." }] });
+        }
+        if (negativeSupport && index >= 14) index -= 3;
         if (index < 18) {
           const turn = index < 11 ? 0 : 1;
           const step = (index - 4) % 7;
@@ -965,15 +980,18 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
             ], reason: "toolUse" };
           }
           if (step === 4) return stop({ modifiedRecords: [arcPath, targetPath], architecturalConflicts: [], laterObligations: [] });
-          if (step === 5) {
-            const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
-            return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths));
-          }
-          if (negativeSupport) return stop({ verdict: "block", findings: [{ severity: "blocking",
-            dimension: "continuity", source: targetPath + ":1",
-            message: "The supporting Character does not establish the required prospective witness role.",
-            repair: "character" }], evidence: [] });
-          return stop({ verdict: "pass", findings: [], evidence: [targetPath + ":1: Required prospective role.", arcPath + ":1: Native Arc link."] });
+          if (step === 5) return read(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p));
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: targetPath, line: 1 };
+          if (outsideSupport && turn === 0) return stop({ sourceDigest: packet.sourceDigest, verdict: "fail",
+            findings: [{ ...ref, path: arcPath, kind: "continuity", message: "The Arc narrative needs a different authorial direction.",
+              requiredCorrection: "Rewrite the Arc premise.", affectedPaths: [arcPath] }], evidence: [] });
+          if (negativeSupport && turn === 0) return stop({ sourceDigest: packet.sourceDigest, verdict: "fail",
+            findings: [{ ...ref, kind: "continuity", message: "The supporting Character does not establish the required prospective witness role.",
+              requiredCorrection: "Establish the prospective witness role.", affectedPaths: [targetPath] }], evidence: [] });
+          return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ ...ref, explanation: "Required prospective role." }] });
         }
         if (index === 18) {
           assert.match(prompt, /character.mara/); assert.match(prompt, /character.oren/);
@@ -1010,12 +1028,15 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
           ], reason: "toolUse" };
         }
         if (index === 6) return { content: scriptedText({ modifiedRecords: ["arcs/truth.md", supportPath], architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
-        if (index === 7) {
+        if (index === 7) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 8) {
           const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
-          const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
-          return { content: scriptedReadCalls(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths), index), reason: "toolUse" };
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1,
+              explanation: "Mara provides the prospective witness role." }] }), reason: "stop" };
         }
-        if (index === 8) return { content: scriptedText({ verdict: "pass", findings: [], evidence: [supportPath + ":1: Mara provides the prospective witness role.", "arcs/truth.md:1: The Arc now links Mara."] }), reason: "stop" };
         if (index === 9) {
           assert.match(raw, /character.mara/);
           return { content: scriptedReadCalls(readSources, index), reason: "toolUse" };
@@ -1217,36 +1238,25 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
       assert.equal(before.sessionFile, undefined);
       const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.equal(chosen.recoveryLifecycle.decision?.adapter, "dependency-work");
-      if (refused || unauthorized || negativeSupport) {
+      if (refused || unauthorized || outsideSupport) {
         const blocked = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
         assert.equal(blocked.status, "blocked");
         assert.equal(blocked.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
         assert.equal(blocked.recoveryLifecycle.decision?.action, "strategy-unresolved");
-        assert.equal(blocked.recoveryLifecycle.decision?.reason, negativeSupport ? "support-review-negative" :
-          unauthorized ? "authorization-refused" : "planning-needed", JSON.stringify(blocked.recoveryLifecycle));
+        assert.equal(blocked.recoveryLifecycle.decision?.reason,
+          outsideSupport ? "support-review-negative" : unauthorized ? "authorization-refused" : "planning-needed", JSON.stringify(blocked.recoveryLifecycle));
         assert.equal(blocked.recoveryLifecycle.inspectionFences.length, 0);
         assert.equal(blocked.recoveryLifecycle.discharged.length, failed.recoveryLifecycle.discharged.length);
-        assert.equal(observed.length, negativeSupport ? 11 : 6);
+        assert.equal(observed.length, outsideSupport ? 11 : 6);
         const { inspectDependencyPlan } = await import("../src/dependency-state.js");
         const entries = (await inspectDependencyPlan(f.job))!.entries;
         assert.equal(entries.length, 1);
         assert.equal(entries[0]!.phase, "rejected");
-        if (negativeSupport) {
+        if (outsideSupport) {
+          assert.ok(entries[0]!.amendment);
           assert.equal(entries[0]!.review?.verdict, "block");
-          assert.ok(entries[0]!.amendment && entries[0]!.commitSha);
-          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), entries[0]!.commitSha);
-          const ledgerPath = join(f.job.stateDir, "dependency-plan.json");
-          const originalLedger = readFileSync(ledgerPath, "utf8");
-          const { saveDependencyPlan } = await import("../src/dependency-state.js");
-          const forged = (await inspectDependencyPlan(f.job))!;
-          const entry = forged.entries[0]!;
-          entry.phase = "verified";
-          entry.review = { ...entry.review!, verdict: "pass", findings: [],
-            evidence: ["characters/mara.md:1: Falsely claimed passing Review."] };
-          try {
-            await saveDependencyPlan(f.job, forged);
-            await assert.rejects(inspectDependencyPlan(f.job), /Supporting Review differs from its completed independent transcript/);
-          } finally { writeFileSync(ledgerPath, originalLedger); }
+          assert.equal(entries[0]!.commitSha, entries[0]!.supportRootSha);
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), entries[0]!.supportRootSha);
         } else {
           assert.equal(entries[0]!.amendment, undefined);
           assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before.expectedHead);
@@ -1258,8 +1268,8 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         const resumed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg }));
         assert.equal(resumed.recoveryLifecycle.active?.id, blocked.recoveryLifecycle.active?.id);
         assert.deepEqual(resumed.recoveryLifecycle.decision, blocked.recoveryLifecycle.decision);
-        assert.equal(observed.length, negativeSupport ? 11 : 6);
-        const session = negativeSupport ? entries[0]!.reviewerSession! : entries[0]!.planner!.sessionFile;
+        assert.equal(observed.length, outsideSupport ? 11 : 6);
+        const session = outsideSupport ? entries[0]!.reviewerSession! : entries[0]!.planner!.sessionFile;
         appendFileSync(session, "\n");
         const inspected = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
         assert.ok(inspected?.inspectionFences.length, JSON.stringify(inspected));
@@ -1269,7 +1279,7 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         assert.equal(tampered.status, "blocked");
         assert.equal(tampered.recoveryLifecycle.active?.id, blocked.recoveryLifecycle.active?.id);
         assert.ok(tampered.recoveryLifecycle.inspectionFences.length);
-        assert.equal(observed.length, negativeSupport ? 11 : 6);
+        assert.equal(observed.length, outsideSupport ? 11 : 6);
         return;
       }
       const headReceiptPath = join(f.job.stateDir, "revisions", "verified-head.json");
@@ -1288,6 +1298,14 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         assert.ok((await inspectModernGenerationRecovery(f.job, saver, paused.threadId))?.inspectionFences.length,
           "An unpublished writer effect cannot legitimize a foreign verified-HEAD receipt");
       } finally { writeFileSync(headReceiptPath, publishedHeadReceipt); }
+
+      if (negativeSupport) {
+        await crashAtSubmission("repair-round", 13, { interruptAfter: ["assess_recovery"] });
+        assert.equal(observed.length, 13);
+        const inspected = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
+        assert.equal(inspected?.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(inspected?.inspectionFences.length, 0, JSON.stringify(inspected));
+      }
 
       let resumeInput: Parameters<typeof graph.invoke>[0] = null;
       if (partialPause) {
@@ -1330,18 +1348,50 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
           [["arcs/archive-account.md"], ["arcs/witness-safety.md"]]);
         assert.ok(entries.every(e => e.planner));
       }
+      if (negativeSupport) {
+        const first = entries[0]!;
+        assert.ok(first.supportRootSha && first.commitSha !== first.supportRootSha);
+        const points = await inspectRecoveryCheckpoints(f.job);
+        assert.equal(points.find(p => p.commitSha === first.supportRootSha)?.semanticReview, "failed");
+        assert.equal(points.find(p => p.commitSha === first.commitSha)?.semanticReview, "passed");
+        assert.equal(git(f.job.worktreeRoot, "rev-parse", first.commitSha + "^"), first.supportRootSha);
+        const ledgerPath = join(f.job.stateDir, "dependency-plan.json");
+        const originalLedger = readFileSync(ledgerPath, "utf8");
+        const { saveDependencyPlan } = await import("../src/dependency-state.js");
+        const forged = (await inspectDependencyPlan(f.job))!;
+        forged.entries[0]!.review!.evidence = ["characters/mara.md:1: Forged successful Review."];
+        try {
+          await saveDependencyPlan(f.job, forged);
+          await assert.rejects(inspectDependencyPlan(f.job), /Supporting Review differs from its completed independent transcript/);
+        } finally { writeFileSync(ledgerPath, originalLedger); }
+        const session = first.reviewerSession!;
+        const transcript = readFileSync(session);
+        try {
+          appendFileSync(session, "\n");
+          await assert.rejects(inspectDependencyPlan(f.job), /Supporting review lost its independently sealed transcript/);
+        } finally { writeFileSync(session, transcript); }
+
+      }
       const support = entries.at(-1)!;
       const rebound = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
       assert.equal(rebound.expectedHead, support.commitSha);
       assert.deepEqual(rebound.blueprintPin, before.blueprintPin);
       assert.equal(rebound.sessionFile, undefined);
-      assert.equal(observed.length, multi ? 18 : 9 + offset);
+      assert.equal(observed.length, multi ? 18 + (negativeSupport ? 3 : 0) : 9 + offset);
       saver.db.close();
       saver = SqliteSaver.fromConnString(paused.checkpointPath);
       graph = createGenerationGraph(saver, "cli");
       const after = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
       assert.equal(after.result?.status, "event-cluster-committed", JSON.stringify({ reason: after.reason, lifecycle: after.recoveryLifecycle, calls: observed.length }));
-      assert.equal(observed.length, multi ? 23 : 14 + offset);
+      assert.equal(observed.length, multi ? 23 + (negativeSupport ? 3 : 0) : 14 + offset);
+      if (negativeSupport) {
+        const calls = observed.length;
+        const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+        assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified",
+          JSON.stringify({ reason: next.reason, recovery: next.recoveryLifecycle }));
+        assert.equal(next.recoveryLifecycle.active, null);
+        assert.equal(observed.length, calls);
+      }
       assert.ok(existsSync(join(f.job.worktreeStoryRoot, supportPath)));
       if (blueprintCaseId) assert.equal(after.recoveryLifecycle.discharged.filter(d => d.case.id === blueprintCaseId).length, 1);
       assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
