@@ -95,7 +95,7 @@ export async function inspectBlockedOriginalThreadCorrection(
   const active = saved.active;
   const op = saved.operationRecovery;
   const commitVerifier = op?.operation === "commit-verification";
-  if (saved.status !== "blocked" || !request?.turnPlanDigest ||
+  if (saved.status !== "blocked" || !request?.turnPlanDigest || request.fixture ||
       saved.graphThreadId !== threadId || request.job !== job.jobId ||
       (saved.result && !commitVerifier) || saved.ideaTask || saved.ideaResult ||
       (!saved.inventory && saved.operationRecovery?.operation !== "adaptive-admission") ||
@@ -268,7 +268,7 @@ export async function inspectBlockedOriginalThreadCorrection(
         saved.eventHead !== repair.eventHead ||
         saved.planVersion !== expectedPlanVersion ||
         JSON.stringify(saved.correctedBlueprintPin) !== JSON.stringify(repair.successor) ||
-        saved.worker !== (request.fixture ? "fixture" : "pi") ||
+        saved.worker !== "pi" ||
         !choice?.eventOnly || !puzzle?.eventOnly ||
         choice.phase !== "not-applicable" || puzzle.phase !== "not-applicable" ||
         choice.beforeHead !== head || puzzle.beforeHead !== head ||
@@ -282,7 +282,7 @@ export async function inspectBlockedOriginalThreadCorrection(
       validatorVersion: job.validatorVersion,
     });
     if (omission.reviewHead !== head || omission.planVersion !== saved.planVersion ||
-        omission.reviewMode !== (request.fixture ? "fixture" : "pi"))
+        omission.reviewMode !== "pi")
       throw Error("Original omission review changed after correction.");
   } catch {
     return refuse("A completed, independently reviewed no-write Interactive receipt is required before retrying the original specialist.");

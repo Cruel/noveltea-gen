@@ -303,55 +303,6 @@ export function auditArcLink(oldText: string, newText: string, character: string
     throw Error("Review-dependency Arc changed more than the addition of one Character link.");
 }
 
-/** Deterministic fixture output exercises the same canonical/native/Git gates.
- * It is never evidence of model-authored literary quality. */
-function fixtureCreatedRecord(create: PlannedFocusCreate, contract: CompletionContract,
-  catalog: CanonicalScopeRecord[]): string {
-  const type = create.id.split(".")[0]!;
-  const base = ["---", "schema: '0.1'", "type: " + type, "id: " + create.id,
-    "title: " + JSON.stringify(create.title), "status: draft", "decisions: []"];
-  const list = (values: string[]) => "[" + values.join(", ") + "]";
-  const title = (id: string) => {
-    const record = catalog.find(item => item.metadata.id === id);
-    const planned = contract.scope.creates?.find(item => item.id === id);
-    return String(record?.metadata.title ?? planned?.title ?? id.split(".")[1]);
-  };
-  if (type === "character") return [...base, "motivation: Seek an honest, consequential exchange.",
-    "---", "# " + create.title,
-    "This Character wants to be heard without sacrificing trust. They enter the conversation with a concrete reason to listen.\n"].join("\n");
-  if (type === "relationship") return [...base,
-    "characters: " + list(create.references), "initial: estranged", "---", "# " + create.title,
-    "The speakers must negotiate trust rather than assume it. Their conversation can establish mutual understanding.\n"].join("\n");
-  if (type === "event") return [...base,
-    "participants: " + list(create.references.filter(id => id.startsWith("character."))),
-    "arcs: " + list(create.references.filter(id => id.startsWith("arc."))),
-    "after: []", "prerequisites:", "  any_of:", "    - completed: []", "      not_completed: []",
-    "consequences:", "  - Both speakers confront what they have withheld.",
-    "steps:", "  - id: exchange", "    branches:", "      - id: continue",
-    "        conditions: []",
-    "        effects: " + (create.references.some(id => id.startsWith("relationship."))
-      ? "[{kind: relationship, relationship: " +
-        create.references.find(id => id.startsWith("relationship.")) + ", value: trusting}]"
-      : "[]"), "---", "# The conversation",
-    "Both Characters choose to meet and trade information. The encounter has a discernible beginning and consequence.\n"].join("\n");
-  if (type === "authored-content") {
-    const event = contract.scope.creates?.find(item => item.id === create.references[0]);
-    const eventRecord = catalog.find(item => item.metadata.id === create.references[0]);
-    const speakers = (event?.references.filter(id => id.startsWith("character.")) ??
-      (Array.isArray(eventRecord?.metadata.participants)
-        ? eventRecord.metadata.participants.filter((id): id is string => typeof id === "string") : []))
-      .slice(0, 2).map(title);
-    const first = speakers[0] ?? "First speaker", second = speakers[1] ?? "Second speaker";
-    return [...base, "events: " + list(create.references), "revelations: []", "---",
-      "# " + create.title,
-      "A quiet moment settles between " + first + " and " + second + " before either speaks.",
-      "", "**" + first + ":** “I wanted to ask what you really knew.”",
-      "", "**" + second + ":** “I was waiting for someone willing to listen.”",
-      "", "**" + first + ":** “Then we should begin with the truth.”",
-      "", "The silence that follows is different from the one that came before.\n"].join("\n");
-  }
-  throw Error("No focused creation fixture for " + create.id);
-}
 
 /** Turn creation grants describe typed IDs; translate them into actual schema
  * fields so the model cannot mistake a relationship link for freeform prose. */
@@ -636,7 +587,8 @@ export interface FocusedWorkOptions {
   round?: { assignmentKey: string; command: AssignmentRoundCommand };
 }
 export async function runFocusedWorkItem(input: FocusedWorkOptions) {
-  if (!input.fixture && !input.round)
+  if (input.fixture) throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
+  if (!input.round)
     throw new ProtocolIntegrityBlockedError("Focused Pi writing requires its checkpointed assignment child.");
   if (input.round && !/^[a-f0-9]{64}$/.test(input.round.assignmentKey))
     throw new ProtocolIntegrityBlockedError("Focused writer lacks an admitted logical assignment key.");
@@ -700,16 +652,16 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       const receipt = pendingCommit;
       const turn = await readTurnEvidence(job, input.contract, input.task, input.turnPlanDigest);
       if (receipt.planVersion !== plan.version || receipt.contractDigest !== digest(JSON.stringify(plan.contract)) ||
-          receipt.worker !== (input.fixture ? "fixture" : "pi") || receipt.assignmentDigest !== turn?.digest ||
+          receipt.worker !== ("pi") || receipt.assignmentDigest !== turn?.digest ||
           receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined) ||
-          (!input.fixture && !turn))
+          (!turn))
         throw Error("Focused committed receipt no longer matches original Turn authority.");
       const records = reportOf(await validateStoryJob(job, input.validatorSource ?? input.skillsSource,
         { ...job, baseSha: receipt.expectedHead }), receipt.expectedHead);
       if (dependency) {
         const grant = dependency.amendment!.assignment.authority;
         const paths = [...grant.existingPaths, ...(grant.newPaths ?? [])].sort();
-        if (receipt.assignmentKey !== input.round?.assignmentKey && !input.fixture ||
+        if (receipt.assignmentKey !== input.round?.assignmentKey ||
             receipt.expectedHead !== dependency.amendment!.sourceSha ||
             JSON.stringify(paths) !== JSON.stringify(receipt.paths) ||
             paths.some(path => !records.some(record => record.path === path)))
@@ -724,7 +676,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       if (turn) assertFocusedTurnAssignment(turn, input.target, receipt.paths,
         [...new Set(owned.map(r => r.metadata.type))].sort());
       }
-      if (!input.fixture && receipt.assignmentKey !== input.round?.assignmentKey)
+      if (receipt.assignmentKey !== input.round?.assignmentKey)
         throw new ProtocolIntegrityBlockedError("Committed Focused receipt belongs to another assignment.");
       receipt.phase = "committed";
       await save(file, receipt);
@@ -801,7 +753,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       if (receipt.jobId !== job.jobId || receipt.target !== input.target ||
           receipt.contractDigest !== contractDigest || receipt.planVersion !== plan.version ||
           JSON.stringify(receipt.paths) !== JSON.stringify(paths) ||
-          receipt.worker !== (input.fixture ? "fixture" : "pi") ||
+          receipt.worker !== ("pi") ||
           receipt.assignmentDigest !== turnAssignmentDigest ||
           receipt.steeringDigest !== (input.steering ? digest(input.steering) : undefined))
         throw new Error("Focused work-item provenance differs from the original authorization.");
@@ -836,7 +788,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
             resolved.amendment?.resumes !== receipt.workItemId ||
             resolved.amendment.assignment.specialist !== original.report.likelySpecialist)
           throw Error("Focused continuation lacks authenticated original support.");
-        if (!input.fixture) dependencyResume = { file: original.seal.sessionFile,
+        dependencyResume = { file: original.seal.sessionFile,
           id: original.seal.sessionId, changedPaths: resolved.amendment.assignment.authority.existingPaths };
         receipt.phase = "pending"; receipt.expectedHead = current;
         delete receipt.pendingDependencyReport; delete receipt.invocationProof;
@@ -846,7 +798,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       }
       // A crash after persisting the authorized pending phase but before
       // dispatch must reopen the same exact session, not silently fork it.
-      if (receipt.phase === "pending" && receipt.resolvedDependency && !input.fixture && !dependencyResume) {
+      if (receipt.phase === "pending" && receipt.resolvedDependency && !dependencyResume) {
         const original = await inspectFocusedPrerequisite(job, input.target, turnAssignmentDigest!,
           input.fixture, plan.version);
         const entry = (await inspectDependencyPlan(job))?.entries.find(e =>
@@ -876,7 +828,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         planVersion: plan.version, contractDigest, expectedHead: current,
         phase: "pending", target: input.target, paths,
         context: selection.context.filter(r => r.metadata.status !== "planned")
-          .map(r => r.path).sort(), worker: input.fixture ? "fixture" : "pi",
+          .map(r => r.path).sort(), worker: "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         ...(turnAssignmentDigest ? { assignmentDigest: turnAssignmentDigest } : {}),
         ...(input.steering ? { steeringDigest: digest(input.steering) } : {}) };
@@ -905,13 +857,13 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     if (await openSkillSnapshot(receipt.snapshot.id) !== receipt.snapshot.path)
       throw new Error("Focused skill snapshot changed.");
     if (!continuing) await preflightPiAssignment(job, receipt.workItemId + ":" + plan.version,
-      input.fixture ? undefined : { provider: receipt.provider, model: receipt.model });
+      { provider: receipt.provider, model: receipt.model });
     const resuming = receipt.phase === "awaiting-author" && !!receipt.authorChoiceId;
     const answered = resuming ? await verifySpecialistChoice(job, receipt.authorChoiceId!, "answered") :
       continuing && receipt.authorChoiceId && (await inspectSpecialistChoice(job, receipt.authorChoiceId)).phase === "resuming"
         ? await inspectSpecialistChoice(job, receipt.authorChoiceId) : undefined;
     if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
-    if (!continuing && input.round && !input.fixture) {
+    if (!continuing && input.round) {
       if (input.round.command.phase !== "invoke" || receipt.assignmentKey && receipt.assignmentKey !== input.round.assignmentKey)
         throw new ProtocolIntegrityBlockedError("Focused writer requires its original child admission.");
       receipt.assignmentKey = input.round.assignmentKey;
@@ -961,34 +913,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       return [];
     };
     let missing: DependencyReport | undefined;
-    const fixtureReport = input.fixture && !dependency && !receipt.resolvedDependency &&
-      process.env.NT_FOCUS_FIXTURE_DEPENDENCY;
-    if (fixtureReport) {
-      missing = parseDependencyReport(JSON.parse(fixtureReport));
-      if (missing.assignmentId !== receipt.workItemId) missing = undefined;
-    }
-    if (input.fixture && !missing) {
-      for (const path of paths) {
-        if (reviewArc && path === reviewArc) {
-          const before = await readFile(join(job.worktreeStoryRoot, path), "utf8");
-          await writeFile(join(job.worktreeStoryRoot, path), appendArcLink(before, input.target));
-        } else if (create && path === create.path) {
-          await writeFile(join(job.worktreeStoryRoot, path),
-            fixtureCreatedRecord(create, input.contract, selection.context), { flag: "wx" });
-        } else {
-          const original = await readFile(join(job.worktreeStoryRoot, path), "utf8");
-          await writeFile(join(job.worktreeStoryRoot, path), original + "\nFocused revision: " + input.task +
-            (input.steering ? "\nAuthor steering: " + input.steering : "") + "\n");
-        }
-      }
-      if (process.env.NT_FOCUS_FIXTURE_CASE === "unauthorized-edit") {
-        const outside = selection.context.find(r => r.metadata.status !== "planned" &&
-          !paths.includes(r.path));
-        if (!outside) throw new Error("Unauthorized-edit fixture requires an upstream context record.");
-        const path = join(job.worktreeStoryRoot, outside.path);
-        await writeFile(path, await readFile(path, "utf8") + "\nUnauthorized fixture change\n");
-      }
-    } else if (!input.fixture) {
+    {
       const output = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
         turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
         input.steering, answered,
@@ -1015,22 +940,21 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           missing.sourceSha !== current || missing.turnDigest !== turnAssignmentDigest ||
           missing.assignmentId !== workItemId)
         throw Error("Dependency report is stale or writer left edits; preserve for manual reconciliation.");
-      const transcript = input.fixture ? Buffer.alloc(0) : await readFile(receipt.piSessionFile!);
+      const transcript = await readFile(receipt.piSessionFile!);
       receipt.dependencySuspension = { reportDigest: dependencyDigest(missing),
-        sessionFile: input.fixture ? "fixture" : receipt.piSessionFile!,
-        sessionId: input.fixture ? "fixture" : receipt.piSessionId!,
+        sessionFile: receipt.piSessionFile!,
+        sessionId: receipt.piSessionId!,
         transcriptBytes: transcript.length,
         ...(receipt.invocationProof ? { invocationProof: receipt.invocationProof,
           invocationPrefix: receipt.invocationPrefix } : {}),
-        transcriptSha256: input.fixture ? "f".repeat(64) :
-          createHash("sha256").update(transcript).digest("hex") };
+        transcriptSha256: createHash("sha256").update(transcript).digest("hex") };
       receipt.dependencyReport = missing; receipt.phase = "waiting-dependency";
       await save(file, receipt);
       if (answered) await completeSpecialistChoice(job, receipt.authorChoiceId!);
       return { status: "dependency-required" };
     }
     await verifyDraft();
-    if (input.round && !input.fixture) {
+    if (input.round) {
       if (!receipt.invocationProof) throw new ProtocolIntegrityBlockedError("Focused draft lacks its settled writer proof.");
       await verifySettledAssignment({ ...focusedInvocationOptions(job, receipt), proof: receipt.invocationProof,
         effect: await assignmentDraftEffect(job, current) });

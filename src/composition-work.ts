@@ -15,7 +15,6 @@ import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { verifiedNarrativeSuccessor, verifiedNarrativeChain } from "./job-successor.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
@@ -589,95 +588,11 @@ function output(job: JobStartResult, state: Receipt) {
       editorialReview: state.validation?.branchReview.reviewer ?? "unverified",
       engineImplementation: "not-started", fullStory: false } };
 }
-async function fixtureAuthor(job: JobStartResult, a: CompositionAssignment): Promise<CompositionEvidence> {
-  const variant = process.env.NT_COMPOSITION_FIXTURE_CASE ?? "";
-  const cluster = fixtureCluster(a.milestoneId);
-  const paths: string[] = [];
-  const write = async (slug: string, events: string[], body: string, revelations: string[] = []) => {
-    slug = cluster.slug(slug); events = events.map(cluster.text); revelations = revelations.map(cluster.text);
-    const path = "authored-content/" + slug + ".md";
-    await mkdir(dirname(join(job.worktreeStoryRoot, path)), { recursive: true });
-    await writeFile(join(job.worktreeStoryRoot, path),
-      `---\nschema: '0.1'\ntype: authored-content\nid: authored-content.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\nevents: [${events.join(", ")}]\nrevelations: [${revelations.join(", ")}]\n---\n\n${body}\n`, { flag: "wx" });
-    paths.push(path);
-  };
-  if (!a.choicePoints.length) {
-    if (a.puzzleSolutions.length) throw Error("Event-only fixture cannot omit a required Puzzle.");
-    for (const id of a.composeTargets) {
-      await write(id.slice("event.".length) + "-scene", [id],
-        "## Observed discovery\n\nAda notices the ledger entry in the archive register. " +
-        "Neri confirms that the absent witness left a signed transfer note and shows " +
-        "the matching record. Ada compares the dates, learns what was concealed, " +
-        "and recognizes the material evidence without making an invented player decision. " +
-        "Their conversation establishes the discovery and its consequences on the page.");
-    }
-    return { modifiedRecords: paths, conflicts: [], obligations: [], skillReads: [] };
-  }
-  const choice = a.choicePoints[0]!;
-  const intro = 'Ada studies the register. Neri waits near the closed folder. "We can decide what to do after we hear the whole story," Ada says.';
-  const menu = choice.outcomes.map(o => "**" + heading(o) + ":** " +
-    (o === "protect" ? "Give Neri a chance to speak." : "Demand a full accounting.")).join("\n");
-  const reactions = choice.outcomes.map(o => "## " + heading(o) + " selected\n\n" +
-    (o === "protect" ? 'Ada lowers her voice. "I will give you a chance before I tell anyone." Neri exhales. "I owe you a real explanation." They return to the archive together.'
-      : 'Ada holds the folder open. "I need an account, not a promise." Neri looks toward the door. "Then ask what you came here to ask." Their alliance feels suddenly uncertain.')).join("\n\n");
-  await write("disclosure-scene", choice.events, "## Shared entry\n\n" +
-    (variant === "shared-leak" ? intro + " The ledger-secret confession proves Neri concealed it."
-      : variant === "shared-optional-clue" ? intro + " Ada already knows the watermark proves the ledger key." : intro) +
-    "\n\n## Choice wording\n\n" + menu + "\n\n" +
-    (variant === "missing-branch" ? reactions.split("## " + heading(choice.outcomes.at(-1)!) + " selected")[0] : reactions),
-    ["revelation.ledger-secret"]);
-  // A second Choice in the same Event needs its OWN selectable menu and
-  // conditioned prose. Reusing the first menu would hide its real outcomes
-  // while still producing native-valid Choice records.
-  for (const additional of a.choicePoints.slice(1)) {
-    for (const event of additional.events) {
-      const secondMenu = additional.outcomes.map(outcome =>
-        "**" + heading(outcome) + ":** " + (outcome === "tell"
-          ? "Disclose the witness's identity to the inquiry."
-          : "Withhold the witness's name and use the independent ledgers.")).join("\n");
-      const secondReactions = additional.outcomes.map(outcome =>
-        "## " + heading(outcome) + " selected\n\n" + (outcome === "tell"
-          ? "Ada gives the inquiry the witness's name. The record is public, but the breach of "
-            + "trust may put the witness in danger, and Neri withdraws from the investigation."
-          : "Ada presents the independently checked ledgers without naming the witness. "
-            + "The inquiry can prove the transfer while the witness's refuge remains private."))
-        .join("\n\n");
-      await write("testimony-choice-scene", [event],
-        "## Shared entry\n\nAda reads the two corroborating records and considers "
-          + "what evidence the inquiry needs without assuming the witness's consent."
-          + "\n\n## Choice wording\n\n" + secondMenu + "\n\n" + secondReactions);
-    }
-  }
-  if (variant !== "missing-aftermath") {
-    await write("aftermath-continuation", ["event.aftermath"],
-      a.choicePoints[0]!.outcomes.map(o => "## " + heading(o) + " selected\n\n" +
-        (o === "protect"
-          ? 'Ada puts the register aside. "We can work together, but you will answer these questions." Neri nods and pulls up another chair. They begin sorting the leads as partners, warily rebuilding trust.'
-          : 'Ada leaves the ledger where Neri can see it. "I will investigate without you until the record is clear." Neri does not follow. The distance between them settles into something harder than anger.')).join("\n\n"));
-  }
-  for (const solution of a.puzzleSolutions.flatMap(p => p.eventIds)) {
-    if (variant === "missing-ending" && solution === a.puzzleSolutions[0]!.eventIds.at(-1)) continue;
-    const body = solution.includes("decode")
-      ? 'Ada turns the document sideways. "The watermark is the key, not the signature," she says. With the cipher deciphered, the lost name appears, and Neri watches without speaking.'
-      : 'Ada holds the seal beside the register. "These match," she tells the custodian. He stops pretending not to recognize it. "I witnessed that transfer," he admits, and Neri looks away.';
-    await write(solution.slice(6) + "-ending", [solution],
-      "## Solution consequence\n\n" + body + "\n\nAda realizes this evidence changes what she can ask next.",
-      ["revelation.puzzle-evidence"]);
-  }
-  if (a.eventIds.includes(cluster.text("event.inspect-ledger"))) {
-    await write("inspect-ledger-scene", ["event.inspect-ledger"],
-      "Ada takes time to examine the handwriting before the conversation. The ledger's marks suggest a deliberate omission.");
-  }
-  if (variant === "event-retcon") {
-    const path = "events/disclose-ledger.md";
-    await writeFile(join(job.worktreeStoryRoot, path),
-      (await readFile(join(job.worktreeStoryRoot, path), "utf8")).replace("Ada", "Another Ada"));
-    paths.push(path);
-  }
-  return { modifiedRecords: paths, conflicts: [], obligations: [], skillReads: [] };
-}
+
 export async function runCompositionWorkItem(input: CompositionOptions) {
+  if (input.fixture && input.action !== "inspect") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
   if (!milestonePattern.test(input.milestone)) throw new Error("--milestone requires exact typed Milestone ID.");
+  if (input.action === "run" && !input.round) throw Error("Composition execution requires its checkpointed assignment child.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const root = job.stateDir;
   const file = join(root, "composition-items", input.milestone.slice(10) + ".json");
@@ -811,7 +726,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       state = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         milestoneId: input.milestone, workItemId: "composition-" + input.milestone.slice(10),
         planVersion: architecture.plan.version, planDigest, interactiveHead, correctedBlueprintPin,
-        worker: input.fixture ? "fixture" : "pi", provider: input.provider ?? "openai",
+        worker: "pi", provider: input.provider ?? "openai",
         model: input.model ?? "gpt-6-luna", thinking: input.thinking,
         authorTask: input.task, phase: "pending" };
       await save(file, state);
@@ -964,8 +879,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             }
             return { stage: "editorial" as const, problems: [] };
           };
-          const authored = s.worker === "fixture" ? await fixtureAuthor(job, assign)
-            : await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
+          const authored = await authorComposition(job, s.snapshot!, assign, s.provider, s.model,
               s.thinking, async (session, id) => {
                 if (s.sessionFile && (s.sessionFile !== session || s.writerSessionId !== id))
                   throw Error("Original Composition writer session changed");
@@ -1017,10 +931,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
             throw new Error("Composition lost previously reachable Event route: " + prev.id);
         }
         const structural = await verifyCompositionProse(job, report, assign, s.paths);
-        const review: SemanticReview = s.worker === "fixture"
-          ? { verdict: "pass", sourceEvidence: assign.branchWitnesses.map(b =>
-              `${b.event}#${b.step}/${b.branch}: ${b.witness.join(", ")}`), concerns: [] }
-          : s.reviewedDigest === s.digest && s.reviewedEvidence && s.reviewPin &&
+        const review: SemanticReview = s.reviewedDigest === s.digest && s.reviewedEvidence && s.reviewPin &&
               s.sessionFile && s.writerSessionId
             ? await verifyCompositionReviewPin(job, s.snapshot!, assign, s.provider, s.model,
                 base, s.planVersion, s.planDigest,
@@ -1037,7 +948,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           throw new Error("Independent editorial review omitted source-linked evidence for a Choice/Puzzle route.");
         const branchReview: ReviewEvidence = { status: "passed", outcomes: structural.outcomes,
           solutions: structural.solutions, sourceEvidence: review.sourceEvidence,
-          reviewer: s.worker === "fixture" ? "fixture-structural-only" : "independent-pi",
+          reviewer: "independent-pi",
           sessionFile: review.sessionFile };
         if (!recovering) {
           assertHead(job, base);

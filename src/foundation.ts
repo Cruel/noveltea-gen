@@ -164,35 +164,8 @@ async function selectTarget(job: JobStartResult): Promise<string> {
   }
   return files[0] || "creative-direction/foundation.md";
 }
-function freshDraft(task: string, envelope: string): FoundationDraft {
-  return {
-    id: "foundation", title: "The Unwritten Mystery",
-    premise: "A missing librarian's final message draws an archivist into a town where memories are traded.",
-    central_conflict: "The archivist must decide whether to recover the truth or protect the people who concealed it.",
-    genre: "Mystery", tone: "Intimate and suspenseful",
-    player_experience: "Explore a contained visual novel through consequential conversations and revelations.",
-    scope: envelope || "A compact dialogue-led narrative with a bounded cast and reusable locations.",
-    decisions: [
-      { id: "author-brief", statement: `Author brief: ${task}`, origin: "user", authority: "user-protected" },
-      ...(envelope ? [{ id: "presentation-envelope", statement: envelope, origin: "user" as const, authority: "user-protected" as const }] : []),
-      { id: "story-hook", statement: "The mystery centers on an archive of exchanged memories.", origin: "agent", authority: "delegated" },
-    ],
-    body: "# Foundation\n\nThe player follows the archivist into a small community united by a secret. Every interview reveals both a clue and a reason to preserve the lie. The climax tests whether knowledge is always worth its human cost.",
-  };
-}
-async function fixtureAuthor(job: JobStartResult, state: FoundationState, target: string) {
-  const path = join(job.worktreeStoryRoot, target);
-  await mkdir(dirname(path), { recursive: true });
-  if (existsSync(path)) {
-    // Existing material is deliberately preserved, including all protected decisions.
-    await writeFile(path, (await readFile(path, "utf8")).trimEnd() +
-      "\n\n## Foundation development\n\nThe central conflict will be realized through dialogue, stakes, and meaningful player choice.\n");
-  } else {
-    await writeFile(path, renderFoundation(freshDraft(state.task, state.envelope)), { flag: "wx" });
-  }
-  return { skillReads: REQUIRED.map(path => join(state.snapshot.path, "skills", path)),
-    piSessionId: undefined, piSessionFile: undefined };
-}
+
+
 
 async function piAuthor(job: JobStartResult, state: FoundationState, target: string, provider: string, modelId: string,
   onSession: (id: string, path: string) => Promise<void>, round: AssignmentRoundCommand, validatorSource?: string) {
@@ -618,11 +591,13 @@ function output(job: JobStartResult, state: FoundationState) {
 }
 
 export async function runFoundationJob(input: FoundationJobOptions) {
+  if (input.fixture && !input.inspect) throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
   if (!input.inspect && (input.mode === "collaborative" || input.authorInput !== undefined))
     throw new ProtocolIntegrityBlockedError("Standalone collaborative Foundation is retired; use authenticated Discovery and Generation.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "foundation", async () => {
     let state = await existingState(job);
+    if (!input.inspect && state?.workerMode === "fixture") throw Error("Historical Foundation evidence is inspection only.");
     // Keep the historical receipt readable, but never interpret old free-text
     // discovery as a new author approval or writer grant.
     if (!input.inspect && state && (state.stage === "awaiting-author" ||
@@ -631,8 +606,8 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       throw new ProtocolIntegrityBlockedError("Historical standalone Foundation discovery is retired; inspect its receipt or begin a current Turn.");
     if (input.round && state?.assignmentKey && input.round.assignmentKey !== state.assignmentKey)
       throw new ProtocolIntegrityBlockedError("Foundation round belongs to a different logical assignment.");
-    if (!input.round && !input.fixture && !input.inspect && !input.recoveryDigest &&
-        state?.workerMode !== "fixture" && state?.stage !== "committed" && !state?.authoredSha256 && !state?.chatApprovalDigest &&
+    if (!input.round && !input.inspect && !input.recoveryDigest &&
+        state?.stage !== "committed" && !state?.authoredSha256 && !state?.chatApprovalDigest &&
         !await readChatApprovedFoundation(job))
       throw new ProtocolIntegrityBlockedError("Foundation Pi writer requires the admitted Generation assignment child.");
     if (!input.inspect && state?.stage === "writing" && state.writerStarted && !state.authoredSha256 &&
@@ -662,7 +637,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
       if (!snapshot) throw new Error("Foundation generation requires configured pinned NovelTea skills (--skills-source or .local/config.json).");
       const approved = await readChatApprovedFoundation(job);
       if (approved && (approved.originalObjective !== input.task ||
-          approved.skillId !== snapshot.id || input.fixture ||
+          approved.skillId !== snapshot.id ||
           approved.provider !== (input.provider ?? "openai") ||
           approved.model !== (input.model ?? "gpt-6-luna")))
         throw new Error("Generation differs from the exact approved Chat foundation handoff.");
@@ -670,7 +645,7 @@ export async function runFoundationJob(input: FoundationJobOptions) {
         version: 1, jobId: job.jobId, baseSha: job.baseSha, workHead: verified,
         task: input.task, envelope: input.envelope ?? "",
         mode: approved?.creativeMode ?? input.mode ?? "autonomous", snapshot,
-        workerMode: input.fixture ? "fixture" : "pi",
+        workerMode: "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         stage: "writing",
         writerStarted: false,
@@ -900,9 +875,7 @@ async function executeFoundationGraph(job: JobStartResult, initial: FoundationSt
       foundation.writerStarted = true;
       if (foundation.workerMode === "pi") foundation.invocationVersion = 1;
       await saveState(stateFile(job), foundation);
-      const authored = foundation.workerMode === "fixture"
-        ? await fixtureAuthor(job, foundation, target)
-        : await piAuthor(job, foundation, target, foundation.provider, foundation.model,
+      const authored = await piAuthor(job, foundation, target, foundation.provider, foundation.model,
           async (id, path) => {
             foundation.piSessionId = id;
             foundation.piSessionFile = path;

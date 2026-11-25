@@ -1,3 +1,5 @@
+import { readTurnEvidence } from "./turn-plan-evidence.js";
+import type { TurnEvidence } from "./turn-plan-evidence.js";
 import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } from "./assignment-metadata-recovery.js";
 import { execFileSync } from "./git-read-cache.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -498,54 +500,7 @@ async function reconcile(job: JobStartResult, state: Receipt, assignmentKey?: st
     return blocked("Unable to reconcile actual Git/Pi state: " + (cause instanceof Error ? cause.message : String(cause)));
   }
 }
-async function fixtureAuthor(job: JobStartResult, state: Receipt) {
-  if (state.plan?.causalAmendment) {
-    const source = state.plan.causalAmendment.source;
-    const file = join(job.worktreeStoryRoot, source.path);
-    const old = await readFile(file, "utf8");
-    if (!old.includes(source.quote))
-      throw Error("Causal Architecture fixture lost its exact protected source quotation.");
-    await writeFile(file, old.replace(source.quote,
-      "The archive ledger bears a disputed timestamp. Ada checks independently dated " +
-      "access evidence and witness accounts before inferring the transfer chronology."));
-    return;
-  }
-  const targets = state.plan!.contract.scope.targets;
-  const arcs = targets.filter(id => id.startsWith("arc."));
-  if (!arcs.length) arcs.push("arc.truth");
-  const milestones = targets.filter(id => id.startsWith("milestone."));
-  if (!milestones.length) milestones.push(...arcs.map((_, i) => i === 0 ? "milestone.disclosure" : "milestone.reckoning"));
-  const records = [
-    ...arcs.map(arc => ({ folder: "arcs", id: arc, type: "arc", fields: 'dramatic_question: "Can truth survive loyalty?"\ncharacters: []',
-      body: "The inquiry puts a friendship under pressure. Each admission makes concealment harder, until loyalty must mean either silence or accountability." })),
-    ...milestones.map((milestone, i) => ({ folder: "milestones", id: milestone, type: "milestone", fields: `completeness: partial\nchange: "${process.env.NT_ARCHITECTURE_FIXTURE_CASE === "decision-choice" ?
-        "The player chooses to protect Neri or challenge his concealed witness ledger, changing their trust and access to evidence" :
-        process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only" ? "Ada learns that Neri concealed the missing witness transfer ledger" :
-        process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal" ? "The signed transfer ledger conclusively proves that the missing witness entered the archive at midnight" :
-        "The hidden evidence becomes a shared responsibility"}"\narcs: [${arcs[i % arcs.length]}]\nfulfillment: {any_of: []}`,
-      body: process.env.NT_ARCHITECTURE_FIXTURE_CASE === "decision-choice"
-        ? "The player must choose whether to protect Neri or challenge his concealment of the missing " +
-          "witness ledger. A protected choice preserves trust while a challenge risks the friendship " +
-          "and exposes evidence. Event design establishes the observable offer; Interactive must " +
-          "enact both outcomes and their causally distinct consequences before the Milestone " +
-          "can be marked complete or Composition may begin."
-        : process.env.NT_ARCHITECTURE_FIXTURE_CASE === "causal"
-        ? "The missing witness is documented elsewhere at midnight, while the unverified ledger " +
-          "entry claims the same witness personally entered the archive at midnight. " +
-          "The architecture treats that uncorroborated entry as conclusive proof. " +
-          "The player needs independently dated access evidence to distinguish altered ink " +
-          "from a genuine entry before any Event can establish the timeline."
-        : process.env.NT_ARCHITECTURE_FIXTURE_CASE === "event-only"
-        ? "In the archive, Neri presents Ada with the signed transfer ledger for the missing witness. Ada verifies the entry against the register and learns Neri hid this record. This is a single observational discovery, not a promise of player-selectable branches; its causal evidence and trust shift must be demonstrated within the Event before player-facing prose is composed."
-        : "The investigator can no longer act alone once the witness discloses the evidence. A future conversation could earn this disclosure through trust; an evidence-led confrontation is another possible route. Event design must establish the prerequisites and consequences before either route is bound. Reuse the inquiry setting and express the revelation through dialogue." })),
-  ];
-  for (const r of records) {
-    const path = join(job.worktreeStoryRoot, r.folder, r.id.split(".")[1] + ".md");
-    if (existsSync(path)) continue;
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `---\nschema: '0.1'\ntype: ${r.type}\nid: ${r.id}\ntitle: "${r.id}"\nstatus: draft\ndecisions: []\n${r.fields}\n---\n\n${r.body}\n`, { flag: "wx" });
-  }
-}
+
 async function publishVerifiedHead(job: JobStartResult, previous: string, commit: string) {
   const file = join(job.stateDir, "revisions", "verified-head.json");
   await mkdir(dirname(file), { recursive: true });
@@ -793,6 +748,8 @@ export async function verifyArchitectureAssignmentResult(
 }
 
 export async function runArchitectureJob(input: ArchitectureOptions, alreadyLocked = false) {
+  if (input.fixture && input.action !== "inspect") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
+  if (input.action === "run" && !input.round) throw Error("Architecture execution requires the original Generation assignment.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const file = join(job.stateDir, "architecture.json");
   // Initial validator pinning updates job.json; reopen the durable manifest before each validation.
@@ -818,32 +775,24 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
       state = { format: 1, jobId: job.jobId, baseSha: job.baseSha, expectedHead: head,
         branch: job.branch, worktreeRoot: job.worktreeRoot, threadId: job.threadId,
         mode: input.mode ?? "autonomous",
-        worker: input.fixture ? "fixture" : "pi", provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+        worker: "pi", provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         history: [], phase: input.contract ? "ready" : "awaiting-author",
         plan: input.contract ? newPlan(parseContract(input.contract)) : undefined };
       await persist(file, state);
     }
     if (input.action === "inspect") return output(job, state, await reconcile(job, state));
-    if (input.action === "reconcile") {
-      if (state.worker === "pi") throw Error("Original Architecture writer must reconcile through its shared assignment receipts.");
-      if (!["writing", "authored"].includes(state.phase) ||
-          !input.recoveryDigest || !/^[a-f0-9]{64}$/.test(input.recoveryDigest)) {
-        throw new Error("Manual reconciliation requires a writing/authored work item and the exact --digest <sha256> of the reviewed files.");
-      }
-      // This author-initiated transition deliberately does not authorize
-      // protected changes. The canonical validator and independent Git gate
-      // must still accept the exact reviewed content on the next run.
-      assertHead(job, state.expectedHead);
-      const paths = await changedPaths(job);
-      const digest = await contentDigest(job, paths);
-      if (digest !== input.recoveryDigest) throw new Error("Review digest differs from current Story bytes. Inspect again; nothing was adopted.");
-      state.paths = paths;
-      state.contentDigest = digest;
-      state.manuallyReconciled = { paths, digest };
-      state.phase = "authored";
-      await persist(file, state);
-      return output(job, state, await reconcile(job, state));
+    if (state.worker !== "pi") throw Error("Historical Architecture evidence is inspection only.");
+    if (input.action === "propose" || input.action === "approve") {
+      // Administrative amendments are not an alternate scheduler: require
+      // the local immutable Turn before modifying the proposal/plan ledger.
+      const local = join(job.stateDir, "turn-plan.json");
+      if (!existsSync(local)) throw Error("Architecture plan amendment requires an authenticated current Turn.");
+      const hint = JSON.parse(await readFile(local, "utf8")) as TurnEvidence;
+      const turn = await readTurnEvidence(job, hint.contract, hint.originalRequest, hint.digest);
+      if (!turn || turn.kind === "protected-amendment")
+        throw Error("Architecture plan amendment requires original Generation authority.");
     }
+    if (input.action === "reconcile") throw Error("Architecture reconciliation requires the original Generation assignment.");
     if (state.phase === "awaiting-author") {
       if (!input.contract) return output(job, state);
       state.plan = newPlan(parseContract(input.contract)); state.phase = "ready";
@@ -946,7 +895,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
     if (recovery.status === "blocked") throw new Error("Architecture recovery blocked: " + recovery.reason);
     if (state.assignmentKey && (state.phase !== "committed" || input.round) && state.assignmentKey !== input.round?.assignmentKey)
       throw Error("Architecture assignment identity changed.");
-    if ((input.fixture === true) !== (state.worker === "fixture") || input.mode && input.mode !== state.mode ||
+    if (input.mode && input.mode !== state.mode ||
         input.provider && input.provider !== state.provider || input.model && input.model !== state.model) throw new Error("Architecture worker configuration differs from the persisted assignment.");
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
@@ -1120,8 +1069,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
         }
         const blueprint = receipt.worker === "pi" ? await readApprovedBlueprint(job, receipt.plan!, receipt.snapshot!,
           receipt.provider, receipt.model, receipt.blueprintTask ?? "", receipt.executionHead ?? receipt.expectedHead) : null;
-        if (receipt.worker === "fixture") await fixtureAuthor(job, receipt);
-        else {
+
           const { authorArchitecture } = await import("./architecture-specialist.js");
           if (!input.round || receipt.assignmentKey !== input.round.assignmentKey ||
               !receipt.sourceDigest || receipt.sourceDigest !== architectureRoundSource(job, receipt) ||
@@ -1184,7 +1132,7 @@ export async function runArchitectureJob(input: ArchitectureOptions, alreadyLock
           if (result.round.status !== "accepted") return { receipt, round: result.round };
           Object.assign(receipt, result.accepted);
           receipt.invocationProof = result.round.proof;
-        }
+
         assertHead(job, receipt.executionHead ?? receipt.expectedHead);
         receipt.paths = await changedPaths(job);
         assertCausalPaths(receipt.plan!, receipt.paths);

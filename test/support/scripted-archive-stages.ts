@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { TurnFulfillmentPacket } from "../../src/turn-fulfillment.js";
 import type { ReviewAssignment } from "../../src/narrative-review-specialist.js";
 import type { JobStartResult } from "../../src/job.js";
 import type { TurnEvidence } from "../../src/turn-plan-evidence.js";
@@ -33,6 +34,10 @@ const openingEvent = bytes(eventPath).replace(/steps:\n[\s\S]*?(?=\n---)/,
 const secondEventPath = "events/redacted-account.md";
 const secondEvent = "---\nschema: '0.1'\ntype: event\nid: event.redacted-account\ntitle: The Redacted Account\nstatus: draft\ndecisions: []\nparticipants: [character.ada, character.neri]\narcs: [arc.truth]\nconsequences: [The inquiry accepts independent proof of concealment without exposing the witness]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.disclose-ledger]\n      not_completed: []\nsteps: []\n---\n\nAda compares the signed entry with the independently maintained daily register and offers a redacted account to the inquiry. The matching dates independently establish concealment. The inquiry accepts the redacted account without requiring the witness's name. The records do not establish Neri's private motive.\n";
 const secondMilestone = (text: string) => text.replace("completeness: partial\n", "").replace("fulfillment: {any_of: []}", "fulfillment: {any_of: [[event.redacted-account]]}");
+const prosePaths = ["authored-content/disclosure-scene.md", "authored-content/aftermath-continuation.md",
+  "authored-content/decode-ledger-ending.md", "authored-content/request-testimony-ending.md"];
+const secondProsePath = "authored-content/redacted-account.md";
+const secondProse = `---\nschema: '0.1'\ntype: authored-content\nid: authored-content.redacted-account\ntitle: The Redacted Account\nstatus: draft\ndecisions: []\nevents: [event.redacted-account]\nrevelations: []\n---\n\nAda sets the signed ledger beside the daily register. "The dates match. We can prove concealment without naming the witness." Neri checks both entries before handing the redacted account to the inquiry. The inquiry accepts the account; the matching entries establish concealment, not his motive.\n`;
 const worldPaths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
 const castPaths = ["characters/ada.md", "characters/neri.md", "relationships/ada-neri.md", arc];
 const architecture: Record<string, string> = {
@@ -67,9 +72,9 @@ const compact: CausalBlueprint = {
     endings: "The corroborated redacted account is accepted on both routes, with distinct trust consequences." },
 };
 
-export function archiveStages(job: JobStartResult, plan: TurnEvidence) {
+export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive = false) {
   const foundationPath = "creative-direction/foundation.md";
-  const foundation = renderFoundation({
+  const foundation = adaptive ? readFileSync(join(job.worktreeStoryRoot, foundationPath), "utf8") : renderFoundation({
     id: "foundation", title: "The Archive Witness",
     premise: compact.premise, central_conflict: "Ada must prove concealment without exposing a witness.",
     genre: "Mystery", tone: "Intimate and suspenseful", player_experience: "Compare sources and make a consequential decision.",
@@ -113,8 +118,11 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence) {
         "event-disclosure": [eventPath], "event-reckoning": [secondEventPath, reckoning],
         "interactive-choice-disclosure": Object.keys(archiveInteractiveRecords[0]!),
         "interactive-puzzle-disclosure": Object.keys(archiveInteractiveRecords[1]!),
+        "composition-disclosure": prosePaths, "composition-reckoning": [secondProsePath],
       };
-      const allowed = expected[item.reviewedWorkItem] ?? expected[item.assignment.id];
+      const allowed = expected[item.reviewedWorkItem] ?? expected[item.assignment.id] ??
+        (item.assurance.changedPaths.length === 1 && item.assurance.changedPaths[0] === disclosure &&
+          onDisk(disclosure).includes("fulfillment: {any_of: [[event.disclose-ledger]]}") ? [disclosure] : undefined);
       assert.ok(allowed, "Unexpected archive Review assignment: " + item.assignment.id + " / " + item.reviewedWorkItem);
       assert.deepEqual([...item.assurance.changedPaths].sort(), [...allowed].sort());
       return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
@@ -127,22 +135,84 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence) {
             explanation: "The scripted source contains the expected canonical record for this bounded assignment." };
         }) });
     }
+    if (prompt.includes("AUTHORIZED SOURCE-BOUND EVENT MILESTONE CLOSEOUT")) {
+      const proposal = JSON.parse(prompt.split("\nCONTROLLER PROPOSAL:\n")[1]!);
+      assert.deepEqual(proposal.allowedPaths, [disclosure]);
+      if (!phase) return read(prompt.split("PINNED REFERENCE PATHS:\n")[1]!.split("\nCANONICAL CONTEXT PATHS:")[0]!
+        .split("\n").concat(prompt.split("CANONICAL CONTEXT PATHS:\n")[1]!.split("\nCONTROLLER PROPOSAL:")[0]!.split("\n")));
+      if (phase === 1) return { reason: "toolUse" as const, content: [{ type: "toolCall" as const, id: "closeout-" + index, name: "edit",
+        arguments: { path: disclosure, edits: [{ oldText: "completeness: partial\nfulfillment: {any_of: []}",
+          newText: "completeness: complete\nfulfillment: {any_of: [[event.disclose-ledger]]}" }] } }] };
+      if (phase === 2) return validate();
+      return stop({ verdict: "pass", evidence: [eventPath + ":1", "choice-points/loyalty.md:1"],
+        reason: "The actual Event binds both reachable Choice outcomes; the original selected Milestone can close." });
+    }
+    if (prompt.includes("You are a pinned nt-narrative-composition author")) {
+      const tail = prompt.split("\nASSIGNMENT:\n")[1]!;
+      const assignment = JSON.parse(tail.slice(0, tail.lastIndexOf("}") + 1));
+      const records = assignment.milestoneId === "milestone.disclosure"
+        ? Object.fromEntries(prosePaths.map(p => [p, bytes(p)]))
+        : { [secondProsePath]: secondProse };
+      if (!phase) return read([...new Set([...skills("nt-narrative-composition"), "skill://nt-catalog/references/glossary.md", ...assignment.sourcePaths])]);
+      if (phase === 1) return write(records);
+      if (phase === 2) return validate();
+      return manifest(Object.keys(records));
+    }
+    if (prompt.includes("INDEPENDENT READ-ONLY Composition editorial reviewer")) {
+      const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!.split("\nEARLIER SEALED VERDICTS:")[0]!);
+      const paths = assignment.milestoneId === "milestone.disclosure" ? prosePaths : [secondProsePath];
+      if (!phase) return read([...prompt.split("\nPINNED SKILLS:\n")[1]!.split("\nCURRENT FILES:")[0]!.split("\n"), ...prompt.split("\nCURRENT FILES:\n")[1]!.split("\nREQUIREMENTS")[0]!.split("\n")]);
+      for (const path of paths) assert.ok(onDisk(path).length > 100);
+      const routes: string[] = JSON.parse(prompt.split("Current required routes: ")[1]!.replace(/\.$/, ""));
+      return stop({ schema: "noveltea-composition-review/v2", status: "pass", findings: [], prior: [],
+        sourceEvidence: (routes.length ? routes : ["Event-only authored consequence"]).map(r => {
+          const p = paths.find(p => r.includes(p.replace("authored-content/", "").replace(".md", ""))) ?? paths[0]!;
+          return r + " " + p + ":1: Verified player-facing route in canonical prose.";
+        }) });
+    }
     if (prompt.includes("You are the independent nt-narrative-review editor")) {
       const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!) as ReviewAssignment;
       if (!phase) return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!
         .split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths));
-      assert.equal(assignment.omission?.assignmentId, "interactive:milestone.reckoning");
-      assert.ok(assignment.paths.includes(secondEventPath));
-      assert.ok(onDisk(secondEventPath).includes("matching dates independently establish concealment"));
-      assert.ok(onDisk(reckoning).includes("fulfillment: {any_of: [[event.redacted-account]]}"));
-      assert.equal(assignment.routes.length + assignment.puzzleRoutes.length, 0);
-      assert.deepEqual(assignment.milestoneRoutes.map(r => [r.milestone, r.alternative, r.status]),
-        [["milestone.reckoning", 0, "reachable"]]);
-      const line = onDisk(reckoning).split("\n").findIndex(l => l.startsWith("fulfillment:")) + 1;
-      return stop({ verdict: "pass", findings: [], evidence: [
-        "milestone.reckoning#0 " + reckoning + ":" + line + ": The redacted account route is fully bound to the verified observational Event.",
-        secondEventPath + ":1: Ada submits corroborating records; no additional local player decision is necessary.",
-      ] });
+      const cite = (p: string, exact: string, label: string) => {
+        assert.ok(assignment.paths.includes(p), p);
+        const line = onDisk(p).split("\n").findIndex(t => t.includes(exact)) + 1;
+        assert.ok(line > 0, p + ": " + exact);
+        return label + " " + p + ":" + line + ": " + exact;
+      };
+      const evidence = [
+        ...assignment.routes.map(r => cite("events/" + r.event.split(".")[1] + ".md", "- id: " + r.branch, r.event + "#" + r.step + "/" + r.branch)),
+        ...assignment.milestoneRoutes.map(r => cite("milestones/" + r.milestone.split(".")[1] + ".md", "fulfillment:", r.milestone + "#" + r.alternative)),
+        ...assignment.puzzleRoutes.map(r => cite("puzzles/" + r.puzzle.split(".")[1] + ".md", "solutions:", r.puzzle + "/" + r.event)),
+      ];
+      if (assignment.omission) {
+        assert.equal(assignment.omission.assignmentId, "interactive:milestone.reckoning");
+        assert.ok(onDisk(secondEventPath).includes("matching dates independently establish concealment"));
+        evidence.push(cite(secondEventPath, "matching dates independently establish concealment", "No additional local player decision is necessary."));
+      }
+      for (const p of new Set((assignment.specialistAssignments ?? [])
+        .flatMap(item => [...item.authority.existingPaths, ...(item.authority.newPaths ?? [])]))) {
+        assert.ok(onDisk(p).length > 0, p);
+        evidence.push(p + ":1: Independently inspected the assigned canonical record.");
+      }
+      if (!evidence.length) {
+        const p = assignment.paths[0]!;
+        assert.ok(onDisk(p).length > 0);
+        evidence.push(p + ":1: Inspected the assigned canonical source.");
+      }
+      return stop({ verdict: "pass", findings: [], evidence });
+    }
+    if (prompt.includes("PLAN-LEVEL PACKET")) {
+      const packet = JSON.parse(prompt.split("\nPLAN-LEVEL PACKET:\n")[1]!) as TurnFulfillmentPacket;
+      if (!phase) return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nPLAN-LEVEL PACKET:")[0]!
+        .split("\n").filter(p => p.startsWith("skill://")).concat(packet.canonical.map(c => c.path)));
+      assert.equal(packet.source.turnDigest, plan.digest);
+      const records = packet.canonical.filter(c => prosePaths.concat(secondProsePath).includes(c.path));
+      assert.equal(records.length, 5);
+      return stop({ digest: packet.digest, verdict: "complete", findings: [],
+        checks: packet.objectives.map(o => ({ objectiveId: o.id, fulfilled: true,
+          evidence: packet.canonical.filter(c => c.content.split("\n").some(t => t.startsWith("id:"))).map(c => ({ path: c.path, line: c.content.split("\n").findIndex(t => t.startsWith("id:")) + 1,
+            explanation: "The complete source-bound archive contains the authored playable scene and its causal consequences." })) })) });
     }
     if (prompt.includes("READ-ONLY COMPACT STORY BLUEPRINT.") ||
         prompt.includes("INDEPENDENT READ-ONLY COMPACT STORY BLUEPRINT REVIEW")) {

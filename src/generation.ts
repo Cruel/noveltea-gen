@@ -1,4 +1,3 @@
-import { withoutJobModelRuntime } from "./model-runtime.js";
 import { parseAuthorAnswer } from "./author-question.js";
 import { answerSpecialistChoice } from "./specialist-choice.js";
 import { createGenerationQuestionGraph, pendingGenerationQuestion, generationQuestionResume, pendingQuestionBudgetPause } from "./generation-author-question.js";
@@ -35,7 +34,7 @@ import { admitRecovery, decideRecovery, dischargePendingRecovery, emptyRecoveryL
   recordRecoveryOutcome, finishVerifiedRecovery, resumePausedRecovery, selectPendingRecovery } from "./generation-recovery-lifecycle.js";
 import { inspectDeferredCorrection } from "./generation-recovery-resolution.js";
 import { applyDomainRecovery, assertRecoverySources, decideExistingRecovery,
-  extractDomainPatch, fixtureTurnIdentity, projectRecovery,
+  extractDomainPatch, projectRecovery,
   type DomainRecoveryStatus, type RecoverySource, type RecoveryState } from "./generation-recovery-graph.js";
 import type { RecoveryLifecycle, RecoveryOrigin, RecoveryEvidence } from "./generation-recovery-contract.js";
 import type { RunnableConfig } from "@langchain/core/runnables";
@@ -110,7 +109,7 @@ export interface GenerationRequest {
   story: string; job: string; task: string; contract: CompletionContract;
   fixture: boolean; skillsSource?: string; validatorSource?: string;
   provider?: string; model?: string; turnPlanDigest?: string; discoveryHandoffDigest?: string;
-  /** Fixtures may omit the model planner, never the shared assignment lifecycle. */
+  /** Historical fixture-test policy is recognized only to refuse execution. */
   orchestrationPolicy?: "explicit" | "fixture-test";
 }
 export interface GenerationOptions {
@@ -280,7 +279,7 @@ const Channels = Annotation.Root({
 export type GenerationGraphState = typeof Channels.State;
 type CoreState = GenerationGraphState;
 // Local node observations only; never LangGraph channels or resume authority.
-type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary" | "fixture-verdict";
+type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary";
   reviewAssessmentRequested?: true;
   reviewDependencyRequest?: ReviewDependencyRequest;
   reviewPauseReason?: "author-pause" | "author-choice" | "protected-approval" | "budget" | "provider-unavailable" | "cancelled"; };
@@ -302,15 +301,13 @@ export function parseGenerationContract(value: unknown): CompletionContract {
     throw new Error("Partial generation requires explicit typed Story record targets.");
   return contract;
 }
-/** Execution admission, including direct checkpoint re-entry. Fixture identity is
- * isolated from live Pi authority; a missing live Turn is never a fallback. */
+/** Execution admission, including direct checkpoint re-entry. Historical requests are inspection only. */
 export async function requireGenerationTurn(job: JobStartResult, request: GenerationRequest,
   admitted = false) {
   if (!request || request.story !== job.storyRoot || request.job !== job.jobId)
     throw Error("Generation request belongs to another Story Job.");
-  const requiresTurn = request.fixture !== true || !!request.contract && isFocusedScope(request.contract);
-  if (requiresTurn && (typeof request.turnPlanDigest !== "string" ||
-      !/^[a-f0-9]{64}$/.test(request.turnPlanDigest)))
+  if (typeof request.turnPlanDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(request.turnPlanDigest))
     throw Error("Generation requires an authenticated current-format Turn plan digest.");
   const { readDiscoveryHandoff } = await import("./discovery-generation-handoff.js");
   const handoff = await readDiscoveryHandoff(job);
@@ -321,15 +318,9 @@ export async function requireGenerationTurn(job: JobStartResult, request: Genera
         handoff.model.id !== request.model || request.fixture)
       throw Error("Generation request differs from its authenticated Discovery handoff.");
   }
-  if (request.orchestrationPolicy !== undefined && request.orchestrationPolicy !== "explicit" &&
-      request.orchestrationPolicy !== "fixture-test")
+  if (request.fixture || request.orchestrationPolicy !== undefined && request.orchestrationPolicy !== "explicit")
     throw Error("Obsolete Generation execution format; inspect or start a current Turn.");
-  if (request.orchestrationPolicy === "fixture-test" && !request.fixture)
-    throw Error("Fixture-only orchestration cannot authorize production execution.");
   const digest = request.turnPlanDigest;
-  if (!requiresTurn && digest === undefined) return null;
-  if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))
-    throw Error("Generation requires an authenticated current-format Turn plan digest.");
   const path = join(job.stateDir, "turn-plan.json");
   // An already admitted Turn can have a separately authenticated amended
   // Work-plan contract; its original immutable Turn remains the source pin.
@@ -340,6 +331,8 @@ export async function requireGenerationTurn(job: JobStartResult, request: Genera
   if (!turn) throw Error("Generation requires the original authenticated Turn receipt.");
   if (!turn.objective)
     throw Error("Generation requires a current-format Turn objective; obsolete execution is refused.");
+  if (turn.kind === "protected-amendment")
+    throw Error("Author-approved protected amendments are controller-only effects, not Generation writer authority.");
   return turn;
 }
 async function checkPlan(job: JobStartResult, request: GenerationRequest, version: number | null | undefined) {
@@ -390,13 +383,7 @@ async function reconciledFailures(job: JobStartResult, failures: Record<string, 
   // unbounded dispatch/failure/reconcile loop. Only a NEW externally settled
   // commit since the previous controller inventory may remove this failure;
   // the exact checkpoint below still must prove the specialist identity.
-  const finalizedFixtureWorldCrash = failures.foundations ===
-    "Injected recovery crash after Git commit and before checkpoint finalization.";
-  // A fixture World crash is the one supported exception: the same HEAD
-  // changes from ineligible to eligible when the original native receipt is
-  // finalized by checkpoint reconciliation. It cannot authorize a new writer.
-  if ((!previousInventoryHead || previousInventoryHead === currentHead) &&
-      !finalizedFixtureWorldCrash) return failures;
+  if (!previousInventoryHead || previousInventoryHead === currentHead) return failures;
   const point = (await inspectRecoveryCheckpoints(job))
     .find(record => record.eligible && record.commitSha === currentHead);
   if (!point) return failures;
@@ -443,18 +430,10 @@ async function reconciledFailures(job: JobStartResult, failures: Record<string, 
   };
   const next = { ...failures };
   for (const key of Object.keys(next)) {
-    // A World checkpoint before Character is normally retryable only after
-    // an independently verified review handoff. The one deterministic fixture
-    // crash injected AFTER the exact Git commit is also recoverable when the
-    // matching fixture receipt and finalized checkpoint are independently
-    // authenticated. No live Pi interruption or arbitrary failure qualifies.
-    const fixturePostCommitCrash = key === "foundations" && point.workItem === "world-foundations" &&
-      next[key] === "Injected recovery crash after Git commit and before checkpoint finalization." &&
-      await readFile(join(job.stateDir, "character-world.json"), "utf8")
-        .then(raw => (JSON.parse(raw) as { worker?: string }).worker === "fixture")
-        .catch(() => false);
-    if (key === "foundations" && !fixturePostCommitCrash &&
-        !/(?:required independent (?:specialist )?review is pending|independent (?:specialist )?review (?:is )?required|await(?:s|ing) (?:an? )?independent (?:specialist )?review)/i.test(next[key]!)) continue;
+    if (key === "foundations") {
+      try { await assertNativeReviewDependencies(job, "character-foundations"); }
+      catch (error) { if (error instanceof IndependentReviewGateError) continue; throw error; }
+    }
     if (await retryable(key)) delete next[key];
   }
   return next;
@@ -794,12 +773,6 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
     default: throw new Error("Invalid generation stage.");
   }
 }
-/** Test seam for exercising the real specialist dispatcher without introducing
- * a fixture-only authority path into the production scheduler. */
-export async function dispatchGenerationAssignment(s: { request: GenerationRequest; active: ExecutionItem }):
-  Promise<{ status: string; headSha?: string }> {
-  return dispatch(s);
-}
 /**
  * R01 production slice: only the atomic Creative Direction/Foundation writer
  * enters the reusable checkpointed child. Composite work items retain their
@@ -854,7 +827,7 @@ async function runFoundationAssignmentChild(
     p.eligible && p.workItem === "foundation" &&
     p.commitSha === (correction?.origin.sourceHeadSha ?? s.inventory!.headSha) &&
     p.planVersion === (s.planVersion ?? null) && p.validation.status === "passed" &&
-    (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+    p.assurance?.turnDigest === s.request.turnPlanDigest);
   const interruptedCommit = !published && s.active.verifiedSha === s.inventory.headSha &&
     jobGit(job, "rev-parse", "HEAD") === s.inventory.headSha &&
     await inspectOriginalSpecialistCommitForResume(s, job);
@@ -868,10 +841,7 @@ async function runFoundationAssignmentChild(
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
     jobThreadId: job.threadId, graphThreadId,
-    turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
-      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
-      turnDigest: null, fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
-    }),
+    turnDigest: s.request.turnPlanDigest!,
     assignmentId: s.active.id, planVersion: s.planVersion,
     sourceHeadSha: sourceHead, scopeDigest,
   };
@@ -1023,9 +993,7 @@ async function runFoundationAssignmentChild(
       const reviews = await resolvedCheckpointReviews(job, points);
       const reviewed = points.find(p => p.workItem === "foundation" &&
         p.commitSha === head && p.parentSha === sourceHead &&
-        (s.request.fixture
-          ? p.validation.status === "passed"
-          : p.assurance?.turnDigest === s.request.turnPlanDigest &&
+        (p.assurance?.turnDigest === s.request.turnPlanDigest &&
             ["passed", "not-required"].includes(reviews.get(p.commitSha) ?? p.semanticReview)));
       if (!reviewed) {
         reviewPatch = await operationFailure(candidate, job, "independent-review",
@@ -1317,7 +1285,7 @@ async function runArchitectureAssignmentChild(
   const original = points.find(p => p.workItem === "global-architecture" &&
     p.planVersion === version && p.validation.status === "passed" &&
     p.commitSha === (correction?.origin.sourceHeadSha ?? saved?.expectedHead) &&
-    (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+    p.assurance?.turnDigest === s.request.turnPlanDigest);
   const sourceHead = original?.parentSha ?? saved?.executionHead ??
     (saved?.phase !== "committed" ? saved?.expectedHead : undefined) ?? s.inventory.headSha;
   if (!correction && sourceHead !== s.inventory.headSha &&
@@ -1326,10 +1294,7 @@ async function runArchitectureAssignmentChild(
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
     jobThreadId: job.threadId, graphThreadId: s.graphThreadId,
-    turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
-      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId: s.graphThreadId,
-      turnDigest: null, fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
-    }),
+    turnDigest: s.request.turnPlanDigest!,
     assignmentId: s.active.id, planVersion: version, sourceHeadSha: sourceHead,
     scopeDigest: createHash("sha256").update(JSON.stringify({
       task: s.request.task, contract: s.request.contract, version,
@@ -1416,7 +1381,7 @@ async function runArchitectureAssignmentChild(
               p.workItem === "global-architecture" && p.planVersion === version &&
               p.commitSha === submission.headSha && p.parentSha === sourceHead &&
               p.validation.status === "passed" &&
-              (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest)))
+              p.assurance?.turnDigest === s.request.turnPlanDigest))
           throw Error("Architecture commit lacks its original native checkpoint.");
       } catch (error) {
         reviewPatch = await operationFailure(candidate, job, "commit-verification", error,
@@ -1441,7 +1406,7 @@ async function runArchitectureAssignmentChild(
         if (!await (await import("./generation-recovery-resolution.js"))
           .verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
           throw Error("Architecture correction lacks its independently passing successor.");
-      } else if (disposition === "commit" && !s.request.fixture) {
+      } else if (disposition === "commit") {
         const current = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
         const reviews = await resolvedCheckpointReviews(job, current);
         const point = current.find(p => p.commitSha === submission.headSha);
@@ -1486,7 +1451,7 @@ async function runArchitectureAssignmentChild(
   if (finished.outcome.status === "verified")
     return { ...reviewPatch, ...(correction || diagnostic ? { planVersion: version } : {}),
       result: { status: finished.submission!.status,
-      headSha: s.request.fixture ? finished.submission!.headSha : finished.outcome.headSha,
+      headSha: finished.outcome.headSha,
       ...(correction && s.result ? { status: s.result.status } : {}) } };
   if (correction) return subunitReviewStop(s, job, identity, correction, finished.outcome, "global-architecture");
   if (finished.submission && reviewPatch)
@@ -1660,13 +1625,10 @@ async function runCharacterWorldAssignmentChild(
       const world = saved.units[0];
       const published = points.some(point => point.workItem === world.id && point.commitSha === world.commitSha);
       const fork = readRecoveryFork(job);
-      // The immutable fork bundle also carries native-verified fixture commits
-      // which have no semantic Review entry. Production dependencies still
-      // pass the independent Review gate below before Character can start.
       const inherited = fork?.checkpoint.completedWorkItems.includes(world.id) &&
         fork.commits[world.id]?.sha === world.commitSha &&
-        (s.request.fixture || fork.reviewCoverage?.some(point =>
-          point.workItem === world.id && point.commitSha === world.commitSha));
+        fork.reviewCoverage?.some(point =>
+          point.workItem === world.id && point.commitSha === world.commitSha);
       if (!published && !inherited)
         throw new IndependentReviewGateError("World checkpoint must be finalized before Character dispatch.");
       await assertNativeReviewDependencies(job, "character-foundations");
@@ -1686,10 +1648,7 @@ async function runCharacterWorldAssignmentChild(
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
     jobThreadId: job.threadId, graphThreadId,
-    turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
-      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
-      turnDigest: null, fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
-    }),
+    turnDigest: s.request.turnPlanDigest!,
     assignmentId: workItem, planVersion: s.planVersion, sourceHeadSha: sourceHead,
     scopeDigest: createHash("sha256").update(JSON.stringify({
       task: s.request.task, contract: s.request.contract, assignmentScope, workItem,
@@ -1769,7 +1728,7 @@ async function runCharacterWorldAssignmentChild(
       const native = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
         p.commitSha === submission.headSha && p.workItem === workItem && p.parentSha === sourceHead &&
         p.planVersion === s.planVersion && p.validation.status === "passed");
-      if (!native || !s.request.fixture && native.assurance?.turnDigest !== s.request.turnPlanDigest)
+      if (!native || native.assurance?.turnDigest !== s.request.turnPlanDigest)
         throw Error("World/Character submission lost its original native/source checkpoint.");
       const candidate: State = { ...s, result: { status: submission.status, headSha: submission.headSha } };
       try {
@@ -1793,16 +1752,11 @@ async function runCharacterWorldAssignmentChild(
       const eligible = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
       const point = eligible.find(p => p.commitSha === submission.headSha)!;
       const resolved = await resolvedCheckpointReviews(job, eligible);
-      if (!s.request.fixture && !["passed", "not-required"].includes(resolved.get(point.commitSha) ?? point.semanticReview))
+      if (!["passed", "not-required"].includes(resolved.get(point.commitSha) ?? point.semanticReview))
         throw Error("World/Character submission lacks its independently passing Review.");
       if (head !== point.commitSha) throw Error("World/Character submission differs from verified HEAD.");
-      if (domain === "world") {
-        try { await assertNativeReviewDependencies(job, "character-foundations"); }
-        catch (error) {
-          if (!s.request.fixture || !(error instanceof IndependentReviewGateError)) throw error;
-          return outcome("unresolved", ref, { dispositionRef: "fixture-verdict" });
-        }
-      }
+      if (domain === "world")
+        await assertNativeReviewDependencies(job, "character-foundations");
       return outcome("verified", "recovery-checkpoints:" + head,
         { headSha: head, reviewRef: "review-checkpoints:" + head });
   };
@@ -1864,12 +1818,10 @@ async function runCharacterWorldAssignmentChild(
         assignmentFailure: { sourceHeadSha: sourceHead, proof: terminal.proof } }, "returned-failure");
   }
   // These are settled source-linked handoffs, not writer failures.
-  if (finished.outcome.status === "unresolved" && finished.outcome.dispositionRef === "fixture-verdict")
-    return { result };
   if (result?.status === "foundations-conflict-reported") {
     const report = await (await import("./character-world.js")).inspectFoundationConflict(job, domain);
     if (report.expectedHead !== sourceHead || report.planVersion !== s.planVersion ||
-        report.worker !== (s.request.fixture ? "fixture" : "pi"))
+        report.worker !== "pi")
       throw Error("Original World/Character no-write report differs from its admitted source.");
     const failure = "Original " + report.domain + " Foundation returned a settled, clean architectural contradiction: " +
       report.conflicts.join("; ") + ". Controller/Architecture owns prerequisite rescoping.";
@@ -1909,12 +1861,9 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       !["event", "composition", "focus"].includes(active.stage) ||
       reroute && (active.stage !== "event" || reroute.sourceSha !== s.inventory.headSha || correctionSelected) ||
       typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId ||
-      s.planVersion === null || !s.request.turnPlanDigest && !s.request.fixture)
+      s.planVersion === null || !s.request.turnPlanDigest)
     throw Error("Narrative child lacks its admitted Turn, assignment and plan.");
-  const turnDigest = s.request.turnPlanDigest ?? fixtureTurnIdentity({
-    jobId: job.jobId, jobThreadId: job.threadId, graphThreadId, turnDigest: null,
-    fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
-  });
+  const turnDigest = s.request.turnPlanDigest!;
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
   const points = await inspectRecoveryCheckpoints(job);
   const root = correction && points.find(p => p.eligible &&
@@ -2071,7 +2020,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
         p.workItem === workItem && p.commitSha === (root ? root.commitSha : submission.headSha) &&
         p.parentSha === (root ? root.parentSha : sourceHead) && p.validation.status === "passed" &&
         p.planVersion === s.planVersion &&
-        (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+        p.assurance?.turnDigest === s.request.turnPlanDigest);
       if (!native) throw Error("Narrative child lacks its original native-validated checkpoint.");
       const candidate = correction ? s.result! : { status: submission.status, headSha: submission.headSha };
       patch = await reviewBoundary({ ...s, result: candidate }, correctionSelected);
@@ -2083,10 +2032,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       const refreshed = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
       const reviews = await resolvedCheckpointReviews(job, refreshed);
       const current = refreshed.find(p => p.commitSha === native.commitSha);
-      if (current && s.request.fixture && current.assurance &&
-          !["passed", "not-required"].includes(reviews.get(current.commitSha) ?? current.semanticReview))
-        return disposition("unresolved", "review-checkpoints:" + current.commitSha);
-      if (!current || !(s.request.fixture && !current.assurance) &&
+      if (!current ||
           !["passed", "not-required"].includes(reviews.get(current.commitSha) ?? current.semanticReview))
         throw Error("Narrative child did not settle its mandatory independent Review.");
       return { status: "verified", assignmentKey: key, evidenceRef: ref,
@@ -2264,7 +2210,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
           !patch.escalation && !patch.reviewSteeringHandoff && actual?.headSha === head &&
           accepted.focus.includes(actual.status) && points.some(p =>
             p.workItem === active.id && p.commitSha === head && p.validation.status === "passed" &&
-            (s.request.fixture || p.assurance?.turnDigest === turnDigest &&
+            (p.assurance?.turnDigest === turnDigest &&
               ["passed", "not-required"].includes(reviews.get(p.commitSha) ?? p.semanticReview))))
         return { status: "verified", assignmentKey: key, evidenceRef: active.id,
           headSha: head, reviewRef: "review-checkpoints:" + head };
@@ -2311,7 +2257,7 @@ async function reviewPrerequisiteIdentity(s: State, config: RunnableConfig,
       s.recoveryLifecycle.phase !== "correcting" || s.recoveryLifecycle.assessorPending ||
       s.recoveryLifecycle.decision?.action !== "known-correction" ||
       s.recoveryLifecycle.decision.adapter !== "review-cycle" ||
-      !s.active || !s.result || s.request.fixture ||
+      !s.active || !s.result ||
       s.active.id !== active.origin.assignmentId || s.result.headSha !== active.origin.sourceHeadSha ||
       active.origin.sourceHeadSha !== request.sourceSha ||
       s.request.turnPlanDigest !== request.turnDigest || s.planVersion !== request.basePlanVersion ||
@@ -2515,8 +2461,19 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
       const point = points.find(p => p.workItem === choice.unit.id && p.commitSha === choice.unit.commitSha);
       const reviews = await resolvedCheckpointReviews(job, points);
-      if (point && (s.request.fixture && !point.assurance ||
-          ["passed", "not-required"].includes(reviews.get(point.commitSha) ?? point.semanticReview))) {
+      const fork = readRecoveryFork(job);
+      const inherited = fork?.commits[choice.unit.id];
+      const inheritedUnit = fork?.receipts["interactive-items/" + milestone.slice(10) + ".json"]?.units?.find(
+        (unit: { id: string }) => unit.id === choice.unit.id);
+      const inheritedReview = resolvedInheritedRecoveryReviews(fork?.reviewCoverage ?? []).find(
+        entry => entry.workItem === choice.unit.id && entry.commitSha === choice.unit.commitSha);
+      const inheritedVerified = fork?.checkpoint.completedWorkItems.includes(choice.unit.id) &&
+        inherited?.sha === choice.unit.commitSha && inherited.planVersion === s.planVersion &&
+        inheritedUnit?.phase === "committed" && inheritedUnit.commitSha === choice.unit.commitSha &&
+        inheritedUnit.beforeHead === choice.unit.beforeHead && inheritedUnit.digest === choice.unit.digest &&
+        ["passed", "not-required"].includes(inheritedReview?.status ?? "");
+      if (point && ["passed", "not-required"].includes(reviews.get(point.commitSha) ?? point.semanticReview) ||
+          inheritedVerified) {
         await assertNativeReviewDependencies(job, "interactive-puzzle-" + milestone.slice(10));
         choiceReviewed = true;
       }
@@ -2531,10 +2488,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
     const identity: AssignmentIdentity = {
       schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
-      graphThreadId, turnDigest: s.request.turnPlanDigest ?? fixtureTurnIdentity({
-        jobId: job.jobId, jobThreadId: job.threadId, graphThreadId, turnDigest: null,
-        fixture: s.request.fixture, task: s.request.task, contract: s.request.contract,
-      }), assignmentId: workItem, planVersion: s.planVersion, sourceHeadSha: sourceHead,
+      graphThreadId, turnDigest: s.request.turnPlanDigest!, assignmentId: workItem, planVersion: s.planVersion, sourceHeadSha: sourceHead,
       scopeDigest: createHash("sha256").update(JSON.stringify({
         scope, domain, task: s.request.task, contract: s.request.contract,
       })).digest("hex"),
@@ -2630,7 +2584,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         const point = points.find(p => p.workItem === workItem && p.commitSha === unit.commitSha &&
           p.parentSha === sourceHead && p.validation.status === "passed" &&
           p.planVersion === s.planVersion &&
-          (s.request.fixture || p.assurance?.turnDigest === s.request.turnPlanDigest));
+          p.assurance?.turnDigest === s.request.turnPlanDigest);
         if (!point) {
           // A fork carries historical native checkpoints in its immutable
           // admission bundle, not in the child's local checkpoint journal.
@@ -2644,20 +2598,15 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
               historical?.sha !== unit.commitSha || historical.planVersion !== s.planVersion ||
               originalUnit?.phase !== "committed" || originalUnit.commitSha !== unit.commitSha ||
               originalUnit.beforeHead !== sourceHead || originalUnit.digest !== unit.digest ||
-              (!(s.request.fixture && !inheritedReview) &&
-                !["passed", "not-required"].includes(inheritedReview?.status ?? "")))
+              !["passed", "not-required"].includes(inheritedReview?.status ?? ""))
             throw Error("Interactive child lacks independently verified native checkpoint");
           return outcome("verified", { headSha: await trustedHead(job), reviewRef: "recovery-fork:" + unit.commitSha });
         }
         const covered = await resolvedCheckpointReviews(job, points);
-        const pending = !(s.request.fixture && !point.assurance) &&
-          !["passed", "not-required"].includes(covered.get(point.commitSha) ?? point.semanticReview);
+        const pending = !["passed", "not-required"].includes(covered.get(point.commitSha) ?? point.semanticReview);
         const candidate: State = { ...s, result: correction ? s.result :
           { status: active.stage === "interactive" && domain === "choice"
               ? "review-handoff" : submission.status, headSha: unit.commitSha } };
-        if (pending && s.request.fixture)
-          return outcome("needs-prerequisite", { suspensionRef: "review-checkpoints:" + unit.commitSha,
-            owner: "nt-narrative-review", scopeRef: identity.scopeDigest, pendingPhase: "review" });
         if (pending || correction) {
           patch = await reviewBoundary(candidate, false);
           if (patch.status === "paused") return outcome("paused", { controlRef: "review-checkpoints" });
@@ -2668,7 +2617,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         const refreshed = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
         const reviews = await resolvedCheckpointReviews(job, refreshed);
         const current = refreshed.find(p => p.commitSha === unit.commitSha);
-        if (!current || !(s.request.fixture && !current.assurance) &&
+        if (!current ||
             !["passed", "not-required"].includes(reviews.get(unit.commitSha) ?? current.semanticReview))
           throw Error("Interactive child did not settle its mandatory independent Review");
         return outcome("verified", { headSha: await trustedHead(job), reviewRef: "review-checkpoints:" + unit.commitSha });
@@ -2822,7 +2771,7 @@ async function authorBoundary(job: JobStartResult, s: State): Promise<Partial<St
  * Preserve s.result across pauses, otherwise LangGraph could replay the
  * already-committed specialist on resume. */
 async function independentAssignmentBoundary(s: State, correctionSelected = false): Promise<Partial<State>> {
-  if (s.request.fixture || !s.result || !s.active ||
+  if (!s.result || !s.active ||
       s.result.status !== "review-handoff" &&
       !accepted[s.active.stage].includes(s.result.status)) return {};
   const job = await openJob(s);
@@ -3061,19 +3010,6 @@ async function authenticateRecoveryOrigin(
 ): Promise<boolean> {
   if (origin.jobId !== job.jobId || origin.graphThreadId !== graphThreadId ||
       origin.jobThreadId !== job.threadId) return false;
-  if (request.fixture && request.turnPlanDigest == null) {
-    const identity = { jobId: job.jobId, jobThreadId: job.threadId, graphThreadId,
-      turnDigest: null, fixture: true, task: request.task, contract: request.contract };
-    return origin.turnDigest === fixtureTurnIdentity(identity) &&
-      evidence.length === 1 && evidence[0]?.store === "graph-checkpoint" &&
-      evidence[0].ref === origin.failureAnchor.ref &&
-      await (async () => {
-        const head = await trustedHead(job);
-        if (!historicalSource) return head === origin.sourceHeadSha;
-        try { jobGit(job, "merge-base", "--is-ancestor", origin.sourceHeadSha, head); return true; }
-        catch { return false; }
-      })();
-  }
   if (assignmentEvidence?.assignmentFailure) {
     if (historicalSource || origin.operation !== "specialist-result" ||
         origin.assignmentId !== assignmentEvidence.assignmentId ||
@@ -3105,7 +3041,7 @@ async function observeNodeOutcome(node: GenerationNode, s: State, config: Runnab
   let result: Partial<State>;
   let observation: GenerationOperationRecovery["outcome"] = "returned-failure";
   try {
-    result = await (s.request.fixture ? withoutJobModelRuntime(() => execute(s, config)) : execute(s, config));
+    result = await execute(s, config);
   }
   catch (error) {
     if ((error != null && isGraphBubbleUp(error)) || config.signal?.aborted) throw error;
@@ -3154,15 +3090,11 @@ export function recoveryNode(
       if (!state.request) throw Error("Missing Generation request.");
       if (state.inventory && state.inventory.invalidationVersion !== 1)
         throw Error("Obsolete Generation inventory cannot authorize execution.");
-      if (state.request.fixture !== true || isFocusedScope(state.request.contract) || state.request.turnPlanDigest !== undefined ||
-          state.request.orchestrationPolicy !== undefined &&
-          state.request.orchestrationPolicy !== "explicit" && state.request.orchestrationPolicy !== "fixture-test") {
-        const job = await openJob(state);
-        const turn = await requireGenerationTurn(job, state.request, !!state.graphThreadId);
-        if (executionOwner) await assertGenerationNodeOwner(job, executionOwner,
-          config.configurable?.thread_id as string | undefined, state.graphThreadId,
-          turn ? { ...state.request, contract: turn.contract } : state.request);
-      }
+      const job = await openJob(state);
+      const turn = await requireGenerationTurn(job, state.request, !!state.graphThreadId);
+      if (executionOwner) await assertGenerationNodeOwner(job, executionOwner,
+        config.configurable?.thread_id as string | undefined, state.graphThreadId,
+        { ...state.request, contract: turn.contract });
     } catch (error) {
       return { status: "blocked", reason: error instanceof Error ? error.message : String(error),
         recoveryLifecycle: admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
@@ -3472,6 +3404,34 @@ export function recoveryNode(
     // A C05 proposal alone never closes a case. Only the same original
     // read-only operation, independently re-executed above and reattested
     // here against its settled Pi transcript, can discharge the failed check.
+    // A known controller-only scheduling failure does not require a model
+    // diagnosis to settle. Reauthenticate the original checkpoint and the
+    // same read-only scheduling check, not an invented writer receipt.
+    if (current && node === "assess_recovery" && domain.operationRecovery === null &&
+        current.origin.operation === "scheduling" &&
+        prior.recoveryLifecycle.decision?.action === "reconcile-effects" &&
+        !prior.recoveryLifecycle.attempt) {
+      try {
+        await withStoryJobLock(job, "generation-scheduling-resolution-proof", async () => {
+          if (!await authenticate(current.origin, current.evidence))
+            throw Error("Original scheduling source is not authenticated.");
+          clean(job);
+          const head = await trustedHead(job);
+          if (head !== current.origin.sourceHeadSha)
+            throw Error("Original scheduling revision changed.");
+          await verifyDependencyHistory(job, state.dependencyHistory ?? []);
+          await verifyPinnedPendingWork(job, state.request.turnPlanDigest, state.pendingVersion);
+          await checkPlan(job, state.request, state.planVersion);
+          if (!state.request.turnPlanDigest || !state.orchestratorOrder ||
+              !state.orchestratorPlanningDigest || !state.orchestratorSnapshotId)
+            throw Error("Original objective planner evidence is absent.");
+          if (!isFocusedScope(state.request.contract))
+            await scheduleIdeasAtBoundary(job, "parent-generation");
+          assurance.verifiedHead = head;
+          assurance.verifiedReceipt = current.evidence[0]!;
+        });
+      } catch { /* Fail closed in applyDomainRecovery. */ }
+    }
     if (current && node === "assess_recovery" && domain.operationRecovery === null &&
         prior.recoveryLifecycle.decision?.action === "reconcile-effects" &&
         prior.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
@@ -3560,10 +3520,8 @@ export function recoveryNode(
 /** The production parent graph. Specialists retain ownership of side effects and recovery. */
 export function createGenerationGraph(
   checkpointer?: SqliteSaver, executionOwner: "server" | "cli" = "server",
-  // Deterministic transport-boundary substitution for graph-level tests.
-  // Production callers always use the real sealed review/repair adapter.
-  reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>> = independentAssignmentBoundary,
 ) {
+  const reviewBoundary = independentAssignmentBoundary;
   return new StateGraph(Channels, { input: GenerationInputSchema })
     .addNode("schedule", recoveryNode("schedule", async (s, config) => {
       // A blocked original Thread may resume only when its CURRENT controller
@@ -3654,8 +3612,7 @@ export function createGenerationGraph(
           if (stopped) return stopped;
         }
         // The trusted controller selects a METHOD, not a worker or write grant.
-        // Every real Turn uses the pinned method; only isolated fixture
-        // transports may omit model planning.
+        // Every executable Turn uses the pinned method.
         const sourceIdentity = {
           task: request.task, kind: request.contract.scope.kind,
           turnPlanDigest: request.turnPlanDigest,
@@ -3668,7 +3625,7 @@ export function createGenerationGraph(
         if (hasSelection) {
           selection = await loadSelectedStoryOrchestrator(job, graphThreadId, sourceIdentity);
           orchestratorSnapshotId = selection.receipt.skillSnapshot.id;
-        } else if (!request.fixture || request.orchestrationPolicy === "explicit") {
+        } else {
           const checkout = request.skillsSource ?? process.env.NT_STUDIO_SKILLS_SOURCE ??
             (await loadSkillConfig()).novelteaSkills;
           if (!checkout) throw new Error(
@@ -3681,7 +3638,7 @@ export function createGenerationGraph(
           throw new Error("Pinned orchestrator snapshot changed during generation resume.");
         let orchestratorOrder: string[] | null = null;
         let orchestratorPlanningDigest: string | null = null;
-        if (selection && request.turnPlanDigest && !request.fixture) {
+        if (selection && request.turnPlanDigest) {
           const plan = await readTurnEvidence(job, request.contract, request.task, request.turnPlanDigest);
           if (!plan) throw new Error("A selected objective lacks the controller's pinned Turn plan.");
           const { inspectPiPolicy } = await import("./job-pi-policy.js");
@@ -3776,7 +3733,8 @@ export function createGenerationGraph(
             // After the original read-only check succeeds, discharge only a
             // settled C05 diagnostic proposal. The wrapper independently
             // authenticates its Pi attempt and original source once more.
-            if (s.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
+            if (op.operation === "scheduling" && !s.recoveryLifecycle.attempt ||
+                s.recoveryLifecycle.attempt?.purpose === "diagnosis" &&
                 s.recoveryLifecycle.attempt.phase === "settled")
               return { status: "running" as const, reason: null, operationRecovery: null };
             return { status: "running" as const, reason: null,
@@ -4052,7 +4010,7 @@ export function createGenerationGraph(
           // saved closeout proposal is a graph routing decision, never a lease;
           // the separate node re-authenticates the entire source under lock.
           if (next.active?.stage === "composition" && next.active.milestone &&
-              next.planVersion && next.request?.turnPlanDigest && !next.request.fixture) {
+              next.planVersion && next.request?.turnPlanDigest) {
             let decision: Awaited<ReturnType<typeof preflightCompositionBoundary>>;
             try {
               decision = await preflightCompositionBoundary(job, next.request,
@@ -4127,7 +4085,6 @@ export function createGenerationGraph(
       const task = s.ideaTask!;
       const job = await openJob(s);
       const file = ideaDispatchFile(job);
-      const fixture = s.request.fixture;
       let reconciling = false;
       let resuming = false;
       try {
@@ -4160,7 +4117,7 @@ export function createGenerationGraph(
               return { ideaResult: result };
             }
             if (saved.phase !== "running" || saved.effectContract !== "idea-protocol.v1" ||
-                !["prepared", "read-only"].includes(saved.effectPhase ?? "") || fixture)
+                !["prepared", "read-only"].includes(saved.effectPhase ?? ""))
               throw new Error("Interrupted automated idea selection/writer; inspect its Pi session, placement receipt and Git worktree before manual reconciliation.");
             // Reenter only the original clean-source task. The placement adapter
             // reconstructs a sealed read-only result, never repeats a started writer.
@@ -4172,14 +4129,13 @@ export function createGenerationGraph(
         }
         if (await trustedHead(job) !== task.priorHead) throw new Error("Idea selection's verified Git base changed.");
         if (!resuming) await persist(file, { jobId: job.jobId, task, phase: "running",
-          ...(!fixture ? { effectContract: "idea-protocol.v1", effectPhase: "prepared" } : {}) });
+          effectContract: "idea-protocol.v1", effectPhase: "prepared" });
         const result = await runIdeaPlacement({ ...s.request,
-          // Opt-in integration evaluation uses real pinned Pi placement.
-          fixture, expectedHead: task.priorHead,
+          fixture: false, expectedHead: task.priorHead,
           reconcileReadOnly: reconciling,
-          beforeRead: fixture ? undefined : () => persist(file, { jobId: job.jobId, task,
+          beforeRead: () => persist(file, { jobId: job.jobId, task,
             phase: "running", effectContract: "idea-protocol.v1", effectPhase: "read-only" }),
-          beforeWrite: fixture ? undefined : () => persist(file, { jobId: job.jobId, task,
+          beforeWrite: () => persist(file, { jobId: job.jobId, task,
             phase: "running", effectContract: "idea-protocol.v1", effectPhase: "writer" }),
           action: task.action, id: task.id,
           ...(task.action === "place" ? { autoSelect: true } : { record: true }) }) as IdeaResult;
@@ -4307,7 +4263,7 @@ export function createGenerationGraph(
           const original = await inspectInteractiveConflict(job, report.milestoneId);
           if (original.domain !== report.domain || original.expectedHead !== report.expectedHead ||
               original.reportDigest !== report.reportDigest ||
-              original.worker !== (s.request.fixture ? "fixture" : "pi") ||
+              original.worker !== "pi" ||
               original.planVersion !== s.planVersion ||
               JSON.stringify(original.conflicts) !== JSON.stringify(evidence.conflicts) ||
               JSON.stringify(original.obligations) !== JSON.stringify(evidence.obligations))
@@ -4389,8 +4345,7 @@ export function createGenerationGraph(
           // failed specialist-result check before removing the active writer
           // and keep the failed objective in the inventory; a diagnostic
           // never grants another Event, Choice or Composition writer.
-          const originalFailure = s.request.fixture ? {} :
-            await operationFailure(s, job, "specialist-result", failure,
+          const originalFailure = await operationFailure(s, job, "specialist-result", failure,
               { reference: "specialist-receipt", assignmentId: s.active!.id,
                 resultStatus: "event-prerequisite-reported", eventNoWrite: {
                   milestoneId: s.active!.milestone!, expectedHead: evidence.prerequisite!.expectedHead,
@@ -4578,39 +4533,6 @@ export function createGenerationGraph(
           const receipt = await checkPlan(job, s.request, s.planVersion);
           const planVersion = receipt?.plan?.version ?? null;
           const stage = s.active!.stage;
-          // A fixture-only multi-specialist handoff has no independent Pi
-          // reviewer. It must stop for separately sealed semantic review,
-          // not fabricate a failed specialist-result recovery case. Real Pi
-          // runs keep their existing reviewer/reentry path unchanged.
-          if (s.request.fixture && s.result?.status === "review-handoff") {
-            const next = stage === "foundations" ? "character-foundations" :
-              ["interactive", "choice", "puzzle"].includes(stage) && s.active?.milestone
-                ? "interactive-" + (stage === "choice" ? "choice" : "puzzle") +
-                  "-" + s.active.milestone.slice(10) : null;
-            if (!next) throw Error("Fixture Review handoff has no original specialist.");
-            try {
-              await assertNativeReviewDependencies(job, next);
-              if (stage !== "foundations") {
-                const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
-                const point = points.find(p => p.commitSha === s.result!.headSha &&
-                  p.workItem.startsWith("interactive-"));
-                const reviews = await resolvedCheckpointReviews(job, points);
-                if (!point || point.assurance && !["passed", "not-required"].includes(reviews.get(point.commitSha) ?? point.semanticReview))
-                  throw new IndependentReviewGateError("Original Interactive subunit Review is pending.");
-              }
-            } catch (error) {
-              if (!(error instanceof IndependentReviewGateError)) throw error;
-              return { nonsemanticStop: "fixture-verdict" as const, status: "blocked" as const,
-                reason: "Fixture specialist is awaiting a separately sealed independent " +
-                  "semantic Review. A structural fixture handoff is not a failed writer " +
-                  "or an authorization to waive the original Review." };
-            }
-            // The original checkpoint's review is now independently sealed.
-            // Return to the SAME original specialist for its unfinished unit.
-            // The specialist itself reauthenticates the earlier commit before
-            // authoring any dependent Choice/Puzzle/Character work.
-            return { result: null, status: "running" as const, reason: null };
-          }
           if (!s.result || !accepted[stage].includes(s.result.status))
             return operationFailure(s, job, "specialist-result",
               "Missing or unaccepted specialist result: " + (s.result?.status ?? "absent"),
@@ -4751,7 +4673,7 @@ export function createGenerationGraph(
           // specialist/Review/admission failures. Preserve the original report
           // tuple and verified checkpoint; never issue a second diagnosis because
           // the report merely rewrote its error prose.
-          if (!complete && !escalation && !s.request.fixture && s.planVersion &&
+          if (!complete && !escalation && s.planVersion &&
               authorizedInventoryComplete(s.inventory) && isTrustedFinalVerdictAnomaly(report)) {
             const headSha = await trustedHead(job);
             const checkpoint = (await inspectRecoveryCheckpoints(job)).find(point =>
@@ -4778,7 +4700,6 @@ export function createGenerationGraph(
             // Needing a *proposal* is blocked; only a real outstanding author
             // approval interrupt or execution control may report paused.
             status: complete ? "completed" as const : "blocked" as const,
-            ...(s.request.fixture && !complete ? { nonsemanticStop: "fixture-verdict" as const } : {}),
             escalation,
             reason: complete ? null : [details || s.completedStages.at(-1)?.status ||
               "Scope remains unverified",
@@ -4836,7 +4757,7 @@ export async function runStoryGeneration(options: GenerationOptions) {
   assertNativeVersion(job.validatorVersion);
   // An obsolete start must not create generation.sqlite (which would claim
   // CLI ownership even though no authenticated Turn was ever admitted).
-  if (options.action === "start" && (!options.fixture || isFocusedScope(parseGenerationContract(options.contract)))) {
+  if (options.action === "start") {
     if (!options.task?.trim()) throw Error("Generation start requires --task and --contract.");
     const contract = parseGenerationContract(options.contract);
     const turn = await readTurnEvidence(job, contract, options.task);
@@ -4873,14 +4794,14 @@ export async function runStoryGeneration(options: GenerationOptions) {
         if (!options.task?.trim()) throw new Error("Generation start requires --task and --contract.");
         const contract = parseGenerationContract(options.contract);
         const turn = await readTurnEvidence(job, contract, options.task);
-        if (!options.fixture && !turn)
+        if (!turn)
           throw Error("Generation start requires a prepared authenticated Turn plan; obsolete unplanned CLI execution is not supported.");
         const request: GenerationRequest = { story: job.storyRoot, job: job.jobId, task: options.task,
           contract, fixture: options.fixture ?? false,
           ...(turn ? { turnPlanDigest: turn.digest } : {}),
           skillsSource: options.skillsSource, validatorSource: options.validatorSource,
           provider: options.provider, model: options.model,
-          orchestrationPolicy: options.fixture && !options.skillsSource ? "fixture-test" : "explicit" };
+          orchestrationPolicy: "explicit" };
         state = { request, recoveryLifecycle: emptyRecoveryLifecycle(), recoverySources: [],
           recovery: null, unknownRecovery: null, operationRecovery: null, fixPickup: null,
           cursor: 0, completedStages: [], status: "running", reason: null,

@@ -274,7 +274,7 @@ export async function inspectDeferredCorrection(
     const placement = idea?.lifecycle.placements.at(-1);
     if (idea?.lifecycle.status !== "integrated" || !placement ||
         !["integrated", "reassessed", "relocated"].includes(placement.action) ||
-        !(placement.verified === "pi" || state.fixture && placement.verified === "fixture-unverified"))
+        placement.verified !== "pi")
       return null;
     const file = join(job.stateDir, "idea-placements",
       idea.id + "-" + placement.revision + ".json");

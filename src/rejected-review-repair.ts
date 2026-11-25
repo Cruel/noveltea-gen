@@ -54,7 +54,6 @@ import type { RecoveryDecision, RecoveryEvidence } from "./generation-recovery-c
 import { isDeepStrictEqual } from "node:util";
 import { currentSteeringBoundary } from "./steering-boundary.js";
 import { steeringForAssignment } from "./steering-amendments.js";
-import { type RepairCycleOps } from "./rejected-repair-controller.js";
 import { deriveReviewRepairAmendment, deriveReviewDependencyRequest, reviewNeedsDependency,
   type ReviewDependencyRequest, type ReviewRepairPlanAmendment } from "./review-repair-amendment.js";
 import { inspectReviewEventSupport, recordReviewDependency } from "./dependency-state.js";
@@ -1869,7 +1868,7 @@ export async function acceptGuidedRepairContinuation(job: JobStartResult,
 /** Source-bound receipt/effect adapters for the checkpointed Review child.
  * No scheduling or standalone admission is available here. */
 async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
-  options: RejectedRepairOptions, childWorkItem: string): Promise<Pick<RepairCycleOps<RepairReceipt>, "begin" | "inspect" | "correct" | "validate" | "commit" | "reviewStatus" | "rereview" | "finishReview" | "shouldYieldForSteering">> {
+  options: RejectedRepairOptions, childWorkItem: string): Promise<{ begin(): Promise<RepairReceipt>; inspect(sha: string): Promise<RepairReceipt>; correct(sha: string): Promise<RepairReceipt>; validate(sha: string): Promise<RepairReceipt>; commit(sha: string): Promise<RepairReceipt>; reviewStatus(state: RepairReceipt): Promise<"required-pending" | "passed" | "failed">; rereview(state: RepairReceipt): Promise<void>; finishReview(sha: string): Promise<RepairReceipt>; shouldYieldForSteering(state: RepairReceipt): Promise<boolean> }> {
   if (!SHA.test(sourceSha)) throw Error("Repair requires one exact reviewed commit.");
   await withStoryJobLock(job, "reconcile-published-repair", async () => {
     await reconcileUnpublishedRepairCommit(job, sourceSha);

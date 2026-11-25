@@ -175,10 +175,11 @@ export async function advanceThread(store: StudioDatabase, owner: string, thread
       const committed = await commitProtectedThreadChange(child, scope.protectedChange, owner)
       const time = now()
       const request: GenerationRequest = { story: child.storyRoot, job: child.jobId,
-        task: claim.content, contract: scope.contract, fixture: true,
-        turnPlanDigest: scope.turnPlan.digest }
+        task: claim.content, contract: scope.contract, fixture: false,
+        turnPlanDigest: scope.turnPlan.digest,
+        ...(model ? { provider: model.provider, model: model.id } : {}) }
       const draft: GenerationDraft = { version: 1, headSha: head, task: claim.content,
-        contract: scope.contract, limits: {}, model: null }
+        contract: scope.contract, limits: oldDraft?.limits ?? {}, model }
       await store.persistence.continuation.protectedFinish({
         owner, threadId, claim, sourceHead: head,
         generationThread: child.threadId + ':generation:web',

@@ -2,6 +2,8 @@
  * native-typed, source-hashed Event consequence proof sealed in the original
  * Git commit can identify the selected record; filenames do not supply IDs.
  * This does not confer general Milestone or new-record authority. */
+import { inheritedReviewedCheckpoint, readRecoveryFork } from "./recovery-fork-state.js";
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { lstat, readFile } from "node:fs/promises";
@@ -39,6 +41,17 @@ export async function readEventMilestoneRepairGrant(job: JobStartResult,
       milestonePath?: string; workItemId?: string; sourcePaths?: string[] };
     consequenceProof?: EventConsequenceProof;
   };
+  if (point.jobId !== job.jobId) {
+    // The current Turn independently authorizes the bounded Event owner;
+    // the old immutable proof only identifies the selected source fields.
+    const inherited = inheritedReviewedCheckpoint(job, point.workItem, point.commitSha);
+    const originalReceipt = readRecoveryFork(job)?.receipts["event-items/" + slug + ".json"];
+    if (purpose !== "deferred-choice-closeout" || !inherited ||
+        !isDeepStrictEqual(inherited.proof, point) ||
+        !originalReceipt || !isDeepStrictEqual(originalReceipt.consequenceProof, receipt.consequenceProof) ||
+        !isDeepStrictEqual(originalReceipt.assignment, receipt.assignment))
+      throw Error("Inherited Event source differs from its independently reviewed fork evidence.");
+  }
   const proof = receipt.consequenceProof;
   const selected = proof?.milestone;
   if (receipt.version !== 1 || receipt.jobId !== job.jobId ||

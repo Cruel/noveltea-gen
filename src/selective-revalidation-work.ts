@@ -297,7 +297,7 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       report.protection.base !== correction.baseSha ||
       report.protection.changes?.length || report.protection.warnings?.length)
     throw Error("Native Story/protected authority is invalid after the upstream correction.");
-  const { plan, originalPoints, reviewedSources } =
+  const { plan, originalPoints, reviewedSources, originalOmissions } =
     await authenticateSelectiveImpact(job, inventory, correction);
   const file = fileOf(job, correction.successorSha);
   let state = await read(file);
@@ -332,9 +332,10 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     if (result.sessionDigest !== await transcript(job, result.sessionFile))
       throw Error("Prior independent revalidation transcript changed after review.");
     const point = originalPoints[result.itemId]?.at(-1);
-    if (!point || result.originalCommitSha !== point.commitSha ||
+    const omission = originalOmissions[result.itemId];
+    if ((!point && !omission) || result.originalCommitSha !== (point?.commitSha ?? omission?.reviewHead) ||
         result.originalReviewDigest !== (reviewedSources[result.itemId]?.reviewDigest ??
-          hash(point.assurance)))
+          hash(point?.assurance)))
       throw Error("Saved dependent verdict changed its original checkpoint evidence.");
   }
   if (state.correctiveAssignment) {
@@ -424,14 +425,15 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     if (state.results.some(r => r.itemId === id)) continue;
     const item = inventory.items.find(i => i.id === id);
     const points = originalPoints[id];
-    if (!item || !points?.length)
+    const omission = originalOmissions[id];
+    if (!item || (!points?.length && !omission))
       throw Error("Dependent revalidation cannot recover the original reviewed specialist assignment: " + id);
-    const point = points.at(-1)!;
+    const point = points?.at(-1);
     const original = reviewedSources[id];
     const source = original?.sourcePaths ?? [];
-    if (!point.assurance || !turn.assignments.some(a => a.id === point.assurance!.assignmentId))
+    if (!omission && (!point?.assurance || !turn.assignments.some(a => a.id === point.assurance!.assignmentId)))
       throw Error("Prior dependent reviewer has no original Turn-owned specialist assignment.");
-    const relevant = [...new Set([...source, ...point.assurance.changedPaths,
+    const relevant = [...new Set([...source, ...(point?.assurance?.changedPaths ?? []),
       ...correction.changedPaths])].sort();
     if (relevant.length > 32)
       throw Error("Dependent revalidation exceeds bounded Story context.");
@@ -444,18 +446,19 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
         " under the original author objective: " + turn.goal +
         ". Only this unit's original obligations and actual consumed premises; " +
         "later assignments remain outside this review.",
+      ...(omission ? { omission: { assignmentId: id, headSha: reviewHead } } : {
       specialistAssignments: [{
-        id: point.assurance.assignmentId,
-        specialist: turn.assignments.find(a => a.id === point.assurance!.assignmentId)!.specialist,
-        outcome: "Revalidate the original reviewed " + point.workItem + " obligation.",
+        id: point!.assurance!.assignmentId,
+        specialist: turn.assignments.find(a => a.id === point!.assurance!.assignmentId)!.specialist,
+        outcome: "Revalidate the original reviewed " + point!.workItem + " obligation.",
         targets: [...item.targetIds],
-        authority: { recordTypes: [...point.assurance.changedRecordTypes],
-          existingPaths: [...point.assurance.changedPaths], mayCreate: false },
+        authority: { recordTypes: [...point!.assurance!.changedRecordTypes],
+          existingPaths: [...point!.assurance!.changedPaths], mayCreate: false },
       }],
-      revalidation: { assignmentId: point.assurance.assignmentId,
-        originalCommitSha: point.commitSha, correctedHeadSha: reviewHead,
+      revalidation: { assignmentId: point!.assurance!.assignmentId,
+        originalCommitSha: point!.commitSha, correctedHeadSha: reviewHead,
         changedPaths: [...new Set([...correction.changedPaths,
-          ...(state.corrected ?? []).flatMap(c => c.proposal.authorizedPaths)])] },
+          ...(state.corrected ?? []).flatMap(c => c.proposal.authorizedPaths)])] } }),
     };
     await preflightPiAssignment(job, "revalidate:" + reviewHead + ":" + id,
       { provider: opts.provider, model: opts.model });
@@ -472,8 +475,8 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     const sessionDigest = await transcript(job, sessionFile);
     const r: Omit<RevalidationReview, "digest"> = {
       itemId: id, sourceSha: reviewHead,
-      originalCommitSha: point.commitSha, originalReviewDigest: original?.reviewDigest ??
-        hash(point.assurance),
+      originalCommitSha: point?.commitSha ?? omission!.reviewHead, originalReviewDigest: original?.reviewDigest ??
+        hash(point?.assurance),
       reviewerDigest: hash({ verdict, sessionDigest, source: reviewHead, item: id }),
       sessionFile, sessionDigest, verdict,
       status: verdict.verdict === "pass" ? "passed" : "failed",
@@ -490,6 +493,12 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       [...state.corrected ?? []].map(c => c.successorSha));
     if (projection.failures.length) {
       const failed = projection.failures.at(-1)!;
+      if (omission || !point?.assurance || point.jobId !== job.jobId) {
+        state.state = "blocked";
+        state.failure = "Independent revalidation rejected inherited or commitless evidence; an authorized owner amendment is required.";
+        await save(file, state);
+        throw Error(state.failure);
+      }
       // One original specialist session may only repair paths it actually wrote.
       // Interactive Choice and Puzzle share the high-level Turn owner, but
       // never share an interchangeable writer transcript or file grant.

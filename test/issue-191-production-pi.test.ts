@@ -1,3 +1,4 @@
+import { archiveStages } from "./support/scripted-archive-stages.js";
 /** #191: deterministic Pi transport over the REAL registered rootless sandbox.
  * Exercises the production orchestrator and independent assignment reviewer
  * adapters, pinned skill reads, actual Pi session transcripts and Git source. */
@@ -48,7 +49,7 @@ const usage: AssistantMessage["usage"] = {
   input: 20, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 40,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-type Script = (index: number) => { content: AssistantMessage["content"]; reason: "stop" | "toolUse" };
+type Script = (index: number, context: TranscriptContext) => { content: AssistantMessage["content"]; reason: "stop" | "toolUse" };
 function scripted(script: Script, observed: Array<{ tools: string[]; messages: readonly unknown[] }>): Provider {
   let index = 0;
   const stream = (_model: Model, ctx: TranscriptContext, _options?: SimpleStreamOptions) => {
@@ -60,7 +61,7 @@ function scripted(script: Script, observed: Array<{ tools: string[]; messages: r
       for (const t of m.toolsRemoved ?? []) active.delete(t.name);
     }
     observed.push({ tools: [...active], messages: ctx.messages });
-    const { content, reason } = script(index++);
+    const { content, reason } = script(index++, ctx);
     const message: AssistantMessage = {
       role: "assistant", api: model.api, provider: model.provider,
       model: model.id, content, usage, stopReason: reason, timestamp: Date.now(),
@@ -113,7 +114,7 @@ const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
 const available = dockerAvailable() &&
   existsSync(join(source, "skills/nt-story-orchestrate/SKILL.md"));
 
-test("production planner and independent reviewer recover in original Pi sessions against pinned Story source", {
+test("production planner and adaptive recovery use original Pi sessions against pinned Story source", {
   skip: !available && "Requires registered rootless sandbox and local noveltea-skills",
   timeout: 240_000,
 }, async () => {
@@ -232,218 +233,6 @@ test("production planner and independent reviewer recover in original Pi session
       assert.equal(plannerCalls.length, 3, "Graph resume cannot repeat the original planner");
     }
 
-    const foundation = await runFoundationJob({
-      story, job: id, task, envelope: "Dialogue mystery",
-      skillsSource: source, validatorSource: source, fixture: true,
-    });
-    assert.equal(foundation.stage ?? foundation.status, "committed", JSON.stringify(foundation));
-    const points = await inspectRecoveryCheckpoints(job);
-    const point = points.find(p => p.eligible && p.workItem === "foundation");
-    assert.ok(point?.assurance, "real Git foundation checkpoint must carry sealed review assurance");
-    assert.equal(point.assurance.reviewSelection.status, "required-pending");
-    const packet = await prepareSemanticReview(job, [point]);
-    const item = packet.items[0]!;
-    const targetPath = item.assurance.changedPaths[0]!;
-    const evidence = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
-      path: targetPath, line: 1, explanation: "Checked pinned Creative Direction source" };
-    const finding = { ...evidence, kind: "missing-requirement",
-      message: "Missing a causal source for the final witness.",
-      requiredCorrection: "Connect the archive witness to a specific causal clue.",
-      affectedPaths: [targetPath] };
-    const invalid = JSON.stringify({ sourceDigest: packet.sourceDigest, verdict: "fail",
-      findings: [{ ...finding, line: 999 }], evidence: [] });
-    const valid = JSON.stringify({ sourceDigest: packet.sourceDigest, verdict: "fail",
-      findings: [finding], evidence: [] });
-    const reviewerCalls: Array<{ tools: string[]; messages: readonly unknown[] }> = [];
-    const reviewerRuntime = await runtimeFor(i => {
-      if (i === 0) return { content: readCalls(boundedPinnedSources("nt-narrative-review")),
-        reason: "toolUse" };
-      if (i === 1) return { content: text(invalid), reason: "stop" };
-      if (i === 2) return { content: text(valid), reason: "stop" };
-      throw Error("Reviewer exceeded bounded scripted calls.");
-    }, reviewerCalls);
-    const snapshot = await createSkillSnapshot({
-      discovery: "explicit-only", novelteaSkills: source, skillDirs: [],
-      requiredSkills: ["nt-narrative-review", "nt-catalog"],
-    });
-    assert.ok(snapshot);
-    const reviewed = await withJobModelRuntime(reviewerRuntime, () =>
-      withStoryJobLock(job, "independent-assignment-review", () =>
-        runPiAssignmentReview(job, [point], {
-          snapshot, provider: model.provider, model: model.id,
-          reviewer: "independent-pi-assignment-review", onSession: async () => {},
-        })));
-    assert.equal(reviewed.verdict.verdict, "fail", "a genuine negative finding remains negative");
-    assert.equal(reviewed.verdict.findings[0]!.message, finding.message);
-    assert.equal(reviewerCalls.length, 3);
-    assert.deepEqual(reviewerCalls[2]!.tools, []);
-    assert.match(JSON.stringify(reviewerCalls[2]!.messages), /RESPONSE-CONTRACT CORRECTION ONLY/);
-    const reviewedCheckpoint = (await inspectRecoveryCheckpoints(job)).find(p => p.commitSha === point.commitSha)!;
-    assert.equal(reviewedCheckpoint.semanticReview, "failed");
-    const reviewReceipt = JSON.parse(readFileSync(join(job.stateDir,
-      "review-protocol/assignment-" + packet.sourceDigest + ".initial.json"), "utf8"));
-    assert.equal(reviewReceipt.attempts, 2);
-    assert.equal(reviewReceipt.status, "accepted");
-    // #195: resume after completed reviewer Pi response, with its independent
-    // seal already on disk. Re-enter the real review adapter twice; the
-    // controller rechecks the same sealed historical source, without Pi.
-    for (let restart = 0; restart < 2; restart++) {
-      const repeat = await withJobModelRuntime(reviewerRuntime, () =>
-        withStoryJobLock(job, "independent-assignment-review", () =>
-          runPiAssignmentReview(job, [point], {
-            snapshot, provider: model.provider, model: model.id,
-            reviewer: "independent-pi-assignment-review", onSession: async () => {},
-          })));
-      assert.deepEqual(repeat.verdict, reviewed.verdict);
-      assert.equal(reviewerCalls.length, 3, "Graph resume cannot duplicate accepted reviewer response");
-    }
-    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
-    assert.equal(git(repo, "rev-parse", "HEAD"), baseline);
-
-    // #195: full Git crash boundary. Upgrade only the fixture's *unhashed*
-    // worker provenance to a deterministic original Pi session; the original
-    // foundation checkpoint, source files, Git and independent FAIL remain
-    // untouched. The real controller must still bind it all during admission.
-    const foundationFile = join(job.stateDir, "foundation.json");
-    const foundationReceipt = JSON.parse(readFileSync(foundationFile, "utf8"));
-    const originalSessionId = randomUUID();
-    const originalSessionDir = join(job.stateDir, "foundation-sessions");
-    mkdirSync(originalSessionDir, { recursive: true });
-    const originalSessionFile = join(originalSessionDir, "original.jsonl");
-    const piLine = (message: unknown) =>
-      JSON.stringify({ type: "message", message }) + "\n";
-    writeFileSync(originalSessionFile, JSON.stringify({ type: "session",
-      id: originalSessionId }) + "\n");
-    Object.assign(foundationReceipt, { workerMode: "pi",
-      provider: model.provider, model: model.id,
-      piSessionFile: originalSessionFile, piSessionId: originalSessionId });
-    writeFileSync(foundationFile, JSON.stringify(foundationReceipt));
-    const originalNegativeSha = point.commitSha;
-    // Exercise the actual repair-admission implementation under the same
-    // graph lease used for a second failed independent rereview. Admission
-    // must reuse this owner without acquiring a competing Story lock.
-    const repair = await withStoryJobLock(job, "rejected-review-next-attempt", () =>
-      beginRejectedRepair(job, point));
-    assert.equal(repair.phase, "ready");
-    const prepared = await withStoryJobLock(job, "rejected-review-writer", () =>
-      claimRejectedRepair(job, originalNegativeSha));
-    assert.equal(prepared.phase, "prepared");
-    for (let restart = 0; restart < 2; restart++) {
-      const safe = await withStoryJobLock(job, "rejected-review-writer", () =>
-        inspectPreparedRepairDispatch(job, originalNegativeSha));
-      assert.equal(safe.phase, "prepared", "durable pre-dispatch marker proves writer unstarted");
-      assert.equal((await inspectRepairLedger(job, plan.digest)).corrections.length, 0);
-    }
-    const originalBytes = readFileSync(originalSessionFile);
-    writeFileSync(originalSessionFile, Buffer.concat([originalBytes, Buffer.from("unexpected")]));
-    await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
-      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked|recover Pi session|transcript/);
-    writeFileSync(originalSessionFile, originalBytes);
-    unlinkSync(originalSessionFile);
-    await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
-      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked|recover Pi session|transcript/);
-    writeFileSync(originalSessionFile, originalBytes);
-    const strayPath = join(job.worktreeStoryRoot, "stray.txt");
-    writeFileSync(strayPath, "Unresolved writer effects must be preserved.");
-    await assert.rejects(withStoryJobLock(job, "rejected-review-writer", () =>
-      inspectPreparedRepairDispatch(job, originalNegativeSha)), /integrity-blocked/);
-    unlinkSync(strayPath);
-    await withStoryJobLock(job, "rejected-review-writer", () =>
-      markRejectedRepairStarted(job, originalNegativeSha));
-    assert.equal((await inspectRejectedRepair(job, originalNegativeSha)).phase, "repairing");
-    assert.equal((await reconcileCompletedRepairWriter(job, originalNegativeSha)).phase,
-      "repairing", "a marked started call cannot be replayed merely because Git is clean");
-    const correctedPath = item.assurance.changedPaths[0]!;
-    const correctedFile = join(job.worktreeStoryRoot, correctedPath);
-    const rejectedBytes = readFileSync(correctedFile, "utf8");
-    writeFileSync(correctedFile, rejectedBytes +
-      "\nThe witness describes finding the archive letter before the inference.\n");
-    const piPrevious = readFileSync(originalSessionFile, "utf8");
-    writeFileSync(originalSessionFile, piPrevious +
-      piLine({ role: "user", content: [{ type: "text",
-        text: "Correct the original source-linked review finding" }] }) +
-      piLine({ role: "assistant", stopReason: "stop",
-        content: [{ type: "text", text: "The cited original file was corrected." }] }));
-    for (let restart = 0; restart < 2; restart++) {
-      const resumed = await withStoryJobLock(job, "rejected-review-writer", () =>
-        reconcileCompletedRepairWriter(job, originalNegativeSha));
-      assert.equal(resumed.phase, "validating");
-      assert.equal(resumed.attempts, 1);
-      assert.equal((await inspectRepairLedger(job, plan.digest)).corrections.length, 1);
-    }
-    await withStoryJobLock(job, "rejected-review-validation", () =>
-      validateRejectedRepairDraft(job, originalNegativeSha));
-    assert.equal((await inspectRejectedRepair(job, originalNegativeSha)).phase,
-      "awaiting-checkpoint");
-
-    // A failing pre-commit hook stops the real publication AFTER the
-    // controller has durably sealed its intended paths, blob hashes, and
-    // validator proof. Replaying no model, reproduce the exact Git commit and
-    // crash before the immutable proof/verified-head/checkpoint are written.
-    const hookRelative = git(job.worktreeRoot, "rev-parse", "--git-path", "hooks/pre-commit");
-    const hook = resolve(job.worktreeRoot, hookRelative);
-    mkdirSync(resolve(hook, ".."), { recursive: true });
-    writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    try {
-      await assert.rejects(withStoryJobLock(job, "rejected-review-commit", () =>
-        commitRejectedRepairDraft(job, originalNegativeSha)), /commit|hook|failed/i);
-    } finally { unlinkSync(hook); }
-    const beforeCommit = await inspectRejectedRepair(job, originalNegativeSha);
-    assert.ok(beforeCommit.commitIntent);
-    const intent = beforeCommit.commitIntent;
-    assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), originalNegativeSha);
-    git(job.worktreeRoot, "-c", "user.name=NovelTea Generator",
-      "-c", "user.email=noveltea-gen@users.noreply.github.com",
-      "commit", "-m", "Correct rejected specialist assignment [" + job.jobId + "]\n\n" +
-      "NovelTea-Job: " + job.jobId + "\n" +
-      "NovelTea-Work-Item: repair-" + originalNegativeSha + "\n" +
-      "NovelTea-Plan-Version: " + intent.planVersion + "\n" +
-      "NovelTea-Review-Repair: " + intent.proofDigest);
-    const correctedSha = git(job.worktreeRoot, "rev-parse", "HEAD");
-    assert.notEqual(correctedSha, originalNegativeSha);
-    const proofFile = join(job.stateDir, "review-repairs", "proofs",
-      originalNegativeSha + ".json");
-    assert.equal(existsSync(proofFile), false);
-
-    // Both unexpected dirty files and altered intent are refused twice; no
-    // cleanup, bogus approval or duplicate model call is permitted.
-    const extraFile = join(job.worktreeStoryRoot, "unexpected.txt");
-    writeFileSync(extraFile, "Unrelated uncommitted data\n");
-    for (let i = 0; i < 2; i++)
-      await assert.rejects(withStoryJobLock(job, "rejected-review-commit", () =>
-        reconcileUnpublishedRepairCommit(job, originalNegativeSha)), /integrity-blocked/);
-    unlinkSync(extraFile);
-    assert.equal(existsSync(proofFile), false);
-    const repairedStateFile = join(job.stateDir, "review-repairs", originalNegativeSha + ".json");
-    const savedState = readFileSync(repairedStateFile, "utf8");
-    writeFileSync(repairedStateFile, JSON.stringify({
-      ...JSON.parse(savedState), commitIntent: {
-        ...intent, fileHashes: { ...intent.fileHashes, [correctedPath]: "0".repeat(64) },
-      },
-    }));
-    for (let i = 0; i < 2; i++)
-      await assert.rejects(withStoryJobLock(job, "rejected-review-commit", () =>
-        reconcileUnpublishedRepairCommit(job, originalNegativeSha)), /integrity-blocked/);
-    writeFileSync(repairedStateFile, savedState);
-
-    const published = await withStoryJobLock(job, "rejected-review-commit", () =>
-      reconcileUnpublishedRepairCommit(job, originalNegativeSha));
-    assert.equal(published?.phase, "reviewing");
-    assert.equal(published.repairedCommitSha, correctedSha);
-    assert.equal(existsSync(proofFile), true);
-    for (let i = 0; i < 2; i++) {
-      assert.equal(await withStoryJobLock(job, "rejected-review-commit", () =>
-        reconcileUnpublishedRepairCommit(job, originalNegativeSha)), null);
-      assert.equal((await inspectRejectedRepair(job, originalNegativeSha)).repairedCommitSha,
-        correctedSha);
-      assert.equal((await inspectRepairLedger(job, plan.digest)).corrections.length, 1);
-      assert.equal(git(job.worktreeRoot, "rev-list", "--count",
-        originalNegativeSha + "..HEAD"), "1");
-    }
-    assert.equal(git(repo, "rev-parse", "HEAD"), baseline,
-      "original repository remains untouched by isolated repair");
-    assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
-
     // The production LangGraph schedule node must admit a NEW model planner,
     // exhaust its original three replies, and use exactly one source-pinned
     // fresh Pi conversation. No other generation node is executed.
@@ -536,88 +325,14 @@ test("production planner and independent reviewer recover in original Pi session
       }
     } finally { saver.db.close(); }
 
-    // The independent reviewer is dispatched after a verified source commit.
-    // Its original session exhausts; the only fresh reviewer must reread the
-    // same pinned packet and produce an independently validated negative result.
-    const secondFoundation = await runFoundationJob({
-      story, job: secondId, task, envelope: "Dialogue mystery",
-      skillsSource: source, validatorSource: source, fixture: true,
-    });
-    assert.equal(secondFoundation.stage ?? secondFoundation.status, "committed");
-    const secondCheckpoint = (await inspectRecoveryCheckpoints(secondJob))
-      .find(p => p.eligible && p.workItem === "foundation");
-    assert.ok(secondCheckpoint?.assurance);
-    const secondPacket = await prepareSemanticReview(secondJob, [secondCheckpoint]);
-    const secondItem = secondPacket.items[0]!;
-    const secondPath = secondItem.assurance.changedPaths[0]!;
-    const genuineFinding = {
-      commitSha: secondItem.assurance.commitSha, assignmentId: secondItem.assignment.id,
-      path: secondPath, line: 1, kind: "missing-requirement",
-      message: "An actual player-visible witness is not established.",
-      requiredCorrection: "Establish the witness in the approved Creative Direction.",
-      affectedPaths: [secondPath],
-    };
-    const validSecondVerdict = JSON.stringify({
-      sourceDigest: secondPacket.sourceDigest, verdict: "fail",
-      findings: [genuineFinding], evidence: [],
-    });
-    const freshReviewerCalls: Array<{ tools: string[]; messages: readonly unknown[] }> = [];
-    const freshReviewerRuntime = await runtimeFor(i => {
-      if (i === 0 || i === 4) return {
-        content: readCalls(boundedPinnedSources("nt-narrative-review")),
-        reason: "toolUse",
-      };
-      if ([1, 2, 3].includes(i)) return { content: text("malformed verdict"),
-        reason: "stop" };
-      if (i === 5) return { content: text(validSecondVerdict), reason: "stop" };
-      throw Error("Reviewer opened a third unapproved session.");
-    }, freshReviewerCalls);
-    const recoveredReview = await withJobModelRuntime(freshReviewerRuntime, () =>
-      withStoryJobLock(secondJob, "independent-assignment-review", () =>
-        runPiAssignmentReview(secondJob, [secondCheckpoint], {
-          snapshot, provider: model.provider, model: model.id,
-          reviewer: "independent-pi-assignment-review", onSession: async () => {},
-        })));
-    assert.equal(recoveredReview.verdict.verdict, "fail");
-    assert.equal(recoveredReview.verdict.findings[0]!.message, genuineFinding.message);
-    assert.equal(freshReviewerCalls.length, 6);
-    assert.deepEqual(freshReviewerCalls[2]!.tools, []);
-    assert.deepEqual(freshReviewerCalls[3]!.tools, []);
-    assert.ok(freshReviewerCalls[4]!.tools.includes("read"));
-    const reviewBase = join(secondJob.stateDir, "review-protocol",
-      "assignment-" + secondPacket.sourceDigest);
-    const r1 = JSON.parse(readFileSync(reviewBase + ".initial.json", "utf8"));
-    const r2 = JSON.parse(readFileSync(reviewBase + ".fresh.json", "utf8"));
-    const fallback = JSON.parse(readFileSync(reviewBase + ".fresh-allowance.json", "utf8"));
-    // #195: the single fresh reviewer is reused on two interrupted Graph
-    // resumes, never retried or replaced with a third conversation.
-    for (let restart = 0; restart < 2; restart++) {
-      const repeated = await withJobModelRuntime(freshReviewerRuntime, () =>
-        withStoryJobLock(secondJob, "independent-assignment-review", () =>
-          runPiAssignmentReview(secondJob, [secondCheckpoint], {
-            snapshot, provider: model.provider, model: model.id,
-            reviewer: "independent-pi-assignment-review", onSession: async () => {},
-          })));
-      assert.deepEqual(repeated.verdict, recoveredReview.verdict);
-      assert.equal(freshReviewerCalls.length, 6);
-    }
-    assert.equal(r1.status, "protocol-exhausted");
-    assert.equal(r1.attempts, 3);
-    assert.equal(r2.status, "accepted");
-    assert.equal(r2.attempts, 1);
-    assert.equal(fallback.freshAllowanceConsumed, true);
-    assert.equal(fallback.sourceDigest, secondPacket.sourceDigest);
-    assert.notEqual(r1.sessionId, r2.sessionId);
-    assert.equal((await inspectRecoveryCheckpoints(secondJob)).find(p =>
-      p.commitSha === secondCheckpoint.commitSha)?.semanticReview, "failed");
-    assert.equal(git(secondJob.worktreeRoot, "status", "--porcelain"), "");
-    // A separate verified Story and graph thread, sharing only the registered
-    // sandbox transport. No completed Stage or model verdict is inherited.
+    // Adaptive planning consumes author-approved planning metadata. Bootstrap
+    // from an actual author-owned source commit, not a fabricated approval
+    // or a specialist claiming its own draft was approved.
     mkdirSync(join(story, "creative-direction"), { recursive: true });
-    const direction = readFileSync(join(secondJob.worktreeStoryRoot, secondPath), "utf8")
-      .replace(/^status: .*$/m, 'status: approved\nplanning: {choice_frequency: occasional, puzzle_emphasis: none}');
-    writeFileSync(join(story, "creative-direction", "foundation.md"), direction);
-    git(repo, "add", "."); git(repo, "commit", "-qm", "Test approved Creative Direction");
+    const approvedDirection = readFileSync(resolve("test/fixtures/archive-witness/creative-direction/foundation.md"), "utf8")
+      .replace(/^status: draft$/m, 'status: approved\nplanning: {choice_frequency: occasional, puzzle_emphasis: none}');
+    writeFileSync(join(story, "creative-direction", "foundation.md"), approvedDirection);
+    git(repo, "add", "."); git(repo, "commit", "-qm", "Author-approved planning baseline");
     for (const [index, adaptiveId] of adaptiveIds.entries()) {
       const db218 = new DatabaseSync(join(app, "studio.sqlite"));
       try { db218.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)").run(
@@ -630,6 +345,7 @@ test("production planner and independent reviewer recover in original Pi session
         rejectProposal: index === 9,
         preCallRefusal: index >= 5 && index <= 8
           ? (["head", "model", "pause", "cancel"] as const)[index - 5] : undefined,
+        bootstrap: (job, turn, observed) => runtimeFor(archiveStages(job, turn, true), observed),
         runtime: script => runtimeFor(i => {
           const next = script(i);
           return Array.isArray(next) ? { content: readCalls(next), reason: "toolUse" } :

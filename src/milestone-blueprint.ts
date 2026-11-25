@@ -892,20 +892,7 @@ function assertLineage(actual: Lineage, expected: Lineage) {
   if (!actual || JSON.stringify(actual) !== JSON.stringify(expected))
     throw Error("Milestone Blueprint is stale or bound to another source, assignment, model or Thread.");
 }
-function fixtureDraft(assignment: EventAssignment): MilestoneBlueprint {
-  return { schema: "noveltea-milestone-blueprint/v1", milestoneId: assignment.milestoneId,
-    events: [{ id: "grounded-discovery", purpose: "Realize the selected Milestone through an inspectable discovery",
-      dependsOn: [], participants: assignment.characterIds.slice(0, 2),
-      evidence: [{ anchorPath: assignment.milestonePath,
-        source: "A proposed in-scene observation grounded in the selected canonical Milestone",
-        observation: "The player can investigate a visible trace or explicitly attributed witness statement",
-        access: "The selected Characters must plausibly reach the scene or witness",
-        establishes: "Only the selected Milestone's supported change, not unobserved past facts",
-        limits: "Do not treat speculation or a present absence as proof of past conditions" }],
-      knowledge: "Give knowledge only to Characters who witness the evidence or are told it",
-      routes: [] }],
-    downstream: [{ owner: "composition", obligation: "Present the verified Event to the player with reachable authored content" }] };
-}
+
 function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Round) {
   return "READ-ONLY LOCAL MILESTONE BLUEPRINT. Read pinned nt-event-design and nt-catalog " +
     "skills and the current selected Milestone, its Arc and relevant Character/World sources. " +
@@ -1243,6 +1230,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     exactPatch: boolean; accepts: (draft: MilestoneBlueprint) => boolean },
   parentAssignmentKey?: string, parentTurnDigest?: string, assessment?: BlueprintAssessmentGrant,
 ): Promise<{ blueprint: MilestoneBlueprint; pin: MilestoneBlueprintPin }> {
+  if (fixture) throw Error("Obsolete Blueprint fixture execution is retired.");
   if (!MILESTONE.test(assignment.milestoneId) || !plan.items.some(i =>
       i.id === "global-architecture" && i.status === "verified" &&
       i.targetIds.includes(assignment.milestoneId)))
@@ -1251,7 +1239,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       git(job, "status", "--porcelain").trim())
     throw Error("Milestone planning requires a clean, current verified canonical source.");
   const binding = await lineage(job, plan, assignment, snapshot,
-    fixture ? "fixture" : provider, fixture ? "fixture" : model, task, head);
+    provider, model, task, head);
   const config = getConfig();
   const checkpointed = !!config?.configurable?.__pregel_checkpointer;
   if ((parentAssignmentKey && !HASH.test(parentAssignmentKey)) ||
@@ -1326,7 +1314,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     await assertDiagnostics(job, current);
     if (current.writer) await verifySeal(job, current.writer, "writer");
     if (current.reviewer) await verifySeal(job, current.reviewer, current.reviewerRole ?? "reviewer");
-    if (!fixture && !["admitted", "planning", "reviewing"].includes(current.phase)) {
+    if (!["admitted", "planning", "reviewing"].includes(current.phase)) {
       const starts = current.reviewStarts ?? (current.reviewStart ? [current.reviewStart] : []);
       const drafts = current.rounds.filter((_, index) => !starts.includes(index)).map(r => r.draftDigest);
       if (current.phase === "draft" && current.reviewStart !== current.rounds.length && current.draft)
@@ -1377,18 +1365,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   const writeDraft = async (): Promise<AssignmentSubmission> => {
     if (receipt.phase !== "admitted" && receipt.phase !== "revision")
       throw Error("Milestone Blueprint writer has no admitted revision.");
-    if (fixture) {
-      const proposed = correction?.candidate ?? fixtureDraft(assignment);
-      if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-interactive")
-        proposed.downstream.push({ owner: "interactive", obligation: "Keep this opening Event-only; the consequential Choice occurs later." });
-      if (!correction && process.env.NT_MILESTONE_BLUEPRINT_FIXTURE_CASE === "historical-knowledge")
-        proposed.events[0]!.knowledge = "Ada never sees the original signed transfer ledger.";
-      const draft = parseMilestoneBlueprint(JSON.stringify(proposed), assignment);
-      receipt.draft = checkCandidate(draft);
-      receipt.phase = "draft";
-      await persist(file, receipt);
-      return draftSubmission(receipt.rounds.length, draft);
-    }
+
     const previousPhase = receipt.phase;
     // Seal ambiguity BEFORE the SDK may create a Pi transcript. A crash in
     // the creation-to-start gap cannot be mistaken for an unstarted planner.
@@ -1462,19 +1439,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     await persist(file, receipt);
   };
   const reviewDraft = async () => {
-    if (fixture) {
-      const draft = receipt.draft;
-      if (receipt.phase !== "draft" || !draft) throw Error("Fixture Blueprint has no settled draft.");
-      const reject = correction?.exactPatch && process.env.NT_BLUEPRINT_CORRECTION_FIXTURE_VERDICT === "revise";
-      const review = parseMilestoneBlueprintReview(JSON.stringify({
-        schema: correction ? "noveltea-milestone-blueprint-review/v5" : "noveltea-milestone-blueprint-review/v1", status: reject ? "revise" : "pass",
-        findings: reject ? [{ anchorPath: assignment.milestonePath, requirement: "Preserve the approved delivery scope", reason: "The proposed removal loses a required obligation.",
-          correction: "Reassess scope before dropping the obligation", evidence: { target: "missing-downstream", owner: "interactive", quote: JSON.stringify(draft.downstream), repair: "extend" } }] : [],
-        ...(correction ? { prior: [] } : {}),
-      }), draft, assignment);
-      await settleReview(review, draft);
-      return;
-    }
+
     if (receipt.phase !== "draft" || !receipt.draft || !receipt.writer)
       throw Error("Milestone Blueprint is not at a sealed review boundary.");
     // The initial reviewer is also an ambiguous admission if interrupted

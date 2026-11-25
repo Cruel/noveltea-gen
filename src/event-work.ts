@@ -26,7 +26,6 @@ import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { verifyJobPiSession } from "./job-session.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { fixtureCluster } from "./fixture-cluster.js";
 import { buildEventConsequenceProof, eventConsequenceProofDigest,
   type EventConsequenceProof } from "./event-consequence-proof.js";
 import { assertPlanContinuity, assertFoundationArchitectureContinuity } from "./plan-continuity.js";
@@ -538,241 +537,18 @@ function output(job: JobStartResult, state: EventReceipt) {
         ? state.obligations ?? [] : [],
       editorial: "unverified", unrelatedComposition: "not-required", fullStory: false } };
 }
-async function fixtureAuthor(job: JobStartResult, assignment: EventAssignment,
-  rerouted = false, causalReplanned = false): Promise<EventEvidence> {
-  const configured = process.env.NT_EVENT_FIXTURE_CASE ?? "fulfilled";
-  const variant = configured === "no-write-causal" && causalReplanned ? "fulfilled" :
-    configured === "no-write-once" ? rerouted ? "fulfilled" : "no-write-prerequisite" :
-    configured === "no-write-evidence-once" ? rerouted ? "fulfilled" : "no-write-evidence" :
-    configured === "no-write-accounts-once" ? rerouted ? "fulfilled" : "no-write-accounts" :
-    configured === "phantom-milestone" ? "decision-pending" : configured;
-  const cluster = fixtureCluster(assignment.milestoneId);
-  const files: string[] = [];
-  const add = async (slug: string, metadata: string, prose: string) => {
-    slug = cluster.slug(slug); metadata = cluster.text(metadata);
-    const local = `events/${slug}.md`;
-    await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
-    await writeFile(join(job.worktreeStoryRoot, local),
-      `---\nschema: '0.1'\ntype: event\nid: event.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${prose}\n`, { flag: "wx" });
-    files.push(local);
-  };
-  if (["no-write-prerequisite", "no-write-evidence", "no-write-accounts", "no-write-dirty", "no-write-empty", "no-write-protected", "no-write-causal"].includes(variant)) {
-    if (variant === "no-write-dirty") {
-      await mkdir(join(job.worktreeStoryRoot, "events"), { recursive: true });
-      await writeFile(join(job.worktreeStoryRoot, "events/uncertain-draft.md"), "Unapproved draft.\n");
-    }
-    const canonical = variant === "no-write-causal"
-      ? await readFile(join(job.worktreeStoryRoot, assignment.milestonePath), "utf8") : "";
-    const selectedChange = canonical.match(/^change:\s*"([^"]+)"/m)?.[1] ?? "";
-    return { claimedPaths: [], skillReads: [],
-      ...(variant === "no-write-causal" ? { causalDiscovery: {
-        sourcePath: assignment.milestonePath, sourceQuote: selectedChange,
-        violatedObligation: "Only the selected Milestone\x27s supported change, not unobserved past facts",
-        proposedCorrection: "Correct the selected Milestone\x27s contradictory signed-ledger chronology while retaining protected author choices.",
-      } } : {}),
-      conflicts: variant === "no-write-causal" ? ["Upstream canonical signed ledger chronology contradicts the accessible witness."] :
-        variant === "no-write-empty" ? [] : variant === "no-write-protected"
-        ? ["Protected author approval for an out-of-scope new Milestone is required."] :
-        variant === "no-write-evidence"
-          ? ["The selected Milestone lacks the material evidence of which spaces and people were accessible during the relevant interval; the current Event does not establish it."] :
-        variant === "no-write-accounts"
-          ? ["The assigned Milestone requires conflicting accounts and an independent observation; canonical sources establish neither."] :
-        ["A distinct Choice and authored ending are needed beyond this Event writer's scope."],
-      obligations: ["no-write-empty", "no-write-evidence", "no-write-accounts"].includes(variant) ? [] :
-        ["Arrange controller-approved interactive work before concluding the resolution."] };
-  }
-  if (["optional", "alternative-routes", "contradiction", "failed-repair", "repair"].includes(variant)) {
-    await add("inspect-ledger",
-      `participants: [character.ada]\narcs: [${assignment.arcIds[0]}]\nconsequences: ["Ada recognizes the handwriting"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: []\n      not_completed: []\nsteps: []`,
-      "Ada recognizes the ledger handwriting. Inspecting is optional, not a prerequisite of disclosure.");
-  }
-  const impossible = ["contradiction", "failed-repair", "repair"].includes(variant);
-  await add("disclose-ledger",
-    `participants: [character.ada, character.neri]\narcs: [${assignment.arcIds[0]}]\nconsequences: ["Neri discloses the ledger, changing Ada's belief and their relationship"]\nafter: ${variant === "optional" ? "[event.inspect-ledger]" : "[]"}\nprerequisites:\n  any_of:\n    - completed: ${impossible ? "[event.inspect-ledger]" : "[]"}\n      not_completed: ${impossible ? "[event.inspect-ledger]" : "[]"}\n      conditions:\n        - kind: knowledge\n          character: character.neri\n          fact: fact.evidence-concealed\n          value: knows\nsteps:\n  - id: admit\n    branches:\n      - id: disclose\n        conditions: []\n        effects:\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting`,
-    variant === "event-only"
-      ? "Neri opens the original signed transfer ledger for the missing witness on the archive table. " +
-        "He places the matching daily register beside it: the witness's name, dated entry, and " +
-        "transfer stamp agree. The correction ink carries Neri's initials. He admits he kept " +
-        "the ledger out of Ada's sight while protecting the witness from an official inquiry. " +
-        "Ada compares the two primary records herself, recognizing both the genuine transfer " +
-        "evidence and Neri's deliberate concealment. Neri hands her the unaltered original " +
-        "and offers to let her check every remaining page with him. His surrender of control " +
-        "and the corroborating signatures answer Ada's earlier suspicion. She is still " +
-        "upset, but her wariness changes to cautious trust as she takes custody of the evidence. " +
-        "No selectable player decision is introduced at this observational disclosure."
-      : "Neri admits concealing the ledger and explains the reason. Ada learns that the concealment is real, while the confession begins repairing their trust. These are typed effects at the disclosure step.");
-  if (["decision-pending", "false-decision-complete", "fake-unrelated-effects", "descriptive"].includes(variant)) {
-    const path = join(job.worktreeStoryRoot, "events/disclose-ledger.md");
-    const original = await readFile(path, "utf8");
-    const newText = variant === "fake-unrelated-effects" ? original :
-      original.replace(/steps:\n[\s\S]*?(?=\n---)/, variant === "descriptive"
-        ? "steps: []"
-        : "steps:\n  - id: decision-offered\n    branches:\n      - id: release\n        conditions: []\n        effects: []\n      - id: withhold\n        conditions: []\n        effects: []");
-    await writeFile(path, newText.replace("Neri discloses the ledger, changing Ada's belief and their relationship",
-      variant === "descriptive" ? "Neri reports the location of the ledger without changing tracked state"
-        : "Neri presents a pending opportunity to release or withhold the ledger")
-      .replace("Neri admits concealing the ledger and explains the reason. Ada learns that the concealment is real, while the confession begins repairing their trust. These are typed effects at the disclosure step.",
-      variant === "descriptive" ? "Neri reveals where the ledger was found; the discovery records no new canonical state."
-        : "Neri shows Ada the ledger and offers to release it or withhold it. The player has not yet made that choice."));
-  }
-  if (variant === "revelation") {
-    const path = "revelations/ledger-shared.md";
-    await mkdir(join(job.worktreeStoryRoot, "revelations"), { recursive: true });
-    await writeFile(join(job.worktreeStoryRoot, path), `---\nschema: '0.1'\ntype: revelation\nid: revelation.ledger-shared\ntitle: "Evidence disclosed"\nstatus: draft\ndecisions: []\nfact: fact.evidence-concealed\n---\n\nThe player is shown the concealed ledger evidence during Neri's confession.\n`, { flag: "wx" });
-    files.push(path);
-    const eventPath = join(job.worktreeStoryRoot, "events/disclose-ledger.md");
-    await writeFile(eventPath, (await readFile(eventPath, "utf8")).replace(
-      "            value: trusting", "            value: trusting\n          - kind: revealed\n            revelation: revelation.ledger-shared\n            value: true"));
-  }
-  if (variant === "unconnected") {
-    const path = "facts/unrelated-rumor.md";
-    await mkdir(join(job.worktreeStoryRoot, "facts"), { recursive: true });
-    await writeFile(join(job.worktreeStoryRoot, path),
-      "---\nschema: '0.1'\ntype: fact\nid: fact.unrelated-rumor\ntitle: \"Unrelated rumor\"\nstatus: draft\ndecisions: []\ninitial: false\n---\n\nAn entirely unrelated state proposition.\n",
-      { flag: "wx" });
-    files.push(path);
-  }
-  const file = join(job.worktreeStoryRoot, assignment.milestonePath);
-  const old = await readFile(file, "utf8");
-  if (!old.includes("fulfillment: {any_of: []}")) throw new Error("Fixture requires an unbound planning Milestone.");
-  if (variant !== "decision-pending") {
-    await writeFile(file, old.replace("completeness: partial\n", "")
-      .replace("fulfillment: {any_of: []}", cluster.text(variant === "alternative-routes"
-        ? "fulfillment: {any_of: [[event.inspect-ledger, event.disclose-ledger], [event.disclose-ledger]]}"
-        : "fulfillment: {any_of: [[event.disclose-ledger]]}")));
-    files.push(assignment.milestonePath);
-  }
-  if (variant === "milestone-retcon") {
-    await writeFile(file, (await readFile(file, "utf8")).replace("The investigator can no longer act alone", "The investigator must act entirely alone"));
-  }
-  if (variant === "unauthorized") {
-    const creative = assignment.sourcePaths.find(p => p.startsWith("creative-direction/"))!;
-    await writeFile(join(job.worktreeStoryRoot, creative), (await readFile(join(job.worktreeStoryRoot, creative), "utf8")) +
-      "\nThis is an unauthorized addition.\n");
-  }
-  if (variant === "mismatch") files.push("events/never-written.md");
-  if (configured === "phantom-milestone") files.push(assignment.milestonePath);
-  // The initial approved local plan is wrong about the source-grounded
-  // knowledge claim. The specialist can cite it without editing the plan.
-  const challengeCase = process.env.NT_BLUEPRINT_SPECIALIST_FIXTURE;
-  let blueprintChallenge: import("./blueprint-challenge.js").SpecialistBlueprintChallenge | undefined;
-  if (challengeCase && assignment.milestoneBlueprint) {
-    const path = "events/disclose-ledger.md";
-    const lines = (await readFile(join(job.worktreeStoryRoot, path), "utf8")).split("\n");
-    const index = lines.findIndex(line => line.startsWith("Neri opens the original"));
-    if (index < 0) throw Error("Specialist fixture missing its original canonical source.");
-    const before = assignment.milestoneBlueprint.design.events[0]!.knowledge;
-    blueprintChallenge = {
-      pinDigest: challengeCase === "wrong-pin" ? "0".repeat(64) : assignment.milestoneBlueprint.digest,
-      field: "events/0/knowledge", before,
-      proposed: challengeCase === "disagree"
-        ? "Ada sees a copy of the register but cannot inspect the signed original."
-        : "Ada sees the original ledger and checks it against the daily register.",
-      sourceQuote: lines[index]!.trim(),
-      path: challengeCase === "wrong-path" ? "events/nonexistent.md" : path,
-      line: index + 1, violatedObligation: before,
-    };
-  }
-  return { claimedPaths: files, ...(blueprintChallenge ? { blueprintChallenge } : {}), conflicts: [], obligations:
-    ["decision-pending", "false-decision-complete", "fake-unrelated-effects"].includes(variant)
-      ? ["Formal Choice Point binding and outcome-specific later consumers remain with the Choice specialist."]
-      : variant === "event-only"
-        ? ["Player-facing prose of this source-grounded observational discovery requires Composition and independent editorial review."]
-        : ["Player-facing prose and alternate branch details require composition and editorial review."],
-    skillReads: [] };
-}
+
 
 /** Deterministic test transport for the corrective fixture cases. It emits
  * the same manifest and effects as Pi, but never supplies Pi assurance or
  * charges invented model usage. All correction policy lives in the shared
  * round service; this function only performs the admitted fixture effect. */
-async function authorFixtureEventRound(job: JobStartResult, receipt: EventReceipt,
-  receiptFile: string, assignment: EventAssignment, command: AssignmentRoundCommand,
-  verifyDraft: (candidate: EventEvidence) => Promise<(string | AssignmentDefect)[]>) {
-  const root = join(job.stateDir, "event-fixture-sessions", receipt.workItemId);
-  await mkdir(root, { recursive: true });
-  if (!receipt.sessionId && !receipt.sessionFile) {
-    receipt.sessionId = randomUUID();
-    receipt.sessionFile = join(root, receipt.sessionId + ".jsonl");
-    await writeFile(receipt.sessionFile, JSON.stringify({ type: "session", id: receipt.sessionId }) + "\n", { flag: "wx" });
-    await persist(receiptFile, receipt);
-  }
-  const file = receipt.sessionFile!;
-  if (!file.startsWith(root + "/") || await realpath(file) !== file ||
-      receipt.invocationSource !== eventInvocationSource(job, receipt))
-    throw Error("Fixture Event round lost its original source or session.");
-  const entries = (await readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  if (entries[0]?.type !== "session" || entries[0]?.id !== receipt.sessionId)
-    throw Error("Fixture Event session changed.");
-  const messages: Array<ResponseContractSession["messages"][number]> =
-    entries.slice(1).map(entry => entry.message);
-  let tools = ["write", "edit"];
-  const session: ResponseContractSession = {
-    sessionId: receipt.sessionId!, sessionManager: { getSessionFile: () => file }, messages,
-    getActiveToolNames: () => tools, setActiveToolsByName: names => { tools = names; },
-  };
-  const add = async (message: ResponseContractSession["messages"][number]) => {
-    messages.push(message);
-    await appendFile(file, JSON.stringify({ type: "message", message }) + "\n");
-  };
-  let accepted: EventEvidence | undefined;
-  const settled = await executeAssignmentRound({
-    session, directory: eventInvocationDirectory(job, receipt.workItemId, session.sessionId, receipt.invocationSource!),
-    sourceDigest: receipt.invocationSource!, sessionRoots: [root], responseKind: "event-manifest-or-choice",
-    initialPrompt: "Deterministic Event fixture for admitted original assignment",
-    authorize: async () => {
-      assertHead(job, receipt.expectedHead);
-      if (receipt.invocationSource !== eventInvocationSource(job, receipt) ||
-          receipt.fixtureCorrectionCase !== process.env.NT_EVENT_FIXTURE_CASE)
-        throw Error("Fixture Event grant changed.");
-    },
-    effect: () => assignmentDraftEffect(job, receipt.expectedHead),
-    beforeTurn: async () => {
-      const control = await readJobControl(job);
-      if (control === "cancelled") throw new StoryCancelledError(receipt.workItemId);
-      if (control !== "running") throw new AssignmentAuthorPauseError();
-      await guardPiBudget(job, "event:" + receipt.workItemId);
-    },
-    prompt: async prompt => {
-      const initial = !messages.length;
-      await add({ role: "user", content: prompt });
-      let manifest: ReturnType<typeof parseEventManifest>;
-      if (initial) {
-        const evidence = await fixtureAuthor(job, assignment);
-        manifest = { modifiedRecords: evidence.claimedPaths, architecturalConflicts: evidence.conflicts,
-          laterObligations: evidence.obligations };
-      } else {
-        const prior = [...messages].reverse().find(m => m.role === "assistant");
-        if (!prior || !Array.isArray(prior.content)) throw Error("Fixture Event lost its original manifest.");
-        manifest = parseEventManifest(prior.content.map(part => part.text ?? "").join(""));
-        if (receipt.fixtureCorrectionCase === "repair" && tools.includes("edit")) {
-          const cluster = fixtureCluster(assignment.milestoneId);
-          const target = join(job.worktreeStoryRoot, "events", cluster.slug("disclose-ledger") + ".md");
-          await writeFile(target, (await readFile(target, "utf8")).replace(
-            cluster.text("completed: [event.inspect-ledger]\n      not_completed: [event.inspect-ledger]"),
-            "completed: []\n      not_completed: []"));
-        }
-      }
-      await add({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: JSON.stringify(manifest) }] });
-    },
-    verify: async manifest => {
-      const summary = parseEventManifest(JSON.stringify(manifest));
-      const evidence: EventEvidence = { claimedPaths: summary.modifiedRecords,
-        conflicts: summary.architecturalConflicts, obligations: summary.laterObligations, skillReads: [] };
-      const diagnostics = await verifyDraft(evidence);
-      if (!diagnostics.length) accepted = evidence;
-      return diagnostics.map(detail => typeof detail !== "string" ? detail : ({ kind: "semantic" as const, path: assignment.milestoneId,
-        code: hash(detail), detail }));
-    },
-  }, command);
-  if (settled.status !== "accepted") return { round: settled };
-  if (!accepted) throw Error("Fixture Event has no verified result.");
-  return { ...accepted, invocationProof: settled.proof };
-}
+
 
 export async function runEventWorkItem(input: EventOptions) {
+  if (input.fixture && input.action !== "inspect") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
   if (!idPattern.test(input.milestone)) throw new Error("--milestone must be a typed milestone.<slug> ID.");
-  if (input.action === "run" && !input.fixture && !input.round)
+  if (input.action === "run" && !input.round)
     throw Error("Event Pi writing requires its checkpointed Generation assignment child.");
   if (input.round && !/^[a-f0-9]{64}$/.test(input.round.assignmentKey))
     throw Error("Event round lacks its admitted assignment identity.");
@@ -868,7 +644,7 @@ export async function runEventWorkItem(input: EventOptions) {
       if (dirty(job).length) throw new Error("Event work item requires a clean verified worktree.");
       receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
         milestoneId: input.milestone, workItemId, planVersion: arch.plan.version,
-        planDigest, expectedHead: head, phase: "ready", worker: input.fixture ? "fixture" : "pi",
+        planDigest, expectedHead: head, phase: "ready", worker: "pi",
         blueprintRequired: true, blueprintTask: input.task ?? "",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna" };
       await persist(receiptFile, receipt);
@@ -979,12 +755,9 @@ export async function runEventWorkItem(input: EventOptions) {
         await persist(receiptFile, receipt);
       } else return output(job, receipt);
     }
-    const correctiveFixture = receipt.worker === "fixture" && (receipt.fixtureCorrectionCase || ["repair", "failed-repair"].includes(process.env.NT_EVENT_FIXTURE_CASE ?? ""));
-    if (input.action === "run" && correctiveFixture && !input.round)
-      throw Error("Corrective Event fixture requires its checkpointed assignment round.");
-    if (input.round && (receipt.worker === "pi" || correctiveFixture) && receipt.assignmentKey && receipt.assignmentKey !== input.round.assignmentKey)
+    if (input.round && receipt.assignmentKey && receipt.assignmentKey !== input.round.assignmentKey)
       throw Error("Event round belongs to another logical assignment.");
-    if (input.round && (receipt.worker === "pi" || correctiveFixture) && !receipt.assignmentKey) {
+    if (input.round && !receipt.assignmentKey) {
       if (receipt.phase !== "ready" || input.round.command.phase !== "invoke")
         throw Error("Event receipt lacks its original child assignment admission.");
       receipt.assignmentKey = input.round.assignmentKey;
@@ -1026,7 +799,7 @@ export async function runEventWorkItem(input: EventOptions) {
       .addNode("event_specialist", async ({ receipt }) => {
         if (receipt.phase === "authored") return { receipt };
         const continuing = receipt.phase === "writing";
-        if (continuing && (receipt.worker !== "pi" && !correctiveFixture || !receipt.assignment ||
+        if (continuing && (!receipt.assignment ||
             !await inspectPendingEventInvocation(job, receipt.milestoneId, receipt.expectedHead)))
           throw Error("Interrupted Event specialist lacks its original invocation.");
         const resuming = receipt.phase === "awaiting-author" || continuing && !!receipt.invocationChoice;
@@ -1059,8 +832,7 @@ export async function runEventWorkItem(input: EventOptions) {
             receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model } : undefined);
           if (resuming) await claimSpecialistChoice(job, receipt.authorChoiceId!);
           receipt.assignment = assign;
-          if (receipt.worker === "pi" || correctiveFixture) {
-            if (correctiveFixture) receipt.fixtureCorrectionCase = process.env.NT_EVENT_FIXTURE_CASE as "repair" | "failed-repair";
+          {
             receipt.invocationChoice = choice?.sessionSha256;
             receipt.invocationSource = eventInvocationSource(job, receipt);
             delete receipt.invocationProof;
@@ -1181,16 +953,7 @@ export async function runEventWorkItem(input: EventOptions) {
             }
           };
           let evidence: EventEvidence;
-          if (receipt.worker === "fixture") {
-            if (correctiveFixture) {
-              const authored = await authorFixtureEventRound(job, receipt, receiptFile, assign,
-                input.round!.command, verifyDraft);
-              if ("round" in authored) return { receipt, round: authored.round };
-              evidence = authored;
-              receipt.invocationProof = evidence.invocationProof;
-            } else evidence = await fixtureAuthor(job, assign, !!receipt.reroutedFrom,
-              !!arch.plan?.causalAmendment);
-          } else {
+
             const authored = await authorEventCluster(job, receipt.snapshot!, assign, receipt.provider, receipt.model,
               async (file, id) => { receipt.sessionFile = file; receipt.sessionId = id; await persist(receiptFile, receipt); }, verifyDraft,
               { sourceDigest: receipt.invocationSource!, sessionFile: receipt.sessionFile, sessionId: receipt.sessionId,
@@ -1207,7 +970,7 @@ export async function runEventWorkItem(input: EventOptions) {
             receipt.invocationProof = evidence.invocationProof;
             await verifySettledAssignment({ ...eventInvocationOptions(job, receipt),
               proof: evidence.invocationProof, effect: await assignmentDraftEffect(job, receipt.expectedHead) });
-          }
+
           if (evidence.authorQuestion) {
             await changedPaths(job, assign, evidence.claimedPaths, true);
             assertHead(job, receipt.expectedHead);
@@ -1238,9 +1001,9 @@ export async function runEventWorkItem(input: EventOptions) {
               await verifyJobPiSession(job, "event", evidence.sessionFile,
                 evidence.piSessionId, receipt.workItemId);
             }
-            const sessionSha256 = receipt.worker === "fixture" ? "f".repeat(64) :
+            const sessionSha256 =
               hash(await readFile(evidence.sessionFile!));
-            const sessionId = receipt.worker === "fixture" ? "fixture" : evidence.piSessionId!;
+            const sessionId = evidence.piSessionId!;
             receipt.claimedPaths = [];
             receipt.conflicts = evidence.conflicts;
             receipt.obligations = evidence.obligations;
@@ -1304,7 +1067,7 @@ export async function runEventWorkItem(input: EventOptions) {
             await contentDigest(job, receipt.paths) !== receipt.contentDigest) {
           throw new Error("Authored Event inventory changed or has architectural conflicts.");
         }
-        if (receipt.worker === "pi" || receipt.fixtureCorrectionCase) {
+        {
           if (!receipt.invocationProof) throw Error("Authored Event lacks its settled invocation");
           await verifySettledAssignment({ ...eventInvocationOptions(job, receipt),
             proof: receipt.invocationProof, effect: receipt.contentDigest });

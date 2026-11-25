@@ -32,7 +32,7 @@ export interface RecoveryForkBundle {
    * copied into child turn-plan.json and grants no new authoring authority. */
   reviewTurn?: TurnEvidence;
   receipts: Record<string, SpecialistReceipt>;
-  commits: Record<string, { sha: string; jobId: string; planVersion: number | null }>;
+  commits: Record<string, { sha: string; jobId: string; planVersion: number | null; proof?: RecoveryCheckpoint }>;
   completedStages: GenerationEvidence[];
   /** Source-verified, same-Thread no-write decisions; no Git commits or author grants. */
   reviewBatch?: ReviewedOmissionBatch;
@@ -136,6 +136,23 @@ export function readRecoveryFork(job: JobStartResult, requireReady = true): Reco
     throw new Error("Fork continuation is incomplete or differs from its immutable job pin.");
   }
   return bundle;
+}
+
+/** Read-only native/Review evidence sealed by fork admission. Never publishes
+ * a local checkpoint or authorizes replay of an inherited writer. */
+export function inheritedReviewedCheckpoint(job: JobStartResult, workItem: string, sha: string) {
+  const fork = readRecoveryFork(job);
+  const entry = fork?.commits[workItem];
+  const proof = entry?.proof;
+  const coverage = resolvedInheritedRecoveryReviews(fork?.reviewCoverage ?? []);
+  const review = coverage.find(r => r.workItem === workItem && r.commitSha === sha);
+  if (!fork?.checkpoint.completedWorkItems.includes(workItem) || entry?.sha !== sha ||
+      !proof || proof.commitSha !== sha || proof.workItem !== workItem ||
+      proof.jobId !== entry.jobId || proof.planVersion !== entry.planVersion ||
+      proof.validation.status !== "passed" || !proof.assurance ||
+      proof.assurance.commitSha !== sha || proof.assurance.jobId !== entry.jobId ||
+      !review || !["passed", "not-required"].includes(review.status)) return null;
+  return { proof, status: review.status, reviewDigest: forkDigest({ proof, review }) };
 }
 
 /** A prepared fork cannot start under altered pins, obsolete graph state or

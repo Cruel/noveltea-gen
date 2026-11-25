@@ -15,7 +15,6 @@ import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { assertNativeReviewDependencies } from "./checkpoint-assurance.js";
 import { verifiedNarrativeSuccessor, verifiedCompositionSuccessor } from "./job-successor.js";
 import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
-import { fixtureCluster } from "./fixture-cluster.js";
 import { assertPlanContinuity } from "./plan-continuity.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { loadSkillConfig } from "./skills.js";
@@ -910,242 +909,7 @@ function output(job: JobStartResult, receipt: Receipt, unit?: InteractiveDomain)
       playerPerceptionAndFairness: "unverified", conditionalWriting: "must-review",
       engineImplementation: "not-started", fullStory: false }, skillSnapshot: receipt.snapshot?.id };
 }
-async function fixtureAuthor(job: JobStartResult, domain: InteractiveDomain,
-  assignment: InteractiveAssignment): Promise<InteractiveEvidence> {
-  const variant = process.env.NT_INTERACTIVE_FIXTURE_CASE ?? "reference";
-  const cluster = fixtureCluster(assignment.milestoneId);
-  const paths: string[] = [];
-  const add = async (folder: string, slug: string, type: string, metadata: string, body: string) => {
-    slug = cluster.slug(slug); metadata = cluster.text(metadata);
-    const path = folder + "/" + slug + ".md";
-    await mkdir(dirname(join(job.worktreeStoryRoot, path)), { recursive: true });
-    await writeFile(join(job.worktreeStoryRoot, path),
-      `---\nschema: '0.1'\ntype: ${type}\nid: ${type}.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${metadata}\n---\n\n${body}\n`,
-      { flag: "wx" });
-    paths.push(path);
-    return path;
-  };
-  const rewrite = async (path: string, fn: (s: string) => string) => {
-    path = cluster.path(path);
-    const target = join(job.worktreeStoryRoot, path);
-    await writeFile(target, cluster.text(fn(await readFile(target, "utf8"))));
-    paths.push(path);
-  };
-  const arc = assignment.arcIds[0]!;
-  const event = assignment.eventIds.includes(cluster.text("event.disclose-ledger"))
-    ? cluster.path("events/disclose-ledger.md") : "events/" + assignment.eventIds[0]!.slice(6) + ".md";
-  if (domain === "choice" && variant === "choice-conflict") {
-    return { modifiedRecords: [], conflicts: [
-      "The approved Event-only source has no causal Choice point; inventing a Choice would contradict its outcome."
-    ], obligations: ["Request a controller-approved Milestone Blueprint correction before new Choice work."],
-    skillReads: [] };
-  }
-  if (domain === "puzzle" && variant === "puzzle-no-write") {
-    return { modifiedRecords: [], conflicts: [
-      "The original Turn promises branch consequences and fair-play clues, not a formal Puzzle. " +
-      "No existing route presents a single independently solvable Puzzle goal with two proved solution Events."
-    ], obligations: ["Preserve fair-play clue continuity and distinct authored endings in Composition."],
-    skillReads: [] };
-  }
-  if (domain === "choice") {
-    await add("choice-points", "loyalty", "choice-point",
-      'prompt: "Protect Neri or challenge the concealment?"\noutcomes: [protect, challenge]',
-      "Protecting the friend preserves intimacy, while challenging the concealment risks the friendship in exchange for accountability.");
-    if (variant === "two-choices") await add("choice-points", "testimony", "choice-point",
-      'prompt: "Disclose the independent witness or protect their anonymity?"\noutcomes: [tell, withhold]',
-      "The witness's identity can corroborate the evidence, but disclosure could endanger them.");
-    const delayedEffect = ["downstream-effect-only", "downstream-no-effect"].includes(variant);
-    const selectorConditions = (outcome: "protect" | "challenge") =>
-      variant === "self-conditioned-selection"
-        ? `\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: ${outcome}`
-        : " []";
-    if (!delayedEffect) await add("revelations", "ledger-secret", "revelation",
-      "fact: fact.evidence-concealed",
-      "If Ada challenges Neri, the ledger detail is exposed to the player within that branch.");
-    if (variant === "choice-content") {
-      await add("authored-content", "choice-presentation", "authored-content",
-        `events: [event.disclose-ledger]
-revelations: [revelation.ledger-secret]`,
-        "Ada can protect Neri and preserve trust, or confront the concealment and weaken their alliance. The actual ledger detail appears after the challenge.");
-    }
-    await rewrite(event, text => {
-      const begin = text.indexOf("steps:");
-      const end = text.indexOf("\n---", begin);
-      if (begin < 0 || end < 0) throw new Error("Fixture expected existing complete Event steps.");
-      const leak = variant === "state-leak";
-      return text.slice(0, begin) +
-        `steps:\n` + (leak ? `  - id: premature\n    branches:\n      - id: shared\n        conditions: []\n        effects:\n          - kind: revealed\n            revelation: revelation.ledger-secret\n            value: true\n` : "") + `  - id: admit\n    branches:\n      - id: disclose\n        conditions:${selectorConditions("protect")}\n        effects:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows` +
-        `\n      - id: challenge\n        conditions:${selectorConditions("challenge")}\n        effects:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: wary\n          - kind: knowledge\n            character: character.ada\n            fact: fact.evidence-concealed\n            value: knows\n          - kind: revealed\n            revelation: revelation.ledger-secret\n            value: true` +
-        (variant === "same-event-payoff" ? `
-  - id: later-payoff
-    branches:
-      - id: protect-follow-through
-        conditions:
-          - kind: outcome
-            choice_point: choice-point.loyalty
-            value: protect
-        effects:
-          - kind: relationship
-            relationship: relationship.ada-neri
-            value: trusting
-      - id: challenge-follow-through
-        conditions:
-          - kind: outcome
-            choice_point: choice-point.loyalty
-            value: challenge
-        effects:
-          - kind: relationship
-            relationship: relationship.ada-neri
-            value: estranged` : "") +
-        (variant === "two-choices" ? `
-  - id: testimony-choice
-    branches:
-      - id: tell
-        conditions: []
-        effects:
-          - kind: outcome
-            choice_point: choice-point.testimony
-            value: tell
-          - kind: relationship
-            relationship: relationship.ada-neri
-            value: wary
-      - id: withhold
-        conditions: []
-        effects:
-          - kind: outcome
-            choice_point: choice-point.testimony
-            value: withhold
-          - kind: relationship
-            relationship: relationship.ada-neri
-            value: trusting
-  - id: testimony-payoff
-    branches:
-      - id: disclosure-consequence
-        conditions:
-          - kind: outcome
-            choice_point: choice-point.testimony
-            value: tell
-        effects:
-          - kind: relationship
-            relationship: relationship.ada-neri
-            value: estranged
-      - id: secrecy-consequence
-        conditions:
-          - kind: outcome
-            choice_point: choice-point.testimony
-            value: withhold
-        effects:
-          - kind: relationship
-            relationship: relationship.ada-neri
-            value: trusting` : "") +
-        text.slice(end);
-    });
-    if (delayedEffect) await rewrite(event, text => {
-      const start = text.indexOf("steps:");
-      const end = text.indexOf("\n---", start);
-      if (start < 0 || end < 0) throw Error("Fixture has no Event step frontmatter.");
-      return text.slice(0, start) + `steps:
-  - id: decision
-    branches:
-      - id: protect
-        conditions: []
-        effects:
-          - kind: outcome
-            choice_point: choice-point.loyalty
-            value: protect
-      - id: challenge
-        conditions: []
-        effects:
-          - kind: outcome
-            choice_point: choice-point.loyalty
-            value: challenge` + text.slice(end);
-    });
-    if (!["conditional-writing", "choice-id-obligation", "unpaid-choice", "same-event-payoff"].includes(variant)) await add("events", "aftermath", "event",
-      `participants: [character.ada, character.neri]\narcs: [${arc}]\nconsequences: ["A choice changes how Ada and Neri collaborate afterward"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [${cluster.text("event.disclose-ledger")}]\n      not_completed: []\nsteps:\n  - id: consequence\n    branches:\n      - id: protect-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: protect\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting\n      - id: challenge-response\n        conditions:\n          - kind: outcome\n            choice_point: choice-point.loyalty\n            value: challenge\n        effects:\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: estranged`,
-      "If Ada protects Neri, they continue investigating as trusted collaborators. If she challenges Neri, the confrontation leaves their alliance damaged.");
-    if (variant === "downstream-no-effect") {
-      await rewrite("events/aftermath.md", text => text
-        .replace(/effects:\n          - kind: relationship\n            relationship: relationship\.ada-neri\n            value: trusting/, "effects: []")
-        .replace(/effects:\n          - kind: relationship\n            relationship: relationship\.ada-neri\n            value: estranged/, "effects: []"));
-    }
-    if (variant === "bypass-gate") {
-      await rewrite(event, s => s.replace("prerequisites:\n  any_of:",
-        "prerequisites:\n  any_of:\n    - completed: []\n      not_completed: []"));
-    }
-    if (variant === "protected-retcon") {
-      const protectedPath = assignment.sourcePaths.find(path => path.startsWith("creative-direction/"))!;
-      await rewrite(protectedPath, text => text.replace(
-        "The player can protect a friend or demand accountability",
-        "The player can never protect a friend"));
-    }
-    if (variant === "exclusive-endings") {
-      // This route illegally demands two mutually exclusive outcomes at once.
-      await add("events", "impossible-ending", "event",
-        `participants: [character.ada]\narcs: [${arc}]\nconsequences: ["Both exclusive decisions somehow hold simultaneously"]\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.aftermath]\n      not_completed: []\n      conditions:\n        - kind: outcome\n          choice_point: choice-point.loyalty\n          value: protect\n        - kind: outcome\n          choice_point: choice-point.loyalty\n          value: challenge\nsteps: []`,
-        "This invalid Event incorrectly requires protecting and challenging at the same time.");
-    }
-  } else {
-    const common = `participants: [character.ada]\narcs: [${arc}]\nconsequences:`;
-    await add("events", "discover-mark", "event",
-      `${common}\n  - "Ada notices a distinctive watermark in an earlier archive note"\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.aftermath]\n      not_completed: []\nsteps: []`,
-      "Ada can inspect a faded margin without solving the cipher. A visible watermark provides a clue to the document's origin.");
-    await add("events", "discover-seal", "event",
-      `${common}\n  - "Ada finds the custodian's seal impressed in a separate record"\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.aftermath]\n      not_completed: []\nsteps: []`,
-      "A comparison record reveals a seal that could authenticate the ledger independently of the watermark.");
-    if (["conditional-writing", "choice-id-obligation", "same-event-payoff"].includes(variant)) {
-      for (const name of ["discover-mark", "discover-seal"]) {
-        await rewrite("events/" + name + ".md", s =>
-          s.replace("completed: [event.aftermath]", "completed: [event.disclose-ledger]"));
-      }
-    }
-    await add("authored-content", "watermark-clue", "authored-content",
-      "events: [event.discover-mark]\nrevelations: []",
-      "In the margin, a crescent-shaped watermark repeats the mark on the custody register. Players can use this visible mark before attempting to decode the ledger.");
-    await add("authored-content", "seal-clue", "authored-content",
-      "events: [event.discover-seal]\nrevelations: []",
-      "The brass seal on the custodian record matches the ledger's stamped cover. Its owner can confirm the missing witness's access before any solution is attempted.");
-    await add("revelations", "puzzle-evidence", "revelation",
-      "fact: fact.evidence-concealed",
-      "Once either Puzzle solution is performed, the player sees the proof of the concealed entry.");
-    await add("events", "decode-ledger", "event",
-      `${common}\n  - "Ada uses the watermark key to decode the concealed ledger entry"\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.discover-mark]\n      not_completed: [event.request-testimony]\nsteps:\n  - id: decipher\n    branches:\n      - id: decode\n        conditions: []\n        effects:\n          - kind: revealed\n            revelation: revelation.puzzle-evidence\n            value: true\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: trusting`,
-      "The watermark identifies a cipher key. Ada decodes the record and gains documentary proof, drawing Neri back toward cooperation.");
-    await add("events", "request-testimony", "event",
-      `${common}\n  - "Ada confronts the custodian with the seal and obtains witness testimony"\nafter: []\nprerequisites:\n  any_of:\n    - completed: [event.discover-seal]\n      not_completed: [event.decode-ledger]\nsteps:\n  - id: verify\n    branches:\n      - id: testimony\n        conditions: []\n        effects:\n          - kind: revealed\n            revelation: revelation.puzzle-evidence\n            value: true\n          - kind: relationship\n            relationship: relationship.ada-neri\n            value: wary`,
-      "The seal gives Ada leverage to question the custodian. The verbal confirmation exposes the concealment but leaves the relationship tense.");
-    await add("puzzles", "ledger-proof", "puzzle",
-      'objective: "Verify that the ledger hides a concealed entry through documentary decoding or corroborated testimony"\nclues: [authored-content.watermark-clue, authored-content.seal-clue]\nsolutions: [event.decode-ledger, event.request-testimony]',
-      "Players can notice a watermark or seal, infer either the cipher key or its custodian, and then choose a method. A mistaken guess yields a comparison prompt, with hints escalating from noticing the mark to matching its source and finally trying the cipher or testimony route.");
-    if (variant === "puzzle-weak-custody") {
-      // #167 negative: all native reachability/clue gates pass, but one
-      // "solution" establishes only custody, not the Puzzle objective.
-      await rewrite("events/request-testimony.md", s => s
-        .replace("Ada confronts the custodian with the seal and obtains witness testimony",
-          "Ada verifies the ledger seal but cannot identify a concealed entry")
-        .replace("The seal gives Ada leverage to question the custodian. The verbal confirmation exposes the concealment but leaves the relationship tense.",
-          "The custodian authenticates the seal and handling interval, but cannot confirm that any ledger entry was concealed. The relationship remains tense.")
-        .replace(/          - kind: revealed\n            revelation: revelation\.puzzle-evidence\n            value: true\n/, ""));
-    }
-    if (variant === "unreachable-clue") {
-      await rewrite("authored-content/watermark-clue.md", s =>
-        s.replace("events: [event.discover-mark]", "events: [event.decode-ledger]"));
-      await rewrite("authored-content/seal-clue.md", s =>
-        s.replace("events: [event.discover-seal]", "events: [event.request-testimony]"));
-      // Duplicate modifiedRecords is invalid; the fixture reports unique paths below.
-    }
-    if (variant === "unverified-solution") {
-      await rewrite("events/request-testimony.md", s =>
-        s.replace("not_completed: [event.decode-ledger]", "not_completed: [event.decode-ledger]\n      unverified: \"The custodian happens to be willing to testify\""));
-    }
-  }
-  if (variant === "mismatch" && domain === "choice") paths.push("choice-points/not-written.md");
-  return { modifiedRecords: [...new Set(paths)], conflicts: [], skillReads: [],
-    obligations: variant === "conditional-writing" && domain === "choice"
-      ? ["Future Events must consume relationship.ada-neri state (trusting vs wary) as conditional payoffs from the two routes"]
-      : variant === "choice-id-obligation" && domain === "choice"
-        ? ["Future Events must check choice-point.loyalty outcome for conditional consequences of the two routes"]
-        : ["Conditional player-facing prose must be reviewed for choice and clue visibility"] };
-}
+
 /** Read-only receipt projection used to identify the original child before
  * invoking it. The domain adapter still authenticates all native/Git effects. */
 export async function inspectInteractiveUnit(job: JobStartResult, milestone: string, domain: InteractiveDomain) {
@@ -1240,7 +1004,9 @@ export async function inspectInteractiveFailure(job: JobStartResult, milestone: 
 }
 
 export async function runInteractiveWorkItem(input: InteractiveOptions) {
+  if (input.fixture && input.action !== "inspect") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
   if (!validMilestone.test(input.milestone)) throw new Error("--milestone requires an exact typed Milestone ID.");
+  if (input.action === "run" && !input.round) throw Error("Interactive execution requires its checkpointed assignment child.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const root = job.stateDir;
   const file = join(root, "interactive-items", input.milestone.slice(10) + ".json");
@@ -1374,10 +1140,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       // Event. The controller, not a forced Choice author, asks an independent
       // reviewer whether both interactive assignments are genuinely optional.
       // Fixtures exercise provenance only and never claim literary certification.
-      if (input.action === "review-omission" || !input.fixture ||
-          process.env.NT_INTERACTIVE_FIXTURE_CASE === "event-only") {
-        if (!input.fixture)
-          await assertNativeReviewDependencies(job, "interactive-choice-" + input.milestone.slice(10));
+      {
+        await assertNativeReviewDependencies(job, "interactive-choice-" + input.milestone.slice(10));
         const head = await trustedHead(job);
         const baseline = reportOf(await validateStoryJob(job, input.validatorSource ??
           input.skillsSource, { ...job, baseSha: head }), head);
@@ -1410,7 +1174,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           receipt = { version: 1, jobId: job.jobId, baseSha: job.baseSha,
             workItemId: "interactive-" + input.milestone.slice(10),
             milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
-            eventHead: event.commitSha, eventSource, worker: input.fixture ? "fixture" : "pi",
+            eventHead: event.commitSha, eventSource, worker: "pi",
             correctedBlueprintPin: consumedCorrection(milestoneBlueprint),
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
             thinking: input.thinking, units: [unit("choice"), unit("puzzle")] };
@@ -1428,7 +1192,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         correctedBlueprintPin: consumedCorrection(milestoneBlueprint),
         workItemId: "interactive-" + input.milestone.slice(10),
         milestoneId: input.milestone, planVersion: architecture.plan.version, planDigest,
-        eventHead: event.commitSha, eventSource, worker: input.fixture ? "fixture" : "pi",
+        eventHead: event.commitSha, eventSource, worker: "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna", thinking: input.thinking,
         units: [{ id: "interactive-choice-" + input.milestone.slice(10), domain: "choice", phase: "pending" },
           { id: "interactive-puzzle-" + input.milestone.slice(10), domain: "puzzle", phase: "pending" }] };
@@ -1475,7 +1239,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
     if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
         receipt.units.every(unit => unit.phase === "pending" && !unit.beforeHead ||
           unit.phase === "committed" && commitOrigin(job, unit.id, unit.commitSha!).jobId !== job.jobId)) {
-      receipt.worker = input.fixture ? "fixture" : "pi";
+      receipt.worker = "pi";
       receipt.provider = input.provider ?? "openai";
       receipt.model = input.model ?? "gpt-6-luna";
       await persist(file, receipt);
@@ -1703,9 +1467,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             } catch (error) { return [String(error)]; }
           };
           let evidence: InteractiveEvidence;
-          if (state.worker === "fixture") {
-            evidence = await fixtureAuthor(job, unit.domain, assign);
-          } else {
+
             await authorizeInvocation();
             const authored = await authorInteractive(job, state.snapshot!, unit.domain, assign, state.provider, state.model, state.thinking,
               async (session, id) => {
@@ -1725,7 +1487,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
               sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
               sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
               effect: await interactiveEffect(job, before) });
-          }
+
           unit.claimedPaths = evidence.modifiedRecords;
           unit.conflicts = evidence.conflicts;
           unit.obligations = evidence.obligations;
@@ -1840,14 +1602,6 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         delete unit.failure;
         await persist(file, state);
         await publishHead(job, before, sha, unit.id);
-        // Deterministic fixture seam: model an author message received while
-        // Choice was running, before the Puzzle boundary drains it.
-        if (state.worker === "fixture" && index === 0 &&
-            process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE) {
-          const { runAuthorAction } = await import("./author-updates.js");
-          await runAuthorAction({ story: job.storyRoot, job: job.jobId,
-            action: "send", file: process.env.NT_TEST_INTERACTIVE_SEND_AFTER_CHOICE });
-        }
       } catch (error) {
         unit.failure = String(error);
         await persist(file, state);

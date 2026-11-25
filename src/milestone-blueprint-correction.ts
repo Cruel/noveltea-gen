@@ -8,7 +8,6 @@ import { isDeepStrictEqual as equal } from "node:util";
 import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
-import { PiBudgetPause, inspectPiPolicy } from "./job-pi-policy.js";
 import { trustedHead } from "./revision.js";
 import { selectedAssignment } from "./event-work.js";
 import { openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
@@ -33,7 +32,7 @@ const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value
 async function originalSpecialistChallenge(job: JobStartResult, event: {
   worker?: string; sessionFile?: string; sessionId?: string; workItemId?: string;
   blueprintChallenge?: SpecialistBlueprintChallenge }, challenge: SpecialistBlueprintChallenge) {
-  if (event.worker === "fixture") return; // Only the deterministic fixture worker may report fixture evidence.
+  if (event.worker !== "pi") throw Error("Historical Event evidence cannot authorize a Blueprint correction.");
   if (event.worker !== "pi" || !event.workItemId)
     throw Error("Blueprint specialist challenge has no original worker identity.");
   await verifyJobPiSession(job, "event", event.sessionFile, event.sessionId, event.workItemId);
@@ -93,6 +92,7 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   event: MilestoneEventSource & { snapshot?: SkillSnapshot; worker?: string; provider?: string; model?: string; planDigest?: string;
     sessionFile?: string; sessionId?: string; workItemId?: string; blueprintChallenge?: SpecialistBlueprintChallenge },
   input: { head: string; fixture: boolean; omission: EventOnlyRef | null; protectionBase?: string; objective?: string; turnDigest?: string; native: Parameters<typeof selectedAssignment>[2] }) {
+  if (input.fixture) throw Error("Obsolete Blueprint correction authority.");
   const old = await historicalMilestoneHandoff(job, event);
   if (!old || !event.assignment || !event.snapshot) return;
   const ownerConflict = !!input.omission && old.design.downstream.some(item => item.owner === "interactive");
@@ -116,15 +116,14 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   await clean();
   const turn = await readTurnEvidence(job, plan.contract);
   const owner = turn?.assignments.find(a => a.id === "event");
-  if (!turn || input.objective !== turn.originalRequest || input.turnDigest && input.turnDigest !== turn.digest ||
-      !input.fixture && input.turnDigest !== turn.digest || !point || review?.status !== "passed" || point.planVersion !== plan.version || point.assurance?.assignmentId !== "event" || point.assurance.turnDigest !== turn.digest ||
+  if (!turn || input.objective !== turn.originalRequest || input.turnDigest !== turn.digest || !point || review?.status !== "passed" || point.planVersion !== plan.version || point.assurance?.assignmentId !== "event" || point.assurance.turnDigest !== turn.digest ||
       event.expectedHead !== old.pin.sourceSha || owner?.specialist !== "nt-event-design" || !owner.authority.recordTypes.includes("event") ||
       owner.targets.some(id => id.startsWith("milestone.")) && !owner.targets.includes(event.milestoneId) ||
       plan.contract.scope.kind === "partial" && !plan.contract.scope.targets.includes(event.milestoneId) ||
       !turn.assignments.some(a => a.id === "interactive") || JSON.stringify(plan.contract) !== JSON.stringify(event.assignment.contract) ||
       !["full-story", "partial"].includes(plan.contract.scope.kind) || input.protectionBase !== head || event.planDigest !== sha(plan) ||
       existsSync(join(job.stateDir, "composition-items", event.milestoneId.slice(10) + ".json")) ||
-      event.worker !== (input.fixture ? "fixture" : "pi") || !event.provider || !event.model ||
+      event.worker !== "pi" || !event.provider || !event.model ||
       await openSkillSnapshot(event.snapshot.id) !== event.snapshot.path)
     throw Error("No current reviewed Event, protected Turn scope or planning owner for Blueprint correction.");
   const currentScope = selectedAssignment(job, plan, input.native, event.milestoneId, point.workItem);
@@ -132,8 +131,8 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
       !equal(currentScope.authority, event.assignment.authority) || !equal(currentScope.arcIds, event.assignment.arcIds) ||
       !equal(currentScope.characterIds, event.assignment.characterIds) || event.assignment.sourcePaths.some(path => !currentScope.sourcePaths.includes(path)))
     throw Error("Blueprint planning scope differs from the current canonical Milestone assignment.");
-  await readReviewedMilestoneBlueprint(job, old.pin, event.assignment, { provider: input.fixture ? "fixture" : event.provider,
-    model: input.fixture ? "fixture" : event.model, planDigest: sha(plan), contractDigest: sha(plan.contract), snapshotId: event.snapshot.id });
+  await readReviewedMilestoneBlueprint(job, old.pin, event.assignment, { provider: event.provider,
+    model: event.model, planDigest: sha(plan), contractDigest: sha(plan.contract), snapshotId: event.snapshot.id });
   git(job, "merge-base", "--is-ancestor", old.eventHead, head);
   let candidate = structuredClone(old.design);
   const sources = new Set<string>();
@@ -220,8 +219,6 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   }
   await recordBlueprintRepair(job, turn.digest, grant);
   await archiveReviewedMilestoneBlueprint(job, old.pin, event.assignment);
-  if (input.fixture && process.env.NT_BLUEPRINT_CORRECTION_FIXTURE_INTERRUPT === "archived")
-    throw new PiBudgetPause("fixture interruption after original Blueprint archival", (await inspectPiPolicy(job)).budget);
   const accepts = (draft: MilestoneBlueprint) => {
     if (equal(draft, candidate)) return true;
     if (equal(draft, old.design)) return false;

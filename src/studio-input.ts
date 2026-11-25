@@ -10,11 +10,11 @@ async function main(args: string[]) {
   for (let i = 0; i < args.length; i++) {
     const name = args[i]!;
     if (values.has(name)) throw new Error("Duplicate option: " + name);
-    if (name === "--fixture") { values.set(name, "true"); continue; }
+    if (name === "--fixture") throw Error("Structural fixture execution is retired; use an authenticated current-format Turn.");
     const value = args[++i];
     if (!value || value.startsWith("--") || !["--story", "--job", "--task", "--contract",
       "--provider", "--model", "--skills-source"].includes(name)) {
-      throw new Error("Usage: pnpm studio:input --story <existing-story> --job <id> --task <objective> --contract <json-file> [--fixture] [--skills-source <path>]");
+      throw new Error("Usage: pnpm studio:input --story <existing-story> --job <id> --task <objective> --contract <json-file> [--skills-source <path>]");
     }
     values.set(name, value);
   }
@@ -26,7 +26,7 @@ async function main(args: string[]) {
   if (!turn?.objective)
     throw Error("Studio input requires an authenticated current-format Turn plan already prepared for this Job.");
   const request: GenerationRequest = { story: selected.storyRoot, job, task, contract,
-    fixture: values.has("--fixture"), provider: values.get("--provider"), model: values.get("--model"),
+    fixture: false, provider: values.get("--provider"), model: values.get("--model"),
     skillsSource: values.get("--skills-source"), turnPlanDigest: turn.digest,
     orchestrationPolicy: "explicit" };
   await requireGenerationTurn(selected, request);

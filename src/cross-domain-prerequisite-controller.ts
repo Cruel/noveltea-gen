@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "./git-read-cache.js";
+import { inheritedReviewedCheckpoint } from "./recovery-fork-state.js";
 import { readTurnEvidence } from "./turn-plan-evidence.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { resolvedCheckpointReviews } from "./checkpoint-assurance.js";
@@ -83,12 +84,14 @@ export async function preflightCompositionBoundary(
   // their valid reviewed omission as an unmet closeout prerequisite.
   if (event.validation?.status === "passed" &&
       event.validation.milestoneState === "complete") return { kind: "ready" };
-  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const localPoint = (await inspectRecoveryCheckpoints(job)).find(p =>
     p.eligible && p.workItem === "event-" + milestoneId.slice("milestone.".length) &&
     p.commitSha === event.commitSha);
-  if (!point || point.semanticReview !== "passed" ||
+  const inheritedEvent = inheritedReviewedCheckpoint(job, "event-" + milestoneId.slice(10), event.commitSha);
+  const point = localPoint ?? inheritedEvent?.proof;
+  if (!point || (localPoint ? localPoint.semanticReview !== "passed" ||
+      localPoint.assurance?.turnDigest !== turn.digest : inheritedEvent?.status !== "passed") ||
       point.assurance?.assignmentId !== "event" ||
-      point.assurance?.turnDigest !== turn.digest ||
       point.planVersion !== planVersion || !ancestor(job, event.commitSha, head))
     return refuse("Original Event has no independently reviewed, Turn-bound native checkpoint.");
   if (!Array.isArray(interactive.units) || interactive.units.length !== 2 ||
@@ -111,11 +114,18 @@ export async function preflightCompositionBoundary(
   const choicePoint = checkpoints.find(p => p.eligible && p.commitSha === interactive.units[0].commitSha);
   const puzzle = interactive.units[1]?.phase === "committed"
     ? checkpoints.find(p => p.eligible && p.commitSha === interactive.units[1].commitSha) : null;
-  if (!choicePoint || choicePoint.workItem !== "interactive-choice-" + milestoneId.slice(10) ||
-      !reviewed(choicePoint) ||
+  const inheritedReviewed = (id: string, sha: string) => {
+    const inherited = inheritedReviewedCheckpoint(job, id, sha);
+    return inherited?.proof.planVersion === planVersion &&
+      inherited.proof.assurance?.assignmentId === choiceOwner.id;
+  };
+  const choiceId = "interactive-choice-" + milestoneId.slice(10);
+  const puzzleId = "interactive-puzzle-" + milestoneId.slice(10);
+  if (!(choicePoint?.workItem === choiceId && reviewed(choicePoint) ||
+        inheritedReviewed(choiceId, interactive.units[0].commitSha)) ||
       (interactive.units[1]?.phase === "committed" &&
-        (!puzzle || puzzle.workItem !== "interactive-puzzle-" + milestoneId.slice(10) ||
-          !reviewed(puzzle))))
+        !(puzzle?.workItem === puzzleId && reviewed(puzzle) ||
+          inheritedReviewed(puzzleId, interactive.units[1].commitSha))))
     return refuse("Deferred Milestone has no fresh independently approved Choice/Puzzle prerequisite.");
   // A reviewed Interactive repair is not a grant to edit the Event owner's
   // Milestone. Refuse even if all downstream native coverage is now valid.

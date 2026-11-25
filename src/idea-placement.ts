@@ -469,6 +469,7 @@ export async function auditIdeasUnderJobLock(job: JobStartResult) {
 }
 
 export async function runIdeaPlacement(input: PlacementOptions) {
+  if (input.fixture && input.action !== "audit") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   return withStoryJobLock(job, "idea-placement", async () => {
     if (input.action === "place" || input.action === "relocate" ||
@@ -509,11 +510,11 @@ export async function runIdeaPlacement(input: PlacementOptions) {
             return { status: "blocked", reason: "Protected dialogue is absent from current realization" };
         }
         await verifyDraft(job, input.validatorSource ?? input.skillsSource, prior, paths);
-        const snapshot = input.fixture ? undefined : await createSkillSnapshot({
+        const snapshot = await createSkillSnapshot({
           discovery: "explicit-only", novelteaSkills: input.skillsSource,
           skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"],
         });
-        if (!input.fixture && !snapshot) throw new Error("Reassessment requires pinned review skills.");
+        if (!snapshot) throw new Error("Reassessment requires pinned review skills.");
         const assignment = JSON.stringify({ ideaId: idea.id, original: idea.original, requirements: idea.requirements,
           identities: idea.identities, originalRealizations: current.recordIds,
           target: { id: current.recordIds[0], path: paths[0] },
@@ -521,10 +522,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         let evidence: string[];
         let reason: string;
         let reviewSession = "";
-        if (input.fixture) {
-          evidence = paths.map(p => p + ":1");
-          reason = "Fixture only; independent editorial reassessment not performed";
-        } else {
+        {
           const editorial = await piWork(job, snapshot!, "nt-narrative-review", assignment,
             input.provider ?? "openai", input.model ?? "gpt-6-luna", input.thinking, false,
             false, input.reconcileReadOnly, input.beforeRead);
@@ -536,7 +534,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
           revision: idea.lifecycle.placements.length + 1, action: "reassessed", priorHead: prior,
           recordIds: [...current.recordIds], rationale: reason || "Retained after full candidate comparison",
           alternatives: alternatives.map(c => ({ recordId: c.id, rationale: c.rationale })),
-          verified: input.fixture ? "fixture-unverified" : "pi", evidence,
+          verified: "pi", evidence,
           sessionFiles: reviewSession ? [reviewSession] : [],
           realizationDigest: currentDigest,
         };
@@ -562,7 +560,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         await persist(receiptPath, { ...data, commitSha: commit });
         await publishHead(job, prior, commit, idea.id, "idea-placement:" + idea.id);
         assertClean(job);
-        return { status: input.fixture ? "reassessed-editorial-unverified" : "reassessed",
+        return { status: "reassessed",
           id: idea.id, current: current.recordIds, alternatives: entry.alternatives,
           rationale: entry.rationale, commitSha: commit };
       }
@@ -586,15 +584,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     let selection: { evidence: string[]; reason: string; sessionFile: string } | undefined;
     if (!target && input.autoSelect && input.action === "place") {
       if (!alternatives.length) return { status: "deferred", reason: "No developed placement candidates" };
-      if (input.fixture) {
-        if (process.env.NT_IDEA_FIXTURE_REJECT === idea.id)
-          return { status: "deferred", reason: "Fixture rejected every current placement candidate" };
-        // A deterministic fixture exercises the orchestration and Git gates,
-        // NOT semantic selection. Prefer the most developed kind, with a stable tie-break.
-        const specificity = (kind: string) => kind === "authored-content" ? 3 : kind === "event" ? 2 : 1;
-        target = [...alternatives].sort((a, b) => specificity(b.kind) - specificity(a.kind) ||
-          b.id.localeCompare(a.id))[0]!.id;
-      } else {
+      {
         const snapshot = await createSkillSnapshot({ discovery: "explicit-only",
           novelteaSkills: input.skillsSource, skillDirs: [],
           requiredSkills: ["nt-narrative-review", "nt-catalog"] });
@@ -645,11 +635,11 @@ export async function runIdeaPlacement(input: PlacementOptions) {
       // specialist revision; it never authorizes unrelated Story rewrites.
     }
     assertClean(job);
-    const snapshot = input.fixture ? undefined : await createSkillSnapshot({
+    const snapshot = await createSkillSnapshot({
       discovery: "explicit-only", novelteaSkills: input.skillsSource,
       skillDirs: [], requiredSkills: [specialistSkill(candidate.kind), "nt-narrative-review", "nt-catalog"],
     });
-    if (!input.fixture && !snapshot) throw new Error("Real idea placement requires pinned NovelTea craft skills.");
+    if (!snapshot) throw new Error("Real idea placement requires pinned NovelTea craft skills.");
     const file = join(job.worktreeStoryRoot, candidate.path);
     if (!(await lstat(file)).isFile() || await realpath(file) !== file)
       throw new Error("Idea realization must target regular existing canonical Markdown.");
@@ -673,15 +663,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     await input.beforeWrite?.();
     let writerEvidence: string[] = [];
     let writerSession = "";
-    if (input.fixture) {
-      if (previousFile) {
-        if (!previousText.includes(idea.original))
-          throw new Error("Fixture cannot relocate prose absent as exact original text.");
-        await writeFile(previousFile, previousText.replace(idea.original, "").trimEnd() + "\n");
-      }
-      await writeFile(file, before.trimEnd() + "\n\n" + idea.original + "\n");
-      writerEvidence = [candidate.path + ":" + (before.split("\n").length + 2)];
-    } else {
+    {
       const writer = await piWork(job, snapshot!, specialistSkill(candidate.kind),
         assignment, input.provider ?? "openai", input.model ?? "gpt-6-luna",
         input.thinking, true);
@@ -710,7 +692,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     await verifyDraft(job, input.validatorSource ?? input.skillsSource, prior, edited);
     let editorialEvidence: string[] = [];
     let reviewSession = "";
-    if (!input.fixture) {
+    {
       const independent = await piWork(job, snapshot!, "nt-narrative-review",
         "INDEPENDENT FULFILLMENT REVIEW: Check every binding meaning, wording and participant " +
         "requirement against literal canonical prose, NOT merely an ID or reference. " +
@@ -731,9 +713,9 @@ export async function runIdeaPlacement(input: PlacementOptions) {
         "Chosen ") + candidate.id + " after comparison of " +
         alternatives.length + " eligible contexts; " + candidate.rationale +
         (selection ? "; semantic selection: " + selection.reason :
-          input.autoSelect && input.fixture ? "; fixture selection only, not semantic" : ""),
+          ""),
       alternatives: all.map(c => ({ recordId: c.id, rationale: c.rationale })),
-      verified: input.fixture ? "fixture-unverified" : "pi",
+      verified: "pi",
       evidence: [...(selection?.evidence ?? []), ...writerEvidence, ...editorialEvidence],
       sessionFiles: [selection?.sessionFile, writerSession, reviewSession].filter((p): p is string => !!p),
       realizationDigest: workingDigest,
@@ -764,7 +746,7 @@ export async function runIdeaPlacement(input: PlacementOptions) {
     await persist(receiptPath, { ...receiptBase, commitSha: commit });
     await publishHead(job, prior, commit, idea.id, "idea-placement:" + idea.id);
     assertClean(job);
-    return { status: input.fixture ? "integrated-editorial-unverified" : "integrated",
+    return { status: "integrated",
       id: idea.id, action: entry.action, realizationIds: entry.recordIds, alternatives: entry.alternatives,
       rationale: entry.rationale, verification: entry.verified, commitSha: commit };
   });

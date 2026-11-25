@@ -21,7 +21,7 @@ import type { PlanHistoryStep } from "./plan-continuity.js";
 import { deferredCompletionObligations } from "./ideas.js";
 import type { auditIdeasUnderJobLock } from "./idea-placement.js";
 import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from "./author-updates.js";
-import { reviewNarrative, repairNarrativeProse, type ReviewAssignment, type EditorialVerdict,
+import { reviewNarrative, type ReviewAssignment, type EditorialVerdict,
   type EditorialFinding } from "./narrative-review-specialist.js";
 
 type Diagnostic = { path?: string; line?: number; code: string; message: string };
@@ -325,70 +325,8 @@ function output(job: JobStartResult, state: Receipt | undefined) {
     ideaAudit: state.ideaAudit, editorial: state.editorial ?? { verdict: "unverified" }, sessionFiles: state.sessionFiles,
     failure: state.failure, worker: state.worker };
 }
-function repairable(audit: ScopeAudit, findings: EditorialFinding[]) {
-  return audit.deterministic === "passed" && findings.length > 0 &&
-    findings.filter(f => f.severity === "blocking").every(f => f.repair === "composition");
-}
-interface RepairOrigin {
-  paths: string[]; sessionFile: string; snapshot: SkillSnapshot;
-  provider: string; model: string; thinking?: "low" | "high";
-}
-/** Select only the original, completed Composition writer for the affected
- * canonical prose. No matching transcript means escalation, not a new writer. */
-async function repairOrigin(job: JobStartResult, audit: ScopeAudit, findings: EditorialFinding[],
-  planVersion: number): Promise<RepairOrigin | null> {
-  const milestones = audit.scopedRecords.filter(id => id.startsWith("milestone."));
-  const stateRoot = job.stateDir;
-  const candidates: RepairOrigin[] = [];
-  for (const milestone of milestones) {
-    const file = join(stateRoot, "composition-items", milestone.slice("milestone.".length) + ".json");
-    if (!existsSync(file)) continue;
-    const data = JSON.parse(await readFile(file, "utf8")) as {
-      phase?: string; jobId?: string; milestoneId?: string; planVersion?: number;
-      worker?: string; paths?: string[]; sessionFile?: string; snapshot?: SkillSnapshot;
-      provider?: string; model?: string; thinking?: "low" | "high";
-    };
-    if (data.phase !== "committed" || data.worker !== "pi" || data.jobId !== job.jobId ||
-        data.planVersion !== planVersion || data.milestoneId !== milestone ||
-        !data.paths?.length || !data.sessionFile || !data.snapshot ||
-        !data.provider || !data.model) continue;
-    const paths = data.paths.filter(p => p.startsWith("authored-content/") &&
-      audit.scopedPaths.includes(p)).sort();
-    if (!paths.length) continue;
-    const prefix = join(stateRoot, "composition-sessions", "composition-" + milestone.slice(10), "write") + "/";
-    if (!data.sessionFile.startsWith(prefix) || !data.sessionFile.endsWith(".jsonl") ||
-        await realpath(data.sessionFile) !== data.sessionFile ||
-        !(await lstat(data.sessionFile)).isFile()) continue;
-    if (await openSkillSnapshot(data.snapshot.id) !== data.snapshot.path) continue;
-    candidates.push({ paths, sessionFile: data.sessionFile, snapshot: data.snapshot,
-      provider: data.provider, model: data.model, thinking: data.thinking });
-  }
-  const matching = candidates.filter(c => findings.filter(f => f.severity === "blocking")
-    .every(f => c.paths.some(p => f.source === p || f.source.startsWith(p + ":"))));
-  return matching.length === 1 ? matching[0]! : null;
-}
-function changed(job: JobStartResult): string[] {
-  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
-  return git(job, "status", "--porcelain=v1", "--untracked-files=all")
-    .split("\n").filter(Boolean).map(s => s.slice(3)).map(p => p.startsWith(prefix) ? p.slice(prefix.length) : p);
-}
-async function publishVerifiedHead(job: JobStartResult, prior: string, head: string) {
-  const file = join(job.stateDir, "revisions", "verified-head.json");
-  await mkdir(dirname(file), { recursive: true });
-  if (existsSync(file)) {
-    const state = JSON.parse(await readFile(file, "utf8")) as { version: number; jobId: string; headSha: string };
-    if (state.version !== 1 || state.jobId !== job.jobId ||
-      (state.headSha !== prior && state.headSha !== head))
-      throw new Error("Review repair cannot replace an unrelated verified-head receipt.");
-    if (state.headSha === head) return;
-  }
-  const tmp = file + "." + randomUUID() + ".tmp";
-  await writeFile(tmp, JSON.stringify({ version: 1, jobId: job.jobId, headSha: head,
-    workItemId: "review-scope-repair" }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-  await rename(tmp, file);
-}
-
 export async function runNarrativeReview(input: NarrativeReviewOptions) {
+  if (input.fixture && input.action !== "inspect") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   if (input.action === "inspect") {
     const file = fileFor(job);
@@ -467,7 +405,7 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
     } else {
       state = { version: 1, jobId: job.jobId, branch: job.branch, threadId: job.threadId,
         baseSha: job.baseSha, planVersion: plan.version, contractDigest,
-        headSha: head, worker: input.fixture ? "fixture" : "pi",
+        headSha: head, worker: "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         thinking: input.thinking, phase: "pending", attempts: 0, seen: [], sessionFiles: [] };
       await save(file, state);
@@ -504,108 +442,23 @@ export async function runNarrativeReview(input: NarrativeReviewOptions) {
             receipt.worker === "pi" ? { provider: receipt.provider, model: receipt.model,
               thinking: receipt.thinking } : undefined);
           receipt.phase = "reviewing"; await save(file, receipt);
-          if (receipt.worker === "fixture") {
-            const issues = audit.diagnostics.filter(d => d.severity === "blocking").map(d => ({
-              severity: "blocking" as const, dimension: "obligation" as const,
-              source: d.source.includes(":") ? d.source : "scope.md:1",
-              message: d.message, repair: d.repair,
-            }));
-            return { verdict: issues.length ? "block" as const : "pass" as const,
-              findings: issues, evidence: ["fixture structural review only; NO literary attestation"] };
-          }
           return reviewNarrative(job, receipt.snapshot!, audit.assignment,
             receipt.provider, receipt.model, receipt.thinking,
             async session => { receipt.sessionFiles.push(session); await save(file, receipt); });
         };
-        let audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred), receipt.headSha);
+        const audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred), receipt.headSha);
         receipt.audit = audit;
         if (audit.deterministic === "blocked") {
           receipt.phase = "blocked"; receipt.failure = "Objective scoped validation/coverage is not complete.";
           await save(file, receipt);
           return { receipt };
         }
-        let editorial = await reviewer(audit);
+        const editorial = await reviewer(audit);
         receipt.editorial = editorial; await save(file, receipt);
-        // A fixture never certifies editorial quality or performs model-authored repair.
-        while (receipt.worker === "pi" && editorial.verdict === "block" &&
-          repairable(audit, editorial.findings) && receipt.attempts < 2) {
-          const origin = await repairOrigin(job, audit, editorial.findings, plan.version);
-          if (!origin) {
-            receipt.failure = "Editorial repair requires an original committed Composition writer session and owned prose paths; escalate otherwise.";
-            break;
-          }
-          const allowed = origin.paths;
-          const priorHead = receipt.headSha;
-          await preflightPiAssignment(job, "narrative-repair:" + job.headSha,
-            { provider: origin.provider, model: origin.model, thinking: origin.thinking });
-          receipt.phase = "repairing"; receipt.attempts++; await save(file, receipt);
-          const before = digest(allowed.map(p => git(job, "hash-object", "--", join(job.worktreeStoryRoot, p))).join("|"));
-          try {
-            await repairNarrativeProse(job, origin.snapshot, audit.assignment,
-              editorial.findings, allowed, origin.provider, origin.model, origin.thinking,
-              origin.sessionFile,
-              async session => { receipt.sessionFiles.push(session); await save(file, receipt); },
-              async () => {
-                const paths = changed(job);
-                if (paths.some(p => !allowed.includes(p)))
-                  throw new Error("Editorial repair changed an unauthorized Story record.");
-                if (!paths.length) throw new Error("Editorial repair produced no prose change.");
-              });
-            const paths = changed(job);
-            if (paths.some(p => !allowed.includes(p)) || !paths.length)
-              throw new Error("Editorial repair exceeded authorized Authored Content.");
-            const after = digest(allowed.map(p => git(job, "hash-object", "--", join(job.worktreeStoryRoot, p))).join("|"));
-            if (after === before || receipt.seen.includes(after))
-              throw new Error("Editorial repair stagnated or oscillated between prior drafts.");
-            receipt.seen.push(after);
-            audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(priorHead), priorHead, deferred), priorHead);
-            receipt.audit = audit;
-            // Never certify invalid text; preserve the exact draft for inspection.
-            if (audit.deterministic !== "passed") throw new Error("Repaired prose failed canonical scoped revalidation.");
-            editorial = await reviewer(audit);
-            receipt.editorial = editorial;
-            await save(file, receipt);
-            if (editorial.verdict !== "pass" && !repairable(audit, editorial.findings))
-              throw new Error("Editorial repair requires architectural/protected escalation.");
-            if (editorial.verdict === "pass") {
-              if (git(job, "rev-parse", "HEAD") !== priorHead ||
-                  git(job, "symbolic-ref", "--short", "HEAD") !== job.branch ||
-                  git(job, "diff", "--cached", "--name-only")) {
-                throw new Error("Story review branch or index changed during repair.");
-              }
-              const finalPaths = changed(job);
-              if (!finalPaths.length || finalPaths.some(p => !allowed.includes(p)))
-                throw new Error("Final review repair changed unauthorized Story paths.");
-              receipt.repairPriorHead = priorHead;
-              receipt.repairPaths = finalPaths;
-              receipt.repairDigest = after;
-              await save(file, receipt);
-              const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
-              git(job, "add", "--", ...finalPaths.map(p => prefix + p));
-              git(job, "-c", "user.name=NovelTea Generator",
-                "-c", "user.email=noveltea-gen@users.noreply.github.com", "commit",
-                "-m", [`Repair independently reviewed scoped prose [${job.jobId}]`, "",
-                  `NovelTea-Job: ${job.jobId}`, "NovelTea-Work-Item: review-scope-repair",
-                  `NovelTea-Plan-Version: ${plan.version}`, `NovelTea-Review-Repair: ${after}`].join("\n"));
-              receipt.headSha = git(job, "rev-parse", "HEAD");
-              receipt.repairCommitSha = receipt.headSha;
-              await save(file, receipt);
-              await publishVerifiedHead(job, priorHead, receipt.headSha);
-              clean(job, receipt.headSha);
-              audit = await withTurnAssignments(auditNarrativeScope(plan, await validate(receipt.headSha), receipt.headSha, deferred), receipt.headSha);
-              receipt.audit = audit;
-              if (audit.deterministic !== "passed")
-                throw new Error("Post-commit scoped repair validation failed; preserve commit for review.");
-            }
-          } catch (error) {
-            receipt.phase = "blocked"; receipt.failure = String(error); await save(file, receipt);
-            throw error;
-          }
-        }
         receipt.editorial = editorial;
         receipt.phase = editorial.verdict === "pass" ? "completed" : "blocked";
         if (editorial.verdict === "block") receipt.failure =
-          receipt.failure ?? "Independent editorial review blocked completion; protected/architectural changes require escalation or repair budget was exhausted.";
+          receipt.failure ?? "Independent editorial review blocked completion; the Generation controller must assess the findings.";
         await save(file, receipt);
         return { receipt };
       }).addEdge(START, "scope_validation_and_editorial_review")

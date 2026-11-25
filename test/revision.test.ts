@@ -1,3 +1,4 @@
+import { startCurrentStory } from "./support/current-story-start.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, sign } from "node:crypto";
@@ -344,13 +345,11 @@ test("modified proposal or forged approval bytes never inherit earlier authoriza
   assert.equal(git(s.job.worktreeRoot, "rev-parse", "HEAD"), s.initialSha);
 });
 
-test("later protected decisions are enforced even when initial trusted Story baseline was empty", { skip: SKIP }, () => {
+test("later protected decisions are enforced even when initial trusted Story baseline was empty", { skip: SKIP }, async () => {
   const s = setup("later-protected", false);
-  const generated = s.cliRun("foundation", "--story", s.story, "--job", "draft",
-    "--fixture", "--task", "Murder mystery with a protected premise",
-    "--skills-source", skills);
-  assert.equal(generated.result.status, 0, generated.result.stderr);
-  const foundationSha = generated.data.commitSha;
+  await startCurrentStory(s.job, { ...process.env, NT_STATE_DIR: s.state, NT_SKILL_CACHE_DIR: join(root, "skill-cache") },
+    "foundation", "Murder mystery with a protected premise", undefined, false);
+  const foundationSha = git(s.job.worktreeRoot, "rev-parse", "HEAD");
   const text = readFileSync(s.file, "utf8");
   writeFileSync(s.file, text.replace("Murder mystery with a protected premise", "Science-fiction adventure"));
   const p = s.inspect("later-change");

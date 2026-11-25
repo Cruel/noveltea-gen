@@ -2,6 +2,18 @@
 
 A local-first TypeScript/pnpm Story generator using LangGraph.js to coordinate Git-backed Story jobs and pinned Pi specialists. The production `job generate` entrypoint schedules an explicitly scoped Story or Arc/Milestone set through independent review. The original `run` note/tagline routing proof of concept remains separate, with its own SQLite checkpoints and tracing.
 
+## Current Story execution contract (#271)
+
+Story writes run only through an authenticated current-format Turn and
+`job generate start/resume` (or the corresponding Studio Generation
+entrypoint). Standalone specialist writer commands and structural Story
+fixtures are retired. The stage-by-stage examples in the historical
+sections below describe prior releases, not supported execution commands.
+Use the current deterministic tests in `test/generation.test.ts`,
+`test/domain-cutover.test.ts`, `test/recovery-cutover.test.ts` and
+`web/test/current-checkpoint-fork.test.ts` for recovery evidence.
+The integrated live qualification remains separate.
+
 ## Setup
 
 Node.js 22+ and pnpm are required:
@@ -56,7 +68,7 @@ pnpm trace:show --json       # All spans, inputs, outputs, timings and errors
 pnpm studio                  # Local graph visualization; no LangSmith API key
 ```
 
-Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage, so use `--fixture` for deterministic graph checks.
+Look in **`.local/traces/*.jsonl`** for saved local traces. Each `--trace-local` run reports its exact `localTrace` path; `pnpm trace:show --file <path>` opens a specific saved run. Other important state lives outside the Story project: checkpoints under `~/.local/state/noveltea-gen/<project-id>/`, real Pi sessions under the Pi agent session directory, and pinned skills under `~/.cache/noveltea-gen/skill-snapshots/`. Local configuration and optional LangSmith credentials live in the repo's ignored `.local/` directory. Consult **`AGENTS.md`** for the full storage map and overrides. Cloud tracing is off unless explicitly enabled via `--trace`; `--trace-local` does not upload traces. Real Pi runs may consume model usage. For Story generation tests, use the deterministic provider over the authenticated Generation graph; the legacy `--fixture` execution flag is retired for Story jobs.
 
 ## Portable Story orchestration selection (#145)
 
@@ -311,7 +323,7 @@ certified or remove `NT_ADAPTIVE_PLANNING=1` until that evidence exists.
 ```sh
 pnpm exec tsx --test test/adaptive-assignments.test.ts test/adaptive-state.test.ts
 pnpm exec tsx --test test/adaptive-final-review.test.ts test/adaptive-final-integration.test.ts
-pnpm exec tsx --test test/interactive-work.test.ts
+pnpm exec tsx --test test/domain-cutover.test.ts test/generation.test.ts
 ```
 
 ## Checkpointed scope-driven Story generation (#32, #33)
@@ -1453,10 +1465,7 @@ is **not** live Pi evidence. Certify fixtures with
 `pnpm exec tsx --test test/character-world.test.ts`. To certify the **real**
 Pi specialists with configured credentials, explicitly opt in:
 
-```sh
-NT_LIVE_FOUNDATIONS=1 NT_SKILLS_CHECKOUT=/path/to/noveltea-skills \\
-  pnpm exec tsx --test test/character-world-live.test.ts
-```
+Historical standalone live test command retired in #271. Use authenticated Generation for integrated qualification.
 
 The live test inspects the actual pinned reads, editing tool calls, canonical
 records, clean worktree and both specialist commits. It can incur model usage.
@@ -1592,10 +1601,7 @@ pnpm exec tsx --test test/event-work.test.ts
 
 Optional real specialist certification may consume model usage:
 
-```sh
-NT_LIVE_EVENT=1 NT_PROVIDER=nvidia NT_MODEL=nvidia/nemotron-3-ultra-550b-a55b \
-  pnpm exec tsx --test test/event-live.test.ts
-```
+Historical standalone live test command retired in #271. Use authenticated Generation for integrated qualification.
 
 ## Interactive Choice Point and Puzzle alternatives (#20)
 
@@ -1666,22 +1672,12 @@ perception, the quality of a clue or finished engine implementation.
 Deterministic tests (no LLM calls):
 
 ```sh
-pnpm exec tsx --test test/interactive-work.test.ts
+pnpm exec tsx --test test/domain-cutover.test.ts test/generation.test.ts
 ```
 
 Opt-in **real Pi** certification (incurs provider usage):
 
-```sh
-NT_LIVE_INTERACTIVE=1 NT_PROVIDER=nvidia \
-  NT_MODEL=nvidia/nemotron-3-ultra-550b-a55b \
-  pnpm exec tsx --test test/interactive-live.test.ts
-
-# Compare GPT-6 Luna using explicitly low or high Pi thinking effort:
-NT_LIVE_INTERACTIVE=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
-  NT_THINKING=low pnpm exec tsx --test test/interactive-live.test.ts
-NT_LIVE_INTERACTIVE=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
-  NT_THINKING=high pnpm exec tsx --test test/interactive-live.test.ts
-```
+Historical standalone live test command retired in #271. Use authenticated Generation for integrated qualification.
 
 Add `NT_KEEP_FAILED_LIVE=1` to preserve a failed disposable live Story and
 its private transcripts. Neither fixture runs nor successful generation
@@ -1801,10 +1797,7 @@ the job state directory (`narrative-review.json`, `review-sessions/`). Test with
 `pnpm exec tsx --test test/narrative-review.test.ts`. To certify the real,
 separate read-only Pi reviewer against the actual branch-aware Story fixture:
 
-```sh
-NT_LIVE_NARRATIVE_REVIEW=1 NT_PROVIDER=openai NT_MODEL=gpt-6-luna \\
-  NT_THINKING=low pnpm exec tsx --test test/narrative-review-live.test.ts
-```
+Historical standalone live test command retired in #271. Use authenticated Generation for integrated qualification.
 
 This fixture intentionally contains continuity/knowledge/Puzzle issues. A
 source-linked **blocking** editorial verdict is the expected successful gate,

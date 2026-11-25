@@ -44,13 +44,13 @@ test("obsolete direct live stage commands refuse before opening a Story job", ()
   for (const args of [
     ["foundation", "--mode", "collaborative"],
     ["foundation", "--mode", "autonomous"],
-    ["architecture", "run"],
+    ["architecture", "run"], ["architecture", "reconcile"], ["foundations", "reconcile"], ["interactive", "review-omission"],
     ["foundations", "run"], ["event", "run"], ["interactive", "run"],
     ["composition", "run"], ["review", "run"], ["repair", "run"],
     ["ideas", "place"], ["ideas", "reassess", "--record"], ["ideas", "relocate"],
-  ]) {
+  ]) for (const flags of [[], ["--fixture"]]) {
     const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts",
-      "job", ...args, "--story", "/nonexistent-story", "--job", "obsolete"], {
+      "job", ...args, ...flags, "--story", "/nonexistent-story", "--job", "obsolete"], {
       encoding: "utf8", timeout: 30_000,
     });
     assert.notEqual(result.status, 0, args.join(" "));
@@ -91,6 +91,9 @@ test("current Turn admission authenticates exact request and source, not a claim
     const request = { story: job.storyRoot, job: job.jobId, task, contract,
       fixture: false, turnPlanDigest: plan.digest };
     assert.deepEqual(await requireGenerationTurn(job, request), plan);
+    await assert.rejects(requireGenerationTurn(job, { ...request, fixture: true }), /Obsolete Generation/);
+    await assert.rejects(requireGenerationTurn(job, { ...request, orchestrationPolicy: "fixture-test" }), /Obsolete Generation/);
+
     // Presets and SQLite normalization can reorder object keys. The signed
     // receipt is unchanged; only the semantic comparison is order independent.
     const reordered = { ...contract, scope: { kind: contract.scope.kind,
@@ -143,11 +146,13 @@ test("obsolete CLI Generation start does not claim SQLite ownership or mutate Gi
     const job = JSON.parse(started.stdout) as JobStartResult;
     const before = readdirSync(job.stateDir).sort();
     const head = git("rev-parse", "HEAD");
-    const refused = cli("generate", "start", "--task", "Continue", "--contract", contract);
-    assert.notEqual(refused.status, 0);
-    assert.match(refused.stderr, /authenticated current-format Turn plan/);
-    assert.deepEqual(readdirSync(job.stateDir).sort(), before);
-    assert.equal(git("rev-parse", "HEAD"), head);
+    for (const flags of [[], ["--fixture"]]) {
+      const refused = cli("generate", "start", "--task", "Continue", "--contract", contract, ...flags);
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /authenticated current-format Turn plan/);
+      assert.deepEqual(readdirSync(job.stateDir).sort(), before);
+      assert.equal(git("rev-parse", "HEAD"), head);
+    }
     writeFileSync(contract, JSON.stringify({
       scope: { kind: "partial", depth: "architecture", targets: ["character.ada"], branches: [] },
       constraints: [], envelope: { presentation: "Interactive Story", hardLimits: [], preferences: [] },
@@ -182,7 +187,7 @@ test("historical Turn receipts cannot grant final fulfillment or current executi
     assert.throws(() => verifyTurnPlan({ ...body, digest }), /Invalid persisted Turn plan/);
     for (const fixture of [true, false])
       await assert.rejects(requireGenerationTurn(job, { story: job.storyRoot, job: job.jobId,
-        task: body.originalRequest, contract, fixture, turnPlanDigest: digest }), /current-format Turn objective/);
+        task: body.originalRequest, contract, fixture, turnPlanDigest: digest }), fixture ? /Obsolete Generation/ : /current-format Turn objective/);
     assert.deepEqual(readdirSync(stateDir), ["turn-plan.json"]);
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
@@ -192,6 +197,7 @@ test("current-format SQLite resume refuses a missing or foreign server owner bef
   const previous = process.env.NT_STATE_DIR;
   process.env.NT_STATE_DIR = join(root, "state");
   let saver: SqliteSaver | undefined;
+  let restoreSandbox: (() => void) | undefined;
   try {
     const story = join(root, "story");
     mkdirSync(story);
@@ -217,14 +223,21 @@ test("current-format SQLite resume refuses a missing or foreign server owner bef
     const task = "An isolated Story";
     const plan = planWholeStory(task, contract, job.baseSha);
     await saveJobTurnPlan(job, plan);
+    const { scriptedModel, scriptedStoryRuntime, fixtureSandboxClient } = await import("./c03-scripted-story-helpers.js");
+    restoreSandbox = fixtureSandboxClient(job.jobId, job.worktreeStoryRoot);
+    const { archiveStages } = await import("./support/scripted-archive-stages.js");
+    const { withJobModelRuntime } = await import("../src/model-runtime.js");
+    const { runtime, observed } = await scriptedStoryRuntime(archiveStages(job, plan));
     const request = { story: job.storyRoot, job: job.jobId, task, contract,
-      fixture: true, turnPlanDigest: plan.digest, orchestrationPolicy: "fixture-test" as const };
+      fixture: false, turnPlanDigest: plan.digest, orchestrationPolicy: "explicit" as const,
+      skillsSource: process.env.NT_SKILLS_CHECKOUT ?? join(process.cwd(), "../noveltea-skills"), provider: scriptedModel.provider, model: scriptedModel.id };
     const thread = job.threadId + ":generation:web";
     const config = { configurable: { thread_id: thread }, recursionLimit: 100 };
     const db = join(job.stateDir, "web-generation.sqlite");
     saver = SqliteSaver.fromConnString(db);
     let graph = createGenerationGraph(saver, "server");
-    await graph.invoke({ request }, { ...config, interruptAfter: ["schedule"] });
+    await withJobModelRuntime(runtime, () => graph.invoke({ request }, { ...config, interruptAfter: ["schedule"] }));
+    const calls = observed.length;
     const snapshot = await graph.getState(config);
     assert.equal(snapshot.values.status, "running", snapshot.values.reason ?? "");
     assert.deepEqual(snapshot.next, ["author_update_intake"]);
@@ -236,7 +249,8 @@ test("current-format SQLite resume refuses a missing or foreign server owner bef
     saver = SqliteSaver.fromConnString(db);
     graph = createGenerationGraph(saver, "server");
     unlinkSync(ownerFile);
-    const stopped = await graph.invoke(null, config);
+    const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));
+    assert.equal(observed.length, calls);
     assert.equal(stopped.status, "blocked", stopped.reason ?? "");
     assert.match(stopped.reason ?? "", /lost its original owner receipt/);
     assert.equal(stopped.recoveryLifecycle.inspectionFences.length, 1);
@@ -255,6 +269,7 @@ test("current-format SQLite resume refuses a missing or foreign server owner bef
     assert.ok(!readdirSync(job.stateDir).includes("foundation.json"));
   } finally {
     saver?.db.close();
+    restoreSandbox?.();
     if (previous === undefined) delete process.env.NT_STATE_DIR; else process.env.NT_STATE_DIR = previous;
     rmSync(root, { recursive: true, force: true });
   }

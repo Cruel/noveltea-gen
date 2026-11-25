@@ -82,20 +82,9 @@ measurements. The required
 Event installed skill/reference texts measured 4,121 words before and 3,818
 after; the 303-word difference is the optional glossary, not lost schema or
 progression guidance. A smaller prompt does **not** establish behavioral
-reliability. Reproduce live Luna certification using the rootless hosted-Pi
-controller and `noveltea-sandbox:local` image; the opt-in suite preserves
-private evidence only when explicitly requested:
-
-```sh
-NT_LIVE_INTERACTIVE=1 NT_LIVE_ARCHITECTURE_ONLY=1 \
-  NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
-  pnpm exec tsx --test test/interactive-live.test.ts
-
-NT_LIVE_INTERACTIVE=1 NT_LIVE_EVENT_CHOICE=1 \
-  NT_LIVE_ASSIGNMENT_REVIEW=1 NT_LIVE_INTERACTIVE_REVIEW=1 \
-  NT_PROVIDER=openai NT_MODEL=gpt-6-luna \
-  pnpm exec tsx --test test/interactive-live.test.ts
-```
+reliability. The following live Luna results are historical. The standalone Interactive
+live test was retired by #271; repeat integrated qualification through
+authenticated Generation, not individual stage writers.
 
 The #165 real Luna Architecture run passed with partial Milestones, no speculative
 Event bindings and no unapproved edits. A distinct Luna Event-to-Choice run

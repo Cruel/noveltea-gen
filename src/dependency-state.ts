@@ -437,6 +437,7 @@ export async function registerReviewDependency(
 }
 
 export async function recordDependency(job: JobStartResult, value: unknown, fixture: boolean) {
+  if (fixture) throw Error("Historical dependency fixture execution is retired.");
   const report = parseDependencyReport(value);
   const turn = await dependencyTurn(job);
   const head = await dependencyBoundary(job);
@@ -460,6 +461,7 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
 }
 export async function approveDependency(job: JobStartResult, plan: DependencyPlan,
   entry: DependencyEntry, proposal: DependencyProposal, validatorSource?: string) {
+  if (entry.fixture) throw Error("Historical dependency evidence cannot authorize an amendment.");
   const head = await dependencyBoundary(job);
   const turn = await dependencyTurn(job);
   const persisted = await inspectDependencyPlan(job);
@@ -614,9 +616,10 @@ export async function finalizeReviewEventDependency(job: JobStartResult, failedS
 
 /** Writer admission never accepts an assignment supplied by a model or caller. */
 export async function authorizedDependency(job: JobStartResult, assignmentId: string, fixture: boolean) {
+  if (fixture) throw Error("Historical dependency evidence cannot authorize a writer.");
   const plan = await inspectDependencyPlan(job);
   const entry = plan?.entries.find(e => e.amendment?.assignment.id === assignmentId);
-  if (!entry?.amendment || !entry.approval || entry.fixture !== fixture ||
+  if (!entry?.amendment || !entry.approval || entry.fixture ||
       !["authorized", "reviewing", "verified"].includes(entry.phase))
     throw Error("Dependency writer lacks a trusted assignment grant.");
   return entry;

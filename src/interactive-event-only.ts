@@ -201,6 +201,7 @@ async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
   const turn = await readReviewTurnEvidence(job);
   if (!turn || turn.digest !== p.turnDigest)
     throw Error("Event-only omission lost its original authenticated Turn.");
+  if (sourceMode !== "historical" && p.reviewMode !== "pi") throw Error("Historical fixture omission is inspection only.");
   if (p.reviewMode === "pi") {
     if (!p.reviewerSnapshotId || !HASH.test(p.reviewerSnapshotId) ||
         !(await openSkillSnapshot(p.reviewerSnapshotId)) ||
@@ -260,6 +261,7 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   eventSnapshotId: string, obligations: string[], input: {
     fixture: boolean; skillsSource?: string; provider: string; model: string;
     blueprint?: ReviewedMilestoneHandoff }): Promise<EventOnlyRef | null> {
+  if (input.fixture) throw Error("Obsolete omission fixture execution is retired.");
   if (!await eventOnlyCandidate(job, plan, report, milestone, eventIds)) return null;
   const turn = await readReviewTurnEvidence(job);
   if (!turn?.digest || !turn.objective) return null;
@@ -276,7 +278,7 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
           p.milestoneId !== milestone || p.eventHead !== eventHead || p.reviewHead !== reviewHead ||
           p.planDigest !== sha256(plan) || p.planVersion !== plan.version ||
           p.validatorVersion !== job.validatorVersion || p.eventSnapshotId !== eventSnapshotId ||
-          p.turnDigest !== turn.digest || p.reviewMode !== "pi" || input.fixture ||
+          p.turnDigest !== turn.digest || p.reviewMode !== "pi" ||
           !p.reviewerSnapshotId || !HASH.test(p.reviewerSnapshotId) ||
           !(await openSkillSnapshot(p.reviewerSnapshotId)) ||
           !p.reviewerSession || !p.reviewerSessionSha256 ||
@@ -291,7 +293,7 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
     const ref = { nonce: saved.nonce, digest: saved.digest };
     const prior = await readEventOnlyOmission(job, milestone, ref, { eventHead,
       eventSnapshotId, planDigest: sha256(plan), validatorVersion: job.validatorVersion });
-    if (prior.reviewHead !== reviewHead || prior.reviewMode !== (input.fixture ? "fixture" : "pi") ||
+    if (prior.reviewHead !== reviewHead || prior.reviewMode !== ("pi") ||
         prior.planVersion !== plan.version || JSON.stringify(prior.eventIds) !== JSON.stringify(eventIds) ||
         JSON.stringify(prior.sourceHashes) !== JSON.stringify(await sourceHashes(job, report, milestone, eventIds)))
       throw Error("Interrupted Event-only decision no longer matches this exact assignment.");
@@ -307,7 +309,7 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
   let snapshotId: string | null = null, session: string | null = null;
   let evidence: string[] = [];
   let rejectedFindings: unknown[] | null = null;
-  if (!input.fixture) {
+  {
     const config = input.skillsSource
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource,
           skillDirs: [], requiredSkills: ["nt-narrative-review", "nt-catalog"] }
@@ -395,7 +397,7 @@ export async function decideEventOnlyOmission(job: JobStartResult, plan: Plan,
     eventHead, reviewHead, milestoneId: milestone, eventIds, planVersion: plan.version,
     planDigest, turnDigest: turn.digest, validatorVersion: job.validatorVersion,
     eventSnapshotId, reviewerSnapshotId: snapshotId,
-    reviewMode: input.fixture ? "fixture" : "pi",
+    reviewMode: "pi",
     reviewerSession: session,
     reviewerSessionSha256: session ? await sessionDigest(job, session) : null,
     evidence, sourceHashes: hashes };

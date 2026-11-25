@@ -25,18 +25,21 @@ import { test } from "node:test";
 import { createControllerServer, SandboxController, type ControllerConfig } from "../web/src/sandbox-controller.js";
 import { SandboxClient } from "../src/sandbox-client.js";
 import { startStoryJob } from "../src/job.js";
-import { runFoundationJob } from "../src/foundation.js";
 import { runArchitectureJob } from "../src/architecture.js";
 import { runAuthorAction } from "../src/author-updates.js";
 import { inspectTrustedApproval, requestTrustedApproval } from "../src/trusted-approval.js";
-import { runCharacterWorldJob } from "../src/character-world.js";
-import { runEventTestAssignment as runEventWorkItem } from "./event-round-fixture.js";
 import { hasUserProtectedDecision } from "../src/foundation-record.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
 import { readIndependentReview } from "../src/checkpoint-assurance.js";
 import { inspectRejectedRepair } from "../src/rejected-review-repair.js";
 import { removeTestTree } from "./helpers.js";
 import { runStoryGeneration } from "../src/generation.js";
+import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
+import { withJobModelRuntime } from "../src/model-runtime.js";
+import { scriptedModel, scriptedStoryRuntime } from "./c03-scripted-story-helpers.js";
+import { archiveStages } from "./support/scripted-archive-stages.js";
+import { archiveContract } from "./support/current-story-start.js";
 
 const repair = process.env.NT_LIVE_REVIEW_REPAIR === "1";
 const live = process.env.NT_LIVE_HOSTED_SANDBOX === "1" || repair;
@@ -183,59 +186,30 @@ test(repair
       assert.match(repairedText, /11:47/);
       assert.ok(hasUserProtectedDecision(repairedText));
     }
-    if (!resumeDir && !repair) {
-      const foundation = resumeDir
-        ? JSON.parse(readFileSync(join(job.stateDir, "foundation.json"), "utf8")) as {
-          stage: string; piSessionFile: string; skillReads: string[]; commitSha: string;
-        }
-        : await runFoundationJob({
-          story, job: id, task: "Write an intimate mystery about an archivist on a stranded midnight train. Invent unspecified details.",
-          envelope: "Dialogue-led visual novel; a small cast and two reusable locations; no fixed ending count.",
+    if (!repair) {
+      const task = "A missing archive witness; invent unspecified details";
+      const contract = archiveContract;
+      const turn = planWholeStory(task, contract, job.baseSha);
+      if (!resumeDir) await saveJobTurnPlan(job, turn);
+      const generate = () => runStoryGeneration(resumeDir
+        ? { story, job: id, action: "resume", pauseAfter: includeStages ? "event" : "architecture" }
+        : { story, job: id, action: "start", task, contract,
           skillsSource: source, validatorSource: source,
-          provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL, fixture: !live,
-        });
-      assert.equal("stage" in foundation ? foundation.stage : foundation.status, "committed");
-      assert.ok((foundation as { skillReads?: unknown[] }).skillReads?.length! >= 5);
-      const foundationFile = join(job.worktreeStoryRoot, "creative-direction/foundation.md");
-      assert.ok(hasUserProtectedDecision(readFileSync(foundationFile, "utf8")));
-
-      const architecture = await runArchitectureJob({
-        story, job: id, action: "run", fixture: !live,
-        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL,
-        skillsSource: source, validatorSource: source,
-        contract: {
-          scope: includeStages
-            ? { kind: "partial", depth: "interactive", targets: ["arc.truth", "milestone.disclosure"],
-                branches: ["trust-route", "confrontation-route"] }
-            : { kind: "partial", depth: "architecture", targets: [], branches: [] },
-          constraints: ["Preserve the archivist and stranded train mystery"],
-          envelope: { presentation: "Dialogue-led visual novel",
-            hardLimits: ["Small cast", "Two reusable locations"], preferences: [] },
-        },
-      });
-      assert.equal(architecture.status, includeStages ? "architecture-committed" : "complete-in-scope", JSON.stringify(architecture));
-      assert.ok(existsSync(join(job.worktreeStoryRoot, "arcs")));
-      assert.ok(existsSync(join(job.worktreeStoryRoot, "milestones")));
-      assert.ok((architecture as { skillReads?: unknown[] }).skillReads?.length === 6 || !live,
-        "Real Architecture Pi must read all pinned skill references");
-    }
-    if (includeStages && !repair) {
-      const foundations = await runCharacterWorldJob({ story, job: id, action: "run", fixture: !live,
-        skillsSource: source, validatorSource: source,
-        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
-      assert.equal(foundations.status, "foundations-committed", JSON.stringify(foundations));
-      // Real specialists choose canonical IDs themselves; never require fixture names.
-      const markdown = (directory: string) => readdirSync(join(job.worktreeStoryRoot, directory))
-        .filter(name => /^[a-z][a-z0-9-]*\.md$/.test(name));
-      assert.ok(markdown("characters").length >= 2);
-      assert.ok(markdown("world-entities").length >= 1);
-      const event = await runEventWorkItem({ story, job: id, action: "run", fixture: !live,
-        milestone: "milestone.disclosure", skillsSource: source, validatorSource: source,
-        provider: process.env.NT_PROVIDER, model: process.env.NT_MODEL });
-      assert.equal(event.status, "event-cluster-committed", JSON.stringify(event));
-      assert.ok(markdown("events").length >= 1);
-      // No model shell access to the host is necessary for either specialist.
-      assert.equal((await client.inspect(id)).status, "running");
+          provider: live ? process.env.NT_PROVIDER : scriptedModel.provider,
+          model: live ? process.env.NT_MODEL : scriptedModel.id,
+          pauseAfter: includeStages ? "event" : "architecture" });
+      const generated = live ? await generate() : await withJobModelRuntime(
+        (await scriptedStoryRuntime(archiveStages(job, turn))).runtime, generate);
+      assert.equal(generated.status, "paused", JSON.stringify(generated));
+      const points = await inspectRecoveryCheckpoints(job);
+      assert.ok(points.some(p => p.workItem === "foundation" && p.eligible));
+      assert.ok(points.some(p => p.workItem === "global-architecture" && p.eligible));
+      assert.ok(hasUserProtectedDecision(readFileSync(join(job.worktreeStoryRoot,
+        "creative-direction/foundation.md"), "utf8")));
+      if (includeStages) {
+        assert.ok(points.some(p => p.workItem.startsWith("event-") && p.eligible));
+        assert.equal((await client.inspect(id)).status, "running");
+      }
     }
     if (!resumeDir && !repair) {
       // Exercise a genuine suspended author-update interrupt against the same

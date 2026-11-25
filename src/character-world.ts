@@ -415,79 +415,7 @@ async function publishHead(job: JobStartResult, previous: string, commit: string
   await persist(file, { version: 1, jobId: job.jobId, headSha: commit, workItemId });
   await finalizeRecoveryCheckpoint(job, workItemId, previous, commit);
 }
-async function fixtureAuthor(job: JobStartResult, unit: Unit, assign: FoundationAssignment): Promise<SpecialistEvidence> {
-  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === unit.domain + "-conflict") {
-    return { claimedPaths: [], skillReads: [], architecturalConflicts: [
-      "The approved architecture assigns a prerequisite to another specialist and cannot be fulfilled by " + unit.domain,
-    ], laterObligations: ["Controller must verify the original assigned owner before any new work"] };
-  }
-  const write = async (folder: string, slug: string, type: string, fields: string, body: string) => {
-    const file = join(job.worktreeStoryRoot, folder, slug + ".md");
-    await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, `---\nschema: '0.1'\ntype: ${type}\nid: ${type}.${slug}\ntitle: "${slug}"\nstatus: draft\ndecisions: []\n${fields}\n---\n\n${body}\n`, { flag: "wx" });
-    return folder + "/" + slug + ".md";
-  };
-  let paths: string[];
-  if (unit.domain === "world") {
-    paths = [
-      await write("world-entities", "archive", "world-entity",
-        'description: "A public archive whose restricted ledger records all evidence transfers"',
-        "The archive is accessible to both witnesses, but the sealed ledger is available only to its custodian. That restriction creates the need for trust rather than a new on-screen Room."),
-      await write("facts", "evidence-concealed", "fact", "initial: true",
-        "At the start, Neri concealed a ledger entry that would implicate a trusted official. The truth does not depend on whether Ada has learned it."),
-    ];
-  } else {
-    paths = [
-      await write("characters", "ada", "character",
-        'motivation: "Learn why the witness disappeared without condemning an innocent friend"\ninitial_knowledge:\n  - fact: fact.evidence-concealed\n    value: disbelieves',
-        "Ada is an investigator whose practiced skepticism conceals a fear of losing Neri. Her questions are precise, yet she avoids accusing a friend without proof. A later disclosure may change her belief; no initial knowledge is retroactively adjusted."),
-      await write("characters", "neri", "character",
-        'motivation: "Protect a vulnerable witness while deciding whether to confess the concealment"\ninitial_knowledge:\n  - fact: fact.evidence-concealed\n    value: knows',
-        "Neri maintains the archive ledger and knows which entry was hidden. Their restrained candor conflicts with Ada's demand for answers. Whether Neri shares the proof remains a branch-dependent future Event."),
-      await write("relationships", "ada-neri", "relationship",
-        "characters: [character.ada, character.neri]\ninitial: wary",
-        "Ada and Neri were once collaborators, but the missing witness made their mutual trust fragile. Concealment threatens the bond; a confession or confrontation might alter it only through later Events."),
-    ];
-    const arcs = assign.sourcePaths.filter(p => p.startsWith("arcs/"));
-    for (const arc of process.env.NT_FOUNDATIONS_FIXTURE_CASE === "one-arc-only" ? arcs.slice(0, 1) : arcs) {
-      const file = join(job.worktreeStoryRoot, arc);
-      const old = await readFile(file, "utf8");
-      const before = old.match(/^characters:\s*\[([^\]\n]*)\]/m);
-      if (!before) throw new Error("Fixture Arc has no characters list to link.");
-      const prior = before[1]!.split(",").map(v => v.trim()).filter(Boolean);
-      const merged = [...new Set([...prior, "character.ada", "character.neri"])];
-      const block = ["block-links", "arc-retcon"].includes(process.env.NT_FOUNDATIONS_FIXTURE_CASE ?? "");
-      const linked = old.replace(/^characters:\s*\[[^\]\n]*\]/m,
-        block ? "characters:\n" + merged.map(id => "  - " + id).join("\n") : "characters: [" + merged.join(", ") + "]");
-      await writeFile(file, process.env.NT_FOUNDATIONS_FIXTURE_CASE === "arc-retcon"
-        ? linked.replace("The inquiry puts a friendship under pressure.", "The inquiry eliminates the player's loyalty choice.")
-        : linked);
-      paths.push(arc);
-    }
-  }
-  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === "mismatch") paths.push("facts/not-authored.md");
-  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === "retcon") {
-    const foundation = assign.sourcePaths.find(p => p.startsWith("creative-direction/"))!;
-    const target = join(job.worktreeStoryRoot, foundation);
-    const original = await readFile(target, "utf8");
-    await writeFile(target, original.replace(
-      'statement: "Ada must be allowed to defend Neri"',
-      'statement: "Ada must never defend Neri"'));
-  }
-  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === "dangling" && unit.domain === "character") {
-    const target = join(job.worktreeStoryRoot, "characters/ada.md");
-    await writeFile(target, (await readFile(target, "utf8")).replace("fact.evidence-concealed", "fact.nonexistent"));
-  }
-  if (process.env.NT_FOUNDATIONS_FIXTURE_CASE === "duplicate-id" && unit.domain === "character") {
-    const original = await readFile(join(job.worktreeStoryRoot, "characters/ada.md"), "utf8");
-    await writeFile(join(job.worktreeStoryRoot, "characters/ada-copy.md"), original, { flag: "wx" });
-    paths.push("characters/ada-copy.md");
-  }
-  return { claimedPaths: paths, skillReads: [], architecturalConflicts: [],
-    laterObligations: unit.domain === "world"
-      ? ["A later Event must establish who learns the concealed evidence; objective truth remains initially true."]
-      : ["Bind disclosure and any Relationship trust change to actual Event branches, not the initial state."] };
-}
+
 /** Immutable negative Foundation source identity; no approval or writer lease. */
 function foundationConflictDigest(receipt: Receipt, unit: Unit) {
   return digest(JSON.stringify({
@@ -850,6 +778,8 @@ export async function inspectRecoverableCharacterWorldCommit(job: JobStartResult
 }
 
 export async function runCharacterWorldJob(input: CharacterWorldOptions) {
+  if (input.fixture && input.action !== "inspect") throw Error("Structural fixture execution is retired; use an authenticated Generation assignment.");
+  if (input.action === "reconcile" || input.action === "run" && !input.round) throw Error("Foundations execution requires the original Generation assignment.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const parent = job.stateDir;
   const file = join(parent, "character-world.json");
@@ -907,7 +837,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         branch: job.branch, worktreeRoot: job.worktreeRoot, threadId: job.threadId,
         architectureHead: arch.expectedHead, planVersion: plan.version, contractDigest,
         ...(input.steering ? { steeringDigest: digest(input.steering) } : {}),
-        worker: input.fixture ? "fixture" : "pi",
+        worker: "pi",
         provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
         units: [{ id: "world-foundations", domain: "world", phase: "pending" },
           { id: "character-foundations", domain: "character", phase: "pending" }] };
@@ -932,7 +862,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     if (readRecoveryFork(job) && receipt.units.some(unit => unit.phase === "pending") &&
         receipt.units.every(unit => unit.phase === "pending" && !unit.beforeHead ||
           unit.phase === "committed" && commitOrigin(job, unit.id, unit.commitSha!).jobId !== job.jobId)) {
-      receipt.worker = input.fixture ? "fixture" : "pi";
+      receipt.worker = "pi";
       receipt.provider = input.provider ?? "openai";
       receipt.model = input.model ?? "gpt-6-luna";
       await persist(file, receipt);
@@ -985,33 +915,6 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
     const validate = async (head: string) => validateStoryJob(
       await startStoryJob({ story: input.story, job: input.job }, false),
       validatorSource, { ...job, baseSha: head });
-    if (input.action === "reconcile") {
-      const index = receipt.units.findIndex(unit => unit.phase !== "committed");
-      const unit = receipt.units[index];
-      if (!unit || unit.phase !== "writing" || !input.recoveryDigest ||
-          !/^[a-f0-9]{64}$/.test(input.recoveryDigest) ||
-          !recovery.candidate || recovery.candidate.unit !== unit.id ||
-          recovery.candidate.digest !== input.recoveryDigest) {
-        throw new Error("Foundations reconciliation requires an interrupted writer and exact inspected --digest; Git, Pi or file inventory is unsafe.");
-      }
-      const before = index ? (unit.beforeHead ?? recovery.characterBeforeHead ??
-        receipt.units[index - 1]!.commitSha) : (receipt.startHead ?? receipt.architectureHead);
-      if (!before) throw new Error("Missing parent work-item commit.");
-      assertHead(job, before);
-      const preReport = reportOf(await validate(before), before);
-      const assign = deriveFoundationAssignment(unit.domain, plan, preReport,
-        receipt.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/")));
-      const paths = await auditPaths(job, unit, assign, recovery.candidate.paths);
-      const reviewed = await fileDigest(job, paths);
-      if (reviewed !== input.recoveryDigest) throw new Error("Foundation review digest no longer matches actual file bytes.");
-      unit.claimedPaths = paths;
-      unit.paths = paths;
-      unit.digest = reviewed;
-      unit.reviewedRecoveryDigest = reviewed;
-      unit.phase = "authored";
-      await persist(file, receipt);
-      return { ...output(job, receipt), status: "authored", recovery: await inspectRecovery(job, receipt) };
-    }
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
       const prior = index ? state.units[index - 1]!.commitSha : (state.startHead ?? state.architectureHead);
@@ -1118,8 +1021,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         unit.phase = "writing";
         await persist(file, state);
         let evidence: SpecialistEvidence | SpecialistChoiceProposal | { round: AssignmentRoundResult };
-        if (state.worker === "fixture") evidence = await fixtureAuthor(job, unit, assign);
-        else {
+
           if (!resumingInvocation) {
             unit.invocationChoiceId = choice?.id;
             unit.invocationTurnDigest = turnEvidence?.digest ?? null;
@@ -1171,7 +1073,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
               effect: () => ownedEffect(job, unit, assign),
             }, choice ?? (resumingInvocation && unit.invocationChoiceId
               ? await inspectSpecialistChoice(job, unit.invocationChoiceId) : undefined), input.round!.command);
-        }
+
         if ("round" in evidence) return evidence.round;
         if ("authorQuestion" in evidence) {
           // Only an independently audited safe draft can be suspended.

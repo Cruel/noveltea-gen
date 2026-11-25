@@ -68,23 +68,6 @@ const strip = (x: Record<string, unknown>): Record<string, unknown> => {
   const { phase: _phase, ...rest } = x;
   return rest;
 };
-export function fixtureTurnIdentity(input: Identity): string | null {
-  // Fixtures have no user Turn or Pi authority. Stable source identity is
-  // derived only for fixture graph certification, never for live execution.
-  if (!input.fixture || input.turnDigest !== null) return null;
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        "noveltea-fixture-turn/v1",
-        input.jobId,
-        input.jobThreadId,
-        input.graphThreadId,
-        input.task,
-        input.contract,
-      ]),
-    )
-    .digest("hex");
-}
 function originalInput(channel: Channel, input: RecoverySource): boolean {
   return input.channel === channel && !Object.hasOwn(input.input, "phase");
 }
@@ -141,10 +124,7 @@ function originalMatchesCase(s: RecoverySource, c: RecoveryCase): boolean {
       !!op.source &&
       op.source.jobId === c.origin.jobId &&
       op.source.threadId === c.origin.graphThreadId &&
-      // A non-Pi fixture's original operation has no signed Turn. Its
-      // lifecycle uses a deterministic, request-bound fixture fingerprint
-      // instead; live admission still requires the exact original Turn.
-      (op.source.turnDigest === c.origin.turnDigest || op.source.turnDigest === null) &&
+      op.source.turnDigest === c.origin.turnDigest &&
       op.source.planVersion === c.origin.planVersion &&
       op.source.headSha === c.origin.sourceHeadSha &&
       (op.evidence?.assignmentId ?? null) === c.origin.assignmentId &&
@@ -243,7 +223,7 @@ function derive(
   observation: RecoveryCase["observation"];
   effect: RecoveryCase["effect"];
 } | null {
-  const turn = identity.turnDigest ?? fixtureTurnIdentity(identity);
+  const turn = identity.turnDigest;
   if (!turn || raw.phase !== "assessment") return null;
   const common = {
     jobId: identity.jobId,

@@ -345,3 +345,35 @@ Whole-story structural fixtures, their remaining standalone paths, and Studio fi
 
 The older CLI structural-fixture execution branches and their remaining direct
 specialist tests still require migration. This is not final R14K certification.
+
+#### R14K final execution cutover (#271)
+
+This supersedes the incremental migration notes above. Historical receipt
+formats remain readable for inspection; they do not provide an alternative
+execution contract. The authority is the local immutable Turn, original
+owner/graph identity, current approved plan, and production assignment
+lifecycle. A deterministic provider cannot substitute another lifecycle.
+
+| Source / surface | Keep, adapt or retire; effect boundary |
+| --- | --- |
+| [CLI](../src/cli.ts), [Studio input](../src/studio-input.ts), [Generation admission](../src/generation.ts) | **Retire** standalone Foundation discovery/writing, Architecture and Foundations run/manual reconcile, Event/Interactive/Composition/Review writers, direct repair and idea placement. Refuse fixture execution and old orchestration policy before invoking a Story writer. Keep job setup, native validate, inspect/report, explicit human revision/approval and Pi budget/control operations. Architecture proposal/approval requires the actual local Turn and exact existing approval protocol; it does not invoke a specialist. |
+| [Turn evidence](../src/turn-plan-evidence.ts), [owner verification](../src/generation-owner.ts), [Studio start](../web/src/lib/fixture-jobs.server.ts), [resume](../web/src/lib/generation-controls.server.ts), [worker](../web/src/agent-runner.ts) | **Adapt** all executable admissions to current Turn objective, exact source and digest; no missing-Turn fixture exception or ownerless dispatch. Keep original queue, owner, credential and source-bound provider reconciliation. A prepared replacement Turn fixes the task and contract; changing model/budget does not replace it. |
+| [Discovery](../web/src/lib/discovery-graph.server.ts), [handoff](../web/src/lib/story-chat-discovery.server.ts), [Foundation](../src/foundation.ts) | **Keep** authorized human/bootstrap and approved Foundation handoff. Retire the separate collaborative writer/discovery fallback; old questions and receipts are evidence, not new permission. |
+| [Generation parent](../src/generation.ts), [assignment lifecycle](../src/generation-assignment-lifecycle.ts), [operation strategy](../src/generation-operation-strategy.ts), [recovery graph](../src/generation-recovery-graph.ts), [inspection](../src/generation-recovery-inspection.ts) | **Adapt** to one actual scheduler, Review adapter and original source-bound Case. Remove fixture-specific identities, missing-pin alternate focused dispatch and whole-loop repair. No caller-supplied Review bypass. A proven controller-only scheduling recheck discharges its original case with no additional model charge. |
+| [Architecture](../src/architecture.ts), [Character/World](../src/character-world.ts), [Event](../src/event-work.ts), [Interactive](../src/interactive-work.ts), [Composition](../src/composition-work.ts), [focused work](../src/focused-work.ts), [idea placement](../src/idea-placement.ts), [narrative review](../src/narrative-review.ts) | **Adapt** production adapters, retain native catalog, scoped tools, Git path/diff/manifest, exact invocation and independent Review gates. Remove structural fixture authors and obsolete final-editorial/repair-controller loops. Refuse a standalone writer round. Historical worker labels are retained only where needed to identify non-executable evidence. |
+| [Milestone prerequisites](../src/cross-domain-prerequisite-controller.ts), [Event grant](../src/event-milestone-repair.ts), [dependent revalidation](../src/selective-revalidation-controller.ts), [dependent work](../src/selective-revalidation-work.ts), [fulfillment](../src/turn-fulfillment.ts) | **Keep** independent native, causal and final-objective checks. Remove fixture permission. A commitless Event-only obligation requires its original independently reviewed omission seal; it does not fabricate a checkpoint. Inherited committed dependencies use original sealed native and review proof, never a replayable invocation. Negative revalidation of inherited/commitless work cannot grant an old writer; it needs authorized owner amendment. |
+| [Fork collection](../src/recovery-fork.ts), [immutable fork evidence](../src/recovery-fork-state.ts), [replacement Turn](../web/src/lib/replacement-turn.server.ts) | **Adapt** current fork admission to carry exact original native checkpoints with existing commit and Review evidence. A new Turn owns only future work; previously reviewed Choice is not dispatched as a writer. Inherited Event proof identifies its selected fields, not a general writer grant. Composition closeout is admitted by the new Turn and independently revalidated. Preserve old source, history cutoff, same-Thread retry and stale/verified rewind refusal. |
+| [Cutover negatives](../test/recovery-cutover.test.ts), [current archive](../test/support/scripted-archive-stages.ts), [current graph](../test/generation.test.ts), [focused graph](../test/focused-generation.test.ts), [adaptive protocol](../test/adaptive-protocol-scenario.ts), [native domain tests](../test/domain-cutover.test.ts), [Studio recovery forks](../web/test/current-checkpoint-fork.test.ts) | **Adapt** tests to actual authenticated Turn, SQLite graph, native validator, Git commits and independently reviewed output. Script only model responses and explicit sandbox/provider transport. Replace obsolete standalone structural-writer scenarios with native domain checks and parent/child recovery regressions; remove duplicate legacy orchestration. Non-Story tagline and disposable integration preview fixtures remain separate read-only/noncanonical tools, not Story execution modes. |
+
+The source gate continues to fingerprint the reviewed actual production
+dispatch and prerequisite functions. R14K does not certify paid provider
+behavior or the later integrated qualification (#272/#260).
+
+The former credential-gated standalone Character/World, Event,
+Event-to-Character dependency, Interactive and narrative-review tests were
+retired with their obsolete entrypoints. Their native/protocol checks are
+covered by the current deterministic suite; live narrative outcomes require
+the subsequent integrated qualification. The hosted sandbox smoke now uses
+a scripted provider on the same authenticated Generation graph and real
+rootless Docker controller. The cooperative live interruption test also
+starts an authenticated Turn; paid interruption is not claimed here.

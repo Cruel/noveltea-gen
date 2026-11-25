@@ -15,7 +15,6 @@ import { git as jobGit } from "./ideas.js";
 import type { RecoveryDecision, RecoveryEvidence, RecoveryLifecycle, RecoveryOrigin } from "./generation-recovery-contract.js";
 import { verifyRecoveryCheckpoint } from "./generation-recovery-lifecycle.js";
 import {
-  fixtureTurnIdentity,
   assertRecoverySources,
   projectRecovery,
   type RecoverySource,
@@ -188,17 +187,7 @@ export async function inspectModernGenerationRecovery(
   } catch {
     inputsValid = false;
   }
-  const expectedTurn =
-    request.turnPlanDigest ??
-    fixtureTurnIdentity({
-      jobId: job.jobId,
-      jobThreadId: job.threadId,
-      graphThreadId: threadId,
-      turnDigest: null,
-      fixture: request.fixture,
-      task: request.task,
-      contract: request.contract,
-    });
+  const expectedTurn = request.turnPlanDigest ?? null;
   const sourceFor = (id: string) => originalSources?.find((s) => s.caseId === id);
   const authenticate = async (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) => {
     if (
@@ -258,15 +247,6 @@ export async function inspectModernGenerationRecovery(
       } catch {
         return false;
       }
-    }
-    if (!request.turnPlanDigest && request.fixture) {
-      if (origin.turnDigest !== expectedTurn) return false;
-      const head = await trustedHead(job);
-      if (original.discharged.some(entry => entry.case.id === caseFile.id)) {
-        try { jobGit(job, "merge-base", "--is-ancestor", origin.sourceHeadSha, head); return true; }
-        catch { return false; }
-      }
-      return head === origin.sourceHeadSha;
     }
     const operation = source.channel === "operationRecovery" ? source.input as unknown as GenerationOperationRecovery : null;
     if (operation?.evidence.assignmentFailure) {

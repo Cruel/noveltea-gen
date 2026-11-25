@@ -6,7 +6,7 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { runArchitectureJob, type CompletionContract } from "../src/architecture.js";
+import { type CompletionContract } from "../src/architecture.js";
 import { createGenerationGraph, runStoryGeneration } from "../src/generation.js";
 import { configurePiPolicy, inspectPiPolicy } from "../src/job-pi-policy.js";
 import { readAdaptiveState, saveAdaptiveState } from "../src/adaptive-state.js";
@@ -14,7 +14,7 @@ import { setJobControl } from "../src/job-control.js";
 import { startStoryJob } from "../src/job.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { inspectRecoveryCheckpoints } from "../src/recovery-checkpoints.js";
-import { reviewBoundedAssignments } from "../src/semantic-assignment-review.js";
+import type { TurnEvidence } from "../src/turn-plan-evidence.js";
 import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
 import { planWholeStory } from "../web/src/lib/turn-plan.js";
 
@@ -25,27 +25,42 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
   preCallRefusal?: "head" | "model" | "pause" | "cancel";
   story: string; id: string; task: string; source: string; scoped: string; contract: CompletionContract;
   provider: string; model: string; calls: Array<{ tools: string[]; messages: readonly unknown[] }>;
+  bootstrap(job: Awaited<ReturnType<typeof startStoryJob>>, turn: TurnEvidence, calls: Array<{ tools: string[]; messages: readonly unknown[] }>): Promise<ModelRuntime>;
   runtime(script: (index: number) => string | string[]): Promise<ModelRuntime>;
 }) {
   const { story, id, task, source, contract, provider, model, calls } = input;
   const job = await startStoryJob({ story, job: id, worktreeCacheRoot: input.scoped });
   const turn = planWholeStory(task, contract, job.baseSha, id);
   writeFileSync(join(job.stateDir, "turn-plan.json"), JSON.stringify(turn));
-  await runArchitectureJob({ action: "run", story, job: id, task, contract, fixture: true, skillsSource: source });
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.workItem === "global-architecture" && p.eligible);
-  assert.ok(point?.assurance);
-  if (point.semanticReview === "required-pending") await reviewBoundedAssignments(job, [point], async packet => ({
-    sourceDigest: packet.sourceDigest, verdict: "pass", findings: [], evidence: packet.items.map(item => ({
-      commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: item.assurance.changedPaths[0]!,
-      line: 1, explanation: "Deterministic Architecture prerequisite only; not a live certification.",
-    })),
-  }), "adaptive-protocol-fixture", true);
   const config = { configurable: { thread_id: job.threadId + ":generation" } };
-  const reads = [...requiredOrchestratorSkillReads("autonomous")];
-  const rt = await input.runtime(i => {
-    if (i === 0 || i === 2) return reads;
-    if (i === 1) return JSON.stringify({ sourceSha: job.baseSha, turnDigest: turn.digest,
-      assignments: turn.assignments.map(a => ({ id: a.id, reason: "Verified scoped assignment" })) });
+  const request = { story, job: id, task, contract, fixture: false, skillsSource: source, provider, model,
+    turnPlanDigest: turn.digest, orchestrationPolicy: "explicit" as const };
+  const previous = process.env.NT_ADAPTIVE_PLANNING;
+  process.env.NT_ADAPTIVE_PLANNING = "0";
+  const file = join(job.stateDir, "generation.sqlite");
+  let saver = SqliteSaver.fromConnString(file);
+  try {
+    let graph = createGenerationGraph(saver, "cli");
+    const bootstrapCalls: typeof calls = [];
+    const bootstrap = await input.bootstrap(job, turn, bootstrapCalls);
+    const start = await withJobModelRuntime(bootstrap, () => graph.invoke({ request, pauseAfter: "architecture" }, config));
+    assert.equal(start.status, "paused", start.reason ?? undefined);
+    const point = (await inspectRecoveryCheckpoints(job)).find(p => p.workItem === "global-architecture" && p.eligible);
+    assert.ok(point?.assurance);
+    assert.equal(point.semanticReview, "passed");
+    const preludeCalls = (await inspectPiPolicy(job)).budget.modelCalls;
+    calls.push(...bootstrapCalls.slice(0, 2));
+    assert.equal(calls.length, 2);
+    process.env.NT_ADAPTIVE_PLANNING = "1";
+    await graph.updateState(config, { status: "running", pauseAfter: null, active: null, result: null }, "schedule");
+    const pinned = (await graph.getState(config)).values;
+    assert.equal(pinned.planVersion, 1);
+    assert.equal(pinned.active, null);
+    assert.match(readFileSync(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"), /planning:/);
+    const reads = [...requiredOrchestratorSkillReads("autonomous")];
+  const rt = await input.runtime(index => {
+    const i = index + 2;
+    if (i === 2) return reads;
     if (input.rejectProposal && i === 3) return JSON.stringify({
       sourceSha: point.commitSha, turnDigest: turn.digest, beforeVersion: 1,
       reason: "Original adaptive response proposed an invalid, empty pending order",
@@ -85,20 +100,6 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
     return JSON.stringify({ sourceSha: point.commitSha, turnDigest: turn.digest, beforeVersion: 1,
       reason: "Preserve the approved pending order", actions: [], order: JSON.parse(match[1]!) });
   });
-  const previous = process.env.NT_ADAPTIVE_PLANNING;
-  process.env.NT_ADAPTIVE_PLANNING = "1";
-  const file = join(job.stateDir, "generation.sqlite");
-  let saver = SqliteSaver.fromConnString(file);
-  try {
-    let graph = createGenerationGraph(saver, "cli");
-    const request = { story, job: id, task, contract, fixture: false, skillsSource: source, provider, model,
-      turnPlanDigest: turn.digest, orchestrationPolicy: "explicit" as const };
-    const start = await withJobModelRuntime(rt, () => graph.invoke({ request }, { ...config, interruptAfter: ["schedule"] }));
-    assert.equal(start.status, "running", start.reason ?? undefined);
-    await graph.updateState(config, { completedStages: [
-      { stage: "foundation", status: "committed", headSha: job.baseSha },
-      { stage: "architecture", status: "architecture-committed", headSha: point.commitSha, planVersion: 1 },
-    ], planVersion: 1 }, "schedule");
     if (input.rejectProposal) {
       const admitted = await withJobModelRuntime(rt, () => graph.invoke(null,
         { ...config, interruptBefore: ["assess_recovery"] }));
@@ -126,7 +127,7 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
         assert.equal(inspected.recoveryInspection?.phase, "fenced");
         assert.equal(calls.length, 5);
       }
-      assert.equal((await inspectPiPolicy(job)).budget.modelCalls, 5,
+      assert.equal((await inspectPiPolicy(job)).budget.modelCalls, preludeCalls + 3,
         "Original source planner and C05 diagnosis must both be metered once");
       return;
     }
@@ -277,7 +278,7 @@ export async function exerciseAdaptiveRecoveryGraph(input: {
       return;
     }
     const assessed = await withJobModelRuntime(rt, () => graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
-    assert.equal(assessed.recoveryLifecycle?.phase, "correcting", assessed.reason ?? undefined);
+    assert.equal(assessed.recoveryLifecycle?.phase, "correcting", JSON.stringify({ reason: assessed.reason, active: assessed.active, lifecycle: assessed.recoveryLifecycle, calls: calls.map(c => c.tools) }));
     assert.equal(assessed.recoveryLifecycle?.decision?.action, "known-correction");
     assert.equal(assessed.recoveryLifecycle?.active?.origin.sourceHeadSha, point.commitSha);
     assert.equal(assessed.recoveryLifecycle?.assessorPending, true,

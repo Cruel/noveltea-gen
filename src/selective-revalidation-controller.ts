@@ -10,7 +10,9 @@ import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { GenerationInventory, ExecutionItem } from "./generation-plan.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
+import { inheritedReviewedCheckpoint, readRecoveryFork } from "./recovery-fork-state.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
+import { readEventOnlyOmission, type EventOnlyPayload } from "./interactive-event-only.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { verifyPlanHistory } from "./architecture.js";
 import { isFocusedScope } from "./focused-scope.js";
@@ -54,7 +56,9 @@ async function sourceReceipt(job: JobStartResult, item: ExecutionItem,
   // These are independently written and sealed origin work receipts. Historical
   // read-only context cannot be inferred from the latest mutable Story tree.
   const slug = item.milestone?.slice(10);
-  const read = async (path: string): Promise<Record<string, any> | null> => {
+  const fork = readRecoveryFork(job);
+  const read = async (path: string, inherited = point.jobId !== job.jobId): Promise<Record<string, any> | null> => {
+    if (inherited) return fork?.receipts[path] ?? null;
     try {
       const parsed = JSON.parse(await readFile(join(job.stateDir, path), "utf8"));
       return parsed.jobId === job.jobId ? parsed as Record<string, any> : null;
@@ -75,7 +79,8 @@ async function sourceReceipt(job: JobStartResult, item: ExecutionItem,
     if (!entry || !unit || unit.commitSha !== point.commitSha ||
         entry.planVersion !== item.planVersion || !entry.eventHead) return null;
     const written = recordPath(unit.paths);
-    const event = await read("event-items/" + slug + ".json");
+    const event = await read("event-items/" + slug + ".json",
+      fork?.commits["event-" + slug]?.sha === entry.eventHead);
     const eventSources = recordPath(event?.assignment?.sourcePaths);
     const eventPaths = recordPath(event?.paths);
     // A Choice or Puzzle consumes its reviewed Event/Milestone source. The
@@ -108,6 +113,7 @@ export interface AuthenticatedSelectiveImpact {
   originalPoints: Record<string, RecoveryInspection[]>;
   /** Original authenticated, *passed* reviewer proofs; no summaries invented. */
   reviewedSources: Record<string, ReviewedConsumerEvidence>;
+  originalOmissions: Record<string, EventOnlyPayload>;
 }
 
 /** Called by a trusted controller holding the original job's writer lease.
@@ -123,8 +129,20 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
     throw Error("Reviewed upstream correction lost its original Turn authority.");
   const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p =>
     p.eligible && p.assurance?.turnDigest === turn.digest);
+  const inheritedProofs = Object.entries(readRecoveryFork(job)?.commits ?? {}).flatMap(([id, entry]) => {
+    const inherited = inheritedReviewedCheckpoint(job, id, entry.sha);
+    return inherited && !checkpoints.some(p => p.workItem === id)
+      ? [inherited] : [];
+  });
+  // These are original read-only proofs in the sealed fork bundle, not local
+  // checkpoint publications or a continuation grant to the old writer.
+  checkpoints.push(...inheritedProofs.map(entry => ({
+    ...entry.proof, eligible: true, reason: null,
+    semanticReview: entry.status,
+  } as RecoveryInspection)));
   const sources: Record<string, ReviewedConsumerEvidence> = {};
   const originalPoints: Record<string, RecoveryInspection[]> = {};
+  const originalOmissions: Record<string, EventOnlyPayload> = {};
   for (const item of inventory.items.filter(i => i.status === "verified")) {
     const matches = workItems(item);
     const points = checkpoints.filter(point => matches.includes(point.workItem));
@@ -160,6 +178,32 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
         status: "not-required", sourcePaths: [], sourcePrecedesUpstream: true };
       continue;
     }
+    // A reviewed Event-only omission owns no Git write. Authenticate the
+    // original two commitless units and the original source hashes instead of
+    // treating the missing specialist checkpoint as a missing writer.
+    if (item.stage === "interactive" && item.milestone && !points.length) {
+      const receipt = JSON.parse(await readFile(join(job.stateDir, "interactive-items",
+        item.milestone.slice(10) + ".json"), "utf8"));
+      const [choice, puzzle] = receipt.units ?? [];
+      if (choice?.phase === "not-applicable" && puzzle?.phase === "not-applicable" &&
+          choice.eventOnly && JSON.stringify(choice.eventOnly) === JSON.stringify(puzzle.eventOnly) &&
+          choice.beforeHead === puzzle.beforeHead && !choice.commitSha && !puzzle.commitSha &&
+          !choice.paths?.length && !puzzle.paths?.length &&
+          !choice.claimedPaths?.length && !puzzle.claimedPaths?.length &&
+          receipt.jobId === job.jobId && receipt.worker === "pi" &&
+          receipt.planVersion === item.planVersion) {
+        const proof = await readEventOnlyOmission(job, item.milestone, choice.eventOnly);
+        if (proof.reviewMode !== "pi" || proof.reviewHead !== choice.beforeHead ||
+            proof.reviewHead !== item.verifiedSha || proof.turnDigest !== turn.digest ||
+            proof.planVersion !== item.planVersion || proof.planDigest !== receipt.planDigest ||
+            proof.eventHead !== receipt.eventHead)
+          throw Error("Commitless dependent has no authenticated original review.");
+        originalOmissions[item.id] = proof;
+        sources[item.id] = { commitSha: proof.reviewHead, reviewDigest: choice.eventOnly.digest,
+          status: "passed", sourcePaths: Object.keys(proof.sourceHashes).sort() };
+        continue;
+      }
+    }
     if (!matches.length || points.length !== matches.length ||
         points.some(p => p.planVersion !== correction.planVersion)) continue;
     const files: string[] = [];
@@ -167,6 +211,17 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
     let accepted = true;
     let unreviewedEarlier = false;
     for (const point of points) {
+      const inherited = inheritedProofs.find(entry => entry.proof.commitSha === point.commitSha);
+      if (inherited) {
+        const precedes = ancestor(job, point.commitSha, correction.predecessorCommitSha);
+        const referenced = precedes ? [] : await sourceReceipt(job, item, point);
+        if (!referenced || inherited.status !== "passed" && !precedes) {
+          accepted = false; break;
+        }
+        files.push(...referenced);
+        reviews.push(inherited.reviewDigest);
+        continue;
+      }
       const review = await inspectCheckpointReview(job, point);
       if (point.semanticReview !== "passed" || !review ||
           review.status !== "passed" || !review.result) {
@@ -193,5 +248,5 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
       sourcePaths: [...new Set(files)].sort() };
   }
   const plan = planSelectiveRevalidation({ inventory, correction, reviews: sources });
-  return { plan, originalPoints, reviewedSources: sources };
+  return { plan, originalPoints, reviewedSources: sources, originalOmissions };
 }

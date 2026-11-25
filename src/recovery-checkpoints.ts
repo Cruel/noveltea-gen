@@ -732,8 +732,6 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   } else await atomic(pending, intent);
   // Deterministic crash-boundary certification. Fixture receipts only; a live
   // Pi worker must never be interrupted by test fault injection.
-  if (receipt.fixture && process.env.NT_RECOVERY_FIXTURE_CRASH_AFTER_INTENT === workItem)
-    throw new Error("Injected recovery crash after Git commit and before checkpoint finalization.");
   if (existsSync(finalizedFile(job, commitSha))) {
     const point = await readFinal(job, commitSha);
     await verifyFinal(job, point);

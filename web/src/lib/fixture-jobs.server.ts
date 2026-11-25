@@ -98,7 +98,7 @@ export function pinnedRequest(row: SavedJob, job: JobStartResult): GenerationReq
   try {
     request = JSON.parse(row.requestJson) as GenerationRequest
     const draft = row.configJson ? JSON.parse(row.configJson) as { model?: PiSelection | null } : null
-    if (request.fixture !== !draft?.model || request.story !== job.storyRoot || request.job !== row.id ||
+    if ((request.fixture && !!draft?.model) || request.story !== job.storyRoot || request.job !== row.id ||
         !request.task?.trim() || !request.contract ||
         JSON.stringify(parseGenerationContract(request.contract)) !== JSON.stringify(request.contract) ||
         request.provider !== (draft?.model?.provider) || request.model !== (draft?.model?.id) ||

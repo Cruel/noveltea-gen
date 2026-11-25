@@ -32,12 +32,10 @@ Usage:
   pnpm dev job pi configure --story /path/to/story --job draft-1 --max-steps 5 --max-model-calls 100
   pnpm dev job foundation --story /path/to/story --job draft-1 --inspect
   pnpm dev job architecture inspect --story /path/to/story --job draft-1
-  pnpm dev job architecture reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract revised-scope.json
   pnpm dev job architecture propose --story /path/to/story --job draft-1 --contract unchanged-scope.json --causal-digest <sha256> --carry-forward reviewed.json
   pnpm dev job architecture approve --story /path/to/story --job draft-1 --proposal <sha256> --approval /path/to/plan-approval-reference.json
   pnpm dev job foundations inspect --story /path/to/story --job draft-1
-  pnpm dev job foundations reconcile --story /path/to/story --job draft-1 --digest <reviewed-sha256>
   pnpm dev job event inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job interactive inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
   pnpm dev job composition inspect --story /path/to/story --job draft-1 --milestone milestone.disclosure
@@ -96,42 +94,19 @@ Job revision:
   --approval <file>  Controller reference JSON {receiptId,nonce}; no inline approval claims
 
 Job architecture:
-  run|inspect|propose|approve|reconcile  Author, inspect, replan or explicitly reconcile saved edits
-  --contract <json-file>    Completion contract: scope {kind,depth,targets,branches}, constraints,
-                            envelope {presentation,hardLimits,preferences}
-  --mode <mode>            autonomous requires contract; collaborative may await author scope
+  inspect|propose|approve  Inspect evidence or propose/approve a versioned author plan amendment
+  --contract <json-file>  Exact proposed completion contract (propose only)
   --proposal <sha256>      Exact digest from architecture propose (approve only)
-  --causal-digest <sha256>  Exact source-bound Generation causal amendment (propose only);
-                           requires unchanged contract and author-signed approval
-  --carry-forward <json>  Explicit independently reviewed unaffected work IDs (propose only)
-  --digest <sha256>        Exact reviewed candidate digest from inspect (reconcile only)
-  --approval <file>         Recorded controller reference JSON {receiptId,nonce}
-  --skills-source <path>   NovelTea skills checkout to pin
-  --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
-  --fixture                Deterministic test adapter, not live Pi evidence
+  --causal-digest <sha256> Source-bound Generation causal amendment (propose only)
+  --carry-forward <json>  Explicit independently reviewed unaffected work IDs
+  --approval <file>       Trusted controller reference JSON {receiptId,nonce}
 
-Job foundations (Character and World foundations after architecture):
-  run|inspect|reconcile   Serialize and safely recover Worldbuilding and Character specialist work units
-  --digest <sha256>        Exact inspected authored-bytes digest for explicit recovery
-  --skills-source <path>   Pinned NovelTea skills checkout (first run)
-  --provider, --model      Real Pi specialist model (default openai/gpt-6-luna)
-  --fixture                Deterministic test adapter, not live Pi evidence
+Job foundations:
+  inspect                 Inspect saved World and Character work units
 
-Job interactive (Choice Point and Puzzle alternatives after Event design):
-  run|inspect             Two serialized pinned specialists with independent validation/commits
-  --milestone <id>        Required typed Milestone ID from completed Event work item
-  --skills-source <path>  NovelTea skills checkout to pin (first run)
-  --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
-  --thinking low|medium|high     Explicit thinking effort for both Pi specialists
-  --fixture               Deterministic test adapter, not live Pi evidence
-
-Job composition (branch-aware Authored Content after interactive design):
-  run|inspect             Pinned composition specialist, independent branch-prose review, and commit
-  --milestone <id>        Required typed Milestone ID from committed interactive work
-  --skills-source <path>  NovelTea skills checkout to pin (first run)
-  --provider, --model     Real Pi provider/model (default openai/gpt-6-luna)
-  --thinking low|high     Explicit thinking effort for writer and reviewer
-  --fixture               Structural/lexical test adapter, NOT independent literary proof
+Job interactive / composition:
+  inspect                 Inspect saved Milestone work item
+  --milestone <id>        Required typed Milestone ID
 
 Job report (read-only generation outcome and integration evidence):
   --format json|markdown   JSON by default; markdown for a human-readable report
@@ -146,19 +121,12 @@ Job merge preview (non-destructive integration assessment):
   --fixture            Deterministic-only preview; literary conflicts explicitly unverified
   No automatic rebase, merge, branch modifications or protected-decision overrides.
 
-Job review (independent end-of-scope completion assessment):
-  run|inspect           Validate the versioned scope, review alternate routes and editorial quality
-  --skills-source <path> Pinned nt-narrative-review and nt-catalog source (first run)
-  --provider, --model   Pi reviewer and bounded composition repair specialist
-  --thinking low|high  Explicit thinking effort
-  --fixture             Deterministic structural checks ONLY, never an editorial pass
+Job review:
+  inspect                 Inspect saved independent Review evidence
 
-Job event (bounded Event-design work item after Character/World foundations):
-  run|inspect             Run or inspect a pinned nt-event-design Milestone work item
-  --milestone <id>        Required typed Milestone ID from the approved architecture plan
-  --skills-source <path>  NovelTea skills checkout to pin (first run)
-  --provider, --model     Pi specialist provider/model (default openai/gpt-6-luna)
-  --fixture               Deterministic tests only, not real Pi evidence
+Job event:
+  inspect                 Inspect saved Event-design Milestone work item
+  --milestone <id>        Required typed Milestone ID
 
 Job trusted approvals (#58; shared CLI/web authorization ledger):
   approval request --story <story> --job <job> --id <id> --file <proposal-payload.json>
@@ -191,13 +159,11 @@ Job ideas (deferred, noncanonical author material):
 
 
 Job foundation:
-  --inspect                Inspect saved writer/crash state without running the specialist
-  --reconcile-digest <sha256>  Explicitly accept inspected unfinished bytes for validation (no replay)
-  --task <brief>            Required when starting foundation discovery
-  --envelope <text>        Author's narrative/presentation constraints
-  --skills-source <path>   NovelTea skills checkout to pin (or configured checkout)
-  --provider, --model      Pi specialist provider/model (default openai/gpt-6-luna)
-  --fixture                Deterministic test adapter, not live Pi evidence
+  --inspect               Inspect saved writer/crash state without running the specialist
+
+Story specialist execution, including interrupted work, is available only through
+authenticated Generation start/resume. Historical standalone writer commands
+and structural fixture execution are retired.
 
 Options:
   --project <path>    Required Story root (existing directory, independent of app checkout)
@@ -321,16 +287,16 @@ function parseJobOptions(
 }
 
 /** Public stage commands cannot be an alternate live Story scheduler.
- * Keep forensic inspection available. Deterministic stage fixtures still
- * need migration to the current Turn transport (R14K). */
+ * Keep forensic inspection available, regardless of historical fixture flags. */
 function refuseObsoleteStageCommand(args: string[]): void {
   if (args[0] !== "job" || args.includes("--help") || args.includes("-h")) return;
   const [, stage, action] = args;
-  const fixture = args.includes("--fixture");
   const direct = stage === "foundation" ? !args.includes("--inspect") :
-    ["architecture", "foundations", "event", "interactive", "composition", "review", "repair"].includes(stage!) ? action === "run" :
+    ["architecture", "foundations"].includes(stage!) ? ["run", "reconcile"].includes(action!) :
+    stage === "interactive" ? ["run", "review-omission"].includes(action!) :
+    ["event", "composition", "review", "repair"].includes(stage!) ? action === "run" :
     stage === "ideas" ? ["place", "relocate"].includes(action!) || action === "reassess" && args.includes("--record") : false;
-  if (direct && (!fixture || stage === "repair"))
+  if (direct)
     throw Error("Standalone Story execution is retired; use authenticated Generation start/resume or inspect historical evidence.");
 }
 

@@ -18,7 +18,11 @@ import { cancelQueuedThreadMessage, advanceThread, readThreadChat,
   settleThreadRun, recoverSettledThreadRuns } from '../src/lib/thread-chat.server'
 import { previewThreadRevision, submitThreadRevision } from '../src/lib/story-revision.server'
 import { assertProtectedThreadApproval, recordProtectedThreadDecision } from '../src/lib/thread-protected-decision.server'
-import { readJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { scriptedModel } from '../../test/c03-scripted-story-helpers'
+import { userPiCredentials } from '../src/lib/pi-credentials.server'
+import { installScriptedArchiveProvider } from './support/scripted-archive-provider'
+import { planWholeStory } from '../src/lib/turn-plan'
+import { readJobTurnPlan, saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
 import { runRevisionAction, trustedHead } from '../../src/revision'
 import { requestTrustedApproval, recordTrustedControllerDecision } from '../../src/trusted-approval'
 import { snapshotForkBoundaryHistory } from '../src/lib/thread-fork-history.server'
@@ -43,12 +47,17 @@ const contract = { scope: { kind: 'full-story' as const, depth: 'composition' as
 
 async function setup() {
   const root = mkdtempSync(join(tmpdir(), 'nt-thread-protected-'))
-  const keys = ['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_NATIVE_CLI','NT_STUDIO_SKILLS_SOURCE']
+  const keys = ['NT_STATE_DIR','NT_GIT_CACHE_DIR','NT_NATIVE_CLI','NT_STUDIO_SKILLS_SOURCE','NT_REQUIRE_USER_PI_RUNTIME','NT_PI_CREDENTIAL_KEY','PI_OFFLINE','NT_AGENT_RPC_URL','NT_AGENT_RPC_TOKEN']
   const oldEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]))
   process.env.NT_STATE_DIR = join(root, 'state')
   process.env.NT_GIT_CACHE_DIR = join(root, 'cache')
   process.env.NT_NATIVE_CLI = native
   delete process.env.NT_STUDIO_SKILLS_SOURCE
+  process.env.NT_REQUIRE_USER_PI_RUNTIME = '1'
+  process.env.NT_PI_CREDENTIAL_KEY = Buffer.alloc(32, 22).toString('base64')
+  process.env.PI_OFFLINE = '1'
+  process.env.NT_AGENT_RPC_URL = 'http://127.0.0.1:1'
+  process.env.NT_AGENT_RPC_TOKEN = 'protected-continuation-test-only'
   const remote = join(root, 'remote')
   mkdirSync(join(remote, 'story'), { recursive: true })
   cpSync(reference, join(remote, 'story'), { recursive: true })
@@ -76,14 +85,21 @@ async function setup() {
     repositoryId: 'github:934', remoteUrl: 'file://' + remote, token: '',
     directory: 'story', commit: sha, jobId: sourceId,
   })
+  const task = 'Explore the mystery'
+  const plan = planWholeStory(task, contract, source.baseSha)
+  await saveJobTurnPlan(source, plan)
+  const scripted = await installScriptedArchiveProvider(source, plan)
+  await userPiCredentials(store, owner).modify(scriptedModel.provider,
+    async () => ({ type: 'api_key', key: 'in-process-only' }))
+  const model = { provider: scriptedModel.provider, id: scriptedModel.id }
   const request = { story: source.storyRoot, job: source.jobId,
-    task: 'Explore the mystery', contract, fixture: true }
+    task, contract, fixture: false, turnPlanDigest: plan.digest, provider: model.provider, model: model.id }
   ;(await seed.job({ id: sourceId, ownerUserId: owner, storyId, title: 'Parent',
     sourceCommitSha: sha, status: 'completed', createdAt: 'now', updatedAt: 'now',
     generationRequestJson: JSON.stringify(request),
     generationThreadId: source.threadId + ':generation:web',
     generationConfigJson: JSON.stringify({
-      version: 1, headSha: sha, task: request.task, contract, limits: {}, model: null,
+      version: 1, headSha: sha, task: request.task, contract, limits: {}, model,
     }) }))
   ;(await seed.queue({ jobId: sourceId, ownerUserId: owner, intent: 'start',
     phase: 'finished', createdAt: 'now', updatedAt: 'now' }))
@@ -96,6 +112,7 @@ async function setup() {
     { status: 'completed' }, 'completion_decision')
   graph.saver.db.close()
   function cleanup() {
+    scripted.restore()
     store.close()
     for (const [key,value] of Object.entries(oldEnv)) {
       if (value === undefined) delete process.env[key]

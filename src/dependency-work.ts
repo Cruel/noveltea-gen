@@ -105,6 +105,7 @@ function supportingWriterRounds(job: import("./job.js").JobStartResult, identity
  * The parent stays on that assignment, so no second origin writer is scheduled.
  * All external effects are fenced by private receipts, independently of graph checkpoints. */
 export async function advanceFocusedDependency(input: FocusedWorkOptions, config?: RunnableConfig) {
+  if (input.fixture) throw Error("Obsolete dependency fixture execution is retired.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const origin = JSON.parse(await readFile(join(job.stateDir, "focused-items", input.target + ".json"), "utf8")) as {
     jobId: string; workItemId: string; phase: string; dependencyReport?: DependencyReport;
@@ -112,7 +113,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
   };
   if (origin.jobId !== job.jobId || origin.workItemId !== "focus:" + input.target ||
       origin.phase !== "waiting-dependency" || !origin.dependencyReport ||
-      origin.assignmentDigest !== input.turnPlanDigest || origin.worker !== (input.fixture ? "fixture" : "pi"))
+      origin.assignmentDigest !== input.turnPlanDigest || origin.worker !== ("pi"))
     throw Error("Dependency amendment requires the exact suspended originating assignment.");
   const planVersion = (origin as { planVersion?: number }).planVersion;
   if (!input.turnPlanDigest || !Number.isSafeInteger(planVersion))
@@ -135,20 +136,13 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     }
     if (entry.phase === "reviewing" && entry.commitSha === head && entry.amendment)
       return entry.amendment.assignment;
-    if (entry.phase === "reviewing" || entry.phase === "rejected" || entry.phase === "planning" && input.fixture)
+    if (entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected dependency work requires original receipt reconciliation; no replay.");
     if (!entry.amendment) {
       if (head !== report.sourceSha) throw Error("Dependency proposal HEAD is stale.");
       const { policy } = await inspectPiPolicy(job);
       let proposal: DependencyProposal;
-      if (input.fixture) {
-        const target = report.affectedIds.find(id => !origin.workItemId.endsWith(id) &&
-          focusedSpecialist(id) === report.likelySpecialist);
-        if (!target) throw Error("Fixture dependency has no owning target.");
-        proposal = { sourceSha: report.sourceSha, reportDigest, target,
-          specialist: report.likelySpecialist, outcome: report.missing,
-          reason: "Deterministic dependency fixture: " + report.missing };
-      } else proposal = await proposeDependency(job, plan, entry,
+      proposal = await proposeDependency(job, plan, entry,
         input.provider ?? policy.profile.provider, input.model ?? policy.profile.model);
       try {
         await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
@@ -222,9 +216,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
         sources: report.sources.map(s => ({ path: s.path, quote: s.quote })),
         diff: dependencyGit(job, "diff", report.sourceSha, head, "--",
           ...assignment.authority.existingPaths.map(p => prefix + p)) } };
-    if (input.fixture) {
-      entry.review = { verdict: "pass", findings: [], evidence: ["Deterministic fixture only; no semantic or literary certification."] };
-    } else {
+    {
       if (!proof.snapshot || await openSkillSnapshot(proof.snapshot.id) !== proof.snapshot.path)
         throw Error("Dependency reviewer lacks the original pinned skill snapshot.");
       const reviewKey = "focused-support:" + reportDigest;

@@ -11,7 +11,7 @@ import {
 import { emptyRecoveryLifecycle, selectPendingRecovery } from "../src/generation-recovery-lifecycle.js";
 import { unknownCompletionCase } from "../src/unknown-recovery-diagnostic.js";
 import type { GenerationOperationRecovery } from "../src/generation-operation-recovery.js";
-import { recoveryNode } from "../src/generation.js";
+import { gateRecoveryOutput, recoveryNode } from "../src/generation.js";
 
 const graphThreadId = "job-thread-1:generation";
 const turn = "a".repeat(64);
@@ -309,7 +309,6 @@ test("C05 injected legacy advisory status cannot claim a real Pi attempt or auth
 
 test("C02 production recovery wrapper prevents completion with an active or deferred case", async () => {
   const admitted = await admit();
-  const complete = recoveryNode("completion_decision", async () => ({ status: "completed" }));
   for (const state of [
     admitted,
     { ...admitted, recoveryLifecycle: {
@@ -319,12 +318,11 @@ test("C02 production recovery wrapper prevents completion with an active or defe
       phase: "idle" as const,
     } },
   ]) {
-    const outcome = await complete({ ...state, request: { fixture: true } } as never, {} as never);
+    const outcome = gateRecoveryOutput({ status: "completed" }, state.recoveryLifecycle);
     assert.equal(outcome.status, "blocked");
     assert.match(outcome.reason ?? "", /Unresolved recovery cases/);
   }
-  const unchanged = recoveryNode("completion_decision", async () => ({}));
-  const inherited = await unchanged({ ...admitted, status: "completed", request: { fixture: true } } as never, {} as never);
+  const inherited = gateRecoveryOutput({}, admitted.recoveryLifecycle, "completed");
   assert.equal(inherited.status, "blocked",
     "a missing status patch must not preserve an earlier completed flag with pending recovery");
 });

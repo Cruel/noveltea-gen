@@ -193,7 +193,10 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
         "Historical specialist skill identity differs from the finalized checkpoint.");
     receipts[source] = cleanEvidence(receipt);
     commits[id] = prior && !point ? prior : { sha: point!.commitSha,
-      jobId: parent.jobId, planVersion: point!.planVersion };
+      jobId: parent.jobId, planVersion: point!.planVersion, proof: (() => {
+        const { eligible: _e, reason: _r, semanticReview: _s, ...proof } = point!;
+        return proof;
+      })() };
   }
   // Keep only the approved plan at the fork boundary, not a later replan and
   // not its job-scoped signed approvals. This is the child's accepted baseline.

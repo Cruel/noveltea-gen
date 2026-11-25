@@ -4,6 +4,8 @@ import { requireUser } from './access.server'
 import { validatedExplorer, type ExplorerIndex } from './story-explorer.server'
 import { parseGenerationContract } from '../../../src/generation'
 import { readRecoveryFork } from '../../../src/recovery-fork-state'
+import { readTurnEvidence } from '../../../src/turn-plan-evidence'
+import { isDeepStrictEqual } from 'node:util'
 import { authorizedStoryJob } from './fixture-jobs.server'
 import { isFocusedScope, resolveFocusedScope } from '../../../src/focused-scope'
 import type { CompletionContract } from '../../../src/architecture'
@@ -155,9 +157,15 @@ export async function generationConfigurationRequest(auth: StudioAuth, store: St
     if (row.status !== 'paused' || row.requestJson)
       throw new ConfigurationError(409, 'Generation configuration cannot change after the job has started.')
     const draft = validateGenerationDraft(await boundedBody(request), index, records)
-    const fork = readRecoveryFork(await authorizedStoryJob(store, user.id, id))
-    if (fork && JSON.stringify(draft.contract) !== JSON.stringify(fork.contract)) {
-      throw new ConfigurationError(409, 'Forks retain the selected approved completion contract. Change the task, model or budget, or authorize a separate plan revision after starting.')
+    const job = await authorizedStoryJob(store, user.id, id)
+    const fork = readRecoveryFork(job)
+    const persisted = row.configJson ? JSON.parse(row.configJson) as GenerationDraft : null
+    const pinned = persisted ? await readTurnEvidence(job, persisted.contract, persisted.task) : null
+    if (pinned && (draft.task !== pinned.originalRequest || !isDeepStrictEqual(draft.contract, pinned.contract))) {
+      throw new ConfigurationError(409, 'The prepared Turn pins its task and completion contract. Change model or budget only.')
+    }
+    if (fork && !isDeepStrictEqual(draft.contract, fork.contract)) {
+      throw new ConfigurationError(409, 'Forks retain the selected approved completion contract. Change model or budget, or authorize a separate plan revision after starting.')
     }
     // An edited sequential follow-up uses a fresh worktree, not a recovery
     // bundle. Its approved revision scope remains immutable even though its

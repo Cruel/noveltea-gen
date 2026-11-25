@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
+import { planWholeStory } from "../web/src/lib/turn-plan.js";
+import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
+import { archiveContract } from "./support/current-story-start.js";
 
 const enabled = process.env.NT_LIVE_CANCEL === "1";
 const cli = resolve("src/cli.ts");
@@ -41,10 +44,13 @@ test("opt-in live Pi specialist cooperatively aborts without publishing unfinish
   };
   const job = cmd("start", "--story", story, "--job", "live-cancel");
   const head = git("-C", job.worktreeRoot, "rev-parse", "HEAD");
-  const args = ["--import", "tsx", cli, "job", "foundation", "--story", story,
-    "--job", "live-cancel", "--task",
-    "Develop a dialogue-driven mystery about a forgotten witness on a remote island. " +
-    "Invent the character motivations, conflicts, scope and central creative direction.",
+  const task = "Develop a dialogue-driven mystery about a forgotten witness on a remote island. " +
+    "Invent the character motivations, conflicts, scope and central creative direction.";
+  const contract = join(temp, "contract.json");
+  writeFileSync(contract, JSON.stringify(archiveContract));
+  await saveJobTurnPlan(job, planWholeStory(task, archiveContract, head));
+  const args = ["--import", "tsx", cli, "job", "generate", "start", "--story", story,
+    "--job", "live-cancel", "--task", task, "--contract", contract,
     "--skills-source", source];
   if (process.env.NT_PROVIDER) args.push("--provider", process.env.NT_PROVIDER);
   if (process.env.NT_MODEL) args.push("--model", process.env.NT_MODEL);
