@@ -416,6 +416,7 @@ export async function inspectModernGenerationRecovery(
           return source.channel === "recovery" ||
             source.channel === "operationRecovery" &&
             !!((source.input as unknown as GenerationOperationRecovery).evidence.assignmentFailure ||
+              (source.input as unknown as GenerationOperationRecovery).evidence.blueprintAssessment ||
               (source.input as unknown as GenerationOperationRecovery).evidence.protocolFailure ||
               d.reason === "protocol-exhausted") &&
             isDeepStrictEqual(d, await selectOperationStrategy(job, values as GenerationGraphState, active).catch(() => null));

@@ -5,7 +5,7 @@ import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
-import { authenticateBlueprintGrant, requestBlueprintAssessment, type BlueprintAssessmentGrant } from "./blueprint-reassessment.js";
+import { authenticateBlueprintGrant, requestBlueprintAssessment, type BlueprintAssessmentGrant, type BlueprintAssessmentProof } from "./blueprint-reassessment.js";
 import { getConfig } from "@langchain/langgraph";
 import { createAssignmentLifecycleGraph, assignmentChildConfig, logicalAssignmentKey,
   type AssignmentIdentity, type AssignmentSubmission, type AssignmentOutcome } from "./generation-assignment-lifecycle.js";
@@ -18,7 +18,7 @@ import type { SkillSnapshot } from "./snapshot.js";
 import { openStoryProject } from "./project.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { createJobModelRuntime } from "./model-runtime.js";
-import { preparePiContext, PiBudgetPause } from "./job-pi-policy.js";
+import { preparePiContext, PiBudgetPause, PiModelUnavailableError } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
@@ -1081,7 +1081,7 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
     session = await sessionFor(job, snapshot, assignment, provider, model,
       "diagnostic", receipt.lineage.reviewCycleId + ":" + index);
   } catch (error) {
-    if (error instanceof PiBudgetPause) {
+    if (error instanceof PiBudgetPause || error instanceof PiModelUnavailableError) {
       // Only admission failed: no diagnostic prompt has been dispatched.
       receipt.phase = "revision";
       await persist(fileFor(job, assignment.milestoneId), receipt);
@@ -1767,8 +1767,8 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       writer = await sessionFor(job, snapshot, assignment, provider, model,
         "writer", binding.reviewCycleId, receipt.writer);
     } catch (error) {
-      if (error instanceof PiBudgetPause) {
-        // sessionFor preflights budget before creating the Pi SDK session.
+      if (error instanceof PiBudgetPause || error instanceof PiModelUnavailableError) {
+        // sessionFor preflights model and budget before any writer prompt.
         receipt.phase = previousPhase;
         await persist(file, receipt);
       }
@@ -1828,7 +1828,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         binding.reviewCycleId + (receipt.reviewerRole === "replacement"
           ? ":" + receipt.reviewStart : ""), receipt.reviewer);
     } catch (error) {
-      if (error instanceof PiBudgetPause) {
+      if (error instanceof PiBudgetPause || error instanceof PiModelUnavailableError) {
         receipt.phase = "draft";
         await persist(file, receipt);
       }
@@ -1964,6 +1964,32 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
   if (finished.outcome.evidenceRef !== sha(pin))
     throw Error("Milestone Blueprint child returned a foreign approval.");
   return { blueprint: await readReviewedMilestoneBlueprint(job, pin, assignment, binding), pin };
+}
+
+/** A sealed recommendation to stop is not a failed or uncertain invocation. */
+export async function readAssessmentMilestoneStop(job: JobStartResult, proof: BlueprintAssessmentProof, key: string) {
+  const { assignment, cycleId } = proof.context;
+  if (!assignment) return null;
+  const record = await load(job, assignment.milestoneId);
+  if (record?.phase !== "stopped") return null;
+  validateReceiptShape(record, assignment.milestoneId);
+  const root = record.rounds[proof.round];
+  const diagnostic = record.diagnostics?.at(-1);
+  if (record.assignmentKey !== key || record.lineage.reviewCycleId !== cycleId ||
+      record.lineage.executionHead !== proof.identity.sourceHeadSha ||
+      root?.draftDigest !== proof.draftDigest || root?.reviewDigest !== proof.reviewDigest ||
+      !diagnostic || diagnostic.round < proof.round || diagnostic.round !== record.rounds.length - 1 ||
+      !["split", "escalate"].includes(diagnostic.diagnosis.action)) return null;
+  await assertDiagnostics(job, record);
+  assertRounds(record, assignment);
+  await assertBlueprintReplies(diagnostic.session, [sha(diagnostic.diagnosis)],
+    text => parseMilestoneDiagnosis(text, record.rounds[diagnostic.round]!.draft, diagnostic.sources));
+  const decision = milestoneDiagnosticDecision(diagnostic.diagnosis.action, false);
+  if (decision.kind !== "stop" || !decision.reason || record.stopReason !== decision.reason) return null;
+  return { reason: decision.reason, evidence: { store: "specialist-receipt" as const,
+    ref: "milestone-blueprint-diagnostics/" +
+      diagnosticFileFor(job, assignment.milestoneId, cycleId!, diagnostic.round).split(sep).at(-1),
+    digest: sha(diagnostic) } };
 }
 
 /** Locate the exact current or archived pin of an assessed assignment. */

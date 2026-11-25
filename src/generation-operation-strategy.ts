@@ -1,7 +1,7 @@
 import { isGraphBubbleUp } from "@langchain/langgraph";
 /** Decisions at the existing assessor only. Original adapters retain every
  * receipt, writer lock, validation, independent review and budget check. */
-import { readBlueprintAssessment } from "./blueprint-reassessment.js";
+import { readBlueprintAssessment, verifyBlueprintAssessmentResolution } from "./blueprint-reassessment.js";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -504,6 +504,17 @@ async function originalBlueprintAssessment(job: JobStartResult, s: State, c: Rec
     ref: "blueprint-assessments/" + ref.key + "-" + ref.round + ".json", digest: ref.digest } };
 }
 
+async function blueprintAssessmentStop(job: JobStartResult, c: RecoveryCase,
+  blueprint: NonNullable<Awaited<ReturnType<typeof originalBlueprintAssessment>>>) {
+  const terminal = await (await import("./milestone-blueprint.js"))
+    .readAssessmentMilestoneStop(job, blueprint.proof, blueprint.ref.key);
+  if (!terminal) return null;
+  const decision: RecoveryDecision = { ...base(c, blueprint.evidence),
+    evidence: [...c.evidence, blueprint.evidence, terminal.evidence],
+    action: "exhausted", reason: "nonconverging", attemptRefs: [terminal.evidence] };
+  return { decision, reason: terminal.reason };
+}
+
 async function selectDiagnosticDecision(job: JobStartResult, c: RecoveryCase, proof: RecoveryEvidence): Promise<RecoveryDecision> {
   const diagnosis: RecoveryDecision = { ...base(c, proof), action: "diagnostic",
     adapter: "unknown-diagnostic", mode: "read-only", attemptRef: null };
@@ -538,8 +549,9 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
   const blueprint = await originalBlueprintAssessment(job, s, c);
   if (blueprint)
-    return { ...base(c, blueprint.evidence), action: "known-correction",
-      adapter: "review-cycle", receipt: blueprint.evidence };
+    return (await blueprintAssessmentStop(job, c, blueprint))?.decision ??
+      { ...base(c, blueprint.evidence), action: "known-correction",
+        adapter: "review-cycle", receipt: blueprint.evidence };
   if (originalOperation?.evidence.protocolFailure) {
     const proof = await authenticateNonSpecialistProtocolFailure(job, originalOperation);
     if (!proof || c.kind !== "protocol") throw Error("Original non-specialist protocol evidence changed");
@@ -1022,8 +1034,11 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         ({ recoveryLifecycle: decideRecovery(settled, decision), reason, status });
       try {
         const source = await originalBlueprintAssessment(job, s, c);
-        if (!source || !isDeepStrictEqual(await selectOperationStrategy(job, s, c), d))
+        if (!source || !isDeepStrictEqual(d, { ...base(c, source.evidence), action: "known-correction",
+            adapter: "review-cycle", receipt: source.evidence }))
           throw Error("Blueprint reassessment has no original source-bound decision.");
+        const terminal = await blueprintAssessmentStop(job, c, source);
+        if (terminal) return stop(terminal.decision, terminal.reason, "blocked");
         const control = await readJobControl(job);
         if (control !== "running")
           return stop({ ...base(c), action: "pause", reason: control === "cancelled" ? "cancelled" : "author-pause", resumeRef: d.receipt },
@@ -1047,20 +1062,26 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         if (result.status !== "blueprint-approved" || !("blueprintPin" in result) || !result.blueprintPin ||
             await trustedHead(job) !== c.origin.sourceHeadSha || git(job, "status", "--porcelain").trim())
           throw Error("Blueprint reassessment did not settle an independently approved, unchanged source.");
+        const assurance = { store: "specialist-receipt" as const,
+          ref: source.proof.identity.assignmentId === "story-blueprint"
+            ? "architecture-blueprints/plan-" + source.proof.identity.planVersion + "-approved.json"
+            : "milestone-blueprints/" + s.active!.milestone!.slice(10) + ".json",
+          digest: createHash("sha256").update(JSON.stringify(result.blueprintPin)).digest("hex") };
+        if (!await verifyBlueprintAssessmentResolution(job, source.ref, assurance, c.origin.sourceHeadSha))
+          throw Error("Blueprint reassessment approval could not be independently authenticated.");
         return { recoveryLifecycle: finishVerifiedRecovery(settled, { status: "verified", caseId: c.id,
-          sourceHeadSha: c.origin.sourceHeadSha, assurance: { store: "specialist-receipt",
-            ref: source.proof.identity.assignmentId === "story-blueprint"
-              ? "architecture-blueprints/plan-" + source.proof.identity.planVersion + "-approved.json"
-              : "milestone-blueprints/" + s.active!.milestone!.slice(10) + ".json",
-            digest: createHash("sha256").update(JSON.stringify(result.blueprintPin)).digest("hex") } }, true),
-          reason: null, status: "running" };
+          sourceHeadSha: c.origin.sourceHeadSha, assurance }, true), reason: null, status: "running" };
       } catch (error) {
+        if (config?.signal?.aborted || (error != null && isGraphBubbleUp(error))) throw error;
         if (error instanceof PiModelUnavailableError || error instanceof Error && error.name === "PiBudgetPause")
           return stop({ ...base(c), action: "pause",
             reason: error instanceof PiModelUnavailableError ? "provider-unavailable" : "budget", resumeRef: d.receipt },
             error.message, "paused");
         if (error instanceof Error && error.name === "StoryCancelledError")
           return stop({ ...base(c), action: "pause", reason: "cancelled", resumeRef: d.receipt }, error.message, "cancelled");
+        const source = await originalBlueprintAssessment(job, s, c).catch(() => null);
+        const terminal = source && await blueprintAssessmentStop(job, c, source).catch(() => null);
+        if (terminal) return stop(terminal.decision, terminal.reason, "blocked");
         return stop({ ...base(c), action: "integrity-fence", reason: "untrusted-receipt",
           requiredInspection: "Inspect the original negative Blueprint, independent diagnosis, and exact settled sessions; no canonical writer was authorized." },
           error instanceof Error ? error.message : String(error), "blocked");

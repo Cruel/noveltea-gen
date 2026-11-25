@@ -297,23 +297,29 @@ export async function inspectDeferredCorrection(
     // load authenticates the immutable inbox capture, every placement
     // transition and its exact committed Git/Pi/receipt provenance.
     const idea = (await load(job)).find(entry => entry.id === evidence.ideaId);
-    const placement = idea?.lifecycle.placements.at(-1);
-    if (idea?.lifecycle.status !== "integrated" || !placement ||
-        !["integrated", "reassessed", "relocated"].includes(placement.action) ||
-        placement.verified !== "pi")
-      return null;
-    const file = join(job.stateDir, "idea-placements",
-      idea.id + "-" + placement.revision + ".json");
-    const receipt = JSON.parse(await readFile(file, "utf8")) as {
-      jobId?: string; ideaId?: string; revision?: number; commitSha?: string;
-    };
-    if (receipt.jobId !== job.jobId || receipt.ideaId !== idea.id ||
-        receipt.revision !== placement.revision || !receipt.commitSha ||
-        receipt.commitSha === original.origin.sourceHeadSha) return null;
-    git(job, "merge-base", "--is-ancestor", original.origin.sourceHeadSha, receipt.commitSha);
-    discharge = { case: original,
-      correction: { store: "idea-placement", ref: idea.id + ":" + receipt.commitSha },
-      correctedHeadSha: receipt.commitSha };
+    if (idea?.lifecycle.status !== "integrated") return null;
+    // A new discharge uses current verified coverage. Restart must verify
+    // the exact historical placement which discharged the original Case,
+    // not substitute a newer reassessment or relocation for that effect.
+    const candidates = expected ? idea.lifecycle.placements : idea.lifecycle.placements.slice(-1);
+    for (const placement of candidates) {
+      if (!["integrated", "reassessed", "relocated"].includes(placement.action) ||
+          placement.verified !== "pi") continue;
+      const file = join(job.stateDir, "idea-placements", idea.id + "-" + placement.revision + ".json");
+      const receipt = JSON.parse(await readFile(file, "utf8")) as {
+        jobId?: string; ideaId?: string; revision?: number; commitSha?: string;
+      };
+      if (receipt.jobId !== job.jobId || receipt.ideaId !== idea.id ||
+          receipt.revision !== placement.revision || !receipt.commitSha) return null;
+      if (expected && receipt.commitSha !== expected.correctedHeadSha) continue;
+      if (receipt.commitSha === original.origin.sourceHeadSha) return null;
+      git(job, "merge-base", "--is-ancestor", original.origin.sourceHeadSha, receipt.commitSha);
+      git(job, "merge-base", "--is-ancestor", receipt.commitSha, head);
+      discharge = { case: original,
+        correction: { store: "idea-placement", ref: idea.id + ":" + receipt.commitSha },
+        correctedHeadSha: receipt.commitSha };
+      break;
+    }
   }
   return expected && !isDeepStrictEqual(discharge, expected) ? null : discharge;
 }

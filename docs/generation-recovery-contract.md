@@ -1006,6 +1006,17 @@ writer grant is not verified progress, and a verified support commit is
 not by itself discharge of the original Case. The parent must authenticate
 the exact supporting effects and affected-only revalidation before re-entry
 and must independently prove the full objective before Turn completion.
+
+For Milestone Blueprint reassessment, an unavailable pinned model before
+Pi session admission preserves the last settled Review phase. Resume the
+same Case and original sessions; do not reset a phase after an uncertain
+prompt. A sealed negative diagnostic disposition retains the Case as
+unresolved, not fenced or discharged. An approved result is re-read through
+the private Blueprint verifier before the parent discharges the Case.
+For deferred Ideas, later verified placement may discharge only its own
+Case. A later reassessment or relocation does not replace the exact
+historical placement receipt that already discharged that Case.
+
 The semantic mutation controls supplement, not replace, the consumer and
 exit inventory. #260 paid certification remains gated on complete #275
 qualification.

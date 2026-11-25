@@ -509,7 +509,9 @@ function available() {
 
 test("#202/#203: production Blueprint review converges after three revisions, protocol repair and a safe budget resume", {
   skip: !available() && "Requires registered rootless sandbox and local noveltea-skills",
-  timeout: 360_000,
+  // This test builds and runs multiple independent Git-backed Blueprint cycles.
+  // A deterministic pass on its own can take nearly six minutes on CI-class hosts.
+  timeout: 600_000,
 }, async () => {
   const tmp = mkdtempSync(join(tmpdir(), "nt-202-production-"));
   const id = randomUUID();

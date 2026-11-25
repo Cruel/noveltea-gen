@@ -1024,6 +1024,65 @@ test("C08 parent Idea dispatch and verification authenticate the original task "
           assert.equal(next.status, "running");
           assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), next.recoveryLifecycle);
           assert.equal(runtime.calls(), 4);
+
+          const { runIdeaPlacement } = await import("../src/idea-placement.js");
+          const placementRuntime = await scriptedStoryRuntime((_index, context) => {
+            const messages = context.messages as Array<{role: string; content: Array<{ type: string; text?: string; name?: string }>}>;
+            const prompt = messages.findLast(m => m.role === "user")!.content.map(c => c.text).join("");
+            const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\nASSIGNMENT:\n") + "\nASSIGNMENT:\n".length)
+              .replace(/^INDEPENDENT FULFILLMENT REVIEW[^\n]*\n/, ""));
+            const path = packet.target.path;
+            const assistants = messages.filter(m => m.role === "assistant");
+            if (!assistants.length) {
+              const reads = prompt.split("READ ALL EXACT FILE PATHS FIRST:\n")[1]!
+                .split(/\n(?:Edit ONLY|Read-only independent)/)[0]!.split("\n");
+              return { content: scriptedReadCalls(reads, _index), reason: "toolUse" };
+            }
+            if (prompt.includes("\nEdit ONLY") && assistants.length === 1)
+              return { content: [{ type: "toolCall", id: "place-" + packet.ideaId, name: "write",
+                arguments: { path, content: readFileSync(join(f.job.worktreeStoryRoot, path), "utf8") +
+                  "\nThe archive bell marks the visitor's arrival before the testimony (" + packet.ideaId + ").\n" } }], reason: "toolUse" };
+            return { content: scriptedText({ verdict: "pass", evidence: [path + ":1"],
+              reason: "The arrival bell now establishes the chronology." }), reason: "stop" };
+          });
+          const placement = { story: f.job.storyRoot, job: f.job.jobId, skillsSource: source,
+            provider: scriptedModel.provider, model: scriptedModel.id };
+          const tasks = (await runIdeaPlacement({ ...placement, action: "plan" })).tasks!;
+          const checkpoint = () => withJobModelRuntime(runtime.runtime, () => graph.invoke(
+            { request: paused.request, pauseAfter: null }, { ...cfg, interruptBefore: ["idea_integration", "specialist_dispatch"] }));
+          const discharged = [];
+          for (const pending of next.recoveryLifecycle.pending) {
+            const ideaId = next.recoverySources.find(s => s.caseId === pending.id)!.input.evidence!.ideaId as string;
+            const target = tasks.find(task => task.id === ideaId)?.candidates[0]?.id;
+            assert.ok(target);
+            const placed = await withJobModelRuntime(placementRuntime.runtime, () =>
+              runIdeaPlacement({ ...placement, action: "place", id: ideaId, target }));
+            assert.equal(placed.status, "integrated");
+            const progressed = await checkpoint();
+            assert.equal(progressed.status, "running", JSON.stringify({ reason: progressed.reason,
+              operation: progressed.operationRecovery, lifecycle: progressed.recoveryLifecycle }));
+            discharged.push({ id: pending.id, head: placed.commitSha });
+            assert.deepEqual(progressed.recoveryLifecycle.discharged.map(d => ({ id: d.case.id, head: d.correctedHeadSha })).sort((a, b) => a.id.localeCompare(b.id)),
+              [...discharged].sort((a, b) => a.id.localeCompare(b.id)));
+            assert.deepEqual(progressed.recoveryLifecycle.pending.map(c => c.id),
+              next.recoveryLifecycle.pending.filter(c => !discharged.some(d => d.id === c.id)).map(c => c.id));
+            assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), progressed.recoveryLifecycle);
+          }
+          const firstId = next.recoverySources.find(s => s.caseId === discharged[0]!.id)!.input.evidence!.ideaId as string;
+          const reassessed = await withJobModelRuntime(placementRuntime.runtime, () =>
+            runIdeaPlacement({ ...placement, action: "reassess", id: firstId, record: true }));
+          assert.equal(reassessed.status, "reassessed");
+          const final = await checkpoint();
+          const inspected = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
+          assert.deepEqual(inspected.discharged, final.recoveryLifecycle.discharged,
+            "A later verified Idea reassessment must not erase the first Case's historical discharge");
+          assert.equal(inspected.inspectionFences.length, 0);
+          assert.equal(placementRuntime.calls(), 12);
+          assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls - calls, 16);
+          assert.equal(runtime.calls(), 4);
+          assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+          assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+          return;
         }
       }
       assert.equal(runtime.calls(), mode === "deferred-two" ? 4 : 2, "Verification cannot replay the model or start an Idea writer");
@@ -1352,13 +1411,15 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery", "source-diagnostic-stop", "source-provider-pause"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   // Allow for native/Git checkpoint and diagnostic work on shared test hosts.
   skip: !available,
-  timeout: ["source-recovery", "prospective-review-stalled-continue", "prospective-paused", "prospective-review-negative",
+  timeout: ["source-recovery", "source-diagnostic-stop", "source-provider-pause", "prospective-review-stalled-continue", "prospective-paused", "prospective-review-negative",
     "prospective-multi"].includes(mode) ? 480_000 : ["prospective", "writer-other-owner", "support"].includes(mode) ? 240_000 : 120_000,
 }, async () => {
-  const sourceRecovery = mode === "source-recovery";
+  const blueprintStop = mode === "source-diagnostic-stop";
+  const blueprintPause = mode === "source-provider-pause";
+  const sourceRecovery = mode === "source-recovery" || blueprintStop || blueprintPause;
   const settledNoWrite = mode === "settled-no-write" || mode === "stale-choice-finding";
   const refused = mode === "prospective-refused";
   const unauthorized = mode === "prospective-unauthorized";
@@ -1480,12 +1541,13 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
           const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
           const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").findLast(t => t.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC"))!;
           const task = JSON.parse(prompt.split("\nTASK: ")[1]!.split("\nAPPROVED CONTRACT: ")[0]!);
-          return { content: scriptedText({ schema: "noveltea-milestone-diagnosis/v1", action: "continue",
+          return { content: scriptedText({ schema: "noveltea-milestone-diagnosis/v1", action: blueprintStop ? "escalate" : "continue",
             explanation: "The actual witness is required but has not yet been realized; keep the original prospective role.",
             assessments: [{ kind: "material", reason: "The witness availability contradicts the authorized source inventory.",
               requirement: { source: "task", quote: task.slice(0, 100) },
               evidence: { eventId: "disclose-ledger", field: "evidence", quote: proposalEvidence(3) } }] }), reason: "stop" };
         }
+        assert.ok(!blueprintStop || index < 18, "A sealed escalation does not authorize another writer or reviewer");
         const i = index >= 18 ? index - 2 : index;
         const round = Math.floor(i / 4);
         if (i % 4 === 0 || i % 4 === 2) {
@@ -2031,7 +2093,41 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         saver.db.close();
         saver = SqliteSaver.fromConnString(paused.checkpointPath);
         graph = createGenerationGraph(saver, "cli");
+        if (blueprintPause) {
+          const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+          const unavailable = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+          const unavailableResult = await withJobModelRuntime(unavailable, () => graph.invoke(null, cfg));
+          assert.equal(unavailableResult.status, "paused", unavailableResult.reason ?? "");
+          assert.equal(unavailableResult.recoveryLifecycle.decision?.reason, "provider-unavailable");
+          assert.equal(unavailableResult.recoveryLifecycle.active?.id, c.id);
+          assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls - initialCalls, 16);
+          assert.deepEqual(JSON.parse(readFileSync(blueprintFile, "utf8")), before,
+            "A provider absence before Pi session admission must preserve the verified revision boundary");
+          saver.db.close();
+          saver = SqliteSaver.fromConnString(paused.checkpointPath);
+          graph = createGenerationGraph(saver, "cli");
+          const selectedAgain = await withJobModelRuntime(runtime, () => graph.invoke({ request: paused.request, pauseAfter: null },
+            { ...cfg, interruptAfter: ["assess_recovery"] }));
+          assert.deepEqual(selectedAgain.recoveryLifecycle.decision, decision.recoveryLifecycle.decision);
+        }
         const settled = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+        if (blueprintStop) {
+          assert.equal(settled.status, "blocked");
+          assert.equal(settled.recoveryLifecycle.decision?.action, "exhausted", settled.reason ?? "");
+          assert.equal(settled.recoveryLifecycle.decision?.reason, "nonconverging");
+          assert.equal(settled.recoveryLifecycle.active?.id, c.id);
+          assert.equal(settled.recoveryLifecycle.discharged.length, 0);
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), settled.recoveryLifecycle);
+          const stopped = JSON.parse(readFileSync(blueprintFile, "utf8"));
+          assert.deepEqual(stopped.rounds, before.rounds);
+          assert.equal(stopped.diagnostics[0]?.diagnosis.action, "escalate");
+          assert.equal(stopped.approvedDigest, undefined);
+          assert.equal(observed.length, 18);
+          assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls - initialCalls, 18);
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), originalHead);
+          assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+          return;
+        }
         assert.ok(settled.recoveryLifecycle.discharged.some(d => d.case.id === c.id),
           JSON.stringify({ reason: settled.reason, lifecycle: settled.recoveryLifecycle, calls: observed.length }));
         assert.equal(observed.length, 22);

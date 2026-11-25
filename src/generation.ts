@@ -3376,6 +3376,7 @@ export function recoveryNode(
         !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment || prior.recoveryLifecycle.decision.supportReview ||
           prior.recoveryLifecycle.decision.reason === "protocol-exhausted" ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure ||
+          assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.blueprintAssessment ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.protocolFailure)) {
       const active = prior.recoveryLifecycle.active;
       try {
@@ -3552,7 +3553,9 @@ export function recoveryNode(
         return { recoveryLifecycle: { ...selected, assessorPending: !terminal },
           status: terminal ? "blocked" : "running",
           ...(terminal ? { reason: strategy.action === "exhausted"
-            ? "Original response protocol exhausted; its invocation and source are preserved."
+            ? strategy.reason === "protocol-exhausted"
+              ? "Original response protocol exhausted; its invocation and source are preserved."
+              : "Original recovery remains unresolved; its independent assessment and source are preserved."
             : strategy.action === "strategy-unresolved"
             ? "The authenticated original no-write producer requires an owner/plan correction, but no corrective adapter is implemented for this source. No writer grant was issued."
             : strategy.requiredInspection } : {}) };

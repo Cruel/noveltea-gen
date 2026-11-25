@@ -45,5 +45,9 @@ re-exercises both real Studio backends and the original Generation path on
 the integrated parent and adapters. Its behavioral controls distinguish
 semantic correction from format exhaustion, authenticated ambiguity from
 integrity fences, and selected advice from executed, verified continuation.
+Milestone Blueprint provider admission failures retain the last settled
+Review phase for original-Case resumption; a sealed independent stop
+retains an unresolved Case. A historical deferred-Case discharge remains
+bound to its original verified effect after subsequent Idea reassessment.
 The remaining unverified paths are not acceptance by implication. Paid/live
 certification remains gated under #260.
