@@ -221,3 +221,14 @@ test("Composition diagnostic cannot produce approval or fabricate a material sou
     /current source/,
   );
 });
+
+test("Composition contract identifies route-evidence type and requirement-source mistakes", () => {
+  const bad = JSON.parse(payload("revise", [finding("Ada knows the route-only key")]));
+  bad.sourceEvidence = [{event:"event.disclosure",step:"decision",branch:"protect",evidence:{path,quote:"Ada knows the route-only key"}}];
+  assert.throws(() => parseCompositionReview(JSON.stringify(bad),[path],original,requirements), /sourceEvidence\[0\].*string/);
+  bad.sourceEvidence = [];
+  bad.findings[0].requirement.source = "assignment";
+  assert.throws(() => parseCompositionReview(JSON.stringify(bad),[path],original,requirements), /findings\[0\].*policy/);
+  bad.findings[0].requirement.source = "policy";
+  assert.equal(parseCompositionReview(JSON.stringify(bad),[path],original,requirements).status,"revise");
+});

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { recoverResponseContract, ProtocolExhaustedError } from "../src/response-contract-recovery.js";
+import { normalizeCompletedModelJson, recoverResponseContract, ProtocolExhaustedError } from "../src/response-contract-recovery.js";
 import { parseEventManifest } from "../src/event-specialist.js";
 import { inspectSpecialistManifest } from "../src/specialist-manifest.js";
 
@@ -205,4 +205,46 @@ test("any attempted tool call in a format-only reply fails closed", async () => 
     session: f.session, validate: inspectSpecialistManifest, parse: parseEventManifest,
     contract: "specialist.changed-paths.v1", prompt,
   }), /protocol correction attempted a tool/);
+});
+
+test("redundant closing delimiters normalize once with sealed raw and normalized hashes and no extra Pi call", async () => {
+  const { createHash } = await import("node:crypto");
+  const { beginProtocolInvocation, inspectCompletedProtocolResponse } = await import("../src/response-contract-recovery.js");
+  const root = await mkdtemp(join(tmpdir(), "nt-jsonrepair-"));
+  const raw = good + "]}";
+  const f = fakeSession(raw, []);
+  const transcript = join(root, "session.jsonl"), base = join(root, "contract");
+  const sourceDigest = "a".repeat(64), contract = "specialist.changed-paths.v1";
+  f.session.sessionManager.getSessionFile = () => transcript;
+  try {
+    await writeFile(transcript, JSON.stringify({type:"session",id:f.session.sessionId})+"\n");
+    await beginProtocolInvocation({receiptFile:base, sourceDigest,contract,session:f.session});
+    await writeFile(transcript, JSON.stringify({type:"session",id:f.session.sessionId})+"\n"+
+      JSON.stringify({type:"message",message:f.messages[0]})+"\n");
+    const result = await recoverResponseContract({session:f.session, contract, sourceDigest,
+      receiptFile:base+".initial.json", sealTranscript:true,
+      validate:inspectSpecialistManifest, parse:parseEventManifest, prompt:f.prompt});
+    assert.deepEqual(result,parseEventManifest(good));
+    assert.equal(f.prompts.length,0);
+    const receipt = JSON.parse(await readFile(base+".initial.json","utf8"));
+    assert.equal(receipt.attempts,1);
+    assert.equal(receipt.responseHash,createHash("sha256").update(raw).digest("hex"));
+    assert.equal(receipt.normalizedResponseHash,createHash("sha256").update(good).digest("hex"));
+    const replay = () => inspectCompletedProtocolResponse({receiptFile:base,sourceDigest,contract,
+      sessionRoots:[root],requireSealedTranscript:true,validate:inspectSpecialistManifest,parse:parseEventManifest});
+    assert.deepEqual(await replay(), result);
+    await writeFile(base+".initial.json",JSON.stringify({...receipt,normalizedResponseHash:"b".repeat(64)}));
+    await assert.rejects(replay(), /Normalized response differs/);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test("jsonrepair cannot invent content, truncate another object or bypass schema validation", async () => {
+  for (const raw of ['{"status":"pass"', '{"status":}', '{"findings":[', '{"status":"pass"}{"status":"revise"}',
+    '{"status":"pass"} explanation', '{"status":"pass",}', '["pass"]]', '{"status":"pass"}x}'])
+    assert.equal(normalizeCompletedModelJson(raw),raw);
+  const f = fakeSession(badShape+"}",[good]);
+  await recoverResponseContract({session:f.session,contract:"specialist.changed-paths.v1",
+    validate:inspectSpecialistManifest,parse:parseEventManifest,prompt:f.prompt});
+  assert.equal(f.prompts.length,1);
+  assert.match(f.prompts[0]!, /modifiedRecords/);
 });

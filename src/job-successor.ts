@@ -130,13 +130,15 @@ async function verifyIndependentReviewRepairSuccessor(job: JobStartResult, commi
 async function verifyReviewedSpecialistSuccessor(job: JobStartResult, commit: string,
   parent: string, paths: string[], message: string[]): Promise<boolean> {
   const workItem = message.find(line =>
-    /^NovelTea-Work-Item: (?:event-|interactive-(?:choice|puzzle)-|composition-)[a-z0-9-]+$/.test(line))
+    /^NovelTea-Work-Item: (?:(?:event-|interactive-(?:choice|puzzle)-|composition-)[a-z0-9-]+|dependency:[1-9][0-9]*:[a-z][a-z-]*\.[a-z][a-z0-9-]*)$/.test(line))
     ?.slice("NovelTea-Work-Item: ".length);
   if (!workItem) return false;
   const { readRecoveryFork, resolvedInheritedRecoveryReviews } =
     await import("./recovery-fork-state.js");
   const fork = readRecoveryFork(job);
   const inherited = fork?.commits[workItem];
+  const support = workItem.startsWith("dependency:");
+  if (support && inherited?.sha !== commit) return false; // local support uses its live ledger below
   const originJob = inherited?.sha === commit ? inherited.jobId : job.jobId;
   if (!message.includes("NovelTea-Job: " + originJob))
     throw Error("Reviewed narrative successor has incorrect Job provenance.");
@@ -153,6 +155,17 @@ async function verifyReviewedSpecialistSuccessor(job: JobStartResult, commit: st
       entry.workItem === workItem && entry.commitSha === commit);
     if (!decision || !["passed", "not-required"].includes(decision.status))
       throw Error("Inherited narrative successor lacks passed, source-bound review coverage.");
+    if (support) {
+      const receipt = fork!.receipts["dependency-items/" + workItem + ".json"];
+      const proof = inherited.proof;
+      if (!receipt || receipt.jobId !== inherited.jobId || receipt.workItemId !== workItem ||
+          receipt.phase !== "committed" || receipt.commitSha !== commit || receipt.expectedHead !== parent ||
+          !proof?.assurance || proof.workItem !== workItem || proof.jobId !== inherited.jobId ||
+          proof.parentSha !== parent || proof.commitSha !== commit || proof.validation.status !== "passed" ||
+          JSON.stringify([...proof.assurance.changedPaths].sort()) !== JSON.stringify(localPaths) ||
+          !Array.isArray(receipt.paths) || JSON.stringify([...receipt.paths].sort()) !== JSON.stringify(localPaths))
+        throw Error("Inherited dependency successor differs from its sealed checkpoint and exact committed paths.");
+    }
     return true;
   }
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");

@@ -22,7 +22,7 @@ import { preparePiContext, PiBudgetPause, PiModelUnavailableError } from "./job-
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
-import { recoverResponseContract, type ResponseContractFailure } from "./response-contract-recovery.js";
+import { normalizeCompletedModelJson, recoverResponseContract, type ResponseContractFailure } from "./response-contract-recovery.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { assertReviewCycleSession, reviewCycleId, reviewRoundProgress } from "./review-cycle.js";
 import { milestoneDiagnosticDecision, milestoneDiagnosticEvidence, milestoneDiagnosticFingerprint,
@@ -502,6 +502,16 @@ function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<Eve
     "For a missing Interactive owner corrected by revising away an implied choice use " +
     "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
     "Controller binds the original rejected identity, before and after values. Do not repeat escaped field arrays. " +
+    "For unchanged rejected fields you MUST use persisting/regressed with current, never improved/resolved with revised. If a blocker remains, include it as a current finding; revise with findings:[] is invalid. " +
+    "CURRENT FIELD COMPARISON (controller-derived, not a verdict): " +
+    JSON.stringify(previous.flatMap((round, i) => independentFindings(round).map((finding, j) => {
+      const claim = finding.evidence;
+      if (!claim || "target" in claim || !finding.eventId) return {round:i, findingIndex:j};
+      const old = milestoneEvent(round.draft, finding.eventId), current = milestoneEvent(draft, finding.eventId);
+      return {round:i, findingIndex:j, eventId:finding.eventId, field:claim.field,
+        changed: !old || !current || milestoneFieldText(old, claim.field) !== milestoneFieldText(current, claim.field),
+        removed: !current};
+    }))) + ". " +
     "Current canonical source paths: " + JSON.stringify(assignment.sourcePaths) + ".";
 }
 export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssignment,
@@ -964,13 +974,13 @@ async function assertBlueprintReplies(session: SessionSeal, expected: string[],
     const entry = JSON.parse(line);
     if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
     last = undefined;
-    if (["error", "aborted", "toolUse"].includes(entry.message.stopReason)) continue;
+    if (entry.message.stopReason !== "stop") continue;
     const text = entry.message.content.filter((c: { type: string }) => c.type === "text")
       .map((c: { text: string }) => c.text).join("");
     try {
-      last = sha(parse(text));
+      last = sha(parse(normalizeCompletedModelJson(text)));
       if (last !== expected[matched] && normalize && matched < expected.length)
-        last = sha(normalize(text, matched));
+        last = sha(normalize(normalizeCompletedModelJson(text), matched));
     } catch { continue; } // e.g. the original protocol-error response
     if (last === expected[matched]) matched++;
   }
@@ -1261,13 +1271,19 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "A Story-wide Interaction profile is not a per-Milestone quota. An investigative commitment or player-directed inspection alone is not a consequential Choice. " +
     "Check each proposed Event against the selected Milestone's exact canonical change and limits, and relevant already-authored Event records. " +
     "Reject duplicated prior/later occurrences, advancement beyond this Milestone's promised knowledge or outcomes, and unsupported prerequisites. " +
+    "dependsOn is exclusively a list of earlier PROVISIONAL slugs within this draft; [] is correct for its first Event. Existing canonical prerequisites belong in evidence/access and route conditions, NOT dependsOn. Never request a canonical event.* ID in dependsOn. " +
     "An inspection performed only by the player can legitimately have participants: []. " +
     (draft.upstreamCorrection ? "Independently inspect the exact existing canonical sources in upstreamCorrection. PASS only if the proposed correction is necessary to deliver the original objective and is not prospective downstream work; the controller must independently authorize and verify that correction before any Event writer. " : "") +
     "Verify EVERY material witness, informant, testimony provider or other Character evidence source " +
     "is explicitly declared in characterSources and participants. The subject of a statement is not automatically its provider. " +
     "Reject a missing declaration by citing the evidence field; " +
     "do not reject a sound design just because a declared prospective Character is unrealized. " +
-    "A prospective Character must be necessary for the selected Milestone, and must be authored by its own authorized owner before Event. " +
+    "A prospective Character must be necessary for the selected Milestone, and must be authored by its own authorized owner before Event. Its proposed ID MUST appear in participants and in the typed prospective characterSources even though it does not exist yet. This is a valid design, not a material defect or reason for revise. If the design correctly declares the prerequisite, PASS allows the controller to realize it. " +
+    "CONTROLLER-DERIVED MATERIAL PROVIDER DECLARATIONS: " +
+    JSON.stringify(draft.events.map(event => ({eventId:event.id, participants:event.participants,
+      prospective: [...new Set(event.evidence.flatMap(e => (e.characterSources ?? [])
+        .filter(source => source.availability === "prospective").map(source => source.id)))]}))) +
+    ". Check actual narrative necessity and feasibility; do not demand that prospective IDs be realized before plan approval. " +
     "Do not insist on canon or playable prose not yet authored, and do not call a future stage's " +
     "obligation a current-stage blocker. Flag actual unsupported, contradictory or missing " +
     "obligations with a CURRENT canonical anchorPath. Preserve prior findings and assess the " +

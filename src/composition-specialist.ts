@@ -8,7 +8,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
-import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolResponse, ProtocolIntegrityBlockedError, authenticateSealedProtocolFailure, type SealedProtocolFailure } from "./response-contract-recovery.js";
+import { normalizeCompletedModelJson, beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolResponse, ProtocolIntegrityBlockedError, authenticateSealedProtocolFailure, type SealedProtocolFailure } from "./response-contract-recovery.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath, requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
@@ -500,7 +500,7 @@ function transcriptReviewVerdict(prefix: Buffer): unknown {
       const message = entry.type === "message" ? entry.message : undefined;
       if (
         message?.role !== "assistant" ||
-        ["error", "aborted"].includes(message.stopReason ?? "")
+        message.stopReason !== "stop"
       )
         continue;
       const response = message.content
@@ -512,7 +512,7 @@ function transcriptReviewVerdict(prefix: Buffer): unknown {
         .replace(/\n```\s*$/, "");
       if (response) {
         try {
-          last = JSON.parse(response);
+          last = JSON.parse(normalizeCompletedModelJson(response));
         } catch {
           /* bounded protocol correction may precede the final verdict */
         }
@@ -877,13 +877,13 @@ export async function createCompositionReviewCycle(
           "For each current material finding: {path,reason,correction,requirement:{source:" +
           "'assignment'|'policy',quote},evidence:{path,quote},origin:'initial'|'continuing'|" +
           "'introduced'|'overlooked'}. " + (history.length ? "Origin initial is forbidden after round zero. " : "All findings must be initial in round zero. ") +
-          "Quotes must be exact 8+ character substrings " +
+          "The requirement.source must be policy for a quotation from the policy text, assignment for a quotation from the assignment JSON. Quotes must be exact 8+ character substrings " +
           "of the cited requirement and current Authored Content path. On follow-ups " +
           "include one prior entry for EVERY historical finding: " +
           "{round,findingIndex,status:'resolved'|'improved'|'persisting'|'regressed'," +
           "reason,evidence:{path,quote}} with a CURRENT quote from that original path. " +
           "Pass requires findings:[], all prior resolved, and sourceEvidence for each " +
-          "actual route. A revise verdict needs 1-8 actionable current blockers. " +
+          "actual route. sourceEvidence MUST be an array of STRINGS, not objects: e.g. [\"choice-id/outcome-id: authored-content/scene.md: exact dialogue quote\"]. For revise, sourceEvidence may be []. A revise verdict needs 1-8 actionable current blockers. " +
           "Current required routes: " +
           JSON.stringify(requiredRoutes) +
           ".";
@@ -937,7 +937,7 @@ export async function createCompositionReviewCycle(
             if (control !== "running") throw new AssignmentAuthorPauseError();
             await guardPiBudget(job, "composition:" + assignment.workItemId + ":editorial-review:" + history.length, reviewer.file);
           },
-          feedback: failures => "Return the exact source-linked editorial JSON contract, including every historical finding. " +
+          feedback: failures => "Return the exact source-linked editorial JSON contract, including every historical finding. sourceEvidence is string[], never objects; use [] for revise if no route evidence is needed. requirement.source must match the actual quoted policy or assignment. " +
             (history.length ? "Origin initial is forbidden; use continuing, introduced or overlooked. " : "Every finding origin must be initial. ") +
             "No tools or new source claims; correct only the response format. Validation: " + failures.map(f => f.expected).join("; "),
           prompt: async text => {

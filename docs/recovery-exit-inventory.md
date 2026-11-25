@@ -1300,3 +1300,28 @@ formatting and diff checks passed. No paid inference or full #275
 qualification was run. Logs: `/tmp/nt246-follow-qualification.log`,
 `/tmp/nt246-follow-discovery.log`, `/tmp/nt246-fork8-final.log`,
 `/tmp/nt246-repaired-follow.log`, `/tmp/nt246-sibling-final.log`.
+
+### #260 deterministic JSON normalization and current-format successor verification
+
+The shared completed-response contract admits conservative jsonrepair
+normalization only when an already complete valid object is followed by
+redundant closing delimiters. Both original and normalized hashes are sealed;
+replay recomputes the normalization, and schema/source checks still run.
+Truncated responses, invented values, concatenated objects and other
+ambiguous repairs still enter the bounded format correction policy. Milestone
+and Composition historical transcript verification reproduce this normalization.
+
+Composition editorial feedback identifies the exact route evidence type and
+requirement source mismatch rather than reissuing an ambiguous schema error.
+Milestone Review receives the controller-derived prospective provider inventory
+and exact prior-field comparison; canonical prior Events belong in source/route
+evidence, not local provisional dependsOn. Prospective prerequisite realization
+remains the controller's independent responsibility. No independent material
+finding is waived by these prompt/contract changes.
+
+The existing narrative successor verifier authenticates inherited supporting
+commits against the pinned original Job, parent, exact changed paths,
+checkpoint/native assurance and resolved independent Review coverage. The
+original saved Luna successor chain and latest checkpoint admission are
+read-only regression witnesses; the prospective integration test also checks
+this boundary on an independently generated supporting checkpoint.

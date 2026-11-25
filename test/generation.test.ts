@@ -2773,6 +2773,8 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         const child = await prepareRecoveryFork(parent, bundle);
         assert.equal(child.baseSha, support.commitSha);
         assert.ok(inheritedReviewedCheckpoint(child, supportId, point.commitSha));
+        const { verifiedNarrativeChain } = await import("../src/job-successor.js");
+        assert.equal(await verifiedNarrativeChain(child, point.parentSha, point.commitSha), point.commitSha);
         assert.equal(dependencyVersionBase(child), 2);
         assert.equal(existsSync(join(child.stateDir, "dependency-plan.json")), false);
         assert.equal(existsSync(join(child.stateDir, path)), false);

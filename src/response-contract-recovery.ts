@@ -1,6 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
+import { jsonrepair } from "jsonrepair";
 import { lstat, readFile, mkdir, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
+
+/** Conservative normalization of a COMPLETE model reply. jsonrepair can
+ * invent missing values or close truncated containers; those are deliberately
+ * not admitted. Only an already valid, complete object followed exclusively
+ * by redundant closing delimiters is unambiguous. Never use for stored JSON. */
+export function normalizeCompletedModelJson(raw: string): string {
+  const text = raw.trim();
+  if (!text.startsWith("{") || Buffer.byteLength(text) > 128_000) return raw;
+  try { JSON.parse(text); return raw; } catch { /* syntax only */ }
+  try {
+    const repaired = jsonrepair(text).trim();
+    if (repaired === text || !text.startsWith(repaired) ||
+        !/^[\s}\]]+$/.test(text.slice(repaired.length)) ||
+        !/[}\]]/.test(text.slice(repaired.length))) return raw;
+    const value: unknown = JSON.parse(repaired);
+    return value && typeof value === "object" && !Array.isArray(value) ? repaired : raw;
+  } catch { return raw; }
+}
+const responseHash = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** Only the response contract is repairable here. This policy never replays a
  * writer, expands a work grant, charges a semantic correction, or compacts Pi. */
@@ -53,6 +73,8 @@ interface ContractReceipt {
   sessionFile: string;
   attempts: number;
   responseHash: string;
+  /** Raw reply remains pinned; optional normalized bytes are reproducible. */
+  normalizedResponseHash?: string;
   status: "invalid-response" | "correction-pending" | "accepted" | "protocol-exhausted";
   failedPaths: string[];
   /** Bound independently to the controller Turn/review packet, not mutable prose. */
@@ -200,6 +222,7 @@ function checkedReceipt(receipt: ContractReceipt, sourceDigest: string,
   contract: string, started: StartedInvocation | null, allowance: FreshAuthorization | null) {
   if (receipt.version !== 1 || receipt.contract !== contract ||
       !hex64.test(receipt.invocationId) || !hex64.test(receipt.responseHash) ||
+      (receipt.normalizedResponseHash !== undefined && !hex64.test(receipt.normalizedResponseHash)) ||
       (receipt.sourceDigest !== undefined && receipt.sourceDigest !== sourceDigest) ||
       !receipt.sessionId || !receipt.sessionFile ||
       invocationId(contract, receipt.sessionId, receipt.sessionFile) !== receipt.invocationId ||
@@ -351,17 +374,21 @@ export async function inspectCompletedProtocolResponse<T>(options: {
   } else {
     throw new ProtocolIntegrityBlockedError("Incomplete protocol attempt requires original-session reconciliation");
   }
-  if (!candidate || validate(candidate).length)
+  const normalized = candidate ? normalizeCompletedModelJson(candidate) : "";
+  if (selected && selected.normalizedResponseHash !== (normalized !== candidate ? responseHash(normalized) : undefined))
+    throw new ProtocolIntegrityBlockedError("Normalized response differs from its sealed receipt");
+  if (!candidate || validate(normalized).length)
     throw new ProtocolIntegrityBlockedError("Completed response is structurally invalid; preserve the original correction budget");
   let result: T;
-  try { result = parse(candidate); }
+  try { result = parse(normalized); }
   catch { throw new ProtocolIntegrityBlockedError("Completed response failed controller parsing"); }
   if (!selected) {
     const receipt: ContractReceipt = {
       version: 1, invocationId: invocationId(contract, sessionId, sessionFile),
       contract, sessionId, sessionFile, sourceDigest,
       attempts, responseOrdinal: evidence.complete.length,
-      responseHash: createHash("sha256").update(candidate).digest("hex"),
+      responseHash: responseHash(candidate),
+      ...(normalized !== candidate ? {normalizedResponseHash: responseHash(normalized)} : {}),
       failedPaths: [], status: "accepted",
     };
     await saveReceipt(receiptFile + ".initial.json", receipt);
@@ -494,9 +521,10 @@ export async function recheckExhaustedProtocolResponse<T>(options: {
     if (message?.role === "assistant" && message.stopReason === "stop") completed++;
   }
   const answer = proof.complete.at(-1)!;
-  if (options.validate(answer).length)
+  const normalized = normalizeCompletedModelJson(answer);
+  if (options.validate(normalized).length)
     throw new ProtocolVerifierRecheckRejectedError("Original response still fails the fixed verifier");
-  try { return options.parse(answer); }
+  try { return options.parse(normalized); }
   catch { throw new ProtocolVerifierRecheckRejectedError("Original response cannot be parsed by the fixed verifier"); }
 }
 
@@ -579,7 +607,7 @@ export async function inspectCompletedProtocolReads(options: {
 
 function response(session: ResponseContractSession): string {
   const last = [...session.messages].reverse().find(m => m.role === "assistant");
-  if (!last || ["error", "aborted"].includes(last.stopReason ?? "") ||
+  if (!last || last.stopReason !== "stop" ||
       !Array.isArray(last.content))
     throw new Error("Pi response did not finish; preserve the original operation for reconciliation.");
   return last.content.filter(c => c.type === "text").map(c => c.text ?? "").join("\n");
@@ -658,7 +686,7 @@ export async function recoverResponseContract<T>(options: {
       if (prior.attempts >= 3 || prior.responseOrdinal !== evidence.complete.length ||
           evidence.messages.at(-1)?.role !== "assistant" || evidence.complete.at(-1) !== text ||
           prior.responseHash !== createHash("sha256").update(text).digest("hex") ||
-          !validate(text).length) throw new ProtocolIntegrityBlockedError("Original invalid response changed");
+          !validate(normalizeCompletedModelJson(text)).length) throw new ProtocolIntegrityBlockedError("Original invalid response changed");
       firstIndex = prior.attempts - 1;
     }
   } else if (receiptFile) {
@@ -672,7 +700,8 @@ export async function recoverResponseContract<T>(options: {
   const originalTools = session.getActiveToolNames();
   for (let index = firstIndex; index < 3; index++) {
     const text = response(session);
-    const failures = validate(text);
+    const normalized = normalizeCompletedModelJson(text);
+    const failures = validate(normalized);
     const current: ContractReceipt = {
       version: 1,
       invocationId: invocationId(contract, session.sessionId, sessionFile),
@@ -680,7 +709,8 @@ export async function recoverResponseContract<T>(options: {
       ...(options.sourceDigest ? { sourceDigest: options.sourceDigest } : {}),
       responseOrdinal: session.messages.filter(m => m.role === "assistant" &&
         m.stopReason === "stop" && Array.isArray(m.content)).length,
-      attempts: index + 1, responseHash: createHash("sha256").update(text).digest("hex"),
+      attempts: index + 1, responseHash: responseHash(text),
+      ...(normalized !== text ? {normalizedResponseHash: responseHash(normalized)} : {}),
       failedPaths: failures.map(f => f.path),
       status: failures.length ? "invalid-response" : "accepted",
     };
@@ -689,7 +719,7 @@ export async function recoverResponseContract<T>(options: {
     if (!failures.length) {
       // Structural validity only. Semantic refusal and independent source
       // validation remain outside this policy and are never retried as JSON.
-      const result = parse(text);
+      const result = parse(normalized);
       if (receiptFile) await saveReceipt(receiptFile, current);
       return result;
     }
@@ -769,7 +799,7 @@ export async function inspectResumableProtocolExhaustion(options: {
   checkedReceipt(first, sourceDigest, contract, started, null);
   const evidence = await transcriptResponses(first.sessionFile, sessionRoots, first.sessionId);
   const last = evidence.complete.at(-1);
-  const failures = last ? options.validate(last) : [];
+  const failures = last ? options.validate(normalizeCompletedModelJson(last)) : [];
   if (!last || first.responseOrdinal !== evidence.complete.length ||
       createHash("sha256").update(last).digest("hex") !== first.responseHash ||
       !failures.length ||

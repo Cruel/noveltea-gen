@@ -71,12 +71,14 @@ export function parseCompositionReview(
     !Array.isArray(value.prior) ||
     !Array.isArray(value.sourceEvidence) ||
     value.sourceEvidence.length > 48 ||
-    value.sourceEvidence.some((e: unknown) => !filled(e, 8, 1000)) ||
     (value.status === "pass"
       ? value.findings.length !== 0 || !value.sourceEvidence.length
       : value.findings.length === 0)
   )
     throw Error("Composition review has invalid source-linked schema or verdict.");
+  for (const [index, evidence] of value.sourceEvidence.entries())
+    if (!filled(evidence, 8, 1000))
+      throw Error("sourceEvidence[" + index + "]: expected a string (8-1000 characters), NOT an object. Include route ID, source path and exact quote in the string.");
   const review = value as CompositionReviewVerdict;
   const citation = (ref: unknown, expectedPath?: string): boolean =>
     exact(ref, ["path", "quote"]) &&
@@ -104,7 +106,7 @@ export function parseCompositionReview(
       !requirements[f.requirement.source]?.includes(f.requirement.quote) ||
       !citation(f.evidence, f.path)
     )
-      throw Error("Composition finding lacks a current source quote or authorized requirement.");
+      throw Error("findings[" + index + "]: cite an exact source quote from the current Authored Content and the correct assignment or policy requirement. Do not label policy text as assignment.");
     if (
       f.origin === "continuing" &&
       !previous.some((round) => round.verdict.findings.some((old) => old.path === f.path))
