@@ -513,6 +513,22 @@ async function reviewerAssignment(job: JobStartResult, request: CloseoutRunReque
         "--", repoPath(job, proposal.allowedPaths[0]!)) },
   };
 }
+/** Keep the signed Event field grant on its original commit, while binding
+ * the inventory to the exact independently reviewed successor, if repaired. */
+async function reviewedCloseoutEvent(job: JobStartResult, inventory: GenerationInventory,
+  proposal: CloseoutProposal): Promise<string> {
+  const item = inventory.items.find(i => i.id === "event:" + proposal.milestoneId);
+  if (!item || item.status !== "verified" || !item.verifiedSha ||
+      item.planVersion !== proposal.planVersion)
+    throw Error("Closeout lacks its original verified Event inventory item.");
+  if (item.verifiedSha !== proposal.sourceEventSha) {
+    const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+    if (!await verifyReviewCycleSuccessor(job, proposal.sourceEventSha, item.verifiedSha))
+      throw Error("Closeout Event successor lacks the original independent Review chain.");
+  }
+  git(job, "merge-base", "--is-ancestor", item.verifiedSha, proposal.sourceSha);
+  return item.verifiedSha;
+}
 /** Invoked only from the production graph's separate dependency node. */
 export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
   const job = await startStoryJob({ story: request.story, job: request.job }, false);
@@ -531,12 +547,9 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
           request.expected.proposalDigest !== boundary.proposal.digest || request.expected.repairId !== boundary.repairId))
         throw Error("Current prerequisite differs from the checkpointed controller decision.");
       if (request.originalInventory.headSha !== boundary.proposal.sourceSha ||
-          request.originalInventory.planVersion !== request.planVersion ||
-          !request.originalInventory.items.some(item =>
-            item.id === "event:" + request.milestoneId &&
-            item.status === "verified" &&
-            item.verifiedSha === boundary.proposal.sourceEventSha))
+          request.originalInventory.planVersion !== request.planVersion)
         throw Error("Cross-domain revalidation cannot replace a reviewed original Event work item.");
+      await reviewedCloseoutEvent(job, request.originalInventory, boundary.proposal);
       await preflightPiAssignment(job, "prerequisite:" + request.milestoneId, {
         provider: request.provider ?? "openai", model: request.model ?? "gpt-6-luna",
       });
@@ -834,13 +847,14 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
     if (await trustedHead(job) !== state.commitSha)
       throw Error("Closeout verified-head publication has not become authoritative.");
     const source = state.history?.[0]?.proposal ?? state.proposal;
+    const predecessor = await reviewedCloseoutEvent(job, request.originalInventory, source);
     await revalidateAfterReviewedCorrection({
       job, inventory: request.originalInventory,
       correction: {
         version: 1, planVersion: state.proposal.planVersion,
         baseSha: source.sourceSha, successorSha: state.commitSha!,
         upstreamItemId: "event:" + state.proposal.milestoneId,
-        predecessorCommitSha: state.proposal.sourceEventSha,
+        predecessorCommitSha: predecessor,
         turnDigest: state.turnDigest, reviewDigest: state.reviewDigest!,
         changedPaths: state.proposal.allowedPaths,
         permittedPaths: source.allowedPaths,

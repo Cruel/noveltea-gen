@@ -571,13 +571,11 @@ async function verifyFinal(job: JobStartResult, point: RecoveryCheckpoint,
       throw new Error("Historical Architecture proof differs from the authorized plan commit.");
   }
   const review = await inspectCheckpointReview(job, point);
-  // An exact author-approved Foundation was finalized *before* Story Chat
-  // created its Turn plan. Its immutable checkpoint correctly has no Turn
-  // review-selection receipt. A later plan must not retroactively manufacture
-  // an assurance or make that same historical commit unusable. Only the
-  // independently verified original Chat handoff above permits this absence;
-  // later specialist checkpoints still require their own original reviews.
-  if (!review && !earlyChatFoundation && await checkpointAssurance(job, point))
+  // The pre-queue whole-Story Foundation now has the original immutable
+  // Turn before it commits. An older checkpoint without that assurance
+  // cannot grant current Generation authority. Foundation-only approvals
+  // have no Generation Turn and therefore no required Turn assurance.
+  if (!review && await checkpointAssurance(job, point))
     throw new Error("Turn checkpoint lacks its required original review-selection receipt.");
   if (point.planVersion !== (source.planVersion ?? (point.plan as { version?: number } | null)?.version ?? null) ||
       point.validation.status !== (source.proof.validation === "unverified-empty-baseline"

@@ -31,3 +31,13 @@ First qualify an actual Generation assignment child, nested checkpoint namespace
 **R14 implementation evidence:** The [recovery contract](../generation-recovery-contract.md#r14-260--incremental-executable-cutover-and-shared-reassessment) and [exit inventory](../recovery-exit-inventory.md#r14-260--current-discovery-handoff-and-execution-cutover-audit) record the incremental retirement of historical owner digest acceptance, unversioned inventory execution, missing-Turn prerequisite bypass, fixed diagnostic-count ceilings, repository-only Discovery execution and historical draft-status Chat approvals. The Discovery/handoff and direct model-consumer AST gates identify reviewed sources and remaining gaps; they do not, on their own, establish universal acceptance or completion of #260.
 
 **Pre-release compatibility invariant:** Do not add beta checkpoint schema migration readers, dual active execution paths or production compatibility selected by a missing Turn plan. During incremental specialist migration, current-contract assignments may temporarily use still-unmigrated domain adapters, but an obsolete *format* does not become a supported execution mode. Block closure of #247 if its Foundation child is conditional on a historical no-Turn fallback, and block final #260 certification until all such production fallbacks are retired. The approved functional spec is #246 and the implementation tickets are #247–#260; the design interview draft is not an additional technical authority.
+
+### R14L qualification evidence (#272)
+
+The [existing recovery contract](../generation-recovery-contract.md) and
+[source-linked exit inventory](../recovery-exit-inventory.md#r14l-incremental-qualification-272)
+record the typed parent/child disposition checks, authenticated Review
+successor consumption, and integrated deterministic Studio Turn regression
+on SQLite and PostgreSQL. This implements the existing ADR boundaries;
+it does not establish a new recovery controller or change this decision.
+Paid/live certification remains #260 under #246 and its R14A–L migrations.

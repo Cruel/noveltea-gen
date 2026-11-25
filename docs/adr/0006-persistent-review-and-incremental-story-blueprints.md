@@ -21,3 +21,13 @@ The existing full-Story causal Architecture Blueprint asks specialists to design
 ## Relationship to earlier decisions
 
 [ADR 0002](0002-goal-driven-story-orchestration.md) remains authoritative on the single goal-driven orchestrator and trusted authorization. [ADR 0003](0003-story-interaction-budget-and-estimation.md) remains authoritative for Playthrough length, Interaction profile and Production budget. [ADR 0005](0005-bounded-correction-and-recovery.md) continues to govern immutable source evidence, safe corrective authority, protocol failures, job budgets and cross-domain revalidation, **except** where it prescribes fresh reviewer sessions after every substantive correction, hard per-finding/Turn semantic correction exhaustion, or persistent semantic finding identity matching as the basis of ordinary review progression. Those rules are replaced by this decision and spec #201.
+
+### R14L qualification evidence (#272)
+
+The [existing recovery contract](../generation-recovery-contract.md) and
+[source-linked exit inventory](../recovery-exit-inventory.md#r14l-incremental-qualification-272)
+record the typed parent/child disposition checks, authenticated Review
+successor consumption, and integrated deterministic Studio Turn regression
+on SQLite and PostgreSQL. This implements the existing ADR boundaries;
+it does not establish a new recovery controller or change this decision.
+Paid/live certification remains #260 under #246 and its R14A–L migrations.

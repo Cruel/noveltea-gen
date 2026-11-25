@@ -976,7 +976,7 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
       assert.equal(observed.length, 11);
       const original = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
       const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
-      assert.equal(chosen.recoveryLifecycle.decision?.action, "diagnostic");
+      assert.equal(chosen.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify({ reason: chosen.reason, lifecycle: chosen.recoveryLifecycle, sources: chosen.recoverySources }));
       const admitted = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.equal(admitted.recoveryLifecycle.decision?.adapter, "assignment-diagnostic", JSON.stringify(admitted.recoveryLifecycle));
       saver.db.close();

@@ -11,7 +11,7 @@ import {
 import { emptyRecoveryLifecycle, selectPendingRecovery } from "../src/generation-recovery-lifecycle.js";
 import { unknownCompletionCase } from "../src/unknown-recovery-diagnostic.js";
 import type { GenerationOperationRecovery } from "../src/generation-operation-recovery.js";
-import { gateRecoveryOutput, recoveryNode } from "../src/generation.js";
+import { assertReviewProjection, gateRecoveryOutput, recoveryNode } from "../src/generation.js";
 
 const graphThreadId = "job-thread-1:generation";
 const turn = "a".repeat(64);
@@ -365,4 +365,15 @@ test("C02 wrapped node responses remove all retired writable graph fields", () =
   );
   assert.deepEqual(Object.keys(patch.rest), ["status"]);
   assert.equal(patch.domain.operationRecovery?.check, "committed-work-verification.v1");
+});
+
+test("R14L contradictory callback projection and replayed child fence cannot grant a writer", () => {
+  const verified = { status: "verified", assignmentKey: "original", evidenceRef: "original",
+    reviewRef: "review-checkpoints:" + head, headSha: head } as const;
+  assert.doesNotThrow(() => assertReviewProjection({ result: { status: "event-authored", headSha: head } }, verified, "original"));
+  assert.throws(() => assertReviewProjection({ result: { status: "event-authored", headSha: "c".repeat(40) } }, verified, "original"), /verified child HEAD/);
+  assert.throws(() => assertReviewProjection({ status: "paused" }, verified, "original"), /disagrees with the authenticated child disposition/);
+  assert.throws(() => assertReviewProjection({ status: "paused", operationRecovery: operation }, verified, "original"), /contradicts/);
+  assert.throws(() => assertReviewProjection(undefined, { status: "fenced", assignmentKey: "original",
+    evidenceRef: "original", inspectionRef: "review-checkpoints" }, "original"), /is fenced/);
 });

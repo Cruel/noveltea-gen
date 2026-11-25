@@ -40,6 +40,20 @@ test("A claimed passing repair cannot discharge the original Review without an i
   assert.equal(verifications, 1);
 });
 
+test("Review round cancellation leaves the child without a semantic outcome or successor", async () => {
+  const rounds = createReviewRoundTransitions({
+    originalHead: sha, originalReceipt: "foundation.json",
+    run: async command => {
+      assert.deepEqual(command, { phase: "admit", sourceSha: sha });
+      return { status: "cancelled", sourceSha: sha, ref: "job-control" };
+    },
+    outcome: () => { throw Error("Cancellation must not become an assignment disposition"); },
+    verifySuccessor: async () => { throw Error("Cancellation must not verify another successor"); },
+  });
+  await assert.rejects(rounds.verify({ status: "committed", receiptRef: "foundation.json", headSha: sha }),
+    { name: "StoryCancelledError" });
+});
+
 function git(cwd: string, ...args: string[]) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);

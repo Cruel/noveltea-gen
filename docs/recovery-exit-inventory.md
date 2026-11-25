@@ -407,10 +407,10 @@ contract.
 
 ### R14L incremental qualification (#272)
 
-This section records partial deterministic qualification under #246/#260
-and the R14A–K migrations (#247–#259, #261–#271). It is not a certification
-of the integrated contract. ADRs 0005–0007 and the existing recovery
-contract remain normative; no new recovery authority is introduced.
+This section records deterministic qualification under #246/#260
+and the R14A–K migrations (#247–#259, #261–#271). ADRs 0005–0007 and
+the existing recovery contract remain normative; no new recovery authority
+is introduced. Live provider certification remains separate.
 
 | Changed boundary | Former exit / next authority | Current gate and independent regression |
 | --- | --- | --- |
@@ -419,7 +419,7 @@ contract remain normative; no new recovery authority is introduced.
 | [Review prerequisite identity and continuation](../src/generation.ts), `reviewPrerequisiteOwner`, `reviewPrerequisiteIdentity`, `runReviewPrerequisiteChild` | Supporting owner resolution was performed only by the later parent projection. A returned suspension could be projected without comparing its complete tuple. | Resolve owner from the same pinned Turn for both boundaries; parent authenticates the original Case/plan/native negative Review and rejects inconsistent returned suspension or a stale suspension after support. Only the parent may admit the supporting assignment; the existing continuation requires its verified receipt. [R14D support](../test/generation.test.ts) checks actual persisted correction-child outcomes equal the parent suspension, original assignment key, native Git diff, original reviewer/writer session, child-before-parent crash/restart and next scheduled work. |
 | [Studio fork regression](../web/test/current-checkpoint-fork.test.ts) | Unset native CLI override was restored as the literal string `undefined`; valid fork then failed the tooling gate. | Restore absence rather than assigning undefined. The native tooling guard is unchanged. Test retains negative controls and verified same-Thread continuation. |
 
-#### Downstream reply-consumer gate (partial)
+#### Downstream reply-consumer gate
 
 The [existing model-consumer AST test](../test/generation-model-consumer-coverage.test.ts)
 now separately enumerates 37 consumer owners of 16 named reply/Review/planning
@@ -446,21 +446,93 @@ were executed in this qualification.
 | `validateTurnFulfillment` → [readTurnFulfillment, assessTurnFulfillment](../src/turn-fulfillment.ts) | Revalidate persisted/returned final objective verdict and source; incomplete or forged evidence cannot complete the Turn. | [Turn fulfillment](../test/turn-fulfillment.test.ts) |
 | `readDiscoveryResponse` → [meterDiscoveryAttempts](../web/src/lib/discovery-evidence.server.ts), [onboardingPiRequest](../web/src/lib/onboarding-pi.server.ts); `onboardingPiRequest` → [storyChatDiscoveryRequest](../web/src/lib/story-chat-discovery.server.ts) | Authenticate original attempt/transcript, exact reviewed proposal, owner and approval; meter once, no repeated handoff effects; unresolved/ambiguous response or missing authority cannot grant a new execution. | [real backend Discovery](../web/test/story-chat-discovery.test.ts), [approved continuation](../web/test/story-approved-continuation.test.ts) |
 
-The new named-consumer set does **not** discover arbitrary higher-order
-aliases, every native/domain-manifest consumer or all transitive provider,
-queue and handoff effect consumers. The remaining adapter exits include
-auxiliary Review patches that can disagree with a typed outcome, initial
-negative Review assessment, and cancellation projected through unresolved
-correction outcomes. These require actual production-adapter behavior
-tests and source-linked exit classification before #272 can close.
+#### Typed adapter exits and parent projection
 
-The Studio Discovery tests currently demonstrate real SQLite and PostgreSQL
-approval and one cumulative-budget handoff through the queue. The production
-Generation tests separately demonstrate resumed Review/support and final
-fulfillment. These are not a single integrated authenticated Discovery-to-
-Generation run and do not satisfy that mandatory acceptance item.
-Paid/live provider acceptance remains with #260 after the deterministic
-gate; no paid model runs were initiated.
+The six-outcome union is shared. A particular adapter only returns the
+outcomes that its authenticated source admits. A parent-wide failure or
+cancellation is not a seventh child disposition. The common
+[projection gate](../src/generation.ts) (`reviewProjectionOutcome`,
+`assertReviewProjection`) whitelists callback fields and compares the
+persisted outcome before a callback can influence the parent. A control
+is not a semantic finding; a negative verdict is not verification.
+A sealed writer terminal references its own proof, not a generic Review
+receipt. A persisted fence remains a fence even when the callback was
+lost. The existing graph assessor owns recovery decisions, and the
+commit-verification node independently reauthenticates verified results.
+
+| Adapter / producer | Boundary, disposition and next authority | Production regression |
+| --- | --- | --- |
+| [Discovery](../web/src/lib/onboarding-pi.server.ts), [Discovery assignment](../web/src/lib/discovery-graph.server.ts) | Validate Question Set, answer revision, proposal and independent verdict against the source attempt. Await exact author answer/approval; pause on control, fence untrusted effects, unresolved only on exhausted response/correction. Verified proposal is not Generation admission; exact approval and durable handoff remain parent-owned. | [Studio Discovery](../web/test/story-chat-discovery.test.ts), [integrated Turn](../web/test/integrated-story-turn.test.ts) |
+| Foundation, `runFoundationAssignmentChild` | Validate original writer/native commit and Review checkpoint. Project verified only after passing proof; reconstruct original failed Review from sealed checkpoint. Cancel at parent terminal; typed budget/provider/author control pauses. Invalid or foreign result fences, sealed terminal enters original assessment. | [Generation](../test/generation.test.ts), [Review cancellation](../test/rejected-review-repair.test.ts) |
+| Architecture, `runArchitectureAssignmentChild` | Original architecture receipt and plan version must match verified HEAD; Review cannot grant a new plan. Reject contradictory callback or replayed disposition before parent admission; pause remains control. | [Generation R14K](../test/generation.test.ts), [architecture/native cutover](../test/domain-cutover.test.ts) |
+| World then Character, `runCharacterWorldAssignmentChild` | Separate child identities and exact unit submissions. Verify original commit/review; negative no-write conflicts become original assessment, not another unit's writer grant; a missing callback is reconstructed only from exact Review disposition. | [R14I nested author question and World recovery](../test/generation.test.ts) |
+| Event and Composition, `runNarrativeAssignmentChild` | Original source-bound invocation, native Git/manifest, independent review and exact successor. Typed pause/fence/unresolved is compared to the callback; rejected original review stays pending until verified successor. Parent alone advances inventory, plans and closeout. | [R14D recovery](../test/generation.test.ts), [integrated Turn](../web/test/integrated-story-turn.test.ts) |
+| Choice then Puzzle, `runInteractiveAssignmentChildren` | Separate unit checkpoints or sealed no-write omission, exact current Event/plan; retain negative finding and pause control; original receipt must verify before next unit. | [Generation](../test/generation.test.ts), [omission merge](../test/recovery-omission-merge.test.ts) |
+| Focused, `runFocusedAssignmentChild` | Exact authorized target and original writer/reviewer; bounded prerequisite must match sealed report and owner/scope; suspend at END for parent support, reauthenticate before same assignment re-entry; preserve submitted result during pause. | [R04 and R07](../test/focused-generation.test.ts) |
+| Subunit Review and supporting child, `subunitReviewTransitions`, `subunitReviewStop`, `runReviewPrerequisiteChild` | Source-bound negative Review, typed writer/Review-phase prerequisite, parent admission and exact support receipt; control does not become semantic rejection. Protected approval is separate; cancellation stays parent terminal. | [R14D support, review and diagnosis](../test/generation.test.ts) |
+| [Shared lifecycle](../src/generation-assignment-lifecycle.ts), [parent boundary](../src/generation.ts) | Exact discriminant, logical identity, source and outcome references; question interrupt differs from prerequisite END; forged/contradictory fields and lost fence cannot authorize work. Parent authenticates every entry before effects. | [Lifecycle](../test/generation-assignment-lifecycle.test.ts), [projection guard](../test/generation-recovery-graph.test.ts), [persisted Generation](../test/generation.test.ts) |
+
+#### Native, manifest and durable-effect consumers
+
+The third source gate in [model-consumer coverage](../test/generation-model-consumer-coverage.test.ts)
+lists the exact function owners and individual reviewed signatures in
+`effectReviewed`. It covers 20 named native, manifest, stage execution,
+handoff and queue producers (72 consumer owners). New imported aliases,
+new consumers and same-count changes are detected. The following groups
+map these owners to their source and independent validation authority;
+no hash alone is evidence of successful work.
+
+| Producer and actual consumers | Validation, exit, next authority / regression |
+| --- | --- |
+| Manifest/report: [responsePolicy](../src/assignment-metadata-recovery.ts), [authorCharacterWorld](../src/character-world-specialist.ts), [inspectFoundationConflict](../src/character-world.ts), [parseEventManifest](../src/event-manifest.ts), [authorEventCluster](../src/event-specialist.ts), [piAuthor](../src/foundation.ts), [parseInteractiveManifest](../src/interactive-specialist.ts), [originalSpecialistChallenge](../src/milestone-blueprint-correction.ts), [inspectSpecialistManifest, requireSpecialistManifest](../src/specialist-manifest.ts) | Parse exact source-bound report and validate bounded response or no-write claim. Invalid protocol -> bounded correction or sealed terminal, not native success. Independent native/Git and Review required before parent adoption. [Metadata recovery](../test/assignment-metadata-recovery.test.ts), [Generation](../test/generation.test.ts). |
+| Native validation: [verifyArchitectureAssignmentResult, runArchitectureJob](../src/architecture.ts), [runCharacterWorldJob](../src/character-world.ts), [runCompositionWorkItem](../src/composition-work.ts), [runEventWorkItem](../src/event-work.ts), [focusedSourceCatalog, runFocusedWorkItem](../src/focused-work.ts), [executeFoundationGraph](../src/foundation.ts), [runInteractiveWorkItem](../src/interactive-work.ts), [createStoryValidateTool](../src/validator.ts) | Authenticate current source/plan/authorized paths, native validation, exact invocation/Git effect. Negative native or uncertain result cannot advance; original correction/assessment only. Tool result alone is not a commit. [Domain cutover](../test/domain-cutover.test.ts), [Generation](../test/generation.test.ts), [Focused](../test/focused-generation.test.ts). |
+| Native and Review successor: [validateCloseoutDraft, reviewerAssignment](../src/cross-domain-closeout-work.ts), [preflightCompositionBoundary](../src/cross-domain-prerequisite-controller.ts), [native](../src/dependent-correction-work.ts), [validateRejectedRepairDraft, runNativeRepairRound](../src/rejected-review-repair.ts), [revalidateAfterReviewedCorrection](../src/selective-revalidation-work.ts) | Original signed field grant and independently reviewed successor are distinct; authenticate both before new closeout, validate affected-only re-review and final parent adoption. Negative or stale proof fences. [Integrated Turn](../web/test/integrated-story-turn.test.ts), [selective revalidation](../test/selective-revalidation.test.ts), [Review cycle](../test/issue-210-postcommit-review-cycle.test.ts). |
+| Planning/no-write and authority: [reviewedAdaptiveOmissions](../src/adaptive-omission.ts), [resolveAdaptiveNoWriteSupersession](../src/adaptive-work.ts), [inspectCausalAmendment](../src/causal-amendment-controller.ts), [registerReviewDependency, approveDependency](../src/dependency-state.ts), [supportingWriterRounds](../src/dependency-work.ts), [verifyDraft](../src/idea-placement.ts), [executeOperationStrategy](../src/generation-operation-strategy.ts), [reconcile, applyLiveSteeringAtBoundary, dispatch, runFoundationAssignmentChild, runNarrativeAssignmentChild, runInteractiveAssignmentChildren](../src/generation.ts) | Parent admits the exact source-bound plan, owner, scope, omission or supporting work. Negative proof is not authorization; no-write work requires original proof. Read-only diagnosis cannot grant a writer. [Recovery lifecycle](../test/generation-recovery-lifecycle.test.ts), [operation recovery](../test/adaptive-operation-recovery.test.ts), [dependency amendments](../test/dependency-amendments.test.ts), [Generation](../test/generation.test.ts). |
+| Read-only and continuation: [main](../src/cli.ts), [previewStoryMerge](../src/merge-preview.ts), [runNarrativeReview](../src/narrative-review.ts), [inspectBlockedOriginalThreadCorrection](../src/original-thread-continuation.ts), [prepareRecoveryFork](../src/recovery-fork.ts), [inspectProposal](../src/revision.ts), [reviewedMilestoneObjectives](../src/turn-fulfillment.ts) | Validate source/head/Turn/native/Review before inspection, preview or replacement. A historical receipt cannot invoke an obsolete writer. Final objective independently assessed. [Cutover](../test/recovery-cutover.test.ts), [fork](../web/test/current-checkpoint-fork.test.ts), [fulfillment](../test/turn-fulfillment.test.ts). |
+| Studio handoff: [admitWholeApprovedStory, continueApprovedStoryChat](../web/src/lib/story-approved-continuation.server.ts), [prepareCachedJob](../web/src/lib/cached-jobs.server.ts), [initializeStoryBranch](../web/src/lib/git-cache.server.ts), [githubInitializationRequest](../web/src/lib/github-initialize.server.ts), [launchNaturalStory](../web/src/lib/natural-story.server.ts) | Authenticate owner, approved proposal, exact source and Turn before committing Foundation or queueing; effect ledger reconciles uncertain provider/worktree/queue starts and prevents duplicate admission. Foundation-only does not queue. [Discovery](../web/test/story-chat-discovery.test.ts), [approved continuation](../web/test/story-approved-continuation.test.ts), [integrated Turn](../web/test/integrated-story-turn.test.ts). |
+| Studio worker: [runPersistedGeneration](../web/src/agent-runner.ts), [pumpAgentQueue](../web/src/agent-service.ts), [verifiedResumeAdmission](../web/src/lib/generation-controls.server.ts), [inspectRegisteredJob, generationJobRequest](../web/src/lib/fixture-jobs.server.ts), [advanceThread, recoverSettledThreadRuns](../web/src/lib/thread-chat.server.ts) | Current owner/Turn/graph Thread admission before provider/sandbox; queue claim and settlement use original durable effect; inspection no writer; lost settlement reconciled, no duplicate usage or execution. [Queue](../web/test/generation-queue.test.ts), [cutover](../test/recovery-cutover.test.ts), [integrated Turn](../web/test/integrated-story-turn.test.ts). |
+| Studio revision / inspection: [reviewPublication](../web/src/lib/publication-review.server.ts), [prepareReplacementTurn](../web/src/lib/replacement-turn.server.ts), [validatedExplorer](../web/src/lib/story-explorer.server.ts), [verifiedReusableStoryFoundation, inspectExistingStoryFoundation](../web/src/lib/story-foundation-reuse.server.ts), [revisionFromSource](../web/src/lib/story-revision.server.ts), [branchEditedThreadMessage](../web/src/lib/thread-message-edit.server.ts), [verifyNewerStory, verifyPreparedStory, prepareThreadRestart](../web/src/lib/thread-restart.server.ts), [readThreadReview](../web/src/lib/thread-review.server.ts) | Revalidate exact owner, source, native checkpoint and replacement authorization before new Turn; read-only consumers cannot grant effects or expose private transcript. [Current fork](../web/test/current-checkpoint-fork.test.ts), [Thread continuation](../web/test/thread-continuation.test.ts), [Thread Review](../web/test/thread-review.test.ts). |
+
+#### Integrated regression and fixes discovered during qualification
+
+- [Approved continuation](../web/src/lib/story-approved-continuation.server.ts)
+  previously committed the approved Foundation before pinning its Generation
+  Turn. Pin the immutable admitted Turn before native commit; remove the
+  early-Foundation missing-assurance exception in
+  [checkpoint verification](../src/recovery-checkpoints.ts). A
+  Foundation-only approval remains a distinct terminal path.
+- [Composition prerequisite](../src/cross-domain-prerequisite-controller.ts)
+  previously required the failed Event itself to have passed, even after
+  authenticated Review correction. Require the same resolved successor
+  coverage used by the other composite units, without relabeling the
+  original failure or widening the Event grant.
+- [Closeout](../src/cross-domain-closeout-work.ts) authenticates the original
+  signed Event field grant and exact passing successor independently.
+  [Selective impact](../src/selective-revalidation-controller.ts) uses that
+  passing checkpoint as the correction predecessor and recognizes the
+  exact Turn-bound pre-plan Foundation as unaffected, not unknown. Unrelated
+  verified items are not reviewed again.
+- The [integrated Studio test](../web/test/integrated-story-turn.test.ts)
+  performs authenticated Question Sets and two Luna-style source defects,
+  exact proposal approval, durable handoff with cumulative usage, real local
+  Git worktree, duplicate continuation and queue claim, original Generation
+  graph, native Event correction, failed independent Review and passing
+  original-cycle successor, composite units, affected-only revalidation,
+  native final validation, final objective verdict and Thread settlement.
+  It asserts one Turn/execution, clean Git and unchanged source repo, exact
+  cumulative model calls, no pending/active Case, no duplicate claim, and
+  original negative Review preserved. The provider and sandbox transports
+  are deterministic, not the graph, database, native validator or Git.
+  The same test passed on real SQLite and PostgreSQL with no backend skips.
+  Separate tests cover Foundation-only approval, fork continuation, nested
+  author interrupt and prerequisite END re-entry.
+
+The named producer gates are maintained change alarms rather than a
+general proof of arbitrary JavaScript higher-order data flow. Coverage
+claims concern the explicitly inventoried production boundaries and
+behavioral regressions, not paid provider behavior. Live provider
+certification and the downloaded native master artifact remain #260
+responsibilities.
 
 #### Incremental verification, 2026-11-24
 
@@ -477,5 +549,30 @@ the actual connection. No backend substitution or paid provider call.
 - `pnpm exec tsx --test test/semantic-assignment-review.test.ts test/turn-fulfillment.test.ts test/generation-recovery-lifecycle.test.ts test/review-other-owner-controller.test.ts test/review-dependency-request.test.ts` — 59 passed, three private historical-replay-state tests skipped (require `NT_TEST_SEMANTIC_REPLAY_STATE` / `NT_TEST_S14_STATE`), zero failures.
 - `pnpm typecheck`, `pnpm lint`, `pnpm build`, `pnpm --filter @noveltea/studio typecheck`, `pnpm --filter @noveltea/studio build` — all passed, including final production guard change; native validation/Git exercised through the above generator and Studio regressions. No unrelated full test suite.
 
-The focused tests certify the named seams only. Full #272 acceptance and
-separate live #260 certification are not established.
+These are the initial incremental results; the subsequent integrated runs
+above and final verification below supersede the earlier seam-only status.
+Separate live #260 certification is not established.
+
+#### Integrated qualification, 2026-11-24
+
+Source base `0362144` plus R14L integrated qualification changes.
+Node 24.18.0, pnpm 11.15.0, actual local NovelTea CLI 1.0.0 from
+Cruel/nt `f842e3c6a`, skills `a602b70`. PostgreSQL 17 Alpine ran
+in a disposable container on a random loopback port. The connection
+was provided by `NT_TEST_PG_URL`; `NT_REQUIRE_KYSELY_PROOF=1`
+makes backend absence a failure. The CI matrix's integrated-recovery
+entry provisions the same backend and actual native artifact rather
+than relying on the ordinary Studio shard's optional PostgreSQL skip.
+
+- `pnpm --filter @noveltea/studio exec tsx --test test/story-chat-discovery.test.ts test/story-approved-continuation.test.ts test/integrated-story-turn.test.ts test/current-checkpoint-fork.test.ts` with mandatory PostgreSQL proof — 6 passed, no skips/failures, including the same complete integrated original Turn on both databases.
+- `pnpm exec tsx --test test/generation-recovery-coverage.test.ts test/generation-model-consumer-coverage.test.ts test/generation-assignment-lifecycle.test.ts test/generation-recovery-c08-matrix.test.ts test/generation-recovery-graph.test.ts test/generation-operation-event-diagnostic.test.ts test/recovery-cutover.test.ts test/selective-revalidation.test.ts test/selective-revalidation-receipt.test.ts` — 85 passed, zero failures/skips.
+- `pnpm exec tsx --test test/generation-recovery-graph.test.ts test/generation-recovery-coverage.test.ts test/generation-model-consumer-coverage.test.ts` — 40 passed, zero failures/skips, after replay-fence, contradictory callback HEAD and typed-integrity propagation guard.
+- `pnpm exec tsx --test --test-name-pattern='crash-cancel|nonconverging-continue-(cancel|budget)|review-native|review-reviewer-unavailable|review-session-unavailable' test/generation.test.ts` — 10 passed, no skips/failures, including the original-Thread author steering, budget and cancellation regressions.
+- `pnpm exec tsx --test test/focused-generation.test.ts` — 8 passed, no failures/skips, including native focused commit restart and supporting writer/Review/omission prerequisites.
+- `pnpm exec tsx --test test/generation-recovery-lifecycle.test.ts test/assignment-metadata-recovery.test.ts test/semantic-assignment-review.test.ts test/turn-fulfillment.test.ts test/review-other-owner-controller.test.ts test/review-dependency-request.test.ts test/adaptive-operation-recovery.test.ts test/job-pi-policy.test.ts test/issue-210-postcommit-review-cycle.test.ts test/dependency-amendments.test.ts` — 114 passed, 3 private historical replay inputs unavailable/skipped, zero failures. The private replay cases are not claimed as executed; deterministic scenarios exercise the current evidence and correction paths.
+- `pnpm --filter @noveltea/studio exec tsx --test test/generation-queue.test.ts test/discovery-evidence.test.ts test/generation-controls.test.ts test/thread-live-steering.test.ts test/thread-continuation.test.ts test/thread-review.test.ts test/thread-usage.test.ts` — 28 passed, no skips/failures.
+- `NT_NATIVE_CLI=<absolute native CLI> NT_SKILLS_CHECKOUT=<canonical skills checkout> pnpm certify:story` — 22 passed, no skips/failures (native contract, Git isolation, validator version and resume).
+- `pnpm typecheck && pnpm lint && pnpm build && pnpm --filter @noveltea/studio typecheck && pnpm --filter @noveltea/studio build` — passed after the replay-fence projection guard.
+
+All deterministic execution uses the current source-bound production
+controller. No paid or live provider certification was performed.

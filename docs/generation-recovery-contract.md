@@ -751,7 +751,7 @@ source receipts, native Git effects, and no additional model calls on fenced
 resumption. This does not confer current authority on historical fixture-only
 checkpoints.
 
-**R14L qualification progress (#272).** The shared lifecycle now rejects
+**R14L deterministic qualification (#272).** The shared lifecycle now rejects
 unknown or contradictory runtime outcome shapes before dispatch/routing.
 For checkpointed subunit Review corrections, a sealed owner-scoped
 controller prerequisite returns the actual `needs-prerequisite` outcome,
@@ -759,6 +759,16 @@ not an unresolved tag. The parent reauthenticates the sealed Review,
 Turn, plan, source, scope and owner before admitting support; the original
 Review remains pending until independently verified continuation. See
 [the incremental source-linked inventory](recovery-exit-inventory.md#r14l-incremental-qualification-272).
-The full per-adapter exit audit, integrated Studio-to-Generation seam,
-and complete deterministic certification remain open. No normative ADR
-or recovery authority has changed.
+The parent projection gate checks returned dispositions, including on
+checkpoint replay; controls do not become semantic failures and
+cancellation remains parent terminal. The approved whole-Story Turn is
+pinned before its native Foundation commit. The exact original signed
+Event field grant remains distinct from an independently verified repair
+successor; Composition and selective revalidation authenticate both.
+The integrated Studio regression executes the original approved Turn
+through final native and independent objective proof on real SQLite and
+PostgreSQL, with scripted transport. The source inventory includes
+adapter, manifest, native, downstream reply, and durable handoff/queue
+consumers and mutation tests. See the inventory for precise verification
+and limitations. No normative ADR or recovery authority has changed;
+paid/live provider certification remains #260.

@@ -73,3 +73,13 @@ Story specialists sometimes make correctable mistakes or identify obligations th
 ## Consequences
 
 The orchestrator must be able to schedule bounded corrective work against earlier verified stages without rewriting checkpoint history. Recovery and graph transitions must represent repairable conditions separately from hard integrity blocks, and deterministic tests must cover bounded retry, escalation, carry-forward, and interrupted work.
+
+### R14L qualification evidence (#272)
+
+The [existing recovery contract](../generation-recovery-contract.md) and
+[source-linked exit inventory](../recovery-exit-inventory.md#r14l-incremental-qualification-272)
+record the typed parent/child disposition checks, authenticated Review
+successor consumption, and integrated deterministic Studio Turn regression
+on SQLite and PostgreSQL. This implements the existing ADR boundaries;
+it does not establish a new recovery controller or change this decision.
+Paid/live certification remains #260 under #246 and its R14A–L migrations.

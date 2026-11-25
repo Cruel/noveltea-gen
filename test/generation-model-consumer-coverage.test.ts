@@ -157,7 +157,7 @@ const downstreamReviewed: Record<string, string> = {
   "src/cross-domain-closeout-specialist.ts:authorMilestoneCloseout": "1:6039a9cb83869c2519f4bc80",
   "src/cross-domain-closeout-work.ts:recoveredCloseoutReview": "1:d07d3a0f91e221a2cb34c6d1",
   "src/cross-domain-closeout-work.ts:verifyLegacyCloseoutReviewTranscript": "1:5acb0a5e8eacbf5aabd14ecf",
-  "src/cross-domain-closeout-work.ts:advanceCrossDomainCloseout": "1:dd63274008530f26908842dc",
+  "src/cross-domain-closeout-work.ts:advanceCrossDomainCloseout": "1:2b9dd8f323a429ae5b9a1401",
   "src/dependent-correction-work.ts:advanceDependentCorrection": "1:f6d5cb09a011d425dbad5a3f",
   "src/execution-replay-capture.ts:captureSealedReview": "2:6b7747a538feb49ecc6465ae",
   "src/execution-replay.ts:executeReplay": "3:5300f4a97d25a99b2f72c042",
@@ -208,4 +208,115 @@ test("R14L downstream reply audit catches a new consumer and a same-count dispos
   assert.notDeepEqual(consumerSignatures("example.ts", original +
     '\nfunction bypass(packet: unknown) { validate(packet); return "verified"; }', downstreamProducers), baseline);
   assert.deepEqual(consumerSignatures("example.ts", original), {}, "Direct Pi inventory alone misses these consumers");
+});
+
+// R14L native/manifest and durable effect boundary. The explicit owners
+// correspond to the categorized source/next-authority crosswalk in
+// recovery-exit-inventory.md. Each consumer body is independently pinned,
+// including read-only and transport-only consumers.
+const effectProducers = new Set([
+  "validateStoryJob", "lastSpecialistManifest", "inspectSpecialistManifest",
+  "parseEventManifest", "requireSpecialistManifest", "runFoundationJob",
+  "runEventWorkItem", "runCharacterWorldJob", "runCompositionWorkItem",
+  "runFocusedWorkItem", "runInteractiveWorkItem", "pinDiscoveryHandoff",
+  "saveJobTurnPlan", "acquireCachedStory", "queueGeneration", "claimNext",
+  "finishAttempt", "settleThreadRun", "runPersistedGeneration", "verifyTrustedRevision",
+]);
+
+const effectReviewed: Record<string, string> = {
+  // Domain validation, sealed submissions and no-write proof.
+  "src/adaptive-omission.ts:reviewedAdaptiveOmissions": "1:2b9f6164eb0fb6b8df609eef",
+  "src/adaptive-work.ts:resolveAdaptiveNoWriteSupersession": "3:9032f2d71a874b4224d0f829",
+  "src/architecture.ts:verifyArchitectureAssignmentResult": "1:4c6671ff8c0f9b78e1980562",
+  "src/architecture.ts:runArchitectureJob": "1:67d8aa7f36e31226f6c039b6",
+  "src/assignment-metadata-recovery.ts:responsePolicy": "4:aae544942ee5e97d276631d8",
+  "src/causal-amendment-controller.ts:inspectCausalAmendment": "1:4c73f42942b7445f1062e8d0",
+  "src/character-world-specialist.ts:authorCharacterWorld": "1:5ea122f5c2089eab89ad3410",
+  "src/character-world.ts:inspectFoundationConflict": "1:9fc8903ca1a231b34ac1deb2",
+  "src/character-world.ts:runCharacterWorldJob": "1:1ccbaca5978bd8429d421ee2",
+  "src/cli.ts:main": "6:423c2953456a0f938e7eef8d",
+  "src/composition-work.ts:runCompositionWorkItem": "2:c41babcd6e7653cbfde3440d",
+  "src/cross-domain-closeout-work.ts:validateCloseoutDraft": "1:78808eb884f941346179bafe",
+  "src/cross-domain-closeout-work.ts:reviewerAssignment": "1:880610212e10fddd54a39ce8",
+  "src/cross-domain-prerequisite-controller.ts:preflightCompositionBoundary": "1:93cd9ea2199739db5e6988ea",
+  "src/dependency-state.ts:registerReviewDependency": "1:dd782da866472074f06be72f",
+  "src/dependency-state.ts:approveDependency": "1:db11742d41c40144de964cd5",
+  "src/dependency-work.ts:supportingWriterRounds": "1:cd9fc1f151ce829348909d3b",
+  "src/dependent-correction-work.ts:native": "1:c3469e6a1dcc5740024c502c",
+  "src/event-manifest.ts:parseEventManifest": "1:9cd665fa6942929e0c38ccd3",
+  "src/event-specialist.ts:authorEventCluster": "1:701d1c814dec11399c9b5d87",
+  "src/event-work.ts:runEventWorkItem": "1:ea6660f956199fece11bb501",
+  "src/focused-work.ts:focusedSourceCatalog": "2:e6a96d7854b897f588b5b2bb",
+  "src/focused-work.ts:runFocusedWorkItem": "2:b1a71ff508cc137f9da59108",
+  "src/foundation.ts:piAuthor": "1:9e5ed08fab9b974df4cfca50",
+  "src/foundation.ts:executeFoundationGraph": "1:c8b2027f7012552fd2c41366",
+  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:ce61e961ebde642e41f90ed6",
+  "src/generation.ts:reconcile": "3:f1a8db03717bd8d2dcc55b88",
+  "src/generation.ts:applyLiveSteeringAtBoundary": "1:d3696b97d784629df921bf9a",
+  "src/generation.ts:dispatch": "5:2527ecada0aa445518aa2b04",
+  "src/generation.ts:runFoundationAssignmentChild": "1:54310f9aab8bb157fe7103b1",
+  "src/generation.ts:runNarrativeAssignmentChild": "3:f08dbd1ec1e84101f9652d84",
+  "src/generation.ts:runInteractiveAssignmentChildren": "4:524adbd0958fd40e891f16bd",
+  "src/idea-placement.ts:verifyDraft": "1:c79724362888c72927074984",
+  "src/interactive-specialist.ts:parseInteractiveManifest": "1:d106d1f084768c3342f538c4",
+  "src/interactive-work.ts:runInteractiveWorkItem": "3:1c0d4704280446e928481bda",
+  "src/merge-preview.ts:previewStoryMerge": "2:840d13f8fe94da7b84e805fe",
+  "src/milestone-blueprint-correction.ts:originalSpecialistChallenge": "1:f1d0b65979f7dded6eecfd8c",
+  "src/narrative-review.ts:runNarrativeReview": "1:5d2a876ce288384748fd396a",
+  "src/original-thread-continuation.ts:inspectBlockedOriginalThreadCorrection": "2:0d4d2fe044219f7d3d1f6cb1",
+  "src/recovery-fork.ts:prepareRecoveryFork": "1:11fc6b8d2b4993504227bae3",
+  "src/rejected-review-repair.ts:validateRejectedRepairDraft": "1:49e7c307f5e59dfad44a78ee",
+  "src/rejected-review-repair.ts:runNativeRepairRound": "1:b3ec9253814377867544b7d0",
+  "src/revision.ts:inspectProposal": "3:f04745505ac6b7eee45d8020",
+  "src/selective-revalidation-work.ts:revalidateAfterReviewedCorrection": "1:0404670200e88b575ffc58fe",
+  "src/specialist-manifest.ts:inspectSpecialistManifest": "1:63bb47eca9604cc6441872f4",
+  "src/specialist-manifest.ts:requireSpecialistManifest": "2:070158f8e794500669be0588",
+  "src/turn-fulfillment.ts:reviewedMilestoneObjectives": "1:1dd20a790e0586311dbc0b2a",
+  "src/validator.ts:createStoryValidateTool": "1:2ef30afe91758edd5a90cd5a",
+  // Studio owner/source admission, actual effect claim/settlement and inspection.
+  "web/src/agent-runner.ts:runPersistedGeneration": "2:7a8e23dec868c576e124f402",
+  "web/src/agent-service.ts:pumpAgentQueue": "5:20892ee86a2f25c4028975ea",
+  "web/src/lib/cached-jobs.server.ts:prepareCachedJob": "1:9727bff733515e4083c2e65c",
+  "web/src/lib/fixture-jobs.server.ts:inspectRegisteredJob": "3:54216dbaced61f1f23c32476",
+  "web/src/lib/fixture-jobs.server.ts:generationJobRequest": "2:602b3d11e4a3f56782c8a49e",
+  "web/src/lib/generation-controls.server.ts:verifiedResumeAdmission": "1:8863ebffa4e799b0820abb21",
+  "web/src/lib/git-cache.server.ts:initializeStoryBranch": "1:4f34cd8fb95533868780c007",
+  "web/src/lib/github-initialize.server.ts:githubInitializationRequest": "1:eca70c5a46cce65ff71c53e9",
+  "web/src/lib/natural-story.server.ts:launchNaturalStory": "1:b5f270efbbff33469f462372",
+  "web/src/lib/publication-review.server.ts:reviewPublication": "1:04f27a079a585503301ec9e6",
+  "web/src/lib/replacement-turn.server.ts:prepareReplacementTurn": "2:07c5edd9a27bd3f7aa3599e9",
+  "web/src/lib/story-approved-continuation.server.ts:admitWholeApprovedStory": "1:3d7345b1d5fd63419a5f9159",
+  "web/src/lib/story-approved-continuation.server.ts:continueApprovedStoryChat": "3:5f42f8344cfd54990172f8e0",
+  "web/src/lib/story-explorer.server.ts:validatedExplorer": "1:804c20a611913d796e173dcb",
+  "web/src/lib/story-foundation-reuse.server.ts:verifiedReusableStoryFoundation": "1:2e32c7afe3f2b6d9d1dfbb74",
+  "web/src/lib/story-foundation-reuse.server.ts:inspectExistingStoryFoundation": "1:8d7dc5c6ab60e84e775efcb7",
+  "web/src/lib/story-revision.server.ts:revisionFromSource": "1:d7d4b715f104acf968592936",
+  "web/src/lib/thread-chat.server.ts:advanceThread": "1:47f8904b1df15ccae40fc29a",
+  "web/src/lib/thread-chat.server.ts:recoverSettledThreadRuns": "1:0909991919ad3ed350c3596b",
+  "web/src/lib/thread-message-edit.server.ts:branchEditedThreadMessage": "1:ef98313f817abe5bf4264bea",
+  "web/src/lib/thread-restart.server.ts:verifyNewerStory": "1:610041ddde077421990114a9",
+  "web/src/lib/thread-restart.server.ts:verifyPreparedStory": "1:cd4062440147a57b2cfa46d1",
+  "web/src/lib/thread-restart.server.ts:prepareThreadRestart": "1:3b37dbd6e8197e3a210d7f0c",
+  "web/src/lib/thread-review.server.ts:readThreadReview": "1:5cb6f0a4ac899cee24f17c49",
+};
+
+test("R14L native, manifest and durable effect consumers retain reviewed source gates", () => {
+  const actual: Record<string, string> = {};
+  for (const base of ["src", "web/src"]) {
+    for (const path of readdirSync(resolve(root, base), { recursive: true, encoding: "utf8" })) {
+      if (!/\.tsx?$/.test(path)) continue;
+      const file = base + "/" + path.replaceAll("\\", "/");
+      Object.assign(actual, consumerSignatures(file, readFileSync(resolve(root, file), "utf8"), effectProducers));
+    }
+  }
+  assert.deepEqual(actual, effectReviewed);
+});
+
+test("R14L effect gate detects an added aliased queue consumer and changed native-result disposition", () => {
+  const original = 'import { validateStoryJob as validate, queueGeneration as enqueue } from "./ports";\n' +
+    'async function verify(job: unknown) { return (await validate(job)).status === "passed" ? "verified" : "fenced"; }';
+  const baseline = consumerSignatures("example.ts", original, effectProducers);
+  assert.equal(Object.keys(baseline).length, 1);
+  assert.notDeepEqual(consumerSignatures("example.ts", original.replace('"fenced"', '"verified"'), effectProducers), baseline);
+  assert.notDeepEqual(consumerSignatures("example.ts", original + '\nasync function bypass(job: unknown) { await enqueue(job); }', effectProducers), baseline);
 });

@@ -156,8 +156,25 @@ jobs:
           - { label: generation-5-of-6, suite: generation, shard: "5/6", certify: false }
           - { label: generation-6-of-6, suite: generation, shard: "6/6", certify: false }
           - { label: studio, suite: studio, shard: "", certify: false }
+          - { label: integrated-recovery, suite: integrated-recovery, shard: "", certify: false }
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    services:
+      # R14L must qualify both actual persistence engines with the native CLI.
+      # Leave the other timing-balanced native shards unchanged.
+      postgres:
+        image: ${{ matrix.suite == 'integrated-recovery' && 'postgres:17-alpine' || '' }}
+        env:
+          POSTGRES_USER: noveltea_test
+          POSTGRES_PASSWORD: noveltea_test_only
+          POSTGRES_DB: noveltea_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U noveltea_test -d noveltea_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
     defaults:
       run:
         working-directory: noveltea-gen
@@ -259,6 +276,12 @@ jobs:
       - name: Run full Studio tests with native CLI and skills
         if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'studio'
         run: pnpm --filter @noveltea/studio test
+      - name: Qualify integrated Story recovery on SQLite and PostgreSQL
+        if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'integrated-recovery'
+        env:
+          NT_REQUIRE_KYSELY_PROOF: "1"
+          NT_TEST_PG_URL: postgresql://noveltea_test:noveltea_test_only@127.0.0.1:5432/noveltea_test
+        run: pnpm --filter @noveltea/studio exec tsx --test test/story-chat-discovery.test.ts test/story-approved-continuation.test.ts test/integrated-story-turn.test.ts test/current-checkpoint-fork.test.ts
 
   native-integration-gate:
     # Preserve the existing required-check name while all matrix entries

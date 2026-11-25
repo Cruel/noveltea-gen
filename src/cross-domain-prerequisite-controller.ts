@@ -84,13 +84,21 @@ export async function preflightCompositionBoundary(
   // their valid reviewed omission as an unmet closeout prerequisite.
   if (event.validation?.status === "passed" &&
       event.validation.milestoneState === "complete") return { kind: "ready" };
-  const localPoint = (await inspectRecoveryCheckpoints(job)).find(p =>
-    p.eligible && p.workItem === "event-" + milestoneId.slice("milestone.".length) &&
+  const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible &&
+    ancestor(job, p.commitSha, head));
+  const coverage = await resolvedCheckpointReviews(job, checkpoints);
+  // Apply the same authenticated successor coverage to every original
+  // prerequisite; the immutable Event receipt still identifies field scope.
+  const reviewed = (p: (typeof checkpoints)[number]) => p.validation.status === "passed" &&
+    p.planVersion === planVersion && p.assurance?.turnDigest === turn.digest &&
+    (p.semanticReview === "passed" ||
+      p.semanticReview === "failed" && coverage.get(p.commitSha) === "not-required");
+  const localPoint = checkpoints.find(p =>
+    p.workItem === "event-" + milestoneId.slice("milestone.".length) &&
     p.commitSha === event.commitSha);
   const inheritedEvent = inheritedReviewedCheckpoint(job, "event-" + milestoneId.slice(10), event.commitSha);
   const point = localPoint ?? inheritedEvent?.proof;
-  if (!point || (localPoint ? localPoint.semanticReview !== "passed" ||
-      localPoint.assurance?.turnDigest !== turn.digest : inheritedEvent?.status !== "passed") ||
+  if (!point || (localPoint ? !reviewed(localPoint) : inheritedEvent?.status !== "passed") ||
       point.assurance?.assignmentId !== "event" ||
       point.planVersion !== planVersion || !ancestor(job, event.commitSha, head))
     return refuse("Original Event has no independently reviewed, Turn-bound native checkpoint.");
@@ -102,15 +110,6 @@ export async function preflightCompositionBoundary(
     return refuse("Choice/Puzzle source is stale, unreviewed or not on the verified Story branch.");
   // This exact Choice/Puzzle source must have independently passed before
   // the controller may propose a narrower Event-owned correction.
-  const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible &&
-    ancestor(job, p.commitSha, head));
-  const coverage = await resolvedCheckpointReviews(job, checkpoints);
-  // A historical negative stays negative. Only an authenticated passing
-  // successor of that exact checkpoint can discharge its mandatory Review.
-  const reviewed = (p: (typeof checkpoints)[number]) => p.validation.status === "passed" &&
-    p.planVersion === planVersion && p.assurance?.turnDigest === turn.digest &&
-    (p.semanticReview === "passed" ||
-      p.semanticReview === "failed" && coverage.get(p.commitSha) === "not-required");
   const choicePoint = checkpoints.find(p => p.eligible && p.commitSha === interactive.units[0].commitSha);
   const puzzle = interactive.units[1]?.phase === "committed"
     ? checkpoints.find(p => p.eligible && p.commitSha === interactive.units[1].commitSha) : null;

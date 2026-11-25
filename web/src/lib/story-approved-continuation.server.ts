@@ -233,6 +233,16 @@ export async function continueApprovedStoryChat(auth: StudioAuth, store: StudioS
       throw Error('The provider acquired a different or untrusted Story revision.')
     await effects.advance('worktree-settled')
     await pinDiscoveryHandoff(job, receipt)
+    // Seal the exact authenticated whole-Story Turn BEFORE the approved
+    // Foundation's native commit/checkpoint. The later queue admission
+    // reuses the same immutable plan. A Foundation-only approval has no
+    // Generation Turn and cannot acquire that authority through this path.
+    if (!foundationOnly) {
+      if (objective.turnPlan?.kind !== 'full-story' ||
+          objective.turnPlan.digest !== receipt.turnPlanDigest)
+        throw Error('Approved Foundation lacks the original whole-Story Turn.')
+      await saveJobTurnPlan(job, objective.turnPlan)
+    }
     await effects.advance('foundation-started')
     // An earlier approved work item owns its own native validation/recovery.
     // Do not classify an interrupted draft as an independently reusable Foundation.

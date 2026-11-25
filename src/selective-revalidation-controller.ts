@@ -145,7 +145,21 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
   const originalOmissions: Record<string, EventOnlyPayload> = {};
   for (const item of inventory.items.filter(i => i.status === "verified")) {
     const matches = workItems(item);
-    const points = checkpoints.filter(point => matches.includes(point.workItem));
+    let points = checkpoints.filter(point => matches.includes(point.workItem));
+    // A repaired upstream Event is still the same inventory assignment.
+    // Authenticate its exact passing successor; never promote the failed
+    // original Review or infer a replacement from the current worktree.
+    if (item.id === correction.upstreamItemId && item.stage === "event" &&
+        points.length === 1 && points[0]!.semanticReview === "failed" &&
+        item.verifiedSha === correction.predecessorCommitSha) {
+      const original = points[0]!;
+      const successor = checkpoints.find(p => p.commitSha === item.verifiedSha &&
+        p.planVersion === item.planVersion && p.semanticReview === "passed" &&
+        p.workItem.startsWith("repair-"));
+      const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
+      if (successor && await verifyReviewCycleSuccessor(job, original.commitSha, successor.commitSha))
+        points = [successor];
+    }
     originalPoints[item.id] = points;
     const historical = ancestor(job, item.verifiedSha ?? "", correction.predecessorCommitSha);
     // A previously author-approved Foundation can be inherited without a
@@ -204,8 +218,16 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
         continue;
       }
     }
+    // Foundation precedes creation of the work plan. Its exact Turn-bound
+    // finalized native/Review checkpoint may legitimately have no version.
+    // Never treat an unbound or later Foundation as historical evidence.
+    const prePlanFoundation = item.stage === "foundation" && historical &&
+      points.length === 1 && points[0]!.planVersion === null &&
+      points[0]!.commitSha === item.verifiedSha &&
+      points[0]!.validation.status === "passed" &&
+      points[0]!.assurance?.turnDigest === turn.digest;
     if (!matches.length || points.length !== matches.length ||
-        points.some(p => p.planVersion !== correction.planVersion)) continue;
+        (!prePlanFoundation && points.some(p => p.planVersion !== correction.planVersion))) continue;
     const files: string[] = [];
     const reviews: string[] = [];
     let accepted = true;

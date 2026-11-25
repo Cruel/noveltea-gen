@@ -4,6 +4,7 @@ import type { AssignmentIdentity, AssignmentOutcome, AssignmentSubmission,
   AssignmentCorrection, AssignmentVerifiedSubmission } from "./generation-assignment-lifecycle.js";
 import type { AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import type { ReviewRoundCommand, ReviewRoundResult } from "./rejected-review-repair.js";
+import { StoryCancelledError } from "./story-interruption.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 
 const sha = /^[a-f0-9]{40}$/;
@@ -35,7 +36,7 @@ export function createReviewRoundTransitions({ originalHead, originalReceipt, ru
       return outcome("unresolved", result.assessment.digest, { dispositionRef: "assess-review" });
     if (result.status === "paused")
       return outcome("paused", result.ref, { controlRef: result.reason + ":" + result.ref });
-    if (result.status === "cancelled") return outcome("unresolved", result.ref, { dispositionRef: "cancelled" });
+    if (result.status === "cancelled") throw new StoryCancelledError("independent-review");
     if (result.status === "steering") return outcome("paused", result.ref, { controlRef: "author-updates" });
     if (result.status === "fenced") return outcome("fenced", result.ref, { inspectionRef: result.sourceSha });
     if (result.status === "native-terminal")

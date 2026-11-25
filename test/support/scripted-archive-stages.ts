@@ -72,7 +72,7 @@ const compact: CausalBlueprint = {
     endings: "The corroborated redacted account is accepted on both routes, with distinct trust consequences." },
 };
 
-export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive = false) {
+export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive = false, recoverEvent = false) {
   const foundationPath = "creative-direction/foundation.md";
   const foundation = adaptive ? readFileSync(join(job.worktreeStoryRoot, foundationPath), "utf8") : renderFoundation({
     id: "foundation", title: "The Archive Witness",
@@ -83,6 +83,8 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
     body: "# The Archive Witness\n\n" + compact.premise + "\nAda compares the signed ledger with the independent daily register, then chooses whether to protect or challenge Neri. The redacted account establishes concealment without exposing the witness.",
   });
   let previous = "", step = 0;
+  let rejectedHead: string | undefined;
+  const correctionQuote = "Ada studies Neri's signature on the ledger before the player must decide.";
   return (index: number, context: { messages: readonly unknown[] }) => {
     const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
     const prompt = messages.filter(m => m.role === "user").flatMap(m =>
@@ -106,8 +108,22 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       return stop({ sourceSha: plan.source.verifiedSha, turnDigest: plan.digest,
         assignments: plan.assignments.map(a => ({ id: a.id, reason: "Carry out the authorized Story objective in causal order." })) });
     }
+    if (recoverEvent && prompt.includes("SOURCE-BOUND STORY CORRECTION")) {
+      if (!phase) {
+        assert.ok(onDisk(eventPath).includes("value: known"));
+        return write({ [eventPath]: openingEvent });
+      }
+      assert.equal(phase, 1);
+      return stop({ modifiedRecords: [eventPath], architecturalConflicts: [],
+        laterObligations: ["Formal Choice Point binding must enact protect and challenge before Milestone fulfillment."] });
+    }
+    if (recoverEvent && prompt.includes("Continue your ORIGINAL specialist Pi session to correct a rejected draft.")) {
+      assert.ok(rejectedHead);
+      if (!phase) return write({ [eventPath]: onDisk(eventPath) + "\n" + correctionQuote + "\n" });
+      assert.equal(phase, 1);
+      return stop("Clarified the original Event's visible evidence.");
+    }
     if (prompt.includes("IMMUTABLE REVIEW PACKET")) {
-      if (!phase) return read(skills("nt-narrative-review"));
       const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
       assert.equal(packet.items.length, 1);
       const item = packet.items[0];
@@ -120,6 +136,24 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
         "interactive-puzzle-disclosure": Object.keys(archiveInteractiveRecords[1]!),
         "composition-disclosure": prosePaths, "composition-reckoning": [secondProsePath],
       };
+      if (recoverEvent && rejectedHead && item.assurance.commitSha !== rejectedHead &&
+          item.assurance.changedPaths.length === 1 && item.assurance.changedPaths[0] === eventPath &&
+          onDisk(eventPath).includes(correctionQuote)) {
+        return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+          evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: eventPath, line: 1,
+            explanation: correctionQuote }],
+          progressDiagnosis: { status: "material", reason: "Added visible observation.",
+            evidence: { path: eventPath, quote: correctionQuote, change: "added" } } });
+      }
+      if (!phase) return read(skills("nt-narrative-review"));
+      if (recoverEvent && item.reviewedWorkItem === "event-disclosure" && !rejectedHead) {
+        rejectedHead = item.assurance.commitSha;
+        assert.ok(!onDisk(eventPath).includes("value: known"));
+        return stop({ sourceDigest: packet.sourceDigest, verdict: "fail", evidence: [],
+          findings: [{ commitSha: rejectedHead, assignmentId: item.assignment.id, path: eventPath, line: 1,
+            kind: "missing-requirement", message: "The visible evidence is insufficiently explicit.",
+            requiredCorrection: correctionQuote, affectedPaths: [eventPath] }] });
+      }
       const allowed = expected[item.reviewedWorkItem] ?? expected[item.assignment.id] ??
         (item.assurance.changedPaths.length === 1 && item.assurance.changedPaths[0] === disclosure &&
           onDisk(disclosure).includes("fulfillment: {any_of: [[event.disclose-ledger]]}") ? [disclosure] : undefined);
@@ -272,7 +306,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const assignment = JSON.parse(prompt.split("\nAUTHORIZED ASSIGNMENT\n")[1]!);
       const first = assignment.milestoneId === "milestone.disclosure";
       assert.ok(first || assignment.milestoneId === "milestone.reckoning");
-      const records: Record<string, string> = first ? { [eventPath]: openingEvent } :
+      const records: Record<string, string> = first ? { [eventPath]: recoverEvent ? openingEvent.replace("value: knows", "value: known") : openingEvent } :
         { [secondEventPath]: secondEvent, [reckoning]: secondMilestone(onDisk(reckoning)) };
       if (!phase) return read([...skills("nt-event-design"), assignment.milestonePath]);
       if (phase === 1) return write(records);
@@ -286,7 +320,8 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const assignment = JSON.parse(prompt.split("\nAUTHORIZED ASSIGNMENT\n")[1]!);
       assert.equal(assignment.milestoneId, "milestone.disclosure");
       const choice = prompt.includes("Complete exactly ONE Choice unit");
-      const records = archiveInteractiveRecords[choice ? 0 : 1]!;
+      const records = { ...archiveInteractiveRecords[choice ? 0 : 1]! };
+      if (recoverEvent && choice) records[eventPath] += "\n" + correctionQuote + "\n";
       if (!phase) return read(skills(choice ? "nt-interactive-narrative" : "nt-puzzle-design"));
       if (phase === 1) return write(records);
       if (phase === 2) return validate();

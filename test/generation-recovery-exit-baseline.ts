@@ -40,7 +40,7 @@ export const reviewedReturnExits = {
   independentAssignmentBoundary:
     "e4b08665b2511bc8:G 1a607abb82d66b8b:R 96abdde40833c509:G ebbaf6e315bb4cf8:G 07ed60be3598169c:U 52996ea9e6d7d0cd:G 386f961b881b5212:B 5d687f16a5596c4f:R",
   operationFailure: "d7c8939bedacfd7d:B 6f8e137a514dd144:F d44d809a12edfc48:R",
-  blocked: "7951930ab4e30f72:B",
+  blocked: "5f4391ebc42fca8a:B",
   runStoryGeneration:
     "f3888d0022bf344c:G 4ad2292cb6c5c2d3:G 15c87780c3d70498:R d7c8939bedacfd7d:B eee7556bf5404abc:V",
   observeNodeOutcome: "cafa5b26a70d2f15:S 457eb16703d85c3e:R 791c12224fd3d55c:F",
