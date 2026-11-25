@@ -1,8 +1,8 @@
 import { subunitRoundProof, subunitWriterResult } from "./generation-writer-round.js";
-import { AssignmentAuthorPauseError, type AssignmentRoundCommand } from "./assignment-metadata-recovery.js";
+import { AssignmentAuthorPauseError, AssignmentNonconvergenceError, type AssignmentRoundCommand } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
 import { trustedHead } from "./revision.js";
-import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
+import { ProtocolIntegrityBlockedError, ProtocolExhaustedError } from "./response-contract-recovery.js";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { RunnableConfig } from "@langchain/core/runnables";
@@ -12,7 +12,7 @@ import { createAssignmentLifecycleGraph, logicalAssignmentKey, assignmentChildCo
 import { join } from "node:path";
 import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
+import { inspectFocusedFailure, inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency, blueprintSourceOf,
   inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, dependencyAncestors, supportingReviewAssignment, DependencyAuthorizationRefusedError, type DependencyEntry } from "./dependency-state.js";
@@ -128,12 +128,13 @@ export async function inspectSupportingReviewSelection(job: import("./job.js").J
 /** The existing native Review terminal is attributable to the original
  * parent Case, not a fresh failed Event or a new budget. */
 export async function inspectSupportingNativeFailure(job: import("./job.js").JobStartResult,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string, caseId: string) {
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string, caseId: string,
+  diagnostic?: import("./rejected-review-repair.js").NativeDiagnosticReference) {
   const plan = await inspectDependencyPlan(job);
   if (!plan) return null;
   const { inspectNativeReviewFailure } = await import("./rejected-review-repair.js");
   for (const entry of plan.entries) {
-    if (entry.phase !== "reviewing" || !entry.supportRootSha || !entry.amendment ||
+    if ((!["authorized", "reviewing"].includes(entry.phase) && !(diagnostic && entry.phase === "verified")) || !entry.amendment ||
         !plan.entries.some(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
           e.blueprintSource.milestoneId === readiness.milestoneId &&
           dependencyAncestors(plan.entries, entry).has(e.reportDigest))) continue;
@@ -142,7 +143,23 @@ export async function inspectSupportingNativeFailure(job: import("./job.js").Job
       jobId: job.jobId, jobThreadId: job.threadId, graphThreadId, turnDigest: entry.report.turnDigest,
       assignmentId: amendment.assignment.id, planVersion: amendment.afterVersion,
       sourceHeadSha: entry.report.sourceSha, scopeDigest: dependencyDigest(amendment.assignment) });
-    const failure = await inspectNativeReviewFailure(job, entry.supportRootSha, caseId, key);
+    if (!entry.supportRootSha || diagnostic) {
+      const writerBase = dependencyWriterBase(plan, entry);
+      const target = amendment.assignment.targets[0]!;
+      // An already published writer is inspected historically only under
+      // the original diagnostic grant; a later Review is not that draft.
+      const selectedWriter = !diagnostic || diagnostic.ref.includes("/focused-sessions/");
+      const failure = selectedWriter ? await inspectFocusedFailure(job, target, writerBase, diagnostic?.authorization,
+        entry.supportRootSha, amendment.assignment.id) : null;
+      if (failure && (!diagnostic || failure.ref === diagnostic.ref)) {
+        if (failure.assignmentKey !== key || !await inspectBlueprintSupportProgress(job, readiness, graphThreadId))
+          throw new ProtocolIntegrityBlockedError("Supporting writer failure lost its original parent lineage.");
+        return { ...failure, nativeOwner: { phase: "writer" as const, workItem: amendment.assignment.id,
+          sourceSha: writerBase, assignmentKey: key, rootSha: writerBase }, supportReportDigest: entry.reportDigest };
+      }
+    }
+    if (!entry.supportRootSha) continue;
+    const failure = await inspectNativeReviewFailure(job, entry.supportRootSha, caseId, key, diagnostic);
     if (!failure) continue;
     if (!await inspectBlueprintSupportProgress(job, readiness, graphThreadId))
       throw new ProtocolIntegrityBlockedError("Native supporting failure lost its original parent lineage.");
@@ -196,7 +213,8 @@ async function supportingBoundary(job: import("./job.js").JobStartResult,
 }
 
 function supportingWriterRounds(job: import("./job.js").JobStartResult, identity: AssignmentIdentity,
-  input: FocusedWorkOptions, currentEntry: () => Promise<NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>["entries"][number] | undefined>) {
+  input: FocusedWorkOptions, currentEntry: () => Promise<NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>["entries"][number] | undefined>,
+  nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   const key = logicalAssignmentKey(identity);
   const preflight = async (): Promise<AssignmentOutcome | null> => {
     const entry = await currentEntry();
@@ -218,7 +236,29 @@ function supportingWriterRounds(job: import("./job.js").JobStartResult, identity
     const entry = (await currentEntry())!;
     if (entry.phase === "reviewing" || entry.phase === "verified")
       return { receiptRef: identity.assignmentId, status: "focused-committed", headSha: entry.supportRootSha ?? entry.commitSha };
-    const result = await runFocusedWorkItem({ ...input, round: { assignmentKey: key, command } });
+    const writerBase = dependencyWriterBase((await inspectDependencyPlan(job))!, entry);
+    const diagnostic = nativeDiagnostic?.phase === "writer" && nativeDiagnostic.assignmentKey === key ? nativeDiagnostic : undefined;
+    const terminal = async () => inspectFocusedFailure(job, input.target, writerBase,
+      diagnostic?.authorization, undefined, identity.assignmentId);
+    let result: Awaited<ReturnType<typeof runFocusedWorkItem>>;
+    try {
+      if (diagnostic && command.phase === "invoke") {
+        const original = await terminal();
+        if (!original || original.ref !== diagnostic.ref || original.assignmentKey !== key || !original.settlementDigest)
+          throw new ProtocolIntegrityBlockedError("Supporting writer diagnosis lost its original terminal.");
+        const proof = original.successorProof ?? { sourceDigest: original.proof.sourceDigest,
+          ordinal: original.proof.ordinal, settlementDigest: original.settlementDigest };
+        return subunitWriterResult({ status: "writer-round", round: { status: "settled", proof } }, identity.assignmentId);
+      }
+      result = await runFocusedWorkItem({ ...input, round: { assignmentKey: key,
+        command: diagnostic ? { ...command, diagnostic: diagnostic.authorization } : command } });
+    } catch (error) {
+      if (!(error instanceof AssignmentNonconvergenceError || error instanceof ProtocolExhaustedError)) throw error;
+      const original = await terminal();
+      if (!original || original.assignmentKey !== key) throw error;
+      return { status: "unresolved" as const, assignmentKey: key, evidenceRef: original.proof.receiptDigest,
+        dispositionRef: "repair-native:" + original.proof.kind };
+    }
     if (result.status === "dependency-required") {
       const original = await supportingSuspension(job, entry, identity);
       if (!original) throw new ProtocolIntegrityBlockedError("Supporting prerequisite lost its sealed writer report.");
@@ -274,10 +314,10 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
   input: FocusedWorkOptions, identity: AssignmentIdentity, reportDigest: string,
   verify: (submission: AssignmentSubmission) => Promise<AssignmentOutcome | AssignmentCorrection | AssignmentVerifiedSubmission<AssignmentIdentity>>, config: RunnableConfig,
   correctReview?: (submission: AssignmentSubmission, correction: AssignmentCorrection) => Promise<AssignmentSubmission | AssignmentOutcome>,
-  caseId?: string) {
+  caseId?: string, nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   const key = logicalAssignmentKey(identity);
   const currentEntry = async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
-  const rounds = supportingWriterRounds(job, identity, input, currentEntry);
+  const rounds = supportingWriterRounds(job, identity, input, currentEntry, nativeDiagnostic);
   // The logical assignment is unchanged, but a new parent task after an
   // assessed END must not inherit the completed child's terminal projection.
   // Retain the physical parent task ID in the unstripped namespace. A replay
@@ -332,7 +372,7 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
         await admitDependency(job, plan, nested, input);
         return nested;
       });
-      await runSupportingDependency(job, input, childEntry.reportDigest, config, caseId);
+      await runSupportingDependency(job, input, childEntry.reportDigest, config, caseId, nativeDiagnostic);
       const checked = (await inspectDependencyPlan(job))!.entries.find(e => e.reportDigest === childEntry.reportDigest);
       if (!checked || checked.phase !== "verified" || !checked.commitSha)
         throw new ProtocolIntegrityBlockedError("Nested prerequisite lacks a verified successor.");
@@ -565,7 +605,8 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
 }
 
 async function runSupportingDependency(job: import("./job.js").JobStartResult,
-  input: FocusedWorkOptions, reportDigest: string, config?: RunnableConfig, caseId?: string) {
+  input: FocusedWorkOptions, reportDigest: string, config?: RunnableConfig, caseId?: string,
+  nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   let saved = await inspectDependencyPlan(job);
   if (!config && saved?.entries.find(e => e.reportDigest === reportDigest)?.phase === "verified")
     return { status: "dependency-verified", reportDigest };
@@ -609,7 +650,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
       outcome: (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome,
       run: command => executeReviewRound(job, { rootSha: root, caseId: caseId ?? key,
         assignmentKey: key, workItem: assignment.id }, command, {
-        skillsSource: input.skillsSource, provider: input.provider, model: input.model,
+        skillsSource: input.skillsSource, provider: input.provider, model: input.model, nativeDiagnostic,
       }),
       verifySuccessor: async head => await trustedHead(job) === head &&
         (await inspectSharedSupportReview(job, await current(), head)).verdict === "pass",
@@ -721,7 +762,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
       });
       return { status: "verified", assignmentKey: key, evidenceRef: dependencyDigest(complete),
         reviewRef: reportDigest, headSha: complete.commitSha! };
-  }, config!, sharedReview ? async (submission, correction) => (await transitions()).correct(submission, correction) : undefined, caseId);
+  }, config!, sharedReview ? async (submission, correction) => (await transitions()).correct(submission, correction) : undefined, caseId, nativeDiagnostic);
   return { status: "dependency-verified", reportDigest };
 }
 
@@ -729,7 +770,8 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
  * existing dependency child. A later Event consumes the unchanged pin only
  * after every supporting commit has native and independent review proof. */
 export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions, "target">,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, config?: RunnableConfig, caseId?: string) {
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, config?: RunnableConfig, caseId?: string,
+  nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const { archiveEventBlueprintPrerequisite, inspectArchivedEventBlueprintPrerequisite,
     blueprintReadinessHistory, rebindEventAfterBlueprintPredecessors } = await import("./event-work.js");
@@ -765,7 +807,7 @@ export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions,
       await admitDependency(job, plan, entry, input);
       return entry;
     });
-    await runSupportingDependency(job, { ...input, target }, admitted.reportDigest, config, caseId);
+    await runSupportingDependency(job, { ...input, target }, admitted.reportDigest, config, caseId, nativeDiagnostic);
   }
   const { head, digest, entries } = await withStoryJobLock(job, "blueprint-dependency-rebind", () =>
     rebindEventAfterBlueprintPredecessors(job, readiness.milestoneId, readiness.reportDigest,

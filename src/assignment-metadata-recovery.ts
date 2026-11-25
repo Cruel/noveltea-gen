@@ -378,6 +378,21 @@ export async function verifySettledAssignment(options: {
   return chain.at(-1)!.response;
 }
 
+/** The committed invocation proof identifies whether this publication used a
+ * diagnostic successor. Recover that link from the immutable grant rather
+ * than an optional field that could be removed from a graph discharge. */
+export async function readPublishedDiagnosticGrant(directory: string, proof: AssignmentInvocationProof) {
+  const grant = await optionalJson<Grant>(join(directory, String(proof.ordinal) + ".grant.json"));
+  if (!grant || grant.source !== proof.sourceDigest || grant.ordinal !== proof.ordinal)
+    throw new ProtocolIntegrityBlockedError("Published assignment has no original grant");
+  if (!grant.diagnostic) return null;
+  const terminal = await optionalJson<TerminalReceipt>(join(directory, "terminal.json"));
+  if (!terminal || terminal.kind !== "nonconverging" || terminal.ordinal + 1 !== proof.ordinal ||
+      terminal.sourceDigest !== proof.sourceDigest || !hex.test(grant.diagnostic))
+    throw new ProtocolIntegrityBlockedError("Published diagnosis lost its terminal predecessor");
+  return { terminalDigest: digest(terminal), decisionDigest: grant.diagnostic };
+}
+
 /** A precommit reviewer may fail only after its original writer settled.
  * Reauthenticate that exact latest effect without mistaking it for a failure. */
 export async function verifyLatestSettledWriter(options: Omit<Parameters<typeof verifySettledAssignment>[0], "proof"> & {
@@ -405,6 +420,7 @@ export async function inspectAssignmentFailure(options: {
   initialDefects?: readonly AssignmentDefect[]; initialEffect?: string;
   /** Only an already admitted parent decision can request historical verification. */
   diagnostic?: AssignmentDiagnosticAuthorization;
+  historical?: boolean;
 }): Promise<{ proof: AssignmentFailureProof; defects: readonly AssignmentDefect[];
   settlementDigest: string | null; effect: string | null; successorProof?: AssignmentInvocationProof } | null> {
   const { directory, sourceDigest, sessionId, sessionFile, sessionRoots, effect } = options;
@@ -447,7 +463,7 @@ export async function inspectAssignmentFailure(options: {
     await attestPrefix(sessionFile, submitted);
     if (settled) {
       successorProof = { sourceDigest, ordinal: ordinal + 1, settlementDigest: digest(settled) };
-      await inspectSettledChain({ ...options, effect, proof: successorProof });
+      await inspectSettledChain({ ...options, effect, proof: successorProof, historical: options.historical });
     }
   }
   const base = join(directory, String(ordinal));

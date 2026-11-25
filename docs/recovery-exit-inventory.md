@@ -965,3 +965,41 @@ original-source fences). Focused passes do not replace the full-suite
 requirement. Browser, paid Pi,
 private replay captures and optional hosted-sandbox coverage are not claimed.
 Do not close #275 or enable paid #260 on this record.
+
+### #275 follow-up: native support and Review diagnosis
+
+The new R14D `prospective-review-native-diagnosis` and
+`prospective-writer-native-diagnosis` cases exercise real Blueprint support
+native nonconvergence, exact source-bound read-only diagnosis, the original
+corrective owner/session, independent Review, the original parent Case
+discharge, and next ordinary Event scheduling. The first also exhausts and
+restores the same budget before the new invocation and reopens SQLite.
+R01 `review-native-diagnosis` independently exercises the ordinary
+Foundation Review repair path, retaining the original negative verdict and
+then verifying and resuming its parent assignment. The precommit reproduction
+initially fenced a derived Arc-to-Character broken reference; the exact
+link-only derived-reference guard fixes it without broadening scope.
+The writer regression also corrupts and restores the historical diagnosis
+transcript after discharge; inspection must fence and spend no new calls.
+
+R01/R02 source proof fingerprints and the direct/transitive effect consumer
+gates were updated for the affected child and repair continuations, the
+three new pause exits, published grant inspection, and their proof helpers.
+These changes reuse the existing Case and dependency ledgers. A remaining
+audit distinction: the new assessor re-entry for a nonconverging supporting
+child is wired through Blueprint-origin prerequisite Cases; the separate
+writer/Focused/Review-origin dependency-amendment parent path has not yet
+been qualified or fully generalized for that same terminal outcome.
+Do not infer this broader coverage from the Blueprint cases.
+
+Full-suite qualification is deliberately deferred by the author; the prior
+suite runs remain historical evidence only. No paid provider calls.
+
+Targeted verification on the follow-up implementation (local native CLI and
+skills checkout; tracing disabled): root typecheck passed; the three recovery
+coverage/consumer/matrix files passed 25/25; the final Generation selection
+`prospective-(writer|review)-native-diagnosis$|\(review-native-diagnosis\)$|R14D.* (prospective-multi|other-owner)$`
+passed 5/5 with no skips or cancellations. This includes historical transcript
+tamper detection. Logs: `/tmp/nt275-history-targeted.log`,
+`/tmp/nt275-history-audit-final.log`, `/tmp/nt275-history-type3.log`.
+The two added behavioral mutation controls await the later qualification run.

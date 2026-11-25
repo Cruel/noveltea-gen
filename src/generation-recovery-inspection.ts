@@ -403,9 +403,13 @@ export async function inspectModernGenerationRecovery(
                   ? "idea:" + (source.input.evidence as { ideaId: string }).ideaId
                   : null)) &&
             d.inventoryRef.ref === active.evidence[0]?.ref;
-        case "integrity-fence":
         case "pause":
+          if (d.resumeRef?.store === "specialist-receipt" && d.evidence.length === active.evidence.length + 2)
+            return !!await (await import("./generation-operation-strategy.js")).pausedNativeReviewDiagnostic(job,
+              values as GenerationGraphState, original);
           return true; // Never a write permission.
+        case "integrity-fence":
+          return true;
         case "exhausted":
           if (d.supportReview) return source.channel === "operationRecovery" &&
             await (await import("./generation-operation-strategy.js")).authenticateSupportingReviewExhaustion(job,
@@ -431,7 +435,10 @@ export async function inspectModernGenerationRecovery(
     authenticateAttempt: async attempt => {
       const { active, decision } = original;
       if (!active || !decision || !(["diagnostic-stop", "reconcile-effects"].includes(decision.action) ||
-          !!assignmentDiagnosticDecisionForLifecycle(original)) ||
+          !!assignmentDiagnosticDecisionForLifecycle(original) ||
+          ((decision.action === "plan-amendment" || decision.action === "known-correction") && !!decision.nativeDiagnostic) ||
+          (decision.action === "pause" && decision.resumeRef?.store === "specialist-receipt" &&
+            decision.evidence.length === active.evidence.length + 2)) ||
           attempt.caseId !== active.id || attempt.purpose !== "diagnosis") return false;
       const source = sourceFor(active.id);
       const target = source?.channel === "operationRecovery" ? diagnosticCaseForDecision(active, decision) :

@@ -1088,3 +1088,35 @@ failures propagate to the parent. The common material-progress policy, not
 a fixed specialist retry ceiling or diagnostic-message matching, governs
 those feedback rounds. A native pass does not substitute for the separate
 postcommit independent editorial Review.
+
+### #275 native nonconvergence in original Review and supporting assignments
+
+A native metadata terminal inside a Review repair or a separately authorized
+support writer is not an untrusted effect merely because the original parent
+owns another obligation. For Blueprint-origin support the parent authenticates
+the exact dependency ancestry, native owner, original invocation and terminal
+before selecting the existing read-only diagnosis. Ordinary Review repair uses
+the sealed original negative Review. The diagnosis can select only local repair
+of the exact verified defects, with the actual work item as owner and exact
+terminal reference as scope; no extra prerequisites or author authority.
+The same parent Case and shared child return to the existing corrective
+invocation chain. The grant includes the settled diagnosis digest; the
+original writer/session, scope, independent Review and native verifier are
+unchanged. A selected or paused decision is not completion.
+
+A newly created Character rejected for metadata may be absent from the native
+catalog: its required Arc link may consequently report a broken reference.
+Focused validation treats that diagnostic as derived only when the controller
+already granted that exact Character creation and the Arc change is proven
+link-only. Unrelated references and any broader Arc edits still fence.
+
+The published successor's immutable invocation grant identifies any diagnosis
+used in its creation. Historical Case inspection reopens that diagnosis and
+the original terminal from the actual committed grant, not an optional
+checkpoint assertion; it also verifies the independent Review and exact
+support lineage. A tampered transcript cannot be waived by a saved discharge.
+The native-diagnostic pause branch retains original author/budget controls and
+reattests the same decision on restart. The C01 added return #9 / status #8 are
+controls, #10 / status #9 are authenticated continuation, and #11 / status #10
+are receipt fences. R01/R02/R14L gates cover the changed child, assessor,
+Focused, publication and inspection functions.

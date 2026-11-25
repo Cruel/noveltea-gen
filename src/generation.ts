@@ -844,6 +844,11 @@ async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<Stat
  * remain the only authorities for external effects.
  */
 type AssignmentDiagnosticContinuation = NonNullable<Awaited<ReturnType<typeof authenticateAssignmentDiagnosticDecision>>>;
+function nativeReviewContinuation(s: State) {
+  const decision = s.recoveryLifecycle.decision;
+  return decision?.action === "known-correction" && decision.adapter === "review-cycle"
+    ? decision.nativeDiagnostic?.digest : undefined;
+}
 function assignmentDiagnosticReentry(s: State, job: JobStartResult, identity: AssignmentIdentity,
     diagnostic?: AssignmentDiagnosticContinuation) {
   const c = diagnostic ? s.recoveryLifecycle.active : null;
@@ -1069,10 +1074,16 @@ async function runFoundationAssignmentChild(
     if (stopped) return stopped;
     const { executeReviewRound, ReviewDependencyRequiredError } = await import("./rejected-review-repair.js");
     try {
+      const decision = s.recoveryLifecycle.decision;
+      const nativeDiagnostic = decision?.action === "known-correction" && decision.nativeDiagnostic
+        ? await (await import("./generation-operation-strategy.js")).authenticateNativeReviewDiagnostic(job, s, correction, decision)
+        : null;
+      if (decision?.action === "known-correction" && decision.nativeDiagnostic && !nativeDiagnostic)
+        throw new ProtocolIntegrityBlockedError("Review diagnosis lost its original native grant.");
       return await executeReviewRound(job, {
         rootSha: correction.origin.sourceHeadSha, caseId: correction.id, assignmentKey: key, workItem: "foundation",
       }, command, { skillsSource: s.request.skillsSource, provider: s.request.provider,
-        model: s.request.model, canYieldForSteering: async () =>
+        nativeDiagnostic: nativeDiagnostic ?? undefined, model: s.request.model, canYieldForSteering: async () =>
           !!s.request.turnPlanDigest && !!s.inventory?.items.some(item =>
             item.stage === "architecture" && item.status === "verified") &&
           (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion });
@@ -1135,7 +1146,7 @@ async function runFoundationAssignmentChild(
       ? { receiptRef: "foundation.json", status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction || diagnostic ? key : null,
     outcome: null, continuationRef: continuation,
-  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original", correction ? nativeReviewContinuation(s) : undefined), durability: "sync" });
   if (!finished.outcome)
     throw Error("Foundation child has a genuine pending author interrupt; return to parent control.");
   if (finished.outcome.assignmentKey !== key)
@@ -1489,7 +1500,7 @@ async function runArchitectureAssignmentChild(
     identity, submission: diagnostic ? diagnosis.submission : correction && s.result
       ? { receiptRef, status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
-  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original", correction ? nativeReviewContinuation(s) : undefined), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Architecture child returned no authenticated outcome.");
   assertReviewProjection(reviewPatch, finished.outcome, receiptRef);
@@ -1565,11 +1576,17 @@ function subunitReviewTransitions(s: State, job: JobStartResult, identity: Assig
       if (stopped) return stopped;
       const { executeReviewRound, ReviewDependencyRequiredError } = await import("./rejected-review-repair.js");
       try {
+        const decision = s.recoveryLifecycle.decision;
+        const nativeDiagnostic = decision?.action === "known-correction" && decision.nativeDiagnostic
+          ? await (await import("./generation-operation-strategy.js")).authenticateNativeReviewDiagnostic(job, s, correction, decision)
+          : null;
+        if (decision?.action === "known-correction" && decision.nativeDiagnostic && !nativeDiagnostic)
+          throw new ProtocolIntegrityBlockedError("Review diagnosis lost its original native grant.");
         return await executeReviewRound(job, {
           rootSha: correction.origin.sourceHeadSha, caseId: correction.id,
           assignmentKey: logicalAssignmentKey(identity), workItem,
         }, command, { skillsSource: s.request.skillsSource, provider: s.request.provider,
-          model: s.request.model, canYieldForSteering: async () =>
+          nativeDiagnostic: nativeDiagnostic ?? undefined, model: s.request.model, canYieldForSteering: async () =>
             !!s.request.turnPlanDigest && (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion });
       } catch (error) {
         if (error instanceof ReviewDependencyRequiredError) {
@@ -1895,7 +1912,7 @@ async function runCharacterWorldAssignmentChild(
       ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
     suspension: writerPin?.suspension ?? null,
-  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original", writerPin?.supportRef ?? undefined), durability: "sync" });
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original", (correction ? nativeReviewContinuation(s) : undefined) ?? writerPin?.supportRef ?? undefined), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("World/Character child did not settle its original assignment.");
   const patch = reviewPatch as Partial<State> | null;
@@ -2209,7 +2226,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
     suspension: writerPin?.suspension ?? null },
-    { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
+    { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original", correction ? nativeReviewContinuation(s) : undefined), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Narrative child returned without an authenticated disposition.");
   assertReviewProjection(patch, finished.outcome, ref);
@@ -2891,7 +2908,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     const finished = await child.invoke({ identity,
       submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
       submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation, suspension: writerPin?.suspension ?? null },
-      { ...assignmentChildConfig(config, identity, correction || diagnostic || retainedChoice ? "correction" : "original", retainedChoice && writerPin ? writerPin.supportRef ?? undefined : undefined), durability: "sync" });
+      { ...assignmentChildConfig(config, identity, correction || diagnostic || retainedChoice ? "correction" : "original", (correction ? nativeReviewContinuation(s) : undefined) ?? (retainedChoice && writerPin ? writerPin.supportRef ?? undefined : undefined)), durability: "sync" });
     if (!finished.outcome || finished.outcome.assignmentKey !== key)
       throw Error("Interactive child returned no authenticated outcome");
     const settled = finished.outcome;
@@ -3477,6 +3494,30 @@ export function recoveryNode(
       return { status: "cancelled", recoveryLifecycle: prior.recoveryLifecycle };
     if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
         prior.recoveryLifecycle.decision?.action === "pause" &&
+        prior.recoveryLifecycle.decision.resumeRef?.store === "specialist-receipt" &&
+        prior.recoveryLifecycle.decision.evidence.length === (prior.recoveryLifecycle.active?.evidence.length ?? 0) + 2 &&
+        ["author-pause", "budget", "provider-unavailable", "author-choice"].includes(prior.recoveryLifecycle.decision.reason)) {
+      const c = prior.recoveryLifecycle.active!;
+      try {
+        const job = await openJob(state);
+        const control = await readJobControl(job);
+        if (control !== "running") return { status: control, recoveryLifecycle: prior.recoveryLifecycle };
+        const { pausedNativeReviewDiagnostic } = await import("./generation-operation-strategy.js");
+        const decision = await pausedNativeReviewDiagnostic(job, state, prior.recoveryLifecycle);
+        if (!decision || config.configurable?.thread_id !== c.origin.graphThreadId ||
+            !await authenticateOriginalFailure(job, state.request, c.origin.graphThreadId, c.origin, c.evidence, true))
+          throw Error("Paused native Review diagnosis lost its original authority.");
+        return { status: "running", reason: null, recoveryLifecycle: {
+          ...decideRecovery(resumePausedRecovery(prior.recoveryLifecycle, true), decision), assessorPending: true } };
+      } catch {
+        return { status: "blocked", reason: "Paused native Review repair requires original receipt inspection.",
+          recoveryLifecycle: { ...admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+            fence: inspectionFence("untrusted-receipt", c.origin, c.evidence, c.evidence[0]!,
+              "Reconcile the original diagnosis and native repair receipts before resumption.") }), assessorPending: false } };
+      }
+    }
+    if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
+        prior.recoveryLifecycle.decision?.action === "pause" &&
         assignmentDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)) {
       const c = prior.recoveryLifecycle.active!;
       const d = assignmentDiagnosticDecisionForLifecycle(prior.recoveryLifecycle)!;
@@ -3667,7 +3708,7 @@ export function recoveryNode(
           recoveryLifecycle: { ...decideRecovery(prior.recoveryLifecycle, {
             schema: "noveltea-generation-recovery-decision/v1", caseId: active.id,
             checkedSourceHeadSha: active.origin.sourceHeadSha, evidence: decision.evidence,
-            action: "pause", reason: outcome.reviewPauseReason, resumeRef: decision.receipt,
+            action: "pause", reason: outcome.reviewPauseReason, resumeRef: decision.nativeDiagnostic ?? decision.receipt,
           }), assessorPending: false } };
       }
       if (!await inspectFoundationReviewBoundary(job, active.origin.sourceHeadSha) &&

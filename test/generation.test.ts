@@ -1536,7 +1536,7 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery", "source-diagnostic-stop", "source-provider-pause"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "prospective-review-native-diagnosis", "prospective-writer-native-diagnosis", "source-recovery", "source-diagnostic-stop", "source-provider-pause"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   // Allow for native/Git checkpoint and diagnostic work on shared test hosts.
   skip: !available,
   timeout: mode.startsWith("source-") || mode.startsWith("prospective-") ? 480_000 :
@@ -1553,9 +1553,11 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
   const stalledSupport = mode === "prospective-review-stalled" || mode === "prospective-review-stalled-continue";
   const continueSupport = mode === "prospective-review-stalled-continue";
   const authorSupport = mode === "prospective-review-author";
-  const nativeSupport = mode === "prospective-review-native-protocol";
+  const writerDiagnosis = mode === "prospective-writer-native-diagnosis";
+  const nativeDiagnosis = mode === "prospective-review-native-diagnosis";
+  const nativeSupport = mode === "prospective-review-native-protocol" || nativeDiagnosis;
   const partialPause = mode === "prospective-paused";
-  const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport || outsideSupport || stalledSupport || authorSupport || nativeSupport;
+  const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport || outsideSupport || stalledSupport || authorSupport || nativeSupport || writerDiagnosis;
   const prospective = mode === "prospective" || sourceRecovery || multi;
   const negativeReviewSupport = mode === "support-negative";
   const writerOwner = mode === "writer-other-owner";
@@ -1636,8 +1638,8 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         characterSources: [{ id: "character.mara", availability: "prospective",
           role: "The archive night witness identifies the ledger signature." }] });
     }
-    if (stalledSupport) Object.assign(plan.events[0]!.evidence[0]!, { anchorPath: "milestones/disclosure.md" });
-    if (multi && !stalledSupport) {
+    if (stalledSupport || nativeDiagnosis || writerDiagnosis) Object.assign(plan.events[0]!.evidence[0]!, { anchorPath: "milestones/disclosure.md" });
+    if (multi && !stalledSupport && !nativeDiagnosis && !writerDiagnosis) {
       plan.events[0]!.participants.push("character.oren");
       Object.assign(plan.events[0]!.evidence[0]!, { anchorPath: "milestones/disclosure.md",
         characterSources: [
@@ -1737,6 +1739,61 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
               : { status: "stalled", reason: "The clothing change does not establish the witness evidence.", evidence: null } });
         }
         if (continueSupport && index >= 22) throw Error("The resumed scheduler must not replay support or invoke a writer before its checkpoint.");
+        if (writerDiagnosis && index >= 9) {
+          const paths = ["arcs/archive-account.md", supportPath];
+          if (index === 9 || index === 10) return stop({ modifiedRecords: paths, architecturalConflicts: [], laterObligations: [] });
+          if (index === 11) {
+            const raw = JSON.stringify(context.messages);
+            const signature = raw.match(/signature=([a-f0-9]{64})/)?.[1];
+            const sourceRef = raw.match(/sourceRef=([^;]+); category=/)?.[1];
+            const owner = raw.match(/local-repair: owner=(dependency:[0-9]+:character\.mara)/)?.[1];
+            assert.ok(signature && sourceRef && owner);
+            return stop({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+              category: "defect", diagnosis: "Remove the unsupported metadata field, preserving the original Character scope.",
+              strategy: "local-repair", owner, scopeRef: sourceRef, prerequisites: [],
+              uncertainty: "Native validation and independent Review remain required." });
+          }
+          if (index === 12) return { content: [{ type: "toolCall", id: "support-writer-diagnostic-successor", name: "write",
+            arguments: { path: supportPath, content: character } }], reason: "toolUse" };
+          if (index === 13) return stop({ modifiedRecords: paths, architecturalConflicts: [], laterObligations: [] });
+          if (index === 14) return read(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p));
+          if (index === 15) {
+            const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+            const item = packet.items[0];
+            return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+              evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1,
+                explanation: "The original required witness role is established." }] });
+          }
+          throw Error("Supporting writer diagnosis must return to ordinary Event scheduling: " + index);
+        }
+        if (nativeDiagnosis && index >= 11) {
+          if ([11, 13, 15].includes(index)) return { content: [{ type: "toolCall", id: "native-stall-" + index, name: "write",
+            arguments: { path: supportPath, content: character.replace("motivation:", "unsupported_field: true\nmotivation:") + "\nMara identifies the signature. Round " + index + ".\n" } }], reason: "toolUse" };
+          if (index === 12) return stop("Corrected the role but produced invalid metadata.");
+          if ([14, 16].includes(index)) return stop({ modifiedRecords: [supportPath], architecturalConflicts: [], laterObligations: [] });
+          if (index === 17) {
+            const raw = JSON.stringify(context.messages);
+            const signature = raw.match(/signature=([a-f0-9]{64})/)?.[1];
+            const sourceRef = raw.match(/sourceRef=([^;]+); category=/)?.[1];
+            assert.ok(signature && sourceRef);
+            const owner = raw.match(/local-repair: owner=(dependency:[0-9]+:character\.mara)/)?.[1] ?? "dependency:1:character.mara";
+            return stop({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+              category: "defect", diagnosis: "Remove the unsupported metadata field, retaining the witness role.",
+              strategy: "local-repair", owner, scopeRef: sourceRef,
+              prerequisites: [], uncertainty: "Native validation and independent Review remain required." });
+          }
+          if (index === 18) return { content: [{ type: "toolCall", id: "native-diagnostic-successor", name: "write",
+            arguments: { path: supportPath, content: character + "\nMara witnessed Neri sign the concealed ledger and can identify the signature.\n" } }], reason: "toolUse" };
+          if (index === 19) return stop({ modifiedRecords: [supportPath], architecturalConflicts: [], laterObligations: [] });
+          if (index === 20) {
+            const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+            const item = packet.items[0];
+            return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+              evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1,
+                explanation: "The required witness role is now established." }] });
+          }
+          throw Error("Native diagnosis must return to ordinary Event scheduling: " + index);
+        }
         if (nativeSupport && index >= 11) {
           if (index === 11) return { content: [{ type: "toolCall", id: "support-invalid-repair", name: "write",
             arguments: { path: supportPath, content: character.replace("motivation:", "unsupported_field: true\nmotivation:") + "\nMara identifies the signature.\n" } }], reason: "toolUse" };
@@ -1789,7 +1846,8 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
               .replace(/(characters:\n(?:  - [^\n]+\n)+)/, "$1  - " + target + "\n");
             assert.notEqual(next, arc);
             return { content: [
-              { type: "toolCall", id: "multi-character-" + turn, name: "write", arguments: { path: targetPath, content: turn ? character.replaceAll("Mara", "Oren").replace("character.mara", target) : character } },
+              { type: "toolCall", id: "multi-character-" + turn, name: "write", arguments: { path: targetPath, content: writerDiagnosis ? character.replace("motivation:", "unsupported_field: true\nmotivation:") :
+                  turn ? character.replaceAll("Mara", "Oren").replace("character.mara", target) : character } },
               { type: "toolCall", id: "multi-arc-" + turn, name: "write", arguments: { path: arcPath, content: next } },
             ], reason: "toolUse" };
           }
@@ -2324,6 +2382,70 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         assert.equal(tampered.recoveryLifecycle.active?.id, blocked.recoveryLifecycle.active?.id);
         assert.ok(tampered.recoveryLifecycle.inspectionFences.length);
         assert.equal(observed.length, outsideSupport ? 11 : 6);
+        return;
+      }
+      if (writerDiagnosis) {
+        const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+        assert.equal(selected.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify({ reason: selected.reason, calls: observed.length }));
+        const diagnosed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+        assert.equal(diagnosed.recoveryLifecycle.decision?.action, "plan-amendment", JSON.stringify(diagnosed.recoveryLifecycle));
+        assert.equal(diagnosed.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), diagnosed.recoveryLifecycle);
+        saver.db.close(); saver = SqliteSaver.fromConnString(paused.checkpointPath); graph = createGenerationGraph(saver, "cli");
+        const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+        assert.ok(supported.recoveryLifecycle.discharged.some(c => c.case.id === failed.recoveryLifecycle.active?.id), JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
+        assert.equal(observed.length, 16);
+        assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, initialCalls + observed.length);
+        const entries = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries;
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0]!.phase, "verified");
+        assert.equal(entries[0]!.review?.verdict, "pass");
+        assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), supported.recoveryLifecycle);
+        const diagnosisRef = diagnosed.recoveryLifecycle.attempt!.settledRef!.ref;
+        const marker = JSON.parse(readFileSync(join(f.job.stateDir, "unknown-diagnostics", diagnosisRef + ".started.json"), "utf8"));
+        const transcript = readFileSync(marker.sessionFile);
+        writeFileSync(marker.sessionFile, Buffer.concat([transcript, Buffer.from("\n")]));
+        const fenced = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
+        assert.ok(fenced.inspectionFences.length, "Historical discharge cannot waive its original diagnosis transcript");
+        writeFileSync(marker.sessionFile, transcript);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), supported.recoveryLifecycle);
+        assert.equal(observed.length, 16);
+        return;
+      }
+      if (nativeDiagnosis) {
+        const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+        assert.equal(selected.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify({ reason: selected.reason, calls: observed.length }));
+        const diagnosed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+        assert.equal(diagnosed.recoveryLifecycle.decision?.action, "plan-amendment", "A supported native Review diagnosis must admit the original repair: " + JSON.stringify(diagnosed.recoveryLifecycle));
+        assert.equal(diagnosed.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), diagnosed.recoveryLifecycle);
+        const { configurePiPolicy } = await import("../src/job-pi-policy.js");
+        const beforeBudget = await inspectPiPolicy(f.job);
+        await configurePiPolicy(f.job, { ...beforeBudget.policy, limits: { ...beforeBudget.policy.limits, modelCalls: beforeBudget.budget.modelCalls } });
+        const exhausted = await withJobModelRuntime(runtime, () => graph.invoke(null, cfg));
+        assert.equal(exhausted.status, "paused", JSON.stringify({reason: exhausted.reason, lifecycle: exhausted.recoveryLifecycle}));
+        assert.equal(exhausted.recoveryLifecycle.decision?.reason, "budget");
+        assert.equal(exhausted.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(observed.length, 18);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), exhausted.recoveryLifecycle);
+        await configurePiPolicy(f.job, { ...beforeBudget.policy, limits: { ...beforeBudget.policy.limits, modelCalls: beforeBudget.budget.modelCalls + 20 } });
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(paused.checkpointPath);
+        graph = createGenerationGraph(saver, "cli");
+        const supported = await withJobModelRuntime(runtime, () => graph.invoke({ ...exhausted, pauseAfter: null }, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+        assert.ok(supported.recoveryLifecycle.discharged.some(c => c.case.id === failed.recoveryLifecycle.active?.id),
+          JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
+        assert.equal(observed.length, 21);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), supported.recoveryLifecycle);
+        const entries = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries;
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0]!.phase, "verified");
+        assert.equal(entries[0]!.review?.verdict, "pass");
+        assert.notEqual(entries[0]!.supportRootSha, entries[0]!.commitSha);
+        assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
         return;
       }
       if (nativeSupport) {
@@ -3531,7 +3653,7 @@ test("R01 obsolete Generation entry is fenced before any model or Git effect", {
   }
 });
 
-for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "nonconverging-continue", "nonconverging-continue-crash", "nonconverging-continue-budget", "nonconverging-continue-tamper", "nonconverging-continue-transcript", "nonconverging-continue-uncertain", "nonconverging-continue-foreign-file", "nonconverging-continue-cancel", "nonconverging-unsafe", "nonconverging-foreign", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-native", "review-native-steer", "review-native-protected", "review-native-protocol", "review-native-stall", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
+for (const scenario of ["cli", "server", "author-pause", "protocol-exhausted", "nonconverging", "nonconverging-continue", "nonconverging-continue-crash", "nonconverging-continue-budget", "nonconverging-continue-tamper", "nonconverging-continue-transcript", "nonconverging-continue-uncertain", "nonconverging-continue-foreign-file", "nonconverging-continue-cancel", "nonconverging-unsafe", "nonconverging-foreign", "review-rejected", "review-converges", "review-stalled", "review-dispute", "review-stalled-continue", "review-scope", "review-session-unavailable", "review-reviewer-unavailable", "review-protected", "review-native", "review-native-steer", "review-native-protected", "review-native-protocol", "review-native-stall", "review-native-diagnosis", "review-crash-rounds", "crash-rounds", "crash-grant-tamper", "crash-assignment-tamper", "crash-cancel"] as const)
 test("R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative (" + scenario + ")", {
   skip: !available, timeout: 240_000,
 }, async () => {
@@ -3686,9 +3808,9 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         return { content: scriptedText("Corrected the witness obligation but introduced invalid metadata."), reason: "stop" };
       if (scenario === "review-native-protocol" && i >= 13 && i <= 15)
         return { content: scriptedText("Still not a structured report."), reason: "stop" };
-      if (scenario === "review-native-stall" && (i === 13 || i === 14))
+      if ((scenario === "review-native-stall" || scenario === "review-native-diagnosis") && (i === 13 || i === 14))
         return { content: scriptedText(report), reason: "stop" };
-      if (scenario === "review-native-stall" && i === 15) {
+      if ((scenario === "review-native-stall" || scenario === "review-native-diagnosis") && i === 15) {
         const serialized = JSON.stringify(context.messages);
         const signature = serialized.match(/signature=([a-f0-9]{64});/)?.[1];
         const sourceRef = serialized.match(/sourceRef=([^;]+); category=/)?.[1];
@@ -3696,16 +3818,24 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
         assert.match(serialized, /assignmentDefects/);
         return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1",
           signature, sourceRef, category: "defect", diagnosis: "The native correction did not converge.",
-          strategy: "review-adjudication", owner: null, scopeRef: null, prerequisites: [],
-          uncertainty: "No currently admitted successor correction." }), reason: "stop" };
+          strategy: scenario === "review-native-diagnosis" ? "local-repair" : "review-adjudication",
+          owner: scenario === "review-native-diagnosis" ? "foundation" : null,
+          scopeRef: scenario === "review-native-diagnosis" ? sourceRef : null, prerequisites: [],
+          uncertainty: "Native validation and independent Review remain required."  }), reason: "stop" };
       }
+      if (scenario === "review-native-diagnosis" && i === 16) {
+        assert.match(JSON.stringify(context.messages), /INDEPENDENT DIAGNOSTIC FOLLOW-UP/);
+        return { content: [{ type: "toolCall", name: "write", id: "native-review-diagnosed",
+          arguments: { path: target, content: authored + "\nThe witness took a ledger from the archive before the theft.\n" } }], reason: "toolUse" };
+      }
+      if (scenario === "review-native-diagnosis" && i === 17) return { content: scriptedText(report), reason: "stop" };
       if (nativeRepair && i === 13) {
         assert.match(JSON.stringify(context.messages.at(-1)), /Native|native diagnostics/);
         return { content: [{ type: "toolCall", name: "write", id: "r14b-native-repair",
           arguments: { path: target, content: authored + "\nThe witness took a ledger from the archive before the theft.\n" } }], reason: "toolUse" };
       }
       if (nativeRepair && i === 14) return { content: scriptedText(report), reason: "stop" };
-      const revisionIndex = nativeRepair && i >= 15 ? i - 2 : stalled && i >= 19 ? i - 2 : i;
+      const revisionIndex = scenario === "review-native-diagnosis" && i >= 18 ? i - 5 : nativeRepair && i >= 15 ? i - 2 : stalled && i >= 19 ? i - 2 : i;
       const correction = revisionIndex >= 11 ? Math.floor((revisionIndex - 11) / 3) + 1 : 0;
       const correctionStep = (revisionIndex - 11) % 3;
       const revisions = [
@@ -4017,6 +4147,29 @@ test("R01 production Foundation enters checkpointed child before scripted Pi; na
             assert.equal(observed.length, beforeDiagnostic + 2, "A settled read-only assessment must not replay");
             assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === head)?.semanticReview, "failed");
           }
+        }
+        if (scenario === "review-native-diagnosis") {
+          const yielded = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...config, interruptAfter: ["independent_assignment_review"] }));
+          assert.equal(yielded.recoveryLifecycle.assessorPending, true);
+          const pending = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
+          assert.equal(pending.recoveryLifecycle.decision?.action, "diagnostic");
+          const diagnosed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...config, interruptAfter: ["assess_recovery"] }));
+          assert.equal(diagnosed.recoveryLifecycle.decision?.action, "known-correction");
+          assert.ok(diagnosed.recoveryLifecycle.decision?.nativeDiagnostic, JSON.stringify(diagnosed.recoveryLifecycle));
+          assert.equal(diagnosed.recoveryLifecycle.active?.id, original.id);
+          saver.db.close(); saver = SqliteSaver.fromConnString(checkpointFile); graph = makeGraph();
+          const repaired = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...config, interruptAfter: ["verify_committed_work"] }));
+          assert.equal(repaired.recoveryLifecycle.discharged.at(-1)?.case.id, original.id, JSON.stringify({reason: repaired.reason, lifecycle: repaired.recoveryLifecycle, calls: observed.length}));
+          assert.equal(observed.length, 21);
+          assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, observed.length);
+          const points = await inspectRecoveryCheckpoints(f.job);
+          assert.equal(points.find(p => p.commitSha === head)?.semanticReview, "failed");
+          assert.equal(points.find(p => p.commitSha === git(f.job.worktreeRoot, "rev-parse", "HEAD"))?.semanticReview, "passed");
+          assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, config.configurable.thread_id), repaired.recoveryLifecycle);
+          const scheduled = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...config, interruptAfter: ["author_update_intake"] }));
+          assert.ok(scheduled.completedStages.some(item => item.stage === "foundation"));
+          assert.equal(observed.length, 21);
+          return;
         }
         if (scenario === "review-native-protocol" || scenario === "review-native-stall") {
           const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, config));

@@ -24,6 +24,20 @@ const controls = [
     assertion: "Well-formed witness/source defects must reach substantive recovery",
   },
   {
+    scenario: "prospective-review-native-diagnosis",
+    file: "src/generation-operation-strategy.ts",
+    before: 'if (native) return native;',
+    after: 'if (native) return null;',
+    assertion: "A supported native Review diagnosis must admit the original repair",
+  },
+  {
+    scenario: "prospective-writer-native-diagnosis",
+    file: "src/generation-recovery-resolution.ts",
+    before: 'await verifyPublishedSupportDiagnostics(job, original, completed.entries) &&',
+    after: 'true &&',
+    assertion: "Historical discharge cannot waive its original diagnosis transcript",
+  },
+  {
     scenario: "prospective-review-stalled-continue",
     file: "src/generation-operation-strategy.ts",
     before: 'return { recoveryLifecycle: { ...decideRecovery(settled, ordinary), assessorPending: true },\n          reason: null, status: "running" };',

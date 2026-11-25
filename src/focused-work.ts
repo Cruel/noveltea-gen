@@ -29,7 +29,7 @@ import { openStoryProject } from "./project.js";
 import { preparePiContext, piNarrativeGroup, preflightPiAssignment, guardPiBudget, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { readJobControl } from "./job-control.js";
-import { assignmentDraftEffect, executeAssignmentRound, nativeMetadataDefects, verifySettledAssignment, inspectAssignmentFailure, ASSIGNMENT_REPORT, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof, type AssignmentDefect } from "./assignment-metadata-recovery.js";
+import { assignmentDraftEffect, executeAssignmentRound, nativeMetadataDefects, verifySettledAssignment, readPublishedDiagnosticGrant, inspectAssignmentFailure, ASSIGNMENT_REPORT, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof, type AssignmentDefect } from "./assignment-metadata-recovery.js";
 import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
@@ -144,12 +144,14 @@ function focusedInvocationOptions(job: JobStartResult, receipt: Receipt) {
     sessionFile: receipt.piSessionFile, sessionRoots: [root], responseKind: "manifest-or-choice" as const };
 }
 export async function inspectFocusedFailure(job: JobStartResult, target: string, sourceHead: string,
-    diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
+    diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string, workItemId = "focus:" + target) {
   if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
-  const file = receiptPath(job, { workItemId: "focus:" + target, target });
+  if (workItemId !== "focus:" + target && !new RegExp("^dependency:[1-9][0-9]*:" + target.replace(".", "\\.") + "$").test(workItemId))
+    throw new ProtocolIntegrityBlockedError("Invalid Focused failure identity.");
+  const file = receiptPath(job, { workItemId, target });
   if (!existsSync(file)) return null;
   const r = JSON.parse(await readFile(file, "utf8")) as Receipt;
-  if (r.jobId !== job.jobId || r.workItemId !== "focus:" + target || r.target !== target ||
+  if (r.jobId !== job.jobId || r.workItemId !== workItemId || r.target !== target ||
       r.expectedHead !== sourceHead || (!diagnostic ? r.phase !== "writing" : !["writing", "authored", "committed"].includes(r.phase)) || r.worker !== "pi" || !r.assignmentKey) return null;
   const options = focusedInvocationOptions(job, r);
   const head = historicalHead ?? git(job, "rev-parse", "HEAD").trim();
@@ -164,13 +166,26 @@ export async function inspectFocusedFailure(job: JobStartResult, target: string,
       "NovelTea-Plan-Version: " + r.planVersion, "NovelTea-Focused-Digest: " + r.sha256]
       .every(line => trailers.includes(line))) throw Error("Original Focused diagnostic commit provenance changed");
     effect = assignmentCommittedEffect(job, sourceHead, head, r.paths, r.sha256);
-    if (!historicalHead && !await inspectPendingFocusedCommit(job, target, sourceHead)) return null;
+    if (!historicalHead && !await inspectPendingFocusedCommit(job, target, sourceHead, workItemId)) return null;
     await verifySettledAssignment({ ...options, proof: r.invocationProof, effect, historical: !!historicalHead });
   }
-  const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic });
+  const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic, historical: !!historicalHead });
   return terminal && { ...terminal, ref: options.directory + "/terminal.json", workItem: r.workItemId,
     assignmentKey: r.assignmentKey, invocationProof: r.invocationProof, sessionId: r.piSessionId! };
 }
+export async function inspectPublishedFocusedDiagnostic(job: JobStartResult, target: string,
+  workItemId: string, head: string) {
+  const receipt = JSON.parse(await readFile(receiptPath(job, {workItemId, target}), "utf8")) as Receipt;
+  if (receipt.jobId !== job.jobId || receipt.workItemId !== workItemId || receipt.target !== target ||
+      receipt.phase !== "committed" || receipt.commitSha !== head || !receipt.invocationProof || !receipt.sha256)
+    throw new ProtocolIntegrityBlockedError("Published supporting writer lost its receipt");
+  const options = focusedInvocationOptions(job, receipt);
+  const effect = assignmentCommittedEffect(job, receipt.expectedHead, head, receipt.paths, receipt.sha256);
+  await verifySettledAssignment({ ...options, proof: receipt.invocationProof, effect, historical: true });
+  const grant = await readPublishedDiagnosticGrant(options.directory, receipt.invocationProof);
+  return grant && { ...grant, ref: options.directory + "/terminal.json", sourceHead: receipt.expectedHead };
+}
+
 export async function inspectPendingFocusedInvocation(job: JobStartResult, target: string, workItemId = "focus:" + target) {
   if (!/^[a-z][a-z-]*\.[a-z][a-z0-9-]*$/.test(target)) return null;
   if (workItemId !== "focus:" + target && !new RegExp("^dependency:[1-9][0-9]*:" + target.replace(".", "\\.") + "$").test(workItemId))
@@ -906,9 +921,24 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         return [{ kind: "requirement" as const, path: paths[0]!, code: "focused-manifest-path-mismatch",
           detail: "Actual cumulative changed paths: " + JSON.stringify(edited.map(statusPath).sort()) }];
       const after = await validateStoryJob(job, input.validatorSource ?? input.skillsSource, { ...job, baseSha: current });
-      if (manifest && after.status === "rejected")
+      if (manifest && after.status === "rejected") {
+        // A newly authored Character with invalid metadata is absent from
+        // the native catalog. Its exact controller-required Arc link then
+        // reports a derived broken reference. Authenticate the link-only
+        // change before classifying this as a scoped metadata correction.
+        const derivedReferences: { path: string; target: string }[] = [];
+        const diagnostics = (after.report as { diagnostics?: { code?: string; path?: string }[] } | undefined)?.diagnostics;
+        if (create && create.id === input.target && create.id.startsWith("character.") &&
+            diagnostics?.some(d => d.path === create.path && ["schema", "yaml", "frontmatter"].includes(d.code ?? ""))) {
+          for (const arc of reviewArcs) {
+            auditArcLink(git(job, "show", "HEAD:" + repoPath(job, arc)),
+              await readFile(join(job.worktreeStoryRoot, arc), "utf8"), create.id);
+            derivedReferences.push({ path: arc, target: create.id });
+          }
+        }
         return nativeMetadataDefects(after, { jobId: job.jobId, baseSha: current,
-          worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths });
+          worktreeStoryRoot: job.worktreeStoryRoot, validatorVersion: job.validatorVersion, paths, derivedReferences });
+      }
       const accepted = reportOf(after, current);
       if (create && !accepted.some(item => item.metadata.id === create.id &&
           item.metadata.type === create.id.split(".")[0] && item.path === create.path &&

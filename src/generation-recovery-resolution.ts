@@ -82,6 +82,41 @@ export async function verifyReviewCycleSuccessor(job: JobStartResult, rootSha: s
   return false;
 }
 
+/** Inspect published support/Review diagnostic grants rather than trusting
+ * a checkpoint to remember which original read-only diagnosis authorized them. */
+async function verifyPublishedRepairDiagnostics(job: JobStartResult, c: RecoveryCase, root: string, head: string) {
+  const { inspectPublishedReviewDiagnostics, inspectNativeReviewFailure } = await import("./rejected-review-repair.js");
+  const { authenticatePublishedNativeDiagnostic, assignmentDiagnosticDefects } = await import("./generation-operation-strategy.js");
+  for (const grant of await inspectPublishedReviewDiagnostics(job, root, head)) {
+    const authorization = await authenticatePublishedNativeDiagnostic(job, c, grant, grant.workItem);
+    const failure = await inspectNativeReviewFailure(job, root, c.id, undefined, authorization, head);
+    if (!failure?.successorProof || !assignmentDiagnosticDefects(failure, grant.workItem)) return false;
+  }
+  return true;
+}
+
+async function verifyPublishedSupportDiagnostics(job: JobStartResult, c: RecoveryCase,
+    entries: readonly import("./dependency-state.js").DependencyEntry[]) {
+  const { inspectPublishedFocusedDiagnostic, inspectFocusedFailure } = await import("./focused-work.js");
+  const { authenticatePublishedNativeDiagnostic, assignmentDiagnosticDefects } = await import("./generation-operation-strategy.js");
+  for (const entry of entries) {
+    if (!entry.amendment || !entry.commitSha) return false;
+    if (entry.fixture) continue;
+    const assignment = entry.amendment.assignment;
+    const writerHead = entry.supportRootSha ?? entry.commitSha;
+    const grant = await inspectPublishedFocusedDiagnostic(job, assignment.targets[0]!, assignment.id, writerHead);
+    if (grant) {
+      const authorization = await authenticatePublishedNativeDiagnostic(job, c, grant, assignment.id);
+      const failure = await inspectFocusedFailure(job, assignment.targets[0]!, grant.sourceHead,
+        authorization.authorization, writerHead, assignment.id);
+      if (!failure?.successorProof || !assignmentDiagnosticDefects(failure, assignment.id)) return false;
+    }
+    if (entry.supportRootSha && !await verifyPublishedRepairDiagnostics(job, c, entry.supportRootSha, entry.commitSha))
+      return false;
+  }
+  return true;
+}
+
 /** C07: authenticate a previously verified ACTIVE case after its controller
  * has returned to the original scheduler. No model, author approval, or write
  * is performed here. The saved lifecycle carries only links to the EXISTING
@@ -123,6 +158,7 @@ export async function inspectActiveRecoveryResolution(
       const event = JSON.parse(await readFile(join(job.stateDir, "event-items", readiness.milestoneId.slice(10) + ".json"), "utf8"));
       return isDeepStrictEqual(completed.original.report, readiness) &&
         completed.head === correctedHeadSha && completed.digest === correction.digest &&
+        await verifyPublishedSupportDiagnostics(job, original, completed.entries) &&
         event.expectedHead === correctedHeadSha && event.blueprintSource?.reportDigest === readiness.reportDigest;
     }
     const ref = (source.input as unknown as GenerationOperationRecovery).evidence?.blueprintAssessment;
@@ -144,7 +180,15 @@ export async function inspectActiveRecoveryResolution(
   if (correction.store === "review-checkpoint" && correction.ref === correctedHeadSha) {
     if (original.origin.operation === "independent-review" &&
         original.observation === "returned-failure")
-      return verifyReviewCycleSuccessor(job, original.origin.sourceHeadSha, correctedHeadSha);
+      {
+        if (!await verifyReviewCycleSuccessor(job, original.origin.sourceHeadSha, correctedHeadSha)) return false;
+        const plan = await (await import("./dependency-state.js")).inspectDependencyPlan(job);
+        const support = plan?.entries.filter(e => e.reviewSourceSha === original.origin.sourceHeadSha && e.phase === "verified") ?? [];
+        if (support.length) return verifyPublishedSupportDiagnostics(job, original, support);
+        const root = checkpoints.find(p => p.commitSha === original.origin.sourceHeadSha && p.eligible);
+        return !root || !sharedFoundationReviewWorkItem(root.workItem)
+          ? true : verifyPublishedRepairDiagnostics(job, original, original.origin.sourceHeadSha, correctedHeadSha);
+      }
     const point = checkpoints.find(p => p.eligible && p.commitSha === correctedHeadSha &&
       p.validation.status === "passed" &&
       (p.semanticReview === "passed" || p.semanticReview === "not-required"));

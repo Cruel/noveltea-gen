@@ -129,11 +129,13 @@ export type RecoveryDecision = RecoveryDecisionBase &
         receipt: RecoveryEvidence;
         /** A source-bound Review adapter continuation selected by the shared assessor. */
         reviewAssessment?: Readonly<{ kind: "diagnostic" | "dispute" | "author-revision" | "scope"; sourceSha: string; digest: string }>;
+        nativeDiagnostic?: RecoveryEvidence;
       }
     | {
         action: "plan-amendment";
         owner: string;
         scopeRef: RecoveryEvidence;
+        nativeDiagnostic?: RecoveryEvidence;
         supportReview?: SupportingReviewAssessment;
         adapter:
           | "dependency-work"

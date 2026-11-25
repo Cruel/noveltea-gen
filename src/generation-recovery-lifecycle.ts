@@ -156,6 +156,8 @@ function validDecision(value: unknown): value is RecoveryDecision {
         ["response-contract", "review-cycle", "known-verifier-fix", "native-revalidation", "assignment-diagnostic"].includes(
           d.adapter,
         ) && validEvidence(d.receipt) &&
+        (d.nativeDiagnostic === undefined || d.adapter === "review-cycle" && validEvidence(d.nativeDiagnostic) &&
+          d.nativeDiagnostic.store === "specialist-receipt" && !!d.nativeDiagnostic.digest) &&
         (d.reviewAssessment === undefined || d.adapter === "review-cycle" &&
           ["diagnostic", "dispute", "author-revision", "scope"].includes(d.reviewAssessment.kind) &&
           hex40.test(d.reviewAssessment.sourceSha) && hex64.test(d.reviewAssessment.digest))
@@ -164,6 +166,8 @@ function validDecision(value: unknown): value is RecoveryDecision {
       return (
         populated(d.owner) &&
         validEvidence(d.scopeRef) &&
+        (d.nativeDiagnostic === undefined || d.adapter === "dependency-work" && validEvidence(d.nativeDiagnostic) &&
+          d.nativeDiagnostic.store === "specialist-receipt" && !!d.nativeDiagnostic.digest) &&
         (d.supportReview === undefined || d.adapter === "dependency-work" && validSupportingReview(d.supportReview)) &&
         [
           "dependency-work",

@@ -46,12 +46,13 @@ const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
   schema: "noveltea-generation-recovery-decision/v1" as const, caseId: c.id,
   checkedSourceHeadSha: c.origin.sourceHeadSha, evidence: proof ? [...c.evidence, proof] : c.evidence,
 });
-async function originalAssignmentFailure(job: JobStartResult, s: State, c: RecoveryCase) {
+async function originalAssignmentFailure(job: JobStartResult, s: State, c: RecoveryCase,
+  diagnostic?: import("./rejected-review-repair.js").NativeDiagnosticReference) {
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined;
   if (op?.evidence.eventBlueprintPrerequisite) {
     const failure = await (await import("./dependency-work.js")).inspectSupportingNativeFailure(job,
-      op.evidence.eventBlueprintPrerequisite, c.origin.graphThreadId, c.id);
+      op.evidence.eventBlueprintPrerequisite, c.origin.graphThreadId, c.id, diagnostic);
     if (!failure) return null;
     if (!await originalNoWriteOwnerProof(job, s, c))
       throw Error("Supporting native failure lost its original parent owner proof.");
@@ -59,7 +60,7 @@ async function originalAssignmentFailure(job: JobStartResult, s: State, c: Recov
   }
   if (!op?.evidence.assignmentFailure) {
     if (c.origin.operation !== "independent-review" || !usesSharedAssignmentReview(c.origin.assignmentId)) return null;
-    const failure = await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id);
+    const failure = await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id, undefined, diagnostic);
     if (!failure) return null;
     if (!await originalFailedReviewProof(job, s, c))
       throw Error("Original Review native failure lost its admitted source");
@@ -88,6 +89,9 @@ export async function authenticateSupportingNativeOrigin(job: JobStartResult, s:
   if (!(s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite)
     return false;
+  const selected = s.recoveryLifecycle.decision;
+  if (selected && (selected.action === "known-correction" || selected.action === "plan-amendment") && selected.nativeDiagnostic)
+    return !!await authenticateNativeReviewDiagnostic(job, s, c, selected);
   const failure = await originalAssignmentFailure(job, s, c);
   return !!failure && "supportReportDigest" in failure;
 }
@@ -615,7 +619,8 @@ export async function authenticateOperationOwnerProof(job: JobStartResult, s: St
   const original = await originalNoWriteOwnerProof(job, s, c);
   if (!original || original.owner !== d.owner ||
       !isDeepStrictEqual(original.proof, d.scopeRef) ||
-      !isDeepStrictEqual(d.evidence, [...c.evidence, original.proof])) return false;
+      !isDeepStrictEqual(d.evidence, [...c.evidence, original.proof, ...(d.nativeDiagnostic ? [d.nativeDiagnostic] : [])])) return false;
+  if (d.nativeDiagnostic && !await authenticateNativeReviewDiagnostic(job, s, c, d)) return false;
   if (!d.supportReview) return true;
   const readiness = (s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
@@ -628,11 +633,12 @@ export async function authenticateOperationReviewProof(job: JobStartResult, s: S
   if (d.action !== "known-correction" || d.adapter !== "review-cycle") return false;
   try {
   const blueprint = await originalBlueprintAssessment(job, s, c);
-  if (blueprint) return !d.reviewAssessment && isDeepStrictEqual(d.receipt, blueprint.evidence) &&
+  if (blueprint) return !d.reviewAssessment && !d.nativeDiagnostic && isDeepStrictEqual(d.receipt, blueprint.evidence) &&
     isDeepStrictEqual(d.evidence, [...c.evidence, blueprint.evidence]);
   const original = await originalFailedReviewProof(job, s, c);
   if (!original || !isDeepStrictEqual(original, d.receipt) ||
-      !isDeepStrictEqual(d.evidence, [...c.evidence, original])) return false;
+      !isDeepStrictEqual(d.evidence, [...c.evidence, original, ...(d.nativeDiagnostic ? [d.nativeDiagnostic] : [])])) return false;
+  if (d.nativeDiagnostic && !await authenticateNativeReviewDiagnostic(job, s, c, d)) return false;
   if (!d.reviewAssessment) return true;
   return usesSharedAssignmentReview(c.origin.assignmentId) &&
     isDeepStrictEqual(d.reviewAssessment,
@@ -721,7 +727,7 @@ export function assignmentDiagnosticDecisionForLifecycle(l: RecoveryLifecycle): 
       !diagnosticWriterSupported(l.active.origin.assignmentId) || l.attempt?.purpose !== "diagnosis") return null;
   if (d?.action === "known-correction" && d.adapter === "assignment-diagnostic") return d;
   if (d?.action === "pause" && d.resumeRef?.store === "specialist-receipt" &&
-      isDeepStrictEqual(d.resumeRef, d.evidence.at(-1)))
+      isDeepStrictEqual(d.evidence, [...l.active.evidence, d.resumeRef]))
     return { ...base(l.active, d.resumeRef), action: "known-correction",
       adapter: "assignment-diagnostic", receipt: d.resumeRef };
   return null;
@@ -807,10 +813,115 @@ export async function authenticateAssignmentDiagnosticDischarge(job: JobStartRes
     await authenticateSettledReviewVerdict(job, point, reviewed.result, cycle, round, "pass");
 }
 
+type NativeReviewFailure = NonNullable<Awaited<ReturnType<typeof inspectNativeReviewFailure>>> |
+  NonNullable<Awaited<ReturnType<typeof import("./dependency-work.js").inspectSupportingNativeFailure>>>;
+function isNativeReviewFailure(failure: Awaited<ReturnType<typeof originalAssignmentFailure>>): failure is NativeReviewFailure {
+  return !!failure && "nativeOwner" in failure && typeof failure.nativeOwner === "object" &&
+    failure.nativeOwner !== null && "workItem" in failure.nativeOwner;
+}
+type NativeDiagnosticDecision = Extract<RecoveryDecision, {action: "known-correction" | "plan-amendment"}>;
+async function nativeReviewDiagnosticDecision(job: JobStartResult, s: State, c: RecoveryCase,
+    diagnostic: Extract<RecoveryDecision, {action: "diagnostic"}>, proposal: RecoveryDiagnosticProposal,
+    failure: Awaited<ReturnType<typeof originalAssignmentFailure>>): Promise<NativeDiagnosticDecision | null> {
+  const proof = diagnostic.evidence.at(-1);
+  if (!isNativeReviewFailure(failure) || failure.proof.kind !== "nonconverging" ||
+      !assignmentDiagnosticDefects(failure, failure.nativeOwner.workItem) ||
+      !proof?.digest || proof.store !== "specialist-receipt" || proof.ref !== failure.ref ||
+      proof.digest !== failure.proof.receiptDigest || !isDeepStrictEqual(diagnostic.evidence.slice(0, -1), c.evidence) ||
+      diagnostic.caseId !== c.id || diagnostic.checkedSourceHeadSha !== c.origin.sourceHeadSha ||
+      proposal.category !== "defect" || proposal.strategy !== "local-repair" || proposal.prerequisites.length ||
+      proposal.owner !== failure.nativeOwner.workItem || proposal.scopeRef !== proposal.sourceRef ||
+      proposal.sourceRef !== [proof.store, proof.ref, proof.digest].join(":")) return null;
+  if ("supportReportDigest" in failure) {
+    const owner = await originalNoWriteOwnerProof(job, s, c);
+    if (!owner || originalOwnerAdapter(s, c) !== "dependency-work") return null;
+    return { ...base(c, owner.proof), action: "plan-amendment", adapter: "dependency-work",
+      owner: owner.owner, scopeRef: owner.proof, nativeDiagnostic: proof, evidence: [...c.evidence, owner.proof, proof] };
+  }
+  const original = await originalFailedReviewProof(job, s, c);
+  return original ? { ...base(c, original), action: "known-correction", adapter: "review-cycle",
+    receipt: original, nativeDiagnostic: proof, evidence: [...c.evidence, original, proof] } : null;
+}
+
+/** Reopen only the exact original native terminal and settled read-only diagnosis.
+ * The shared Review child still grants, executes and verifies the corrective round. */
+export async function authenticateNativeReviewDiagnostic(job: JobStartResult, s: State, c: RecoveryCase,
+    d: NativeDiagnosticDecision): Promise<import("./rejected-review-repair.js").NativeDiagnosticContinuation | null> {
+  const proof = d.nativeDiagnostic;
+  if (!proof?.digest) return null;
+  const diagnostic = { ...base(c, proof), action: "diagnostic" as const, adapter: "unknown-diagnostic" as const,
+    mode: "read-only" as const, attemptRef: null };
+  const target = diagnosticCaseForDecision(c, diagnostic);
+  const proposal = await inspectOriginalUnknownDiagnosis(job, target);
+  if (!("strategy" in proposal)) return null;
+  const attempt = await inspectDiagnosticAttempt(job, target, c.id);
+  if (attempt.phase !== "settled" || attempt.mode !== "read-only" ||
+      !isDeepStrictEqual(attempt, s.recoveryLifecycle.attempt)) return null;
+  const grant = { ref: proof.ref, authorization: { terminalDigest: proof.digest,
+    decisionDigest: pendingDigest({ decision: diagnostic, attempt, proposal }), advice: proposal.diagnosis } };
+  const failure = await originalAssignmentFailure(job, s, c, grant);
+  const original = await nativeReviewDiagnosticDecision(job, s, c, diagnostic, proposal, failure);
+  const { reviewAssessment: _review, supportReview: _support, ...ordinary } = d as NativeDiagnosticDecision & {
+    reviewAssessment?: unknown; supportReview?: unknown;
+  };
+  if (!original || !isDeepStrictEqual(original, ordinary) || !isNativeReviewFailure(failure)) return null;
+  return { ...grant, assignmentKey: failure.nativeOwner.assignmentKey, phase: failure.nativeOwner.phase };
+}
+
+/** The accepted native invocation grant carries the original diagnosis digest.
+ * Historical discharge inspection must independently reopen its read-only
+ * transcript, not accept a new checkpoint's assertion of completion. */
+export async function authenticatePublishedNativeDiagnostic(job: JobStartResult, c: RecoveryCase,
+    grant: {ref: string; terminalDigest: string; decisionDigest: string}, workItem: string) {
+  const proof = {store: "specialist-receipt" as const, ref: grant.ref, digest: grant.terminalDigest};
+  const diagnostic = { ...base(c, proof), action: "diagnostic" as const, adapter: "unknown-diagnostic" as const,
+    mode: "read-only" as const, attemptRef: null };
+  const target = diagnosticCaseForDecision(c, diagnostic);
+  const proposal = await inspectOriginalUnknownDiagnosis(job, target);
+  const attempt = await inspectDiagnosticAttempt(job, target, c.id);
+  if (!("strategy" in proposal) || proposal.strategy !== "local-repair" ||
+      proposal.category !== "defect" || proposal.owner !== workItem || proposal.prerequisites.length ||
+      proposal.scopeRef !== proposal.sourceRef || proposal.sourceRef !== target.proofRef ||
+      attempt.phase !== "settled" || attempt.mode !== "read-only" ||
+      pendingDigest({decision: diagnostic, attempt, proposal}) !== grant.decisionDigest)
+    throw Error("Published native correction lost its original diagnostic grant");
+  return { ref: grant.ref, authorization: {terminalDigest: grant.terminalDigest,
+    decisionDigest: grant.decisionDigest, advice: proposal.diagnosis} };
+}
+
+/** A pause carries the original proof and diagnosis reference, not a fresh
+ * allowance. Reconstruct the exact selected strategy from the sealed attempt. */
+export function isNativeDiagnosticRef(ref: RecoveryEvidence | undefined) {
+  return ref?.store === "specialist-receipt" && (ref.ref.startsWith("review-repairs/native-rounds/") ||
+    ref.ref.includes("/focused-sessions/"));
+}
+export async function pausedNativeReviewDiagnostic(job: JobStartResult, s: State,
+    lifecycle: RecoveryLifecycle): Promise<NativeDiagnosticDecision | null> {
+  const c = lifecycle.active, pause = lifecycle.decision;
+  if (!c || pause?.action !== "pause" || pause.resumeRef?.store !== "specialist-receipt" ||
+      !isNativeDiagnosticRef(pause.resumeRef) ||
+      pause.evidence.length !== c.evidence.length + 2 || !isDeepStrictEqual(pause.resumeRef, pause.evidence.at(-1)) ||
+      !isDeepStrictEqual(pause.evidence.slice(0, -2), c.evidence)) return null;
+  const original = pause.evidence.at(-2)!;
+  const proof = pause.resumeRef;
+  const owner = await originalNoWriteOwnerProof(job, s, c);
+  const decision: NativeDiagnosticDecision = owner ? {
+    ...base(c, owner.proof), action: "plan-amendment", adapter: "dependency-work", owner: owner.owner,
+    scopeRef: owner.proof, nativeDiagnostic: proof, evidence: pause.evidence,
+  } : {
+    ...base(c, original), action: "known-correction", adapter: "review-cycle",
+    receipt: original, nativeDiagnostic: proof, evidence: pause.evidence,
+  };
+  return await authenticateNativeReviewDiagnostic(job, s, c, decision) ? decision : null;
+}
+
 /** The proposal cannot select an adaptive reconciliation unless the original
  * controller admission and the actual Pi transcript independently agree. */
 export async function authorizeOperationDiagnosticStrategy(job: JobStartResult, s: State, c: RecoveryCase,
   diagnostic: Extract<RecoveryDecision, { action: "diagnostic" }>, proposal: RecoveryDiagnosticProposal) {
+  const failure = await originalAssignmentFailure(job, s, c);
+  const native = await nativeReviewDiagnosticDecision(job, s, c, diagnostic, proposal, failure);
+  if (native) return native;
   const local = assignmentDiagnosticDecision(c, diagnostic, proposal);
   if (local) {
     const original = await originalAssignmentFailure(job, s, c);
@@ -1100,7 +1211,8 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         ({ recoveryLifecycle: { ...decideRecovery(lifecycle, decision), assessorPending: false }, reason, status });
       const control = await readJobControl(job);
       if (control !== "running")
-        return stop({ ...base(c), action: "pause", reason: control === "cancelled" ? "cancelled" : "author-pause" },
+        return stop({ ...base(c), action: "pause", reason: control === "cancelled" ? "cancelled" : "author-pause",
+          ...(d.nativeDiagnostic ? { evidence: d.evidence, resumeRef: d.nativeDiagnostic } : {}) },
           "Author control precedes Review reassessment.", control);
       if (d.reviewAssessment) {
         try {
@@ -1124,7 +1236,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           throw error;
         }
       }
-      if (await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id)) {
+      if (!d.nativeDiagnostic && await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id)) {
         const selected = await selectOperationStrategy(job, s, c);
         if (selected?.action === "exhausted") return stop(selected, "Original Review native response protocol exhausted.", "blocked");
         if (selected?.action !== "diagnostic") throw Error("Review native terminal has no shared assessment");
@@ -1154,7 +1266,9 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
   const pauseDecision = (reason: Extract<RecoveryDecision, { action: "pause" }>["reason"]): RecoveryDecision =>
-    readiness && (d.action === "plan-amendment" && d.adapter === "dependency-work" || d.action === "diagnostic")
+    d.action === "plan-amendment" && d.nativeDiagnostic
+      ? { ...base(c), action: "pause", reason, evidence: d.evidence, resumeRef: d.nativeDiagnostic }
+      : readiness && (d.action === "plan-amendment" && d.adapter === "dependency-work" || d.action === "diagnostic")
       ? { ...base(c, d.action === "plan-amendment" ? d.scopeRef : d.evidence.at(-1)), action: "pause", reason, resumeRef: { store: "dependency-plan",
           ref: readiness.reportDigest, digest: readiness.reportDigest } }
       : { ...base(c), action: "pause", reason };
@@ -1196,7 +1310,9 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       }
       let result: Awaited<ReturnType<typeof advanceBlueprintDependency>>;
       try {
-        result = await advanceBlueprintDependency(s.request, readiness, config, c.id);
+        const nativeDiagnostic = d.nativeDiagnostic ? await authenticateNativeReviewDiagnostic(job, s, c, d) : null;
+        if (d.nativeDiagnostic && !nativeDiagnostic) throw Error("Supporting native diagnosis lost its original grant.");
+        result = await advanceBlueprintDependency(s.request, readiness, config, c.id, nativeDiagnostic ?? undefined);
       } catch (error) {
         // Derive the stop from the existing authenticated ledger even if the
         // child graph wrapped the error. Uncertain effects still fail closed.
@@ -1367,7 +1483,9 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           original: packet.existingFindings, assignmentDefects: originalDraft.defects,
           observation: "Repeated source-bound assignment correction did not converge; draft remains uncommitted.",
         };
-        if (!("supportReportDigest" in originalDraft) && diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
+        if (isNativeReviewFailure(originalDraft) && assignmentDiagnosticDefects(originalDraft, originalDraft.nativeOwner.workItem))
+          packet.availableAdapters = ["local-repair: owner=" + originalDraft.nativeOwner.workItem + ", scopeRef=exact sourceRef; only the original controller-verified native defects in the existing " + originalDraft.nativeOwner.phase + " grant"];
+        else if (!("supportReportDigest" in originalDraft) && diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
             assignmentDiagnosticDefects(originalDraft, c.origin.assignmentId))
           packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef=exact sourceRef; only the exact original controller-verified defects within the existing write grant, no other owner or new prerequisites"];
       }
