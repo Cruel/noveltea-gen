@@ -707,7 +707,10 @@ export async function readEventSourceBlueprint(job: JobStartResult, pin: Milesto
     if (completion.head !== writerBase || JSON.stringify(completion.original.pin) !== JSON.stringify(pin))
       throw new ProtocolIntegrityBlockedError("Event writer base is not the verified Blueprint predecessor tip.");
   }
-  return readReviewedMilestoneBlueprint(job, pin, assignment);
+  const design = await readReviewedMilestoneBlueprint(job, pin, assignment);
+  if (design.upstreamCorrection)
+    throw new ProtocolIntegrityBlockedError("A Blueprint with an unsettled canonical owner finding cannot authorize Event writing.");
+  return design;
 }
 
 export async function rebindEventAfterBlueprintPredecessors(job: JobStartResult,

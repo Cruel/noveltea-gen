@@ -280,7 +280,7 @@ export function authorizeWriterDependency(input: {
       !text(proposal.reason) || report.sourceSha !== head || report.turnDigest !== plan.digest ||
       !plan.objective.obligations.includes(report.obligation) || report.authorDecisionRequired ||
       JSON.stringify(report.sources) !== JSON.stringify(input.sources) ||
-      target.metadata.decisions !== undefined && (!Array.isArray(target.metadata.decisions) || target.metadata.decisions.length) ||
+      cited.some(r => r.metadata.decisions !== undefined && (!Array.isArray(r.metadata.decisions) || r.metadata.decisions.length)) ||
       input.priorAmendments.some(a => a.authority.existingPaths.includes(source.targetPath) || a.authority.newPaths?.includes(source.targetPath)) ||
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
     throw new DependencyAuthorizationRefusedError("Writer prerequisite is not a source-linked, unprotected existing owner correction.");

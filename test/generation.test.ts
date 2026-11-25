@@ -331,7 +331,7 @@ for (const stage of ["composition", "choice", "puzzle", "blueprint"] as const) t
         supported = true;
         return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
           evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
-            explanation: "Verified the bounded Character correction." }] });
+            explanation: "Verified the bounded canonical owner correction." }] });
       }
       return ordinary(index, context);
     });
@@ -354,6 +354,32 @@ for (const stage of ["composition", "choice", "puzzle", "blueprint"] as const) t
     }
     const verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
     assert.ok(verified.focusedPrerequisite?.supportRef, JSON.stringify({ reason: verified.reason, recovery: verified.recoverySources }));
+    const support = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries.find(entry =>
+      entry.writerSource?.sealDigest === suspended.focusedPrerequisite!.writerSource!.sealDigest)!;
+    assert.ok(support.commitSha);
+    assert.deepEqual(git(f.job.worktreeRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", support.commitSha).trim().split("\n"),
+      [(f.job.storyRelativePath ? f.job.storyRelativePath + "/" : "") + path]);
+    const revalidated = JSON.parse(readFileSync(join(f.job.stateDir, "revalidation-items", support.commitSha + ".json"), "utf8"));
+    assert.equal(revalidated.state, "completed");
+    assert.ok(revalidated.proposal.unaffected.includes("foundation"));
+    assert.ok(!revalidated.results.some((entry: {itemId: string}) => revalidated.proposal.unaffected.includes(entry.itemId)));
+    if (stage === "composition") {
+      assert.ok(revalidated.results.some((entry: {itemId: string; status: string}) =>
+        entry.itemId === "event:milestone.disclosure" && entry.status === "passed"));
+    }
+    if (blueprint) {
+      const source = suspended.focusedPrerequisite!.writerSource!;
+      const archive = join(f.job.stateDir, "event-writer-prerequisites", milestone.slice(10) + "-" + source.sealDigest + ".json");
+      const bytes = readFileSync(archive, "utf8");
+      const forged = JSON.parse(bytes);
+      forged.blueprintPin.sourceSha = support.commitSha;
+      const { inspectWriterDependency } = await import("../src/writer-dependency.js");
+      try {
+        writeFileSync(archive, JSON.stringify(forged));
+        await assert.rejects(inspectWriterDependency(f.job, source), /exact original|approved design|prerequisite/i);
+      } finally { writeFileSync(archive, bytes); }
+      await inspectWriterDependency(f.job, source);
+    }
     const result = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
     assert.equal(result.result?.status, blueprint ? "event-cluster-committed" : stage === "composition" ? "composition-committed" : stage === "choice" ? "review-handoff" : "interactive-slice-committed", JSON.stringify({ reason: result.reason, recovery: result.recoverySources }));
     const current = receipt();

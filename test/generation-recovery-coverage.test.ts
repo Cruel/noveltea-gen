@@ -241,12 +241,13 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
 // clean-HEAD recovery authentication, never a new writer entitlement.
 test("R02 source-bound correction and terminal evidence retain reviewed proof gates", () => {
   const reviewed = [
+    ["event-work.ts", "readEventSourceBlueprint", "751106980d2098c6110e0659186676c230c59559aeb3a46e9d2e7e165b7a3c38"],
     ["writer-dependency.ts", "reconstructWriterDependency", "008a86449d6715c9daa883776b081de251da4d14b3a89809cfd3a1c73763555a"],
     ["writer-dependency.ts", "inspectWriterDependency", "fe92b89eb8f41f536b1d52d4463a009712cb9751c915299aa28433206f24458c"],
     ["writer-dependency.ts", "verifiedWriterSupport", "66398271cef38d9ff4a7cd91303d771b8cdc3170ac9f8a8126995640ae0386e8"],
     ["writer-dependency.ts", "authenticateWriterContinuation", "4c76d6dee30921908daa5a7ed50334f8fab1b35373e512c1460a949dfd266c4f"],
     ["dependency-work.ts", "advanceWriterDependency", "39d594f85a78f290ca58c9c5fc7155571c0978935d4e6317e727d06bf81848ac"],
-    ["dependency-amendments.ts", "authorizeWriterDependency", "b5667b6b444a61d15477552d3f4c95968fda395820c8485fb71177bdafb8f8b4"],
+    ["dependency-amendments.ts", "authorizeWriterDependency", "8b878e244b9738dc1ae6822ca9cc921fa5b7a0c9a041f38a12224124eadd9f6f"],
     ["dependency-amendments.ts", "parseWriterDependencyFinding", "22f4e8d0b376b88e908446dc1ad867588c40bd0a2751eafb894400785412a1b3"],
     ["event-work.ts", "inspectEventWriterDependency", "32f1c2fa4f89fbfa85284f89d1beb76379adadd9f68f46a2d644487a68135578"],
     ["event-work.ts", "archiveEventWriterDependency", "3a41cab28f560d243fe86e9f44dbb6ddaa46d31fd639b6d8bb0b3a632dc60e9b"],
