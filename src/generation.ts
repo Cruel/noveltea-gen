@@ -51,10 +51,9 @@ import { runFoundationJob, inspectPendingFoundationInvocation, inspectFoundation
 import { AssignmentNonconvergenceError, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
 import { reusableExistingFoundation } from "./foundation-readiness.js";
 import { runCharacterWorldJob, inspectCharacterWorldFailure, inspectPendingCharacterWorldInvocation, inspectRecoverableCharacterWorldCommit } from "./character-world.js";
-import { runEventWorkItem, inspectEventFailure, inspectPendingEventInvocation } from "./event-work.js";
-import { routeEventPrerequisite } from "./event-prerequisite-routing.js";
+import { runEventWorkItem, inspectEventFailure, inspectEventNoWrite, inspectPendingEventInvocation } from "./event-work.js";
 import { inspectCausalAmendment } from "./causal-amendment-controller.js";
-import type { CausalAmendment, CausalDiscovery } from "./causal-amendment.js";
+import type { CausalAmendment } from "./causal-amendment.js";
 import { runInteractiveWorkItem, inspectInteractiveUnit, inspectPendingInteractiveInvocation,
   inspectInteractiveFailure } from "./interactive-work.js";
 import type { InteractiveDomain } from "./interactive-specialist.js";
@@ -1285,7 +1284,7 @@ async function runAssignmentDiagnosticRecovery(s: State, config: RunnableConfig,
       : stage === "focus" ? await runFocusedAssignmentChild(s, config, reviewBoundary, original)
       : stage === "interactive" || stage === "choice" || stage === "puzzle"
         ? await runInteractiveAssignmentChildren(s, config, reviewBoundary, false, original)
-        : await runNarrativeAssignmentChild(s, config, reviewBoundary, false, undefined, original);
+        : await runNarrativeAssignmentChild(s, config, reviewBoundary, false, original);
     if (updated.status === "paused" || updated.status === "cancelled")
       return pause(updated.status === "cancelled" ? "cancelled" :
         updated.reviewControlRef === "budget" || updated.reviewControlRef === "provider-unavailable"
@@ -1918,14 +1917,12 @@ async function runCharacterWorldAssignmentChild(
 async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
   correctionSelected = false,
-  reroute?: { reportDigest: string; sourceSha: string; task: string },
   diagnostic?: NonNullable<Awaited<ReturnType<typeof authenticateAssignmentDiagnosticDecision>>>): Promise<Partial<State>> {
   const job = await openJob(s);
   const active = s.active;
   const graphThreadId = config.configurable?.thread_id;
   if (!active?.milestone || !s.inventory ||
       !["event", "composition", "focus"].includes(active.stage) ||
-      reroute && (active.stage !== "event" || reroute.sourceSha !== s.inventory.headSha || correctionSelected) ||
       typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId ||
       s.planVersion === null || !s.request.turnPlanDigest)
     throw Error("Narrative child lacks its admitted Turn, assignment and plan.");
@@ -1939,7 +1936,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     throw Error("Narrative correction lacks its original native and Review receipts.");
   const focusSource = active.stage === "focus" && s.request.turnPlanDigest
     ? await inspectFocusedPrerequisite(job, active.milestone, s.request.turnPlanDigest, s.request.fixture, s.planVersion) : null;
-  const pendingEvent = active.stage === "event" && !reroute && !correction
+  const pendingEvent = active.stage === "event" && !correction
     ? await inspectPendingEventInvocation(job, active.milestone) : null;
   const pendingComposition = active.stage === "composition" && !correction
     ? await inspectPendingCompositionInvocation(job, active.milestone) : null;
@@ -1950,8 +1947,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   const identity: AssignmentIdentity = {
     schema: "noveltea-assignment-identity/v1", jobId: job.jobId, jobThreadId: job.threadId,
     graphThreadId, turnDigest, assignmentId: workItem, planVersion: s.planVersion,
-    sourceHeadSha: sourceHead, scopeDigest: dependencyDigest({ scope, task: s.request.task, contract: s.request.contract,
-      ...(reroute ? { reroute } : {}) }),
+    sourceHeadSha: sourceHead, scopeDigest: dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }),
   };
   const key = logicalAssignmentKey(identity);
   const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
@@ -1997,8 +1993,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     if (stopped) return stopped;
     try {
       const round = { assignmentKey: key, command: diagnosis.command(command), publish };
-      result = reroute ? await runEventWorkItem({ ...s.request, action: "run", milestone,
-        task: reroute.task, reroute, round }) : await dispatch(s, undefined, round);
+      result = await dispatch(s, undefined, round);
       const saved = subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, ref);
       if (result.status === "composition-authored" && "status" in saved && saved.status === "writer-round")
         return { ...saved, status: "composition-authored" };
@@ -4444,43 +4439,21 @@ export function createGenerationGraph(
               action: "Preserve the reviewed prospective Blueprint and authorize the necessary Character predecessor through the shared work plan before Event dispatch." } };
         }
         if (result.status === "event-prerequisite-reported") {
-          let evidence = result as typeof result & {
-            prerequisite?: { reportDigest: string; expectedHead: string };
-            conflicts?: string[]; obligations?: string[]; reroutedFrom?: string;
-            causalDiscovery?: CausalDiscovery;
-          };
-          if (!evidence.prerequisite || !/^[a-f0-9]{64}$/.test(evidence.prerequisite.reportDigest))
-            throw Error("A no-write Event dependency report lacks a sealed source receipt.");
+          if (s.active?.stage !== "event" || !s.active.milestone ||
+              s.active.id !== "event:" + s.active.milestone || !s.inventory)
+            throw new ProtocolIntegrityBlockedError("Event no-write returned outside its admitted assignment.");
           const job = await openJob(s);
-          const route = routeEventPrerequisite({
-            milestone: s.active!.milestone!, activeStage: s.active!.stage,
-            expectedHead: evidence.prerequisite.expectedHead,
-            verifiedHead: await trustedHead(job), reportDigest: evidence.prerequisite.reportDigest,
-            conflicts: evidence.conflicts ?? [], obligations: evidence.obligations ?? [],
-            alreadyRerouted: !!evidence.reroutedFrom,
-          });
-          if (route.kind === "event-setup") {
-            // Same authorized Event assignment, one new task and a fresh
-            // settled Pi session. The original source receipt is archived;
-            // no Choice/ending grant or dependency inversion is introduced.
-            const child = await runNarrativeAssignmentChild(s, config, reviewBoundary, false,
-              { reportDigest: route.reportDigest,
-                sourceSha: evidence.prerequisite.expectedHead, task: route.task });
-            if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
-                child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest ||
-                child.result.status !== "event-prerequisite-reported") return child;
-            result = child.result;
-            evidence = result as typeof evidence;
-          }
+          const evidence = await inspectEventNoWrite(job, s.active.milestone,
+            s.inventory.headSha, s.planVersion);
+          if (evidence.prerequisite.reportDigest !== (result as typeof result & {
+            prerequisite?: { reportDigest: string } }).prerequisite?.reportDigest)
+            throw new ProtocolIntegrityBlockedError("Returned Event no-write does not match its settled original.");
           const failure = "Clean no-write Event prerequisite report " +
             evidence.prerequisite!.reportDigest + " at " + evidence.prerequisite!.expectedHead +
             ": " + [...evidence.conflicts ?? [], ...evidence.obligations ?? []].join("; ") +
-            ". " + (route.kind === "event-setup"
-              ? "An independently bounded Event-setup reassignment also reported no edits; "
-              : route.reason + " ") +
-            "The original settled session is preserved; no unauthorized Choice or upstream work " +
+            ". The original settled session is preserved; no unauthorized Choice or upstream work " +
             "was dispatched. Obtain a controller-approved bounded architecture/work-plan revision.";
-          if (route.kind === "replan-required" && evidence.causalDiscovery && s.inventory) {
+          if (evidence.causalDiscovery) {
             const receipt = await checkPlan(job, s.request, s.planVersion);
             if (!receipt?.plan) throw Error("Causal replan lacks its verified Architecture plan.");
             const causalAmendment = await withStoryJobLock(job, "causal-amendment-admission", () =>

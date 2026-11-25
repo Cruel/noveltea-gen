@@ -26,7 +26,7 @@ export const reviewedReturnExits = {
   verify_idea_integration:
     "fc4216fab4e774f4:G a8f06f34fb2636b9:R 3455306dafdc433b:G c373186eff1403b1:G 85e672986fb4d591:R",
   specialist_dispatch:
-    "24d3234e13786970:G 67b5750b1e2f2d35:R e4b08665b2511bc8:G 2e390504c300c98d:S 7a691ba8e5d9ee20:G aff8ea941706c451:G 96fd9f45db7bb4c2:S 96fd9f45db7bb4c2:S 773d436bc9ee46ab:R 13fca47490992833:R 96fd9f45db7bb4c2:S 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G a36a5142fcf487a7:R 591562bbc7305825:R 2347023c580cd850:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
+    "24d3234e13786970:G 67b5750b1e2f2d35:R e4b08665b2511bc8:G 2e390504c300c98d:S 7a691ba8e5d9ee20:G aff8ea941706c451:G 96fd9f45db7bb4c2:S 96fd9f45db7bb4c2:S 773d436bc9ee46ab:R 13fca47490992833:R 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G a36a5142fcf487a7:R 591562bbc7305825:R 2347023c580cd850:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
   dependency_amendment: "eb13fe2b1f18ff5d:S 6b32f8cbd165bff6:G 365b250dad205c8c:G 495fbeab957c05af:S 0769876482d9a3e7:R",
   independent_assignment_review:
     "cf87cfda057d4dea:G 418d3dec6f744971:R 418d3dec6f744971:S 418d3dec6f744971:S 4d0c3b0ac80f6dc6:B 4f56955e96ca670d:V 9fe665d7fe799027:R 418d3dec6f744971:S",
@@ -56,7 +56,7 @@ export const reviewedThrowExits = {
   author_update_intake: "0abd139e9b6f45a4",
   idea_integration: "5c212deb6b599f1b 2e0ec52402b79d11 8e87eec152864718 c98f90ca62ed64ed c7c8d830407dd1e5",
   verify_idea_integration: "308c430973f6b74e 43e1138180314eb1 a4b0709f69a7c2f3 63cc21025b2defc5",
-  specialist_dispatch: "b306d96cffbf864c 8c468a57ba68bc74 086baca322d6ec07 44903bac895ce58d 8cf89d55148c1a84 c0072050cbf2a40f 95fa1456013e2d48 a1beda487210eb50 8c468a57ba68bc74",
+  specialist_dispatch: "b306d96cffbf864c 8c468a57ba68bc74 086baca322d6ec07 44903bac895ce58d 8cf89d55148c1a84 c0072050cbf2a40f 16cf2788d5413e94 d980fe569e35ead1 a1beda487210eb50 8c468a57ba68bc74",
   dependency_amendment: "ba56ceef28aadcc7 31c32f029ac15a97 6d9bcb7f81920391 0546c40eba97d45f 4b99521c61fca4d0 8c468a57ba68bc74 8c468a57ba68bc74",
   independent_assignment_review: "e646f3af90c171bf",
   verify_committed_work: "a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",

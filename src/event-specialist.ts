@@ -65,6 +65,7 @@ export interface EventEvidence {
   invocationProof?: AssignmentInvocationProof;
   /** No-write source-bound claim only; does not authorize an Architecture edit. */
   causalDiscovery?: CausalDiscovery;
+  blueprintFinding?: import("./event-manifest.js").EventBlueprintFinding;
   /** Source-backed challenge to the provisional approved plan; no write grant. */
   blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge;
   skillReads: string[];
@@ -422,7 +423,12 @@ export function eventSpecialistPrompt(
       "Do not request author permission for a discovery Event already in this " +
       "authorized work item. No choice authorizes protected changes. " +
       "No-write prerequisite reports have modifiedRecords:[] and must precede " +
-      "any edit. For a genuinely impossible upstream causal obligation ONLY, " +
+      "any edit. If your sole blocker is a delivery listed under milestoneBlueprint.design.downstream, " +
+      "cite blueprintFinding:{kind:'downstream',pinDigest,downstreamIndex} and its exact obligation. " +
+      "If only the planned in-scene evidence is missing, cite {kind:'scene-evidence',pinDigest,eventId,evidenceIndex} " +
+      "and the exact establishes clause. Put the cited clause alone in architecturalConflicts and leave laterObligations empty. " +
+      "Do not use blueprintFinding for upstream, mixed, or protected findings. " +
+      "For a genuinely impossible upstream causal obligation ONLY, " +
       "the no-write manifest MAY include causalDiscovery:{sourcePath,sourceQuote," +
       "violatedObligation,proposedCorrection}. Cite an exact 20+ character quote " +
       "from the current canonical selected Milestone, and a verbatim establishes/" +
@@ -475,7 +481,7 @@ export async function authorEventCluster(
   verifyDraft: (evidence: EventEvidence) => Promise<(string | AssignmentDefect)[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
-  resume: SpecialistChoiceReceipt | undefined, reroutedFrom: string | undefined, round: AssignmentRoundCommand,
+  resume: SpecialistChoiceReceipt | undefined, round: AssignmentRoundCommand,
 ): Promise<EventEvidence | { round: AssignmentRoundResult }> {
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config: SkillConfig = { discovery: "explicit-only", novelteaSkills: snapshot.path,
@@ -490,13 +496,10 @@ export async function authorEventCluster(
     }
   }
   const runtime = await createJobModelRuntime();
-  const sessionDir = join(job.stateDir, "event-sessions", assignment.workItemId,
-    ...(reroutedFrom ? ["rerouted-" + reroutedFrom] : []));
+  const sessionDir = join(job.stateDir, "event-sessions", assignment.workItemId);
   const context = await preparePiContext(job, project, {
-    // A fresh bounded reassignment must not fork the no-write author's settled Pi session.
-    group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId) +
-      (reroutedFrom ? ":rerouted-" + reroutedFrom : ""),
-    step: "event:" + assignment.workItemId + (reroutedFrom ? ":rerouted-" + reroutedFrom : ""),
+    group: piNarrativeGroup("event", assignment.sourcePaths, assignment.milestoneId),
+    step: "event:" + assignment.workItemId,
     paths: assignment.sourcePaths, snapshot: snapshot.id,
     task: { kind: "event", ids: [assignment.milestoneId], scope: "related" },
     provider, model: modelId, directory: sessionDir, insideWriter: true,
@@ -569,6 +572,28 @@ export async function authorEventCluster(
         if (!summary.modifiedRecords.length) {
           if (resume || calls.some(c => ["write", "edit"].includes(c.name)) || await original.effect() !== null)
             throw Error("Event no-write prerequisite report follows a writer tool or author-choice resume.");
+          const claim = summary.blueprintFinding;
+          if (claim) {
+            evidence.blueprintFinding = claim;
+            const pin = assignment.milestoneBlueprint;
+            const delivery = claim.kind === "downstream" ? pin?.design.downstream[claim.downstreamIndex] : undefined;
+            if (pin?.digest === claim.pinDigest && delivery?.owner === "interactive" &&
+                delivery.obligation === summary.architecturalConflicts[0])
+              return [{ kind: "semantic", code: "event-future-interaction", path: assignment.milestonePath,
+                detail: "The independently reviewed Milestone Blueprint assigns this delivery AFTER Event setup: " +
+                  delivery.obligation + ". Write only the originally authorized Event setup; leave the Interactive delivery outstanding." }];
+            if (pin?.digest === claim.pinDigest && claim.kind === "scene-evidence") {
+              const planned = pin.design.events.find(e => e.id === claim.eventId);
+              const scene = planned?.evidence[claim.evidenceIndex];
+              if (planned && scene && scene.establishes === summary.architecturalConflicts[0] &&
+                  assignment.sourcePaths.includes(scene.anchorPath) &&
+                  planned.participants.every(id => assignment.characterIds.includes(id)) &&
+                  scene.characterSources?.every(s => assignment.characterIds.includes(s.id)))
+                return [{ kind: "semantic", code: "event-planned-evidence", path: scene.anchorPath,
+                  detail: "Show this reviewed observation in the authorized Event: " + scene.observation +
+                    ". Respect its source and limits: " + scene.limits + ". The plan is not proof of delivery or authority to change upstream canon." }];
+            }
+          }
           accepted = evidence;
           return [];
         }

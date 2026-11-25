@@ -117,7 +117,7 @@ export async function correctPendingBlueprint(job: JobStartResult, plan: Plan,
   const turn = await readTurnEvidence(job, plan.contract);
   const owner = turn?.assignments.find(a => a.id === "event");
   if (!turn || input.objective !== turn.originalRequest || input.turnDigest !== turn.digest || !point || review?.status !== "passed" || point.planVersion !== plan.version || point.assurance?.assignmentId !== "event" || point.assurance.turnDigest !== turn.digest ||
-      event.expectedHead !== old.pin.sourceSha || owner?.specialist !== "nt-event-design" || !owner.authority.recordTypes.includes("event") ||
+      point.parentSha !== event.expectedHead || owner?.specialist !== "nt-event-design" || !owner.authority.recordTypes.includes("event") ||
       owner.targets.some(id => id.startsWith("milestone.")) && !owner.targets.includes(event.milestoneId) ||
       plan.contract.scope.kind === "partial" && !plan.contract.scope.targets.includes(event.milestoneId) ||
       !turn.assignments.some(a => a.id === "interactive") || JSON.stringify(plan.contract) !== JSON.stringify(event.assignment.contract) ||

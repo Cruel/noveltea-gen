@@ -10,7 +10,8 @@ import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import type { GenerationInventory } from "./generation-plan.js";
 import { buildCausalAmendment, type CausalAmendment, type CausalDiscovery } from "./causal-amendment.js";
-import { readReviewedMilestoneBlueprint, type MilestoneBlueprintPin } from "./milestone-blueprint.js";
+import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
+import { readEventSourceBlueprint } from "./event-work.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { executionId, resolvedCheckpointReviews } from "./checkpoint-assurance.js";
 import { validateStoryJob } from "./validator.js";
@@ -72,9 +73,7 @@ export async function inspectCausalAmendment(job: JobStartResult, input: {
   await authenticateEventNoWrite(job, event);
   // This verifies the complete original writer/reviewer cycle, exact private
   // source hashes, original model identity, and job/Thread/assignment pins.
-  const blueprint = await readReviewedMilestoneBlueprint(job, event.blueprintPin, event.assignment);
-  if (event.blueprintPin.sourceSha !== event.expectedHead)
-    throw Error("Event causal discovery refers to a stale Milestone Blueprint.");
+  const blueprint = await readEventSourceBlueprint(job, event.blueprintPin, event.assignment, event.expectedHead);
   const validated = await validateStoryJob(job, input.validatorSource, { ...job, baseSha: input.sourceSha });
   const report = validated.report as { records?: Array<{ path: string; metadata: { id: string; status: string } }>;
     diagnostics?: unknown[]; protection?: { status: string; base?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;

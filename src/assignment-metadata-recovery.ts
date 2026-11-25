@@ -318,7 +318,7 @@ async function inspectSettledChain(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
   sessionRoots: string[]; effect: string | null; historical?: boolean; responseKind?: AssignmentResponseKind;
   initialDefects?: readonly AssignmentDefect[]; initialEffect?: string;
-}): Promise<{ grant: Grant; settled: Settlement }[]> {
+}) {
   const { proof, directory, sessionId, sessionFile, sessionRoots, effect } = options;
   const policy = responsePolicy(options.responseKind);
   if (!hex.test(proof.sourceDigest) || !hex.test(proof.settlementDigest) ||
@@ -326,7 +326,7 @@ async function inspectSettledChain(options: {
     throw new ProtocolIntegrityBlockedError("Invalid settled assignment reference");
   let previous: string | null = null;
   let previousEffect: string | null = null;
-  const chain: { grant: Grant; settled: Settlement }[] = [];
+  const chain: { grant: Grant; settled: Settlement; response: Record<string, unknown> }[] = [];
   for (let ordinal = 0; ordinal <= proof.ordinal; ordinal++) {
     const base = join(directory, String(ordinal));
     const grant = await optionalJson<Grant>(base + ".grant.json");
@@ -343,7 +343,7 @@ async function inspectSettledChain(options: {
       throw new ProtocolIntegrityBlockedError("Settled original invocation/effect proof changed");
     await attestPrefix(sessionFile, submitted);
     await attestPrefix(sessionFile, settled);
-    await inspectCompletedProtocolResponse({
+    const response = await inspectCompletedProtocolResponse({
       receiptFile: base, sourceDigest: digest(grant), ...policy, sessionRoots,
       sealedPrefix: settled,
     });
@@ -355,7 +355,7 @@ async function inspectSettledChain(options: {
           digest(terminal.defects) !== digest(grant.defects) || ordinal !== proof.ordinal)
         throw new ProtocolIntegrityBlockedError("Settled diagnostic successor lost its immutable predecessor");
     }
-    chain.push({ grant, settled });
+    chain.push({ grant, settled, response });
     previous = digest(settled);
     previousEffect = settled.effect;
     if (ordinal === proof.ordinal) {
@@ -373,8 +373,9 @@ export async function verifySettledAssignment(options: {
   proof: AssignmentInvocationProof; directory: string; sessionId: string; sessionFile: string;
   sessionRoots: string[]; effect: string | null; responseKind?: AssignmentResponseKind;
   initialDefects?: readonly AssignmentDefect[]; initialEffect?: string; historical?: boolean;
-}): Promise<void> {
-  await inspectSettledChain(options);
+}) {
+  const chain = await inspectSettledChain(options);
+  return chain.at(-1)!.response;
 }
 
 /** A precommit reviewer may fail only after its original writer settled.

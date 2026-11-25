@@ -1,9 +1,11 @@
 /** One source-bound attestation for every accepted Event no-write report.
- * Admission, reroute, and crash recovery must verify identical evidence. */
+ * Admission and crash recovery must verify identical evidence. */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
 import { verifyJobPiSession } from "./job-session.js";
 import type { JobStartResult } from "./job.js";
+import type { EventBlueprintFinding } from "./event-manifest.js";
 import type { CausalDiscovery } from "./causal-amendment.js";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -13,6 +15,7 @@ export interface EventNoWriteSource {
   worker: "pi" | "fixture"; sessionFile?: string;
   snapshot?: { id: string }; assignment?: unknown;
   conflicts?: string[]; obligations?: string[]; causalDiscovery?: CausalDiscovery;
+  blueprintFinding?: EventBlueprintFinding;
   prerequisite?: { expectedHead: string; sessionSha256: string; sessionId: string;
     assignmentDigest: string; snapshotId: string; sessionFile: string;
     worker: "pi" | "fixture"; reportDigest: string };
@@ -23,6 +26,7 @@ export function eventPrerequisiteReportDigest(value: {
   sessionSha256: string; sessionId: string; assignmentDigest: string;
   snapshotId: string; sessionFile: string; worker: "pi" | "fixture";
   conflicts: string[]; obligations: string[]; causalDiscovery?: CausalDiscovery;
+  blueprintFinding?: EventBlueprintFinding;
 }) {
   if (!/^[a-f0-9]{40}$/.test(value.expectedHead) ||
       !/^[a-f0-9]{64}$/.test(value.sessionSha256) ||
@@ -38,7 +42,7 @@ export function eventPrerequisiteReportDigest(value: {
       value.conflicts.length > 8 || value.obligations.length > 8 ||
       [...value.conflicts, ...value.obligations].some(s => typeof s !== "string" ||
         !s.trim() || s.length > 1500))
-    throw Error("Unverified or unbounded Event no-write prerequisite report.");
+    throw new ProtocolIntegrityBlockedError("Unverified or unbounded Event no-write prerequisite report.");
   return hash(JSON.stringify(value));
 }
 
@@ -61,13 +65,14 @@ export async function authenticateEventNoWrite(job: JobStartResult, event: Event
         sessionFile: source.sessionFile, worker: source.worker,
         conflicts: event.conflicts, obligations: event.obligations,
         ...(event.causalDiscovery ? { causalDiscovery: event.causalDiscovery } : {}),
-      })) throw Error("Event no-write report changed or does not match its sealed source.");
+        ...(event.blueprintFinding ? { blueprintFinding: event.blueprintFinding } : {}),
+      })) throw new ProtocolIntegrityBlockedError("Event no-write report changed or does not match its sealed source.");
   if (source.worker === "pi") {
     await verifyJobPiSession(job, "event", source.sessionFile, source.sessionId, event.workItemId);
     if (hash(await readFile(source.sessionFile)) !== source.sessionSha256)
-      throw Error("Event no-write Pi transcript changed after the settled turn.");
+      throw new ProtocolIntegrityBlockedError("Event no-write Pi transcript changed after the settled turn.");
   } else if (source.sessionSha256 !== "f".repeat(64) || source.sessionId !== "fixture") {
-    throw Error("Event no-write deterministic fixture provenance is invalid.");
+    throw new ProtocolIntegrityBlockedError("Event no-write deterministic fixture provenance is invalid.");
   }
   return source;
 }

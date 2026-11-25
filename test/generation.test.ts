@@ -809,10 +809,11 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
-  skip: !available, timeout: mode === "prospective-review-stalled-continue" ? 240_000 : 120_000,
+for (const mode of ["review", "support", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+  skip: !available, timeout: ["prospective-review-stalled-continue", "prospective"].includes(mode) ? 240_000 : 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
+  const settledNoWrite = mode === "settled-no-write" || mode === "stale-choice-finding";
   const refused = mode === "prospective-refused";
   const unauthorized = mode === "prospective-unauthorized";
   const negativeSupport = mode === "prospective-review-negative";
@@ -1135,6 +1136,18 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         status: "pass", findings: [], prior: [] }), reason: "stop" };
       const write = (content: string) => ({ content: [{ type: "toolCall" as const,
         id: "r14d-event-" + index, name: "write", arguments: { path, content } }], reason: "toolUse" as const });
+      if (mode === "future-choice" || mode === "scene-evidence" || settledNoWrite) {
+        if (index === 5) return { content: scriptedReadCalls(["milestones/disclosure.md"], index), reason: "toolUse" };
+        if (index === 6) {
+          const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+          const pinDigest = mode === "stale-choice-finding" ? "f".repeat(64) : receipt.blueprintPin.digest;
+          return { content: scriptedText({ modifiedRecords: [], architecturalConflicts: [mode === "scene-evidence"
+            ? plan.events[0]!.evidence[0]!.establishes : plan.downstream[0]!.obligation], laterObligations: [],
+            ...(mode === "future-choice" || mode === "stale-choice-finding" ? { blueprintFinding: { kind: "downstream", pinDigest, downstreamIndex: 0 } } :
+              mode === "scene-evidence" ? { blueprintFinding: { kind: "scene-evidence", pinDigest, eventId: "disclose-ledger", evidenceIndex: 0 } } : {}) }), reason: "stop" };
+        }
+        if (index === 7) assert.match(JSON.stringify(context.messages), mode === "scene-evidence" ? /event-planned-evidence/ : /event-future-interaction/);
+      }
       if (index === 5) return write(invalidDraft);
       if (diagnosis && index >= 7) {
         if (index === 7 || index === 9) {
@@ -1257,6 +1270,27 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
       saver.db.close();
       saver = SqliteSaver.fromConnString(paused.checkpointPath);
       graph = createGenerationGraph(saver, "cli");
+    }
+    if (settledNoWrite) {
+      const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+      await crashAtSubmission("event-prerequisite-reported", 7, { interruptBefore: ["assess_recovery"] });
+      const failed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+      assert.equal(observed.length, 7, "Settled prose naming a future Choice cannot open another session");
+      assert.equal(failed.recoveryLifecycle.active?.origin.operation, "specialist-result", JSON.stringify(failed.reason));
+      assert.equal(failed.recoveryLifecycle.active?.origin.assignmentId, item.id);
+      assert.equal(failed.inventory?.items.find(i => i.id === item.id)?.status, "blocked");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+      const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(receipt.phase, "prerequisite-reported");
+      assert.equal(receipt.invocationProof.ordinal, 0);
+      const { inspectEventNoWrite } = await import("../src/event-work.js");
+      const original = await inspectEventNoWrite(f.job, receipt.milestoneId, head, receipt.planVersion);
+      assert.deepEqual(original.conflicts, [plan.downstream[0]!.obligation]);
+      writeFileSync(join(f.job.stateDir, "event-items/disclosure.json"), JSON.stringify({ ...receipt,
+        conflicts: ["A substituted upstream requirement"] }));
+      await assert.rejects(inspectEventNoWrite(f.job, receipt.milestoneId, head, receipt.planVersion),
+        /differs from the original settled response/);
+      return;
     }
     if (prospective) {
       const offset = sourceRecovery ? 18 : 0;
@@ -1531,6 +1565,16 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
       const after = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
       assert.equal(after.result?.status, "event-cluster-committed", JSON.stringify({ reason: after.reason, lifecycle: after.recoveryLifecycle, calls: observed.length }));
       assert.equal(observed.length, multi ? 23 + (negativeSupport ? 3 : 0) : 14 + offset);
+      const committedEvent = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      const { historicalMilestoneHandoff } = await import("../src/milestone-obligation-handoff.js");
+      const handoff = await historicalMilestoneHandoff(f.job, committedEvent);
+      assert.deepEqual(handoff?.pin, before.blueprintPin);
+      assert.equal(handoff?.eventHead, after.result.headSha);
+      assert.notEqual(committedEvent.expectedHead, handoff?.pin.sourceSha);
+      await assert.rejects(historicalMilestoneHandoff(f.job, { ...committedEvent,
+        assignment: { ...committedEvent.assignment, blueprintSource: undefined } }));
+      await assert.rejects(historicalMilestoneHandoff(f.job, { ...committedEvent,
+        blueprintPin: { ...committedEvent.blueprintPin, sourceSha: committedEvent.expectedHead } }));
       if (negativeSupport) {
         const calls = observed.length;
         const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
@@ -1540,6 +1584,21 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         assert.equal(observed.length, calls);
       }
       assert.ok(existsSync(join(f.job.worktreeStoryRoot, supportPath)));
+      if (mode === "prospective") {
+        const { archiveStages } = await import("./support/scripted-archive-stages.js");
+        const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+        const ordinary = await scriptedStoryRuntime(archiveStages(f.job, turn));
+        const calls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+        const complete = await withJobModelRuntime(ordinary.runtime, () => graph.invoke(null, cfg));
+        assert.equal(complete.status, "completed", JSON.stringify({ reason: complete.reason,
+          active: complete.active, recovery: complete.recoveryLifecycle.active }));
+        assert.equal(complete.request.turnPlanDigest, turnDigest);
+        assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, calls + ordinary.observed.length);
+        for (const stage of ["event", "interactive", "composition"]) assert.equal(
+          complete.inventory?.items.find(i => i.id === stage + ":milestone.disclosure")?.status, "verified");
+        const history = git(f.job.worktreeRoot, "log", "--format=%B", "--fixed-strings", "--grep=NovelTea-Work-Item: event-disclosure");
+        assert.equal(history.split("\n").filter(line => line === "NovelTea-Work-Item: event-disclosure").length, 1);
+      }
       if (blueprintCaseId) assert.equal(after.recoveryLifecycle.discharged.filter(d => d.case.id === blueprintCaseId).length, 1);
       assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
       return;

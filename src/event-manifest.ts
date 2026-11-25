@@ -1,8 +1,13 @@
 import { lastSpecialistManifest } from "./specialist-manifest.js";
 import type { CausalDiscovery } from "./causal-amendment.js";
 
+export type EventBlueprintFinding = { pinDigest: string } & (
+  | { kind: "downstream"; downstreamIndex: number }
+  | { kind: "scene-evidence"; eventId: string; evidenceIndex: number }
+);
+
 export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[];
-  laterObligations: string[]; causalDiscovery?: CausalDiscovery;
+  laterObligations: string[]; causalDiscovery?: CausalDiscovery; blueprintFinding?: EventBlueprintFinding;
   blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge } {
   const obj = lastSpecialistManifest(text);
   const strings = (value: unknown): value is string[] =>
@@ -12,6 +17,17 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
       (!obj.modifiedRecords.length && !obj.architecturalConflicts.length &&
         !obj.laterObligations.length)) {
     throw new Error("Event specialist must return a JSON manifest with modifiedRecords, architecturalConflicts and laterObligations.");
+  }
+  const finding = obj.blueprintFinding as EventBlueprintFinding | undefined;
+  if (finding !== undefined) {
+    const keys = finding && Object.keys(finding).sort().join();
+    const index = (v: number) => Number.isSafeInteger(v) && v >= 0;
+    if (!finding || typeof finding.pinDigest !== "string" || !/^[a-f0-9]{64}$/.test(finding.pinDigest) ||
+        !(finding.kind === "downstream" && keys === "downstreamIndex,kind,pinDigest" && index(finding.downstreamIndex) ||
+          finding.kind === "scene-evidence" && keys === "eventId,evidenceIndex,kind,pinDigest" && index(finding.evidenceIndex) &&
+          typeof finding.eventId === "string" && /^[a-z][a-z0-9-]{0,79}$/.test(finding.eventId)) ||
+        obj.modifiedRecords.length || obj.architecturalConflicts.length !== 1 || obj.laterObligations.length || obj.causalDiscovery !== undefined)
+      throw Error("blueprintFinding requires a single no-write conflict and one reviewed Blueprint field reference.");
   }
   let causalDiscovery: CausalDiscovery | undefined;
   if (obj.causalDiscovery !== undefined) {
@@ -47,5 +63,5 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
   }
   return { modifiedRecords: obj.modifiedRecords, architecturalConflicts: obj.architecturalConflicts,
     laterObligations: obj.laterObligations, ...(causalDiscovery ? { causalDiscovery } : {}),
-    ...(blueprintChallenge ? { blueprintChallenge } : {}) };
+    ...(finding ? { blueprintFinding: finding } : {}), ...(blueprintChallenge ? { blueprintChallenge } : {}) };
 }

@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
 import type { EventAssignment } from "./event-specialist.js";
-import { eventCompletionDigest } from "./event-work.js";
+import { eventCompletionDigest, readEventSourceBlueprint } from "./event-work.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { inspectRepairLedger } from "./repair-ledger.js";
 import { assertFutureBlueprintActive, originalBlueprintReviewDigest, readReviewedMilestoneBlueprint, type MilestoneBlueprint,
@@ -89,7 +89,7 @@ export async function historicalMilestoneHandoff(job: JobStartResult,
   }
   const pin = source.blueprintPin;
   const milestoneState = source.validation.milestoneState;
-  if (!milestoneState || !source.expectedHead || pin.sourceSha !== source.expectedHead || !source.snapshot?.id ||
+  if (!milestoneState || !source.expectedHead || !source.snapshot?.id ||
       !source.contentDigest || !Array.isArray(source.obligations) ||
       git(job, "rev-parse", source.commitSha + "^") !== source.expectedHead ||
       !git(job, "log", "-1", "--format=%B", source.commitSha).split("\n").includes(
@@ -106,7 +106,7 @@ export async function historicalMilestoneHandoff(job: JobStartResult,
         .includes("NovelTea-Milestone-Blueprint: " + pin.digest))
     throw Error("Milestone Blueprint is not linked to the original committed Event assignment.");
   git(job, "merge-base", "--is-ancestor", pin.sourceSha, source.commitSha);
-  const design = await readReviewedMilestoneBlueprint(job, pin, source.assignment);
+  const design = await readEventSourceBlueprint(job, pin, source.assignment, source.expectedHead);
   const consumed = source.assignment.milestoneBlueprint;
   if (consumed && (consumed.digest !== pin.digest || JSON.stringify(consumed.design) !== JSON.stringify(design)))
     throw Error("Event assignment differs from the original reviewed Blueprint.");
