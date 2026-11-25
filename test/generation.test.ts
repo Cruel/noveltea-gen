@@ -267,6 +267,7 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
     const { archiveStages, earlyAccountOverreach } = await import("./support/scripted-archive-stages.js");
     const ordinary = archiveStages(f.job, turn);
     const blueprint = stage === "blueprint";
+    const initialCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
     let target = blueprint ? "event.disclose-ledger" : "character.neri";
     let path = blueprint ? "events/disclose-ledger.md" : "characters/neri.md";
     let specialist = blueprint ? "nt-event-design" : "nt-character-development";
@@ -444,6 +445,12 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
       assert.notDeepEqual(current.blueprintPin, original.blueprintPin);
       assert.ok(!readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(earlyAccountOverreach));
       assert.equal(current.blueprintPin.sourceSha, verified.inventory?.headSha);
+      assert.equal(support.review?.verdict, "pass");
+      const next = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+      assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", next.reason ?? "");
+      assert.ok(next.active && next.active.id !== item.id, "The corrected Blueprint must continue through parent verification to ordinary work");
+      assert.equal(next.recoveryLifecycle.active, null);
+      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, initialCalls + runtime.observed.length);
     } else assert.equal(stage === "composition" ? current.writerSessionId : current.piSessionId, stage === "composition" ? original.writerSessionId : original.piSessionId);
     assert.equal(current.phase, "committed");
     assert.equal(current.assignmentKey, original.assignmentKey);
@@ -1346,7 +1353,10 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
 }
 
 for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
-  skip: !available, timeout: ["prospective-review-stalled-continue", "prospective", "writer-other-owner"].includes(mode) ? 240_000 : 120_000,
+  // Allow for native/Git checkpoint and diagnostic work on shared test hosts.
+  skip: !available,
+  timeout: ["source-recovery", "prospective-review-stalled-continue", "prospective-paused", "prospective-review-negative",
+    "prospective-multi"].includes(mode) ? 480_000 : ["prospective", "writer-other-owner", "support"].includes(mode) ? 240_000 : 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
   const settledNoWrite = mode === "settled-no-write" || mode === "stale-choice-finding";
@@ -1377,6 +1387,7 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
   assert.equal(f.cli(["generate", "resume", "--pause-after", "architecture"]).status, "paused");
   const paused = f.cli(["generate", "resume", "--pause-after", "foundations"]);
   assert.equal(paused.status, "paused", paused.reason + "\n" + readFileSync(log, "utf8"));
+  const initialCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
   const saved = Object.fromEntries(["NT_STATE_DIR", "NT_CONFIG_FILE", "NT_SKILL_CACHE_DIR",
     "NT_SANDBOX_SOCKET", "NT_SANDBOX_TOKEN_FILE",
     ].map(key => [key, process.env[key]]));
@@ -2000,8 +2011,10 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
       if (sourceRecovery) {
         const originalHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
         const original = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["assess_recovery"] }));
+        const c = original.recoveryLifecycle.active;
+        assert.equal(c?.kind, "semantic", "Well-formed witness/source defects must reach substantive recovery, not format exhaustion or an integrity fence");
+        assert.ok(c);
         assert.equal(observed.length, 16, JSON.stringify({ reason: original.reason, lifecycle: original.recoveryLifecycle }));
-        const c = original.recoveryLifecycle.active!;
         blueprintCaseId = c.id;
         assert.equal(c.origin.assignmentId, item.id);
         assert.equal(c.origin.sourceHeadSha, originalHead);
@@ -2051,7 +2064,8 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         const blocked = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
         assert.equal(blocked.status, "blocked");
         assert.equal(blocked.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
-        assert.equal(blocked.recoveryLifecycle.decision?.action, "strategy-unresolved");
+        assert.equal(blocked.recoveryLifecycle.decision?.action, "strategy-unresolved",
+          "Authenticated prerequisite ambiguity or refusal must remain unresolved, not become an integrity fence");
         assert.equal(blocked.recoveryLifecycle.decision?.reason,
           outsideSupport ? "support-review-negative" : unauthorized ? "authorization-refused" : "planning-needed", JSON.stringify(blocked.recoveryLifecycle));
         assert.equal(blocked.recoveryLifecycle.inspectionFences.length, 0);
@@ -2156,13 +2170,23 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
           return;
         }
         const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
-        assert.ok(supported.recoveryLifecycle.discharged?.some(c => c.case.id === failed.recoveryLifecycle.active?.id),
+        const discharge = supported.recoveryLifecycle.discharged.find(c => c.case.id === failed.recoveryLifecycle.active?.id);
+        assert.ok(discharge, "Supported diagnostic continuation must verify and discharge the original Case, not stop at advice: " +
           JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
+        assert.equal(discharge.disposition, "active-verified");
+        const [entry] = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries;
+        assert.equal(entry?.phase, "verified");
+        assert.equal(entry.commitSha, discharge.correctedHeadSha);
+        assert.ok(entry.supportRootSha && entry.supportRootSha !== entry.commitSha);
+        const history = await inspectRecoveryCheckpoints(f.job);
+        assert.equal(history.find(p => p.commitSha === entry.supportRootSha)?.semanticReview, "failed");
+        assert.equal(history.find(p => p.commitSha === entry.commitSha)?.semanticReview, "passed");
         assert.equal(observed.length, 22);
         const after = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
         assert.equal(after.active?.id, "event:milestone.disclosure");
         assert.equal(after.recoveryLifecycle.active, null);
         assert.equal(observed.length, 22);
+        assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, initialCalls + observed.length);
         return;
       }
       const headReceiptPath = join(f.job.stateDir, "revisions", "verified-head.json");
@@ -2229,7 +2253,9 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
       if (multi) {
         assert.deepEqual(entries.map(e => e.amendment!.assignment.authority.existingPaths),
           [["arcs/archive-account.md"], ["arcs/witness-safety.md"]]);
-        assert.ok(entries.every(e => e.planner));
+        assert.deepEqual(entries.map(e => e.blueprintSource?.target), ["character.mara", "character.oren"]);
+        assert.ok(entries.every(e => e.planner && e.report.affectedIds.includes("milestone.disclosure") &&
+          e.report.sources.some(source => source.path === "milestones/disclosure.md")));
       }
       if (negativeSupport) {
         const first = entries[0]!;
@@ -2277,13 +2303,15 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         assignment: { ...committedEvent.assignment, blueprintSource: undefined } }));
       await assert.rejects(historicalMilestoneHandoff(f.job, { ...committedEvent,
         blueprintPin: { ...committedEvent.blueprintPin, sourceSha: committedEvent.expectedHead } }));
-      if (negativeSupport) {
+      if (multi) {
         const calls = observed.length;
         const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
         assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified",
           JSON.stringify({ reason: next.reason, recovery: next.recoveryLifecycle }));
         assert.equal(next.recoveryLifecycle.active, null);
+        assert.ok(next.active && next.active.id !== item.id, "The verified original Event must rejoin ordinary scheduling");
         assert.equal(observed.length, calls);
+        assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, initialCalls + calls);
       }
       assert.ok(existsSync(join(f.job.worktreeStoryRoot, supportPath)));
       if (mode === "prospective") {

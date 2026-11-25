@@ -48,7 +48,7 @@ const baselineArchitecture: Record<string, string> = {
     "\nNeri shows Ada the ledger entry. She compares its date with the independently maintained daily register before deciding whether to protect him or challenge his account. The register can establish concealment, but cannot prove motive.\n",
   [reckoning]: "---\nschema: '0.1'\ntype: milestone\nid: milestone.reckoning\ntitle: The Redacted Account\nstatus: draft\ndecisions: []\ncompleteness: partial\nchange: The inquiry receives an independently corroborated account of concealment\narcs: [arc.truth]\nfulfillment: {any_of: []}\n---\n\nAfter the ledger comparison, Ada offers the inquiry a redacted account supported by both the signed entry and the independent daily register. The inquiry accepts proof of concealment without exposing the witness. Protecting Neri preserves his cooperation; challenging him produces a wary alliance, but neither route erases the corroborated conclusion.\n",
 };
-const baselineCompact: CausalBlueprint = {
+const baselineCompact: CausalBlueprint & Required<Pick<CausalBlueprint, "arcs">> = {
   schema: "noveltea-causal-blueprint/v2",
   premise: "Ada investigates a missing archive witness and Neri's concealed ledger.",
   arcs: [{ id: "truth", goal: "Establish concealment while deciding what loyalty requires." }],

@@ -829,3 +829,116 @@ feedback is not a new scheduler. The original-thread omission continuation
 is verified, not a new authorization to transfer revalidated changed bytes
 into an independent fork. Full-suite, persistence and final consolidated
 qualification remain #275, not an inference from an individual lane pass.
+
+## #275 consolidated deterministic qualification
+
+Source under qualification: integrated `48b6756` (#274), including parent
+progression `3fa3179`, `eed0686`, `1e64bce` (#273). Completed baseline
+`aa449d8` (#248), `583409b` (#250), and `e4e0a88` (#268) is retained. The
+transferred ticket requirements above are still normative. The rows below
+identify what the combined regressions actually exercise; none turns a
+selected strategy or child `verified` outcome into proof of Story completion.
+
+### Compositional production matrix
+
+Use the same [Generation parent](../src/generation.ts) and shared
+[assignment child](../src/generation-assignment-lifecycle.ts) with the real
+native CLI, Git and SQLite. The [Studio Turn](../web/test/integrated-story-turn.test.ts)
+adds real Studio persistence, handoff and queue ownership to the same
+Generation path. Only Pi transport (and the Studio test's external provider
+and sandbox transport) is scripted. These are overlapping configurations of
+existing seams, not parallel schedulers.
+
+| Origin, topology and authority | Execution → independent verifier → same logical work / scheduling | Evidence on integrated source |
+| --- | --- | --- |
+| #248/#267: well-formed witness/availability error, substantive stagnation; distinct malformed-JSON control | [Milestone planner and Review](../src/milestone-blueprint.ts) seal semantic source findings; [Blueprint reassessment](../src/blueprint-reassessment.ts) authenticates a fresh independent diagnosis and allows the original writer/Review to correct the exact rejected source. Malformed JSON instead uses finite zero-tool response correction with no Review or pin. | `R14D ... source-recovery` and `#220` production Milestone diagnostic; source regression compares original sessions, retained negative rounds, approved successor, discharge, and subsequent prerequisite/original Event. |
+| #250/#259/#268: one or two prospective witnesses under a Milestone, multiple Arcs with IDs that differ from file paths; ambiguity and unauthorized selection | [Dependency admission](../src/dependency-state.ts) derives candidates from native source and the reviewed pin; the planner proposes only necessary Arc links. [Parent strategy](../src/generation-operation-strategy.ts) verifies all supporting work and re-enters the original Event. A sealed ambiguity/refusal remains unresolved; foreign scope is refused without a writer. | `R14D ... prospective[-multi\|-refused\|-unauthorized]`; the multi-Arc case checks exact Character IDs, Milestone anchor, native Arc paths, verified inventory, next dispatch and cumulative charges. This preflight has no original Event writer to reopen; the descendant gets a new source-bound grant for the same pending Work-plan item. |
+| #259/#253: negative supporting Review, diagnostic continuation, supporting writer requiring support | [Supporting assignment](../src/dependency-work.ts) releases writer claim at END, retains original Case and scoped receipts, and verifies support before original re-entry. An independently diagnosed continuation must commit and pass Review, not just return advice. | `R14D ... prospective-review-{negative,stalled,stalled-continue,author,native-protocol}` and `R04 ... nested`; compare failed predecessor and passing successor, restart and distinct authority/resource controls. `C08 ... deferred-two` exercises two independent pending Cases; it does not prove both discharge. |
+| #252/#253/#264/#265: Event → Character; Choice → World; Composition → existing Event, Character, World, Choice or Puzzle; earlier Review vs writer origin | [Writer dependency](../src/writer-dependency.ts) seals original producer, existing authority and pending phase. [Resolved support](../src/generation-recovery-resolution.ts) checks native/independent Review and [affected-only revalidation](../src/selective-revalidation-work.ts); the original work must finish and return to parent scheduling. | `R07 integrated`, `R07 composition*`, `R07 choice`, `R07 puzzle`, `R07 retained Choice`, and `R04` Focused. Includes changed-source omission revalidation, reviewed material carried forward, repeated SQLite checkpoint replay, and Event no-write without fabricated effects. |
+| #254/#266/#267: canonical Architecture and both Blueprint levels; actual earlier Event has later search, recovery and testimony | [Event admission](../src/event-work.ts) turns the approved provisional contradiction into typed canonical owner work. [Historical Blueprint handoff](../src/milestone-obligation-handoff.ts) preserves the original approval and refuses substitution. Actual tightly scoped Git correction and independent revalidation precede a new source approval and the original later Event. | `R08 blueprint` and `blueprint-consumer`; verifies earlier Interaction where present, unrelated Foundation unchanged, new Review pin, later Event verification, next scheduling and exact charges. Existing architecture draft and approved-source challenge regressions are separate boundaries. |
+| #272: approved Story starts one Turn with cumulative budget, author controls and final objective | [Discovery](../web/src/lib/discovery-graph.server.ts) → [approved handoff](../web/src/lib/story-approved-continuation.server.ts) → [queue/worker](../web/src/agent-service.ts) → Generation native/independent Review → [final objective](../src/turn-fulfillment.ts). Durable Studio source/approval/queue receipts do not confer verified Git effects. | `integrated-story-turn` on both DBs; `story-chat-discovery`, `story-approved-continuation`, `current-checkpoint-fork`. `R14I` distinguishes genuine nested author interruption from END-returned support; `R01` tests current-contract CLI/server ownership, steering, protected consent, budget, cancellation and corrupted or uncertain operation receipts. |
+
+### Execution and verification exits
+
+| Parent disposition / adapter | Effect authority and exit evidence |
+| --- | --- |
+| `known-correction/response-contract` | [Generation recovery wrapper](../src/generation.ts) returns to the existing planner session/helper. [Response contracts](../src/response-contract-recovery.ts) limit format-only prompts and revoke write tools. New output is revalidated at the original consumer; exhausting the allowance is not an independent negative Review. |
+| `known-correction/review-cycle` and `assignment-diagnostic` | [Operation strategy](../src/generation-operation-strategy.ts) authenticates the exact original negative Review/diagnostic, then re-enters the owning child or the separately sealed Blueprint Review. [Recovery resolution](../src/generation-recovery-resolution.ts) verifies current-source successor or sealed private Blueprint approval. A returned recommendation does not resolve a Case. |
+| `plan-amendment/dependency-work` | [Dependency admission and support](../src/dependency-work.ts) authenticate parent scope, original no-write or Review, each planner proposal, and a verified support chain. `executeOperationStrategy` verifies history, current HEAD and original prerequisite satisfaction before clearing the active Case; Focused/other writer and Review suspensions authenticate their saved re-entry phase separately. |
+| `plan-amendment/adaptive-work` | [Adaptive omission](../src/adaptive-omission.ts) and [retained Choice execution](../src/interactive-work.ts) distinguish independently verified omission from existing obligation. Same negative receipt is retained on declined omission and the original Choice or its support must verify before progressing to Puzzle. |
+| `plan-amendment/cross-domain-closeout` | [Composition preflight](../src/cross-domain-prerequisite-controller.ts) binds outstanding causal fields to original Event authority. [Closeout](../src/cross-domain-closeout-work.ts) checks exact native delta and independent successor Review, then revalidates affected dependents before parent scheduling. |
+| `continue-independent`, reconciliation and completion | [Recovery lifecycle](../src/generation-recovery-lifecycle.ts) preserves deferred Cases and rejects conflicting/duplicate source. [Generation parent](../src/generation.ts) rechecks inventory/current plan and runs safe author intake before dispatch; verified independent progress cannot discharge another Case. [Turn fulfillment](../src/turn-fulfillment.ts) independently verifies objective at the current source. |
+| Author interrupt, resource pause, cancellation, untrusted effects | [Generation author question](../src/generation-author-question.ts) authenticates the pending task and answer; a child that returned END has no pending task. [Studio discovery evidence](../web/src/lib/discovery-evidence.server.ts) and [worker queue claim](../web/src/agent-service.ts) separately authenticate across their effect boundaries. Real pause preserves original resource/authority; cancelled Turn is terminal; ambiguous external effects are preserved and fenced. |
+
+### Disposition checks and limitations
+
+The [R14L transitive reply and effect consumer inventory](#r14l-incremental-qualification-272)
+and [#274 adapter crosswalk](#274-cross-lane-implementation-and-qualification-record)
+remain the source-linked change alarms for native, Planning, diagnostic,
+Review, Studio provider/queue/handoff and completion exits. The separate
+[behavioral mutation runner](../scripts/qualify-recovery-mutations.mjs) runs
+only real production-seam tests in disposable source copies. It requires each
+unmodified test to pass and each mutated source to fail at the designated
+behavioral assertion, not at build/import failure or an AST fingerprint:
+
+- authenticated planner ambiguity/refusal becomes an integrity fence;
+- structurally valid but semantically wrong witness data is checked as a
+  response-contract/format failure;
+- an authenticated diagnostic `continue` result terminates at advice before
+  support correction, verification and original Case discharge.
+
+This is not exhaustive semantic verification of arbitrary higher-order
+consumer flow. In particular, `originalOwnerAdapter` covers only specific
+sealed source capabilities. The C04 World no-write regression still expects
+`unsupported-implementation` for a settled report without an executable owner
+adapter; that is not evidence of a safe supported continuation, nor proof that
+no remedy could exist. `executeOperationStrategy` also retains a sealed
+advisory stop when the controller cannot authenticate a proposed diagnostic
+strategy. Such a stop is valid only where the controller lacks a safe grant;
+its existence does not qualify every proposed owner/scope combination. The
+matrix above tests the executable known routes listed, not every combination
+of adapters and failure origins. Full #275 closure and paid #260 certification
+remain blocked wherever that proof is missing.
+
+### Reproduction environment
+
+Node 24.18.0, pnpm 11.15.0, installed NovelTea CLI 1.0.0, local skills
+`4d92c75`. Use absolute paths via `NT_NATIVE_CLI` / `NT_SKILLS_CHECKOUT`.
+Studio PostgreSQL is a disposable `postgres:17-alpine` container with a
+random loopback port and private credentials in `NT_TEST_PG_URL`; require it
+with `NT_REQUIRE_KYSELY_PROOF=1`. SQLite uses actual persisted Studio and
+Generation files in disposable fixtures. `LANGSMITH_TRACING=false`,
+`LANGCHAIN_TRACING_V2=false`, `TRACE_TO_LANGSMITH=false`; no live opt-ins,
+private captured fixtures, or paid provider calls.
+
+### Verification record
+
+- `pnpm --filter @noveltea/studio exec tsx --test test/story-chat-discovery.test.ts test/story-approved-continuation.test.ts test/integrated-story-turn.test.ts test/current-checkpoint-fork.test.ts`: **6 passed**, no backend skips. Both databases ran the complete original Studio Turn.
+- `pnpm certify:story`: **22 passed**, no skips. Native executable, protected edits, source-bound validation, Git isolation, restart and CLI version covered.
+- `pnpm exec tsx --test test/generation-model-consumer-coverage.test.ts test/generation-recovery-coverage.test.ts test/generation-recovery-c08-matrix.test.ts test/generation-assignment-lifecycle.test.ts test/generation-recovery-graph.test.ts`: **57 passed**, no skips. These are supplemental source alarms and focused authority tests, not the compositional matrix by themselves.
+- `pnpm exec tsx --test test/issue-220-production-milestone-diagnostic.test.ts`: **1 passed**, including genuine malformed Blueprint exhaustion (two tool-free retries, no rounds or approval) and the false independent PASS control. `pnpm exec tsx --test --test-name-pattern='^R08' test/generation.test.ts`: **2 passed**, including parent verification and next scheduling after real upstream correction.
+- `pnpm exec tsx --test --test-name-pattern='^R07 integrated' test/generation.test.ts`: **1 passed**. The wider `R07|R08|R04|C08|R14I|R14D.*(prospective|diagnosis)` selection across `test/generation.test.ts test/focused-generation.test.ts` was stopped after the four R04 Focused scenarios and the R07/R08 upstream variants passed; it is not a completed sweep. `pnpm exec tsx --test --test-name-pattern='^R14I|^C08.*deferred-two$' test/generation.test.ts`: **4 passed** (crash, public CLI and Studio nested-interrupt variants, plus two independent deferred Cases).
+- `pnpm exec tsx --test --test-name-pattern='R14D.* (prospective-multi|prospective-review-negative|prospective-paused)$' test/generation.test.ts`: the multi-Arc reproduction passed. The pause variant timed out in the concurrent run. Rerunning the `prospective-paused` and `prospective-review-negative` pair with an extended fixture timeout passed both, no skips.
+- `node scripts/qualify-recovery-mutations.mjs`: **3 production baselines passed, 3 mutants rejected** at the named disposition/continuation assertions. Isolating each run in its own process and allowing the multi-commit diagnostic fixture more time avoided a timeout contaminating the next test's fixture environment. The existing `integrated-recovery` native CI entry now runs these controls; hosted CI execution is not claimed.
+- `NT_KYSELY_PROOF_URL="$NT_TEST_PG_URL" NT_REAL_NATIVE_CLI="$NT_NATIVE_CLI" pnpm --filter @noveltea/studio exec tsx --test test/kysely-guards.test.ts test/story-explorer.test.ts test/gitlab-initialize.test.ts`: **21 passed**, no skips. The first full Studio run provided the Studio DB URL but omitted the separate transaction-proof URL; the targeted rerun supplies both.
+- `pnpm typecheck`, `pnpm lint` (including Studio persistence boundary), `pnpm format:check`, `pnpm build`, `pnpm --filter @noveltea/studio typegen:check`, `pnpm --filter @noveltea/studio typecheck`, `pnpm --filter @noveltea/studio build`: **passed** after making the Arc array required in the multi-Arc test fixture. The integrated baseline failed Studio typecheck with TS2488 at the optional Arc-array spread. No production type or validator grant was loosened.
+
+The full-suite attempt covered the root files with `pnpm exec tsx --test
+--test-concurrency=4` (excluding `test/generation.test.ts`), all six
+`NT_GENERATION_TEST_SHARD=i/6 node --import tsx --test test/generation.test.ts`
+shards in private source copies to isolate CLI build products, and Studio
+with `pnpm exec tsx --test --test-concurrency=4 test/*.test.ts test/*.test.tsx`
+from `web/`. The run did **not** qualify the full suite. The Studio run
+reported 538 passed, 8 skipped and one setup failure (missing
+`NT_KYSELY_PROOF_URL`, see passing rerun above). The non-Generation root
+run reported 870 passed, 43 skipped and two cancellations from timeouts
+in the production adaptive and #202/#203 Blueprint regressions. Both passed
+on focused reruns: `pnpm exec tsx --test test/issue-191-production-pi.test.ts`
+(1 passed), and `pnpm exec tsx --test test/adaptive-protocol-graph.test.ts
+ test/issue-202-production-blueprint.test.ts` (2 passed, no skips).
+The six concurrent Generation shards reported 85 passed, 2 skipped,
+5 cancellations from timeouts and 6 failures (including subsequent
+original-source fences). Focused passes do not replace the full-suite
+requirement. Browser, paid Pi,
+private replay captures and optional hosted-sandbox coverage are not claimed.
+Do not close #275 or enable paid #260 on this record.

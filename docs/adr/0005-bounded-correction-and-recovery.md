@@ -82,4 +82,8 @@ record the typed parent/child disposition checks, authenticated Review
 successor consumption, and integrated deterministic Studio Turn regression
 on SQLite and PostgreSQL. This implements the existing ADR boundaries;
 it does not establish a new recovery controller or change this decision.
-Paid/live certification remains #260 under #246 and its R14A–L migrations.
+See [#275 consolidated qualification](../recovery-exit-inventory.md#275-consolidated-deterministic-qualification)
+for authenticated support, actual verifier and original-assignment re-entry
+checks. Supported corrections must continue; a genuine lack of a safe grant
+and an unimplemented adapter are not interchangeable. Paid/live
+certification remains gated under #260.

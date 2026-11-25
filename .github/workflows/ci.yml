@@ -287,6 +287,9 @@ jobs:
           NT_REQUIRE_KYSELY_PROOF: "1"
           NT_TEST_PG_URL: postgresql://noveltea_test:noveltea_test_only@127.0.0.1:5432/noveltea_test
         run: pnpm --filter @noveltea/studio exec tsx --test test/story-chat-discovery.test.ts test/story-approved-continuation.test.ts test/integrated-story-turn.test.ts test/current-checkpoint-fork.test.ts
+      - name: Reject misclassified or advisory-only recovery on the production graph
+        if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'integrated-recovery'
+        run: node scripts/qualify-recovery-mutations.mjs
 
   native-integration-gate:
     # Preserve the existing required-check name while all matrix entries

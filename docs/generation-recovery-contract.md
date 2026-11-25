@@ -995,6 +995,21 @@ and its mandatory Review settle. The new intake and dependency-amendment
 returns are graph progress, not success verdicts; a mismatched original
 assignment or support receipt is a classified exception.
 
+### #275 deterministic acceptance boundary
+
+The [consolidated qualification](recovery-exit-inventory.md#275-consolidated-deterministic-qualification)
+links the #273/#274 integration to executed production-seam evidence and
+records what remains unverified. Strategy selection, a returned END,
+verified support and ordinary rescheduling are separate observations. A
+sealed planning refusal is unresolved (not an integrity fence), a withheld
+writer grant is not verified progress, and a verified support commit is
+not by itself discharge of the original Case. The parent must authenticate
+the exact supporting effects and affected-only revalidation before re-entry
+and must independently prove the full objective before Turn completion.
+The semantic mutation controls supplement, not replace, the consumer and
+exit inventory. #260 paid certification remains gated on complete #275
+qualification.
+
 ### #274: verified sequential support, retained Interaction and omission lineage
 
 A second prerequisite for the same original writer must originate at the
