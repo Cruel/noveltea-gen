@@ -270,7 +270,7 @@ const effectReviewed: Record<string, string> = {
   "src/milestone-blueprint-correction.ts:originalSpecialistChallenge": "1:f1d0b65979f7dded6eecfd8c",
   "src/narrative-review.ts:runNarrativeReview": "1:5d2a876ce288384748fd396a",
   "src/original-thread-continuation.ts:inspectBlockedOriginalThreadCorrection": "2:0d4d2fe044219f7d3d1f6cb1",
-  "src/recovery-fork.ts:prepareRecoveryFork": "1:42ee5fe968396e236c892334",
+  "src/recovery-fork.ts:prepareRecoveryFork": "1:3d9ee2859929dfa70bd87c53",
   "src/rejected-review-repair.ts:validateRejectedRepairDraft": "1:ce1d97d751a48d201f1cd9af",
   "src/rejected-review-repair.ts:runNativeRepairRound": "1:c89983ba717426cab9f9b856",
   "src/revision.ts:inspectProposal": "3:f04745505ac6b7eee45d8020",

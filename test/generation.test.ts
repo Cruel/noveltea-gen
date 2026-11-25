@@ -2666,6 +2666,56 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
 
       }
       const support = entries.at(-1)!;
+      if (mode === "prospective") {
+        const { collectRecoveryFork, prepareRecoveryFork } = await import("../src/recovery-fork.js");
+        const { inheritedReviewedCheckpoint, readRecoveryFork } = await import("../src/recovery-fork-state.js");
+        const { dependencyVersionBase } = await import("../src/dependency-state.js");
+        const { prepareReplacementTurn } = await import("../web/src/lib/replacement-turn.server.js");
+        const { archiveStages } = await import("./support/scripted-archive-stages.js");
+        const parent = await startStoryJob({story: f.job.storyRoot, job: f.job.jobId}, false);
+        const point = (await inspectRecoveryCheckpoints(parent)).find(p => p.commitSha === support.commitSha)!;
+        assert.ok(point.eligible && point.semanticReview === "passed");
+        const supportId = support.amendment!.assignment.id;
+        const path = "dependency-items/" + supportId + ".json";
+        const receiptBytes = readFileSync(join(parent.stateDir, path), "utf8");
+        const ledgerBytes = readFileSync(join(parent.stateDir, "dependency-plan.json"), "utf8");
+        const parentTurn = JSON.parse(readFileSync(join(parent.stateDir, "turn-plan.json"), "utf8"));
+        const bundle = await collectRecoveryFork(parent, "verified-support-continuation", point.commitSha,
+          parentTurn.contract, source, "same-thread");
+        assert.equal(bundle.reviewCoverage?.find(r => r.workItem === supportId)?.status, "passed");
+        assert.equal(bundle.receipts[path]?.workItemId, supportId);
+        assert.equal(bundle.receipts[path]?.piSessionFile, undefined);
+        const child = await prepareRecoveryFork(parent, bundle);
+        assert.equal(child.baseSha, support.commitSha);
+        assert.ok(inheritedReviewedCheckpoint(child, supportId, point.commitSha));
+        assert.equal(dependencyVersionBase(child), 2);
+        assert.equal(existsSync(join(child.stateDir, "dependency-plan.json")), false);
+        assert.equal(existsSync(join(child.stateDir, path)), false);
+        assert.equal(readFileSync(join(parent.stateDir, path), "utf8"), receiptBytes);
+        assert.equal(readFileSync(join(parent.stateDir, "dependency-plan.json"), "utf8"), ledgerBytes);
+        const task = paused.request.task;
+        const turn = await prepareReplacementTurn(child, {version: 1, headSha: child.baseSha,
+          task, contract: bundle.contract, limits: {steps: 100}, model: {provider: scriptedModel.provider, id: scriptedModel.id}}, parent.jobId, parentTurn.creativePolicy);
+        const childRuntime = await scriptedStoryRuntime(archiveStages(child, turn));
+        const childSaver = SqliteSaver.fromConnString(join(child.stateDir, "continuation-test.sqlite"));
+        const childSandbox = fixtureSandboxClient(child.jobId, child.worktreeStoryRoot);
+        try {
+          const next = await withJobModelRuntime(childRuntime.runtime, () => createGenerationGraph(childSaver, "cli").invoke({
+            request: {...paused.request, job: child.jobId, turnPlanDigest: turn.digest}, pauseAfter: "event",
+          }, {configurable: {thread_id: child.threadId + ":generation"}, recursionLimit: 1000}));
+          assert.equal(next.status, "paused", JSON.stringify({reason: next.reason, recovery: next.recoverySources}));
+          const childPoints = await inspectRecoveryCheckpoints(child);
+          const event = childPoints.find(p => p.eligible && p.workItem === "event-disclosure")!;
+          assert.ok(event, JSON.stringify(childPoints));
+          assert.equal(event.parentSha, point.commitSha);
+          assert.ok(event.completedWorkItems.includes(supportId));
+          assert.equal(git(child.worktreeRoot, "log", "--format=%B", child.baseSha + "..HEAD").includes("NovelTea-Work-Item: " + supportId), false);
+          assert.equal(readRecoveryFork(child)?.commits[supportId]?.sha, point.commitSha);
+          const nested = await collectRecoveryFork(child, "verified-support-nested", event.commitSha, bundle.contract, source, "same-thread");
+          assert.equal(nested.commits[supportId]?.sha, point.commitSha);
+          assert.equal(nested.reviewCoverage?.find(r => r.workItem === supportId)?.status, "passed");
+        } finally { childSandbox(); childSaver.db.close(); }
+      }
       const rebound = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
       assert.equal(rebound.expectedHead, support.commitSha);
       assert.deepEqual(rebound.blueprintPin, before.blueprintPin);

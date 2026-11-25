@@ -137,6 +137,20 @@ export function assertRecoveryReceiptCompatibility(
       incompatible();
     return;
   }
+  if (source.startsWith("dependency-items/")) {
+    const match = /^dependency-items\/(dependency:[1-9][0-9]*:([a-z][a-z-]*\.[a-z][a-z0-9-]*))\.json$/.exec(source);
+    if (!match || receipt.version !== 1 || receipt.phase !== "committed" ||
+        receipt.workItemId !== match[1] || receipt.target !== match[2] ||
+        !completed.has(receipt.workItemId) ||
+        !/^[a-f0-9]{40}$/.test(receipt.expectedHead ?? "") ||
+        !/^[a-f0-9]{40}$/.test(receipt.commitSha ?? "") ||
+        !/^[a-f0-9]{64}$/.test(receipt.sha256 ?? "") ||
+        receipt.validation?.status !== "passed" ||
+        receipt.validation.baseSha !== receipt.expectedHead ||
+        !Array.isArray(receipt.paths) || !receipt.paths.length)
+      incompatible();
+    return;
+  }
   if (source.startsWith("event-items/") || source.startsWith("composition-items/") ||
       source.startsWith("focused-items/")) {
     if (receipt.version !== 1 || receipt.phase !== "committed" ||

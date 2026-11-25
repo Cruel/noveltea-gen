@@ -1181,3 +1181,21 @@ scope/prerequisite prose cannot grant additional work or veto the existing
 bounded correction. Foreign owner, foreign source, unsupported strategy and
 unverified defects remain inadmissible. The original independently verified
 source, attempt, budget and validation/Review checks remain required.
+
+### #260 current-format supporting checkpoint continuation
+
+A finalized, independently reviewed dependency checkpoint was visible as
+eligible but rejected by Studio's current receipt compatibility gate.
+The existing fork/continuation bundle now includes the original committed
+support receipt and passing Review coverage after authenticating the
+settled dependency ledger and any corrective successor at the selected
+Git boundary. Inherited supporting receipts remain sealed historical
+evidence only; no old support ledger, live writer receipt, session,
+approval or pending grant is installed in the child. Subsequent
+continuations read the immutable inherited receipt from the bundle.
+New dependency plans reserve the inherited work-item version range to
+prevent collision and retain the existing per-Job grant and review checks.
+The R14D prospective case covers actual supporting commit, new child
+admission, replacement Turn, original work preservation, next native
+Event checkpoint and nested continuation. Compatibility tests reject
+incomplete, foreign and failed support receipts.

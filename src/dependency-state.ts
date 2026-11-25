@@ -7,6 +7,7 @@ import type { JobStartResult } from "./job.js";
 import { persist } from "./ideas.js";
 import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
+import { readRecoveryFork } from "./recovery-fork-state.js";
 import { inspectCheckpointReview, readRepairCommitProof } from "./checkpoint-assurance.js";
 import { auditEventParticipantCorrection } from "./event-participant-correction.js";
 import { deriveReviewDependencyRequest, reviewOtherOwners, type OtherOwnerCheckpoint, type EventCharacterRepairGrant,
@@ -237,6 +238,20 @@ export async function reviewOtherOwnerCheckpoint(job: JobStartResult, turn: Turn
   return checkpoint;
 }
 
+/** Reserve historical support work-item identities without importing any old
+ * Turn grants or executable entries. New dependency plans belong to this job. */
+export function dependencyVersionBase(job: JobStartResult): number {
+  const completed = readRecoveryFork(job)?.checkpoint.completedWorkItems ?? [];
+  const versions = completed.flatMap(id => {
+    const match = /^dependency:([1-9][0-9]*):/.exec(id);
+    return match ? [Number(match[1])] : [];
+  });
+  const base = 1 + Math.max(0, ...versions);
+  if (!Number.isSafeInteger(base) || base > Number.MAX_SAFE_INTEGER - 8)
+    throw Error("Inherited dependency identity exceeds the safe version range.");
+  return base;
+}
+
 async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean): Promise<DependencyPlan | null> {
   if (!existsSync(file(job))) return null;
   const saved = JSON.parse(await readFile(file(job), "utf8")) as DependencyPlan;
@@ -248,7 +263,7 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
       (saved.reviewRequests !== undefined && (!Array.isArray(saved.reviewRequests) ||
         saved.reviewRequests.length > 8 ||
         new Set(saved.reviewRequests.map(r => r.sourceSha)).size !== saved.reviewRequests.length)) ||
-      saved.version !== 1 + saved.entries.filter(e => e.amendment).length)
+      saved.version !== dependencyVersionBase(job) + saved.entries.filter(e => e.amendment).length)
     throw Error("Dependency plan identity, version or source evidence is corrupt.");
   // A pending review request belongs to the original sealed negative verdict,
   // not to later model statements or a mutable Story catalog. Reconstruct its
@@ -284,7 +299,7 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
         throw Error("Review dependency differs from immutable source, ownership or scope.");
     }
   }
-  let version = 1;
+  let version = dependencyVersionBase(job);
   const seen = new Set<string>();
   for (const entry of saved.entries) {
     parseDependencyReport(entry.report);
@@ -600,7 +615,7 @@ export async function recordReviewDependency(job: JobStartResult, request: Revie
   const plan = await inspectDependencyPlan(job) ?? {
     schema: "noveltea-dependency-plan/v1" as const,
     jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest,
-    version: 1, entries: [], reviewRequests: [], digest: "",
+    version: dependencyVersionBase(job), entries: [], reviewRequests: [], digest: "",
   };
   const previous = plan.reviewRequests?.find(r => r.sourceSha === request.sourceSha);
   if (previous) {
@@ -778,7 +793,7 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
   const turn = await dependencyTurn(job);
   const head = await dependencyBoundary(job);
   const plan = await inspectDependencyPlan(job) ?? { schema: "noveltea-dependency-plan/v1" as const,
-    jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest, version: 1, entries: [], digest: "" };
+    jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest, version: dependencyVersionBase(job), entries: [], digest: "" };
   const parent = plan.entries.find(e => e.amendment?.assignment.id === report.assignmentId);
   if (report.sourceSha !== head || report.turnDigest !== turn.digest ||
       (!parent && !turn.assignments.some(a => a.id === report.assignmentId)))

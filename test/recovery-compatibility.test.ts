@@ -123,3 +123,26 @@ test("current specialist receipt schemas admit only compatible, committed prior 
     phase: "committed", workItemId: "event-disclosure", commitSha: "3".repeat(40) });
   reject("architecture.json", { format: 0, snapshot, phase: "committed", plan: {}, history: [] });
 });
+
+
+test("current supporting dependency receipt is historical completed work, not an executable grant", () => {
+  const target = "character.passenger-witness";
+  const id = "dependency:1:" + target;
+  const source = "dependency-items/" + id + ".json";
+  const receipt = { version: 1, phase: "committed", workItemId: id, target,
+    snapshot: {id: "e".repeat(64)}, expectedHead: "a".repeat(40),
+    commitSha: "b".repeat(40), sha256: "f".repeat(64),
+    paths: ["characters/passenger-witness.md"],
+    validation: {status: "passed", baseSha: "a".repeat(40)} };
+  assert.doesNotThrow(() => assertRecoveryReceiptCompatibility(source, receipt, new Set([id])));
+  for (const changed of [
+    {...receipt, phase: "writing"}, {...receipt, target: "character.foreign"},
+    {...receipt, workItemId: "dependency:2:" + target},
+    {...receipt, validation: {status: "failed", baseSha: receipt.expectedHead}},
+    {...receipt, validation: {status: "passed", baseSha: "c".repeat(40)}},
+    {...receipt, sha256: ""}, {...receipt, paths: []},
+  ]) assert.throws(() => assertRecoveryReceiptCompatibility(source, changed, new Set([id])),
+    /incompatible or incomplete layout/);
+  assert.throws(() => assertRecoveryReceiptCompatibility(source, receipt, new Set()),
+    /incompatible or incomplete layout/);
+});

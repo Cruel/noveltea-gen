@@ -18,7 +18,7 @@ import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
   selectCurrentRecoveryToolchain, RecoveryCompatibilityError } from "./recovery-compatibility.js";
 import type { Plan, CompletionContract } from "./architecture.js";
 import type { GenerationEvidence } from "./generation-plan.js";
-import { forkDigest, readRecoveryFork, type RecoveryForkBundle, type SpecialistReceipt } from "./recovery-fork-state.js";
+import { forkDigest, readRecoveryFork, resolvedInheritedRecoveryReviews, type RecoveryForkBundle, type SpecialistReceipt } from "./recovery-fork-state.js";
 
 function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
@@ -176,6 +176,12 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
   const completed = new Set(checkpoint.completedWorkItems);
   const receipts: RecoveryForkBundle["receipts"] = {};
   const commits: RecoveryForkBundle["commits"] = {};
+  // Supporting effects are completed historical work, not transferable grants.
+  // Require the original support ledger to be settled at the selected Git
+  // boundary (including a verified repair successor, if one was needed).
+  const supportPlan = points.some(p => p.eligible && p.workItem.startsWith("dependency:") &&
+    completed.has(p.workItem)) ? await (await import("./dependency-state.js")).inspectDependencyPlan(parent) : null;
+  const resolvedCoverage = resolvedInheritedRecoveryReviews(reviewCoverage);
   for (const id of completed) {
     const point = points.find(p => p.eligible && p.workItem === id && (() => {
       try { git(parent, "merge-base", "--is-ancestor", p.commitSha, commitSha); return true; } catch { return false; }
@@ -196,10 +202,14 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
     if (!source) throw new RecoveryCompatibilityError("invalid-evidence",
       "Inherited work has no matching historical specialist receipt.");
     let receipt: SpecialistReceipt;
-    try { receipt = JSON.parse(await readFile(join(parent.stateDir, source), "utf8")) as SpecialistReceipt; }
+    // Inherited support has only sealed historical evidence, no child writer
+    // receipt. Reuse the original pinned bytes on another continuation.
+    const inheritedSupport = !point && id.startsWith("dependency:") && prior;
+    try { receipt = inheritedSupport ? inherited!.receipts[source]! :
+      JSON.parse(await readFile(join(parent.stateDir, source), "utf8")) as SpecialistReceipt; }
     catch { throw new RecoveryCompatibilityError("invalid-evidence",
       "The historical specialist receipt is missing or cannot be read."); }
-    if (receipt.jobId !== parent.jobId) throw new RecoveryCompatibilityError("invalid-evidence",
+    if (!receipt || receipt.jobId !== (inheritedSupport ? prior.jobId : parent.jobId)) throw new RecoveryCompatibilityError("invalid-evidence",
       "The historical specialist receipt belongs to a different job.");
     // The finalized source checkpoint binds the old skill digest to the
     // authenticated receipt. Reopening the historical skill *files* is not
@@ -208,6 +218,17 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
       throw new RecoveryCompatibilityError("invalid-evidence",
         "Historical specialist skill identity differs from the finalized checkpoint.");
     if (source.startsWith("event-items/")) assertInheritedEventCompletion(parent, receipt);
+    if (id.startsWith("dependency:")) {
+      const support = point ? supportPlan?.entries.find(e => e.amendment?.assignment.id === id) : undefined;
+      const sha = point?.commitSha ?? prior?.sha;
+      if (!sha || !resolvedCoverage.some(r => r.workItem === id && r.commitSha === sha &&
+          ["passed", "not-required"].includes(r.status)) ||
+          (point && (!support || support.phase !== "verified" || support.review?.verdict !== "pass" ||
+            (support.supportRootSha ?? support.commitSha) !== sha || !support.commitSha ||
+            !reviewCoverage.some(r => r.commitSha === support.commitSha && r.status === "passed"))))
+        throw new RecoveryCompatibilityError("invalid-evidence",
+          "Supporting checkpoint lacks independently verified completed prerequisite work.");
+    }
     receipts[source] = cleanEvidence(receipt);
     commits[id] = prior && !point ? prior : { sha: point!.commitSha,
       jobId: parent.jobId, planVersion: point!.planVersion, proof: (() => {
@@ -317,6 +338,9 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
       throw new Error("Incomplete fork worktree changed; preserve it for reconciliation.");
     await writeOnce(join(child.stateDir, "recovery-fork.json"), JSON.stringify(bundle, null, 2) + "\n");
     for (const [path, original] of Object.entries(bundle.receipts)) {
+      // Completed support is review evidence only. Never materialize a
+      // previous Turn's focused writer receipt in the live child directory.
+      if (path.startsWith("dependency-items/")) continue;
       // The sealed source bundle retains historical proofs. A child uses its
       // freshly pinned skills for future work; old writer sessions are not reused.
       const receipt = { ...original, jobId: child.jobId, baseSha: child.baseSha,
