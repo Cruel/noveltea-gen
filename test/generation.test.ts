@@ -1414,8 +1414,8 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
 for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery", "source-diagnostic-stop", "source-provider-pause"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   // Allow for native/Git checkpoint and diagnostic work on shared test hosts.
   skip: !available,
-  timeout: ["source-recovery", "source-diagnostic-stop", "source-provider-pause", "prospective-review-stalled-continue", "prospective-paused", "prospective-review-negative",
-    "prospective-multi"].includes(mode) ? 480_000 : ["prospective", "writer-other-owner", "support"].includes(mode) ? 240_000 : 120_000,
+  timeout: mode.startsWith("source-") || mode.startsWith("prospective-") ? 480_000 :
+    ["prospective", "writer-other-owner", "support", "support-negative"].includes(mode) ? 240_000 : 120_000,
 }, async () => {
   const blueprintStop = mode === "source-diagnostic-stop";
   const blueprintPause = mode === "source-provider-pause";
