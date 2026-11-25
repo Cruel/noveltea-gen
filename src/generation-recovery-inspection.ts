@@ -335,7 +335,7 @@ export async function inspectModernGenerationRecovery(
             .authenticateOperationReviewProof(job, values as GenerationGraphState, active, d);
         case "plan-amendment": {
           const graphState = values as GenerationGraphState;
-          if (d.adapter === "dependency-work")
+          if (d.adapter === "dependency-work" || d.adapter === "adaptive-work")
             return source.channel === "operationRecovery" &&
               await (await import("./generation-operation-strategy.js"))
                 .authenticateOperationOwnerProof(job, graphState, active, d);
@@ -349,6 +349,10 @@ export async function inspectModernGenerationRecovery(
           if (source.channel === "operationRecovery") return isDeepStrictEqual(d,
             await selectOperationStrategy(job, values as GenerationGraphState, active).catch(() => null));
           return source.channel === "unknownRecovery" && d.mode === "read-only" && d.attemptRef === null;
+        case "strategy-unresolved":
+          return source.channel === "operationRecovery" &&
+            await (await import("./generation-operation-strategy.js"))
+              .authenticateUnresolvedStrategy(job, values as GenerationGraphState, active, d);
         case "diagnostic-stop":
           if (source.channel === "operationRecovery") {
             try {

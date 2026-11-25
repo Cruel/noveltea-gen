@@ -62,6 +62,10 @@ function links(record: CanonicalScopeRecord, target: string): boolean {
  * review and reconstruct these catalog records using native validation at HEAD.
  * This pure gate checks every original Turn/owner/scope and exact proposal;
  * Git and field-level diff auditing remain mandatory at dispatch. */
+/** The exact proposed grant failed a deterministic authority check.
+ * Distinct from failures reconstructing the original source or receipt. */
+export class DependencyAuthorizationRefusedError extends Error {}
+
 export function authorizeReviewCharacterDependency(input: {
   plan: TurnEvidence; head: string; request: ReviewDependencyRequest;
   proposal: ReviewCharacterProposal; reportDigest: string;
@@ -127,7 +131,7 @@ export function authorizeReviewCharacterDependency(input: {
         (foundation && a.authority.existingPaths.includes(arc!.path)) ||
         a.targets.includes(proposal.target)) ||
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
-    throw Error("Review dependency lacks exact approved full-Story creation, Arc source, owner or plan authorization.");
+    throw new DependencyAuthorizationRefusedError("Review dependency lacks exact approved full-Story creation, Arc source, owner or plan authorization.");
   // A Character prerequisite discovered in an Event review needs two
   // distinct writers: the Character specialist creates exactly one record;
   // the original Event specialist subsequently corrects only the cited
@@ -202,7 +206,7 @@ export function authorizeReviewOtherOwnerDependency(input: {
       sourceHash(plan.assignments) !== request.ownersDigest ||
       sourceHash(owner) !== request.originalAssignmentDigest ||
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
-    throw Error("Cross-specialist prerequisite is not a proven in-scope, single-owner existing canonical correction.");
+    throw new DependencyAuthorizationRefusedError("Cross-specialist prerequisite is not a proven in-scope, single-owner existing canonical correction.");
   return {
     beforeVersion: input.version, afterVersion: input.version + 1,
     sourceSha: head, turnDigest: plan.digest, reportDigest: input.reportDigest,
@@ -236,7 +240,7 @@ export function authorizeDependency(input: {
       (plan.kind !== "revision" && !parent) || report.authorDecisionRequired ||
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8 ||
       JSON.stringify(report.sources) !== JSON.stringify(input.sources))
-    throw Error("Dependency amendment has stale evidence, changed obligations or requires author approval.");
+    throw new DependencyAuthorizationRefusedError("Dependency amendment has stale evidence, changed obligations or requires author approval.");
   const origin = parent ?? plan.assignments.find(a => a.id === report.assignmentId);
   const record = records.find(r => r.metadata.id === proposal.target);
   // Write authority is path-based: supportingTargets may be in existingPaths
@@ -256,14 +260,14 @@ export function authorizeDependency(input: {
       !report.sources.some(s => s.path === record.path) ||
       report.sources.some(s => !records.some(r => r.path === s.path && report.affectedIds.includes(r.metadata.id))) ||
       !originRecords.some(r => links(r, proposal.target) || links(record, r.metadata.id)))
-    throw Error("Unknown, speculative, already assigned or unrelated dependency record.");
+    throw new DependencyAuthorizationRefusedError("Unknown, speculative, already assigned or unrelated dependency record.");
   if (proposal.specialist !== focusedSpecialist(proposal.target) ||
       report.likelySpecialist !== proposal.specialist || proposal.specialist === origin.specialist)
-    throw Error("Dependency amendment must use the proper cross-domain specialist.");
+    throw new DependencyAuthorizationRefusedError("Dependency amendment must use the proper cross-domain specialist.");
   if (records.some(r => report.affectedIds.includes(r.metadata.id) &&
       r.metadata.decisions !== undefined &&
       (!Array.isArray(r.metadata.decisions) || r.metadata.decisions.length > 0)))
-    throw Error("Dependency affects decisions requiring explicit protected-authority review.");
+    throw new DependencyAuthorizationRefusedError("Dependency affects decisions requiring explicit protected-authority review.");
   return { beforeVersion: input.version, afterVersion: input.version + 1,
     sourceSha: head, turnDigest: plan.digest, reportDigest: input.reportDigest,
     reason: proposal.reason, objective: structuredClone(plan.objective), resumes: origin.id,
@@ -282,7 +286,7 @@ export function selectBlueprintArcSources(source: import("./dependency-state.js"
   const ids = proposal.arcIds ?? (source.arcCandidates.length === 1 ? [source.arcCandidates[0]!.id] : []);
   if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length ||
       ids.some(id => !source.arcCandidates.some(a => a.id === id)))
-    throw Error("Dependency proposal must identify necessary canonical Arc candidates.");
+    throw new DependencyAuthorizationRefusedError("Dependency proposal must identify necessary canonical Arc candidates.");
   return source.arcCandidates.filter(a => ids.includes(a.id)).sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -325,7 +329,7 @@ export function authorizeBlueprintCharacterDependency(input: {
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8 ||
       (!existing && [...plan.assignments, ...input.priorAmendments].some(a => a.targets.includes(target) ||
         a.authority.existingPaths.includes(newPath) || a.authority.newPaths?.includes(newPath))))
-    throw Error("Blueprint predecessor lacks exact whole-Story ownership, safe delegated Arc link or Character authority.");
+    throw new DependencyAuthorizationRefusedError("Blueprint predecessor lacks exact whole-Story ownership, safe delegated Arc link or Character authority.");
   return { beforeVersion: input.version, afterVersion: input.version + 1, sourceSha: head,
     turnDigest: plan.digest, reportDigest: input.reportDigest, reason: proposal.reason,
     objective: structuredClone(plan.objective), resumes: event.id,

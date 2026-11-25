@@ -381,6 +381,8 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
       "strategy=local-repair|dependency-plan|blueprint-or-work-plan-amend|review-adjudication|reconcile-original|no-write-omission-review|resource-or-author-pause|unsafe. " +
       "Provide a specific diagnosis (4-500 chars) and uncertainty (4-300 chars), " +
       "owner and scopeRef as null or 4–120 and 4–1024 character strings respectively, prerequisites as up to five 4–160 character strings. No control characters in strings. " +
+      "The strategy vocabulary describes diagnoses, not executable capability. The verified packet's availableAdapters lists candidate adapters for this original failure only. " +
+      "You may identify a needed but missing capability; do not claim it was executed or that the original failure is resolved. " +
       "A proposal never grants authority; the controller independently decides whether an exact existing adapter is safe. " +
       "VERIFIED PACKET: " + JSON.stringify(packet ?? { failedOperation: evidence.operation,
         failedCheck: evidence.check, sourceProof: evidence.proofRef }) :

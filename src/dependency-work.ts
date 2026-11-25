@@ -15,8 +15,14 @@ import { withStoryJobLock } from "./job-lock.js";
 import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency, blueprintSourceOf,
-  inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, type DependencyEntry } from "./dependency-state.js";
+  inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, supportingReviewAssignment, DependencyAuthorizationRefusedError, type DependencyEntry } from "./dependency-state.js";
 import { proposeDependency } from "./dependency-planner.js";
+
+/** A settled refusal is not a failed or uncertain writer. The parent must
+ * independently authenticate the original ledger before acting on it. */
+export class DependencyPlanningUnresolvedError extends Error {
+  constructor(readonly reportDigest: string) { super("Supporting prerequisite needs further source-bound planning."); }
+}
 import { type DependencyReport } from "./dependency-amendments.js";
 import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
@@ -172,7 +178,11 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
         if (nested.parent?.reportDigest !== reportDigest ||
             nested.parent.suspensionDigest !== suspension.suspensionRef)
           throw new ProtocolIntegrityBlockedError("Nested grant belongs to a different parent.");
-        if (nested.phase === "rejected") throw Error("Nested supporting prerequisite was independently rejected.");
+        if (nested.phase === "rejected") {
+          if (nested.rejection?.kind)
+            throw new DependencyPlanningUnresolvedError(nested.reportDigest);
+          throw Error("Nested supporting prerequisite was independently rejected.");
+        }
         await admitDependency(job, plan, nested, input);
         return nested;
       });
@@ -249,13 +259,22 @@ async function admitDependency(job: import("./job.js").JobStartResult,
         arcIds: [source.arcCandidates[0]!.id] }
     : await proposeDependency(job, plan, entry,
         input.provider ?? policy.profile.provider, input.model ?? policy.profile.model);
+  if ("rejected" in proposal) {
+    entry.phase = "rejected";
+    entry.rejection = { kind: "planning-needed", reason: proposal.reason, proposal };
+    await saveDependencyPlan(job, plan);
+    throw new DependencyPlanningUnresolvedError(entry.reportDigest);
+  }
+  // A native/source/protection failure is not a rejected planner response.
+  // Preserve the original planning state for receipt reconciliation.
   try {
     await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
   } catch (error) {
+    if (!(error instanceof DependencyAuthorizationRefusedError) || !entry.planner) throw error;
     entry.phase = "rejected";
-    entry.rejection = { reason: error instanceof Error ? error.message : String(error), proposal };
+    entry.rejection = { kind: "authorization-refused", reason: error.message, proposal };
     await saveDependencyPlan(job, plan);
-    throw error;
+    throw new DependencyPlanningUnresolvedError(entry.reportDigest);
   }
 }
 
@@ -348,22 +367,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
     entry.commitSha = head; entry.phase = "reviewing";
     await saveDependencyPlan(job, saved);
     const turn = await dependencyTurn(job);
-    const dependencyContract = { ...turn.contract, scope: { ...turn.contract.scope,
-      targets: assignment.targets, supportingTargets: [], creates: [] } };
-    const review: ReviewAssignment = { contract: dependencyContract,
-      planVersion: entry.amendment!.afterVersion, scopeIds: [...new Set([...entry.report.affectedIds, ...assignment.targets])],
-      paths: [...new Set([...authorizedPaths, ...report.sources.map(s => s.path)])],
-      routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
-      turnGoal: "ONLY review the necessary supporting prerequisite for this original author goal: " + turn.goal +
-        (entry.blueprintSource
-          ? ". Verify the Character's exact prospective role and the independently authorized Arc references. Do not require the suspended Event to have happened yet."
-          : ". The originating author dialogue is suspended and will be written only AFTER this review passes; its current incompleteness is not a failure of the supporting assignment."),
-      specialistAssignments: [assignment],
-      dependency: { sourceSha: writerBase, commitSha: head,
-        obligation: report.obligation, reason: entry.amendment!.reason,
-        sources: report.sources.map(s => ({ path: s.path, quote: s.quote })),
-        diff: dependencyGit(job, "diff", writerBase, head, "--",
-          ...authorizedPaths.map(p => prefix + p)) } };
+    const review = supportingReviewAssignment(job, saved, entry, turn);
     {
       if (!proof.snapshot || await openSkillSnapshot(proof.snapshot.id) !== proof.snapshot.path)
         throw Error("Dependency reviewer lacks the original pinned skill snapshot.");
@@ -420,7 +424,11 @@ export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions,
       let entry = plan?.entries.find(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
         e.blueprintSource.target === target);
       if (entry?.phase === "verified") return entry;
-      if (entry?.phase === "rejected") throw Error("Independent prerequisite review rejected the supporting work.");
+      if (entry?.phase === "rejected") {
+        if (entry.rejection?.kind)
+          throw new DependencyPlanningUnresolvedError(entry.reportDigest);
+        throw Error("Independent prerequisite review rejected the supporting work.");
+      }
       if (!entry || entry.phase !== "authorized" || !plan?.entries.some(e => e.parent?.reportDigest === entry!.reportDigest))
         await supportingBoundary(job, entry);
       if (!entry) {

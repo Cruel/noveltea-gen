@@ -3204,7 +3204,8 @@ export function recoveryNode(
     }
     if (prior.recoveryLifecycle.inspectionFences.length)
       return { status: "blocked", reason: state.reason ?? "Original recovery requires inspection.", recoveryLifecycle: prior.recoveryLifecycle };
-    if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
+    if (prior.recoveryLifecycle.decision?.action === "strategy-unresolved" ||
+        prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
         prior.recoveryLifecycle.decision?.action === "exhausted" &&
         !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment ||
           prior.recoveryLifecycle.decision.reason === "protocol-exhausted" ||
@@ -3215,10 +3216,14 @@ export function recoveryNode(
         const job = await openJob(state);
         const thread = config.configurable?.thread_id;
         if (!active || typeof thread !== "string" ||
-            await recoverySourceHead(job, prior, active.origin) !== active.origin.sourceHeadSha ||
+            prior.recoveryLifecycle.decision?.action !== "strategy-unresolved" &&
+              await recoverySourceHead(job, prior, active.origin) !== active.origin.sourceHeadSha ||
             !await authenticateRecoveryOrigin(job, state.request, thread,
               active.origin, active.evidence, false, assignmentFailureEvidence(prior, active.origin)) ||
-            !(prior.recoveryLifecycle.decision?.action === "exhausted"
+            !(prior.recoveryLifecycle.decision?.action === "strategy-unresolved"
+              ? await (await import("./generation-operation-strategy.js"))
+                  .authenticateUnresolvedStrategy(job, state as State, active, prior.recoveryLifecycle.decision)
+              : prior.recoveryLifecycle.decision?.action === "exhausted"
               ? prior.recoveryLifecycle.decision.reviewAssessment
                 ? await (await import("./generation-operation-strategy.js")).authenticateFoundationReviewExhaustion(job, state as State, active, prior.recoveryLifecycle.decision)
                 : isDeepStrictEqual(prior.recoveryLifecycle.decision, await selectOperationStrategy(job, state as State, active))
@@ -3350,11 +3355,14 @@ export function recoveryNode(
         const strategy = prior.recoverySources.some(x => x.caseId === active.id && x.channel === "operationRecovery")
           ? await withStoryJobLock(job, "assess-source-bound-operation", () => selectOperationStrategy(job, state, active)) : null;
         const selected = strategy ? decideRecovery(prior.recoveryLifecycle, strategy) : decideExistingRecovery(prior);
-        const terminal = strategy?.action === "exhausted" || strategy?.action === "integrity-fence";
+        const terminal = strategy?.action === "exhausted" || strategy?.action === "integrity-fence" ||
+          strategy?.action === "strategy-unresolved";
         return { recoveryLifecycle: { ...selected, assessorPending: !terminal },
           status: terminal ? "blocked" : "running",
           ...(terminal ? { reason: strategy.action === "exhausted"
             ? "Original response protocol exhausted; its invocation and source are preserved."
+            : strategy.action === "strategy-unresolved"
+            ? "The authenticated original no-write producer requires an owner/plan correction, but no corrective adapter is implemented for this source. No writer grant was issued."
             : strategy.requiredInspection } : {}) };
       } catch {
         return { status: "blocked", reason: "The original failure cannot admit a recovery decision.",

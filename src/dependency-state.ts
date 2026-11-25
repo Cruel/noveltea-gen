@@ -16,9 +16,10 @@ import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
 import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, selectBlueprintArcSources, parseDependencyReport,
   type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
-  type DependencyAmendment } from "./dependency-amendments.js";
+  type DependencyAmendment, DependencyAuthorizationRefusedError } from "./dependency-amendments.js";
+export { DependencyAuthorizationRefusedError };
 import type { SkillSnapshot } from "./snapshot.js";
-import type { EditorialVerdict } from "./narrative-review-specialist.js";
+import type { EditorialVerdict, ReviewAssignment } from "./narrative-review-specialist.js";
 
 /** A protected other-owner source requires an explicit author decision, not
  * a speculative controller dependency writer. */
@@ -91,7 +92,7 @@ export interface DependencyEntry {
   reviewSourceSha?: string;
   originalReview?: EditorialVerdict; originalReviewerSession?: string;
   originalReviewerSessionDigest?: string; originalReviewerSessionBytes?: number;
-  rejection?: { reason: string; proposal: unknown };
+  rejection?: { kind?: "planning-needed" | "authorization-refused"; reason: string; proposal: unknown };
 }
 export interface DependencyPlan {
   schema: "noveltea-dependency-plan/v1"; jobId: string; threadId: string;
@@ -390,14 +391,18 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
     }
     const supportPassed = entry.phase === "verified" ||
       entry.phase === "reviewing" && entry.review?.verdict === "pass";
-    if (supportPassed && !entry.fixture) {
+    const supportRejected = entry.phase === "rejected" && !entry.reviewSourceSha &&
+      entry.review?.verdict === "block";
+    if (supportRejected && (!entry.amendment || !entry.commitSha || !entry.reviewerSession || entry.fixture))
+      throw Error("Negative supporting Review lacks its original committed assignment and reviewer.");
+    if ((supportPassed || supportRejected) && !entry.fixture) {
       const session = entry.reviewerSession!;
       if (!session.startsWith(join(job.stateDir, "review-sessions") + "/") ||
           await realpath(session) !== session || !entry.reviewerSessionDigest ||
           createHash("sha256").update(await readFile(session)).digest("hex") !== entry.reviewerSessionDigest)
         throw Error("Supporting review lost its independently sealed transcript.");
     }
-    if (supportPassed) {
+    if (supportPassed || supportRejected) {
       const a = entry.amendment!;
       const writerBase = dependencyWriterBase(saved, entry);
       const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", a.assignment.id + ".json"), "utf8"));
@@ -427,9 +432,54 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         }
       }
       dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha!, "HEAD");
+      if (supportRejected) {
+        const { inspectCompletedPiReviewContext } = await import("./job-pi-policy.js");
+        const { recoveredCloseoutReview } = await import("./cross-domain-closeout-work.js");
+        const { openSkillSnapshot } = await import("./snapshot.js");
+        if (!proof.snapshot || await openSkillSnapshot(proof.snapshot.id) !== proof.snapshot.path)
+          throw Error("Rejected supporting Review lost its pinned method.");
+        const packet = supportingReviewAssignment(job, saved, entry, turn);
+        const completion = await inspectCompletedPiReviewContext(job, {
+          group: "narrative:" + packet.planVersion + ":independent:focused-support:" + entry.reportDigest,
+          sessionFile: entry.reviewerSession!, snapshotId: proof.snapshot.id,
+          requested: { provider: proof.provider, model: proof.model },
+        });
+        const verdict = await recoveredCloseoutReview(job, entry.reviewerSession!, completion.sessionSha256, packet);
+        if (completion.sessionSha256 !== entry.reviewerSessionDigest ||
+            JSON.stringify({ ...verdict, sessionFile: entry.reviewerSession }) !== JSON.stringify(entry.review))
+          throw Error("Rejected supporting Review differs from its completed independent transcript.");
+      }
     }
   }
   return saved;
+}
+/** The original focused support review packet, also used to authenticate a
+ * settled negative verdict without starting a new reviewer. */
+export function supportingReviewAssignment(job: JobStartResult, plan: DependencyPlan,
+  entry: DependencyEntry, turn: TurnEvidence): ReviewAssignment {
+  const amendment = entry.amendment!;
+  const assignment = amendment.assignment;
+  const report = entry.report;
+  const writerBase = dependencyWriterBase(plan, entry);
+  const head = entry.commitSha!;
+  const authorizedPaths = [...assignment.authority.existingPaths, ...(assignment.authority.newPaths ?? [])].sort();
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const dependencyContract = { ...turn.contract, scope: { ...turn.contract.scope,
+    targets: assignment.targets, supportingTargets: [], creates: [] } };
+  return { contract: dependencyContract,
+    planVersion: amendment.afterVersion, scopeIds: [...new Set([...report.affectedIds, ...assignment.targets])],
+    paths: [...new Set([...authorizedPaths, ...report.sources.map(s => s.path)])],
+    routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
+    turnGoal: "ONLY review the necessary supporting prerequisite for this original author goal: " + turn.goal +
+      (entry.blueprintSource
+        ? ". Verify the Character's exact prospective role and the independently authorized Arc references. Do not require the suspended Event to have happened yet."
+        : ". The originating author dialogue is suspended and will be written only AFTER this review passes; its current incompleteness is not a failure of the supporting assignment."),
+    specialistAssignments: [assignment],
+    dependency: { sourceSha: writerBase, commitSha: head,
+      obligation: report.obligation, reason: amendment.reason,
+      sources: report.sources.map(s => ({ path: s.path, quote: s.quote })),
+      diff: dependencyGit(job, "diff", writerBase, head, "--",
+        ...authorizedPaths.map(p => prefix + p)) } };
 }
 export interface DependencyHistoryPin { reportDigest: string; entryDigest: string }
 export async function verifyDependencyHistory(job: JobStartResult, pins: DependencyHistoryPin[]) {
@@ -664,14 +714,20 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
   await saveDependencyPlan(job, plan);
   return { plan, entry };
 }
-export async function approveDependency(job: JobStartResult, plan: DependencyPlan,
-  entry: DependencyEntry, proposal: DependencyProposal, validatorSource?: string) {
+/** Read-only admission check. Historical refusals use the identical native
+ * and deterministic owner/scope checks, without creating another grant. */
+export async function inspectDependencyAdmission(job: JobStartResult, plan: DependencyPlan,
+  entry: DependencyEntry, proposal: DependencyProposal, validatorSource?: string,
+  inspectRefusal = false): Promise<DependencyAmendment> {
   if (entry.fixture) throw Error("Historical dependency evidence cannot authorize an amendment.");
   const head = await dependencyBoundary(job);
   const turn = await dependencyTurn(job);
   const persisted = await inspectDependencyPlan(job);
   if (!persisted || persisted.digest !== plan.digest || !plan.entries.includes(entry) ||
-      !["reported", "planning"].includes(entry.phase) || entry.amendment)
+      !(inspectRefusal ? entry.phase === "rejected" : ["reported", "planning"].includes(entry.phase)) ||
+      entry.amendment || entry.approval || entry.commitSha ||
+      head !== entry.report.sourceSha || proposal.sourceSha !== head ||
+      proposal.reportDigest !== entry.reportDigest)
     throw Error("Dependency approval has a stale plan version or is not the pending report.");
   const result = await validateStoryJob(job, validatorSource, { ...job, baseSha: head });
   const report = result.report as { records?: CanonicalScopeRecord[]; protection?: {
@@ -688,6 +744,8 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     if (!bytes.includes(source.quote)) throw Error("Dependency evidence quote is absent from Story source.");
     sources.push({ ...source, sha256: sourceDigest(bytes) });
   }
+  if (JSON.stringify(sources) !== JSON.stringify(entry.report.sources))
+    throw Error("Dependency source hashes changed before admission.");
   const priorAmendments = plan.entries.filter(e => e !== entry && e.amendment)
     .map(e => e.amendment!.assignment);
   const request = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
@@ -702,7 +760,7 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     if (JSON.stringify(expected) !== JSON.stringify(source.arcCandidates))
       throw Error("Blueprint prerequisite candidates differ from native canonical source.");
   }
-  const amendment = blueprintSource
+  return blueprintSource
     ? authorizeBlueprintCharacterDependency({ plan: turn, head, report: entry.report,
         reportDigest: entry.reportDigest, proposal: proposal as ReviewCharacterProposal,
         records: report.records, sources, version: plan.version, source: blueprintSource,
@@ -719,9 +777,15 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     : authorizeDependency({ plan: turn, head, report: entry.report,
         reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version,
         priorAmendments });
+
+}
+
+export async function approveDependency(job: JobStartResult, plan: DependencyPlan,
+  entry: DependencyEntry, proposal: DependencyProposal, validatorSource?: string) {
+  const amendment = await inspectDependencyAdmission(job, plan, entry, proposal, validatorSource);
   entry.proposal = proposal; entry.amendment = amendment;
   entry.approval = { authority: "necessary-dependency/v1", jobId: job.jobId,
-    threadId: job.threadId, sourceSha: head, amendmentDigest: dependencyDigest(amendment) };
+    threadId: job.threadId, sourceSha: amendment.sourceSha, amendmentDigest: dependencyDigest(amendment) };
   entry.phase = "authorized"; plan.version = amendment.afterVersion;
   await saveDependencyPlan(job, plan);
 }

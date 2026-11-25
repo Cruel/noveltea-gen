@@ -496,6 +496,25 @@ async function selectDiagnosticDecision(job: JobStartResult, c: RecoveryCase, pr
   return diagnosis;
 }
 
+/** Capabilities are selected from the authenticated producer, not from the
+ * proposal taxonomy. Each selected owner adapter has an actual executor and
+ * verifier below. Missing producer support is explicitly non-executable. */
+function originalOwnerAdapter(s: State, c: RecoveryCase): "dependency-work" | "adaptive-work" | null {
+  const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
+    GenerationOperationRecovery | undefined;
+  if (op?.evidence.eventBlueprintPrerequisite) return "dependency-work";
+  const interactive = op?.evidence.interactiveNoWrite;
+  if (interactive?.domain === "choice" &&
+      c.origin.assignmentId === "interactive:" + interactive.milestoneId &&
+      s.inventory?.headSha === c.origin.sourceHeadSha &&
+      s.inventory.items.some(i => i.id === c.origin.assignmentId && i.status === "blocked") &&
+      s.failures[c.origin.assignmentId] && !s.request.fixture &&
+      s.request.orchestrationPolicy === "explicit" && s.request.contract.scope.kind === "full-story" &&
+      s.adaptiveVersion && s.adaptiveVersion > 1)
+    return "adaptive-work";
+  return null;
+}
+
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (!s.request.turnPlanDigest || s.request.turnPlanDigest !== c.origin.turnDigest) return null;
   const originalOperation = s.recoverySources.find(x => x.caseId === c.id &&
@@ -527,8 +546,11 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   const owner = await originalNoWriteOwnerProof(job, s, c);
   if (owner) {
     await assertSource(job, s, c);
+    const adapter = originalOwnerAdapter(s, c);
+    if (!adapter) return { ...base(c, owner.proof), action: "strategy-unresolved",
+      reason: "unsupported-implementation", scopeRef: owner.proof, receipt: owner.proof };
     return { ...base(c, owner.proof), action: "plan-amendment",
-      adapter: "dependency-work", owner: owner.owner, scopeRef: owner.proof };
+      adapter, owner: owner.owner, scopeRef: owner.proof };
   }
   const reviewProof = await originalFailedReviewProof(job, s, c);
   if (reviewProof) {
@@ -558,8 +580,8 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
  * Re-read that proof at the same HEAD; never let checkpoint data rebind it. */
 export async function authenticateOperationOwnerProof(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
-  if (d.action !== "plan-amendment" || d.adapter !== "dependency-work" ||
-      d.owner !== "architecture") return false;
+  if (d.action !== "plan-amendment" || d.adapter !== originalOwnerAdapter(s, c))
+    return false;
   const original = await originalNoWriteOwnerProof(job, s, c);
   return !!original && original.owner === d.owner &&
     isDeepStrictEqual(original.proof, d.scopeRef) &&
@@ -775,11 +797,68 @@ export async function authenticateSealedDiagnosticStop(job: JobStartResult, s: S
       "action" in sealed && d.recommendation === sealed.action && d.advisoryCategory === sealed.category);
 }
 
+/** Keep the Case unresolved when an authenticated supporting planner refused
+ * the proposed work. A model refusal is neither author refusal nor corrupt
+ * source. No new grant is inferred from the refusal. */
+async function unresolvedDependencyStrategy(job: JobStartResult, s: State, c: RecoveryCase,
+  scopeRef: RecoveryEvidence, reportDigest: string): Promise<RecoveryDecision | null> {
+  const original = await originalNoWriteOwnerProof(job, s, c);
+  if (!original || !isDeepStrictEqual(original.proof, scopeRef)) return null;
+  const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
+    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+  if (!readiness) return null;
+  const { inspectDependencyPlan, dependencyBoundary, dependencyDigest } = await import("./dependency-state.js");
+  const plan = await inspectDependencyPlan(job);
+  const entry = plan?.entries.find(e => e.reportDigest === reportDigest);
+  if (!plan || !entry || entry.phase !== "rejected" ||
+      await dependencyBoundary(job) !== (entry.commitSha ?? entry.report.sourceSha)) return null;
+  let root = entry;
+  const visited = new Set<string>();
+  while (root.parent) {
+    if (visited.has(root.reportDigest)) return null;
+    visited.add(root.reportDigest);
+    const parent = plan.entries.find(e => e.reportDigest === root.parent!.reportDigest);
+    if (!parent) return null;
+    root = parent;
+  }
+  if (root.blueprintSource?.readinessDigest !== readiness.reportDigest ||
+      root.blueprintSource.milestoneId !== readiness.milestoneId) return null;
+  const reason = entry.rejection?.kind ??
+    (entry.commitSha && entry.review?.verdict === "block" && !entry.reviewSourceSha
+      ? "support-review-negative" : null);
+  if (!reason) return null;
+  if (reason !== "support-review-negative") {
+    const { policy } = await inspectPiPolicy(job);
+    const { inspectDependencyPlanningRefusal } = await import("./dependency-planner.js");
+    if (!await inspectDependencyPlanningRefusal(job, plan, entry,
+        s.request.provider ?? policy.profile.provider, s.request.model ?? policy.profile.model,
+        s.request.validatorSource ?? s.request.skillsSource)) return null;
+  }
+  const receipt = { store: "dependency-plan" as const, ref: entry.reportDigest, digest: dependencyDigest(entry) };
+  return { ...base(c, scopeRef), evidence: [...c.evidence, scopeRef, receipt],
+    action: "strategy-unresolved", reason, scopeRef, receipt };
+}
+
+export async function authenticateUnresolvedStrategy(job: JobStartResult, s: State, c: RecoveryCase,
+  d: Extract<RecoveryDecision, { action: "strategy-unresolved" }>): Promise<boolean> {
+  try {
+    if (d.reason !== "unsupported-implementation")
+      return isDeepStrictEqual(d, await unresolvedDependencyStrategy(job, s, c, d.scopeRef, d.receipt.ref));
+    const owner = await originalNoWriteOwnerProof(job, s, c);
+    if (!owner || !isDeepStrictEqual(owner.proof, d.scopeRef)) return false;
+    await assertSource(job, s, c);
+    // Only lanes which have no executable adapter may use this disposition.
+    if (originalOwnerAdapter(s, c)) return false;
+    return isDeepStrictEqual(d, { ...base(c, owner.proof), action: "strategy-unresolved",
+      reason: "unsupported-implementation", scopeRef: owner.proof, receipt: owner.proof });
+  } catch { return false; }
+}
+
 export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle, config?: import("@langchain/core/runnables").RunnableConfig): Promise<Partial<State> | null> {
   const c = lifecycle.active!, d = lifecycle.decision!;
   if (!lifecycle.assessorPending || !d || !c || !s.recoverySources.some(x => x.caseId === c.id && x.channel === "operationRecovery") ||
       (d.action !== "diagnostic" &&
-        !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work"].includes(d.adapter)) &&
+        !(d.action === "plan-amendment" && ["cross-domain-closeout", "dependency-work", "adaptive-work"].includes(d.adapter)) &&
         !(d.action === "known-correction" && d.adapter === "review-cycle"))) return null;
   if (d.action === "known-correction") {
     const original = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
@@ -908,7 +987,28 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           job.threadId !== c.origin.jobThreadId || s.planVersion !== c.origin.planVersion)
         throw Error("Blueprint dependency lost its original recovery decision.");
       const { advanceBlueprintDependency } = await import("./dependency-work.js");
-      const result = await advanceBlueprintDependency(s.request, readiness, config);
+      let result: Awaited<ReturnType<typeof advanceBlueprintDependency>>;
+      try {
+        result = await advanceBlueprintDependency(s.request, readiness, config);
+      } catch (error) {
+        // Derive the stop from the existing authenticated ledger even if the
+        // child graph wrapped the error. Uncertain effects still fail closed.
+        if (config?.signal?.aborted || (error != null && isGraphBubbleUp(error)) ||
+            error instanceof PiModelUnavailableError || error instanceof Error && error.name === "PiBudgetPause") throw error;
+        const { inspectDependencyPlan } = await import("./dependency-state.js");
+        const plan = await inspectDependencyPlan(job);
+        for (const entry of plan?.entries ?? []) {
+          if (entry.phase !== "rejected") continue;
+          const unresolved = await unresolvedDependencyStrategy(job, s, c, d.scopeRef, entry.reportDigest);
+          if (unresolved?.action === "strategy-unresolved") return stop(unresolved,
+            unresolved.reason === "support-review-negative"
+              ? "Independent supporting Review rejected the committed prerequisite. Original Case and negative verdict remain unresolved; the parent assignment cannot resume."
+              : unresolved.reason === "authorization-refused"
+              ? "Controller refused the proposed supporting scope. Original Case and exact planner response remain unresolved; no writer grant was issued."
+              : "Supporting prerequisite planning remains unresolved. Original Case and sealed planner refusal are retained; no writer grant was issued for this prerequisite.");
+        }
+        throw error;
+      }
       const failures = { ...s.failures };
       delete failures[c.origin.assignmentId!];
       const inventory = { ...s.inventory!, headSha: result.head,
@@ -935,7 +1035,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       if (author.status !== "ready") return stop({ ...base(c), action: "pause", reason: author.status === "cancelled" ? "cancelled" :
         author.status === "paused" ? "author-pause" : "author-choice" }, "Author boundary precedes corrective work.", author.status === "cancelled" ? "cancelled" : "paused");
     }
-    if (d.action === "plan-amendment" && d.adapter === "dependency-work") {
+    if (d.action === "plan-amendment" && d.adapter === "adaptive-work") {
       await assertSource(job, s, c);
       if (!await authenticateOperationOwnerProof(job, s, c, d))
         throw Error("Owner correction lost the original negative specialist Pi report.");
@@ -1002,15 +1102,9 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
               "reviewed prerequisite amendment before dispatch. Do not replay the original " +
               "negative Choice session or substitute an invented no-write approval." } };
       }
-      return { recoveryLifecycle: { ...lifecycle, assessorPending: false },
-        status: "blocked", reason: "Authenticated no-write requires an independently " +
-          "reviewed Architecture or Work-plan amendment; no new writer scope was granted.",
-        escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
-          sources: [{ source: d.scopeRef.ref, message: "Original source-bound no-write",
-            repair: "controller-authorized Architecture/Work-plan amendment" }],
-          action: "Review original prerequisites and independently approve a bounded owner correction." } };
+      throw Error("Selected omission adapter no longer matches the original producer or its verified disposition.");
     }
-    if (d.action === "plan-amendment") {
+    if (d.action === "plan-amendment" && d.adapter === "cross-domain-closeout") {
       const pending = s.crossDomainCloseout!;
       if (!matchesOriginalCloseout(s, c, pending) ||
           !isDeepStrictEqual(d.evidence, [...c.evidence, d.scopeRef]) ||
@@ -1029,6 +1123,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         sourceHeadSha: result.headSha, assurance: { store: "repair-ledger", ref: pending.repairId } }, true),
         crossDomainCloseout: null, active: null, result: null, reason: null, status: "running" };
     }
+    if (d.action !== "diagnostic") throw Error("Selected plan adapter has no executable operation.");
     return await withStoryJobLock(job, "assess-original-operation-diagnostic", async () => {
       if (!isDeepStrictEqual(await selectOperationStrategy(job, s, c), d)) throw Error("Original diagnosis source changed");
       const target = diagnosticCaseForDecision(c, d);

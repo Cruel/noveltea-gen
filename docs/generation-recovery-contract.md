@@ -647,6 +647,10 @@ Discharge requires the exact successor settlement, native-verified Git commit an
 
 For a parent-owned `adaptive-admission` failure, `reconcile-original` may select the existing checkpoint reconciliation adapter only for an already controller-admitted amendment from the original completed Pi operation. The accepted receipt binds the original prompt, session, native source, Turn, plan and amendment version. The assessor restores the ordinary native-verified inventory with new amendments disabled, rechecks the settled diagnosis and source, and discharges only the original Case on verified restore. Rejected/ambiguous proposals remain unresolved. No fake writer child for parent operations.
 
+The #268 follow-up distinguishes the proposal vocabulary from controller capability. The original no-write owner adapter selects Blueprint dependency work or eligible composite Choice adaptive supersession only when its existing source-bound prerequisites hold. An unsupported producer receives a non-authorizing `strategy-unresolved/unsupported-implementation` stop, not a plan-amendment decision that cannot execute. This does not implement an upstream writer for unsupported producers.
+
+The Blueprint prerequisite adapter preserves the original Case on a sealed planner refusal (`planning-needed`), an authenticated deterministic scope refusal (`authorization-refused`), or a committed prerequisite rejected by independent Review (`support-review-negative`). These are terminal unresolved decisions, not discharge or corrupt evidence. The original source and exact planner/Review proof must reauthenticate on inspection and restart; tampered or uncertain evidence fences. The positive route still requires every prerequisite's verified commit/Review and the original assignment re-entry. Bounded recovery from a rejected supporting assignment and corresponding routing in other dependency producers are still outstanding; the new disposition is not certification of those continuations.
+
 Strategy dispositions are explicit:
 
 | Proposal | Controller authority / outcome |

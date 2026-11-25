@@ -180,6 +180,10 @@ function validDecision(value: unknown): value is RecoveryDecision {
       );
     case "continue-independent":
       return validEvidence(d.inventoryRef) && populated(d.blockedAssignmentId);
+    case "strategy-unresolved":
+      return ["planning-needed", "authorization-refused", "support-review-negative", "unsupported-implementation"].includes(d.reason) &&
+        validEvidence(d.scopeRef) && validEvidence(d.receipt) &&
+        !!d.scopeRef.digest && !!d.receipt.digest;
     case "diagnostic-stop":
       if (d.disposition !== "operator-intervention" ||
           d.receipt?.store !== "response-contract" || !validEvidence(d.receipt)) return false;
@@ -404,6 +408,7 @@ function phaseForDecision(decision: RecoveryDecision): RecoveryLifecycle["phase"
       return "paused";
     case "exhausted":
     case "integrity-fence":
+    case "strategy-unresolved":
     case "diagnostic-stop":
       return "fenced";
   }
@@ -507,6 +512,7 @@ export function recordRecoveryOutcome(
       state.decision.action === "exhausted" ||
       state.decision.action === "pause" ||
       state.decision.action === "integrity-fence" ||
+      state.decision.action === "strategy-unresolved" ||
       state.decision.action === "diagnostic-stop"
     )
       throw Error("A stopped or independent action cannot discharge a source obligation");
@@ -720,13 +726,13 @@ function validLifecyclePhase(value: RecoveryLifecycle): boolean {
     case "resolved":
       return (
         !!decision &&
-        !["pause", "exhausted", "integrity-fence", "continue-independent", "diagnostic-stop"].includes(decision.action)
+        !["pause", "exhausted", "integrity-fence", "continue-independent", "diagnostic-stop", "strategy-unresolved"].includes(decision.action)
       );
     case "paused":
       return decision?.action === "pause";
     case "fenced":
       return decision?.action === "integrity-fence" || decision?.action === "exhausted" ||
-        decision?.action === "diagnostic-stop";
+        decision?.action === "diagnostic-stop" || decision?.action === "strategy-unresolved";
   }
 }
 /** Authenticate the current checkpoint, not an old schema.

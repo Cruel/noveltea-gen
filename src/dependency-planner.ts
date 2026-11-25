@@ -8,11 +8,11 @@ import { createProjectResourceLoader } from "./pi.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { reconcileReadOnlyProtocol } from "./non-specialist-protocol.js";
-import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolReads, type ResponseContractFailure } from "./response-contract-recovery.js";
+import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolReads, inspectCompletedProtocolResponse, type ResponseContractFailure } from "./response-contract-recovery.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
-import { dependencyBoundary, dependencyTurn, dependencyDigest, saveDependencyPlan, blueprintSourceOf,
+import { dependencyBoundary, dependencyTurn, dependencyDigest, saveDependencyPlan, blueprintSourceOf, inspectDependencyAdmission, DependencyAuthorizationRefusedError,
   type DependencyEntry, type DependencyPlan } from "./dependency-state.js";
 import type { DependencyProposal } from "./dependency-amendments.js";
 
@@ -20,11 +20,13 @@ import type { DependencyProposal } from "./dependency-amendments.js";
  * output may omit both identity fields; the trusted controller binds the
  * already verified report. Explicitly conflicting identity fields fail closed.
  * An explicit model rejection is never converted into a grant. */
+export type DependencyPlanningResponse = DependencyProposal | { rejected: true; reason: string };
+
 export function bindDependencyProposalIdentity(
-  proposal: DependencyProposal | { rejected: true; reason: string },
+  proposal: DependencyPlanningResponse,
   entry: Pick<DependencyEntry, "report" | "reportDigest">,
-): DependencyProposal {
-  if ("rejected" in proposal) return proposal as unknown as DependencyProposal;
+): DependencyPlanningResponse {
+  if ("rejected" in proposal) return proposal;
   if (
     (proposal.sourceSha !== undefined && proposal.sourceSha !== entry.report.sourceSha) ||
     (proposal.reportDigest !== undefined && proposal.reportDigest !== entry.reportDigest) ||
@@ -63,7 +65,7 @@ export function inspectDependencyProposalResponse(text: string, reviewCharacter:
 /** Invoked under the shared writer lock at a clean boundary. Model output is
  * only a proposal; approveDependency independently checks source and scope. */
 export async function proposeDependency(job: JobStartResult, plan: DependencyPlan,
-  entry: DependencyEntry, provider: string, model: string): Promise<DependencyProposal> {
+  entry: DependencyEntry, provider: string, model: string): Promise<DependencyPlanningResponse> {
   if (entry.phase !== "reported" && entry.phase !== "planning") throw Error("Dependency planner is not at its original admission boundary.");
   const turn = await dependencyTurn(job);
   if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Stale dependency planning source.");
@@ -86,7 +88,7 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
     source: entry.report.sourceSha, version: plan.version, snapshot: snapshot.id, provider, model,
   }), contract: "dependency.proposal.v1", sessionRoots: [dir],
     validate: (text: string) => inspectDependencyProposalResponse(text, reviewCharacter, !!blueprint),
-    parse: (text: string) => JSON.parse(text.trim()) as DependencyProposal };
+    parse: (text: string) => JSON.parse(text.trim()) as DependencyPlanningResponse };
   if (entry.phase === "planning") {
     if (!entry.planner || entry.planner.snapshot.id !== snapshot.id)
       throw Error("Original dependency planner snapshot is missing or changed.");
@@ -231,4 +233,45 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
     await context.completed(sessionFile, session.sessionId);
     return bindDependencyProposalIdentity(proposal, entry);
   } finally { session.dispose(); }
+}
+
+/** An unresolved plan may never confer a writer grant. Reauthenticate its
+ * original accepted read-only protocol, including pinned source and reads. */
+export async function inspectDependencyPlanningRefusal(job: JobStartResult, plan: DependencyPlan,
+  entry: DependencyEntry, provider: string, model: string, validatorSource?: string): Promise<boolean> {
+  if (entry.phase !== "rejected" || entry.amendment || entry.approval || entry.commitSha ||
+      !entry.planner || !entry.rejection ||
+      !["planning-needed", "authorization-refused"].includes(entry.rejection.kind ?? "")) return false;
+  const turn = await dependencyTurn(job);
+  const index = plan.entries.indexOf(entry);
+  if (index < 0) return false;
+  const version = 1 + plan.entries.slice(0, index).filter(e => e.amendment).length;
+  const hint = JSON.parse(await readFile(join(job.stateDir, "orchestrator-selection.json"), "utf8"));
+  const selection = await loadSelectedStoryOrchestrator(job, hint.graphThreadId,
+    { task: turn.originalRequest, kind: turn.contract.scope.kind, turnPlanDigest: turn.digest });
+  const snapshot = selection.receipt.skillSnapshot;
+  if (snapshot.id !== entry.planner.snapshot.id) return false;
+  const dir = join(job.stateDir, "dependency-sessions", entry.reportDigest, "plan");
+  const blueprint = blueprintSourceOf(entry);
+  const reviewCharacter = !!blueprint || plan.reviewRequests?.find(r =>
+    r.sourceSha === entry.reviewSourceSha)?.classification === "new-full-story-record";
+  const protocol = { receiptFile: join(dir, "response"), sourceDigest: dependencyDigest({
+    jobId: job.jobId, threadId: job.threadId, turn: turn.digest, report: entry.reportDigest,
+    source: entry.report.sourceSha, version, snapshot: snapshot.id, provider, model,
+  }), contract: "dependency.proposal.v1", sessionRoots: [dir],
+    validate: (text: string) => inspectDependencyProposalResponse(text, reviewCharacter, !!blueprint),
+    parse: (text: string) => JSON.parse(text.trim()) as DependencyPlanningResponse };
+  const response = await inspectCompletedProtocolResponse({ ...protocol, requireSealedTranscript: true });
+  const proof = await inspectCompletedProtocolReads(protocol);
+  const reads = proof.reads.map(path => canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
+  const bound = bindDependencyProposalIdentity(response, entry);
+  if (proof.sessionFile !== entry.planner.sessionFile ||
+      JSON.stringify(reads) !== JSON.stringify(entry.planner.skillReads) ||
+      JSON.stringify(bound) !== JSON.stringify(entry.rejection.proposal)) return false;
+  if ("rejected" in bound)
+    return entry.rejection.kind === "planning-needed" && bound.reason === entry.rejection.reason;
+  if (entry.rejection.kind !== "authorization-refused") return false;
+  try { await inspectDependencyAdmission(job, plan, entry, bound, validatorSource, true); }
+  catch (error) { return error instanceof DependencyAuthorizationRefusedError && error.message === entry.rejection.reason; }
+  return false;
 }

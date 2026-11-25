@@ -714,16 +714,18 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
       assert.equal(admitted.recoveryLifecycle.active?.observation, "returned-failure");
       assert.equal(admitted.recoveryLifecycle.attempt, null);
       const selected = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
-      assert.equal(selected.recoveryLifecycle.decision?.action, "plan-amendment");
-      assert.equal(selected.recoveryLifecycle.decision?.adapter, "dependency-work");
-      assert.equal(selected.recoveryLifecycle.decision?.owner, "architecture");
-      assert.equal(selected.recoveryLifecycle.assessorPending, true);
+      assert.equal(selected.recoveryLifecycle.decision?.action, "strategy-unresolved");
+      assert.equal(selected.recoveryLifecycle.decision?.reason, "unsupported-implementation");
+      assert.equal(selected.recoveryLifecycle.assessorPending, false);
       assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId),
         selected.recoveryLifecycle,
         "A saved owner correction must authenticate the original Pi and source on restart");
       assert.equal(observed.length, 2, "Selection does not invoke any model or replacement writer");
       const stopped = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
       assert.equal(stopped.status, "blocked");
+      assert.equal(stopped.recoveryLifecycle.decision?.action, "strategy-unresolved");
+      assert.equal(stopped.recoveryLifecycle.decision?.reason, "unsupported-implementation");
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), stopped.recoveryLifecycle);
       assert.equal(stopped.escalation?.kind, "dependency-replan");
       assert.equal(stopped.escalation?.requiresTrustedApproval, false,
         "In-objective owner routing is not automatically an author-only protected change");
@@ -786,11 +788,14 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
-  const multi = mode === "prospective-multi";
+  const refused = mode === "prospective-refused";
+  const unauthorized = mode === "prospective-unauthorized";
+  const negativeSupport = mode === "prospective-review-negative";
+  const multi = mode === "prospective-multi" || refused || unauthorized || negativeSupport;
   const prospective = mode === "prospective" || sourceRecovery || multi;
   const needsCharacter = mode === "support";
   const bindingDiagnosis = mode === "binding-diagnosis";
@@ -940,9 +945,10 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
               .concat("milestones/disclosure.md", "arcs/archive-account.md", "arcs/witness-safety.md"));
           }
           if (step === 1) {
+            if (refused) return stop({ rejected: true, reason: "No uniquely necessary Arc is established by the cited evidence." });
             const report = JSON.parse(prompt.split("\nDependency evidence: ")[1]!);
             return stop({ target, specialist: "nt-character-development", title,
-              arcIds: [turn ? "arc.safety" : "arc.truth"], outcome: report.missing,
+              arcIds: [unauthorized ? "arc.foreign" : turn ? "arc.safety" : "arc.truth"], outcome: report.missing,
               reason: "This role is required by the approved Milestone and belongs to the selected enclosing Arc." });
           }
           if (step === 2) return read(["nt-character-development/SKILL.md", "nt-catalog/SKILL.md",
@@ -962,6 +968,10 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
             const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
             return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths));
           }
+          if (negativeSupport) return stop({ verdict: "block", findings: [{ severity: "blocking",
+            dimension: "continuity", source: targetPath + ":1",
+            message: "The supporting Character does not establish the required prospective witness role.",
+            repair: "character" }], evidence: [] });
           return stop({ verdict: "pass", findings: [], evidence: [targetPath + ":1: Required prospective role.", arcPath + ":1: Native Arc link."] });
         }
         if (index === 18) {
@@ -1206,6 +1216,49 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
       assert.equal(before.sessionFile, undefined);
       const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.equal(chosen.recoveryLifecycle.decision?.adapter, "dependency-work");
+      if (refused || unauthorized || negativeSupport) {
+        const blocked = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+        assert.equal(blocked.status, "blocked");
+        assert.equal(blocked.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(blocked.recoveryLifecycle.decision?.action, "strategy-unresolved");
+        assert.equal(blocked.recoveryLifecycle.decision?.reason, negativeSupport ? "support-review-negative" :
+          unauthorized ? "authorization-refused" : "planning-needed", JSON.stringify(blocked.recoveryLifecycle));
+        assert.equal(blocked.recoveryLifecycle.inspectionFences.length, 0);
+        assert.equal(blocked.recoveryLifecycle.discharged.length, failed.recoveryLifecycle.discharged.length);
+        assert.equal(observed.length, negativeSupport ? 11 : 6);
+        const { inspectDependencyPlan } = await import("../src/dependency-state.js");
+        const entries = (await inspectDependencyPlan(f.job))!.entries;
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0]!.phase, "rejected");
+        if (negativeSupport) {
+          assert.equal(entries[0]!.review?.verdict, "block");
+          assert.ok(entries[0]!.amendment && entries[0]!.commitSha);
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), entries[0]!.commitSha);
+        } else {
+          assert.equal(entries[0]!.amendment, undefined);
+          assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before.expectedHead);
+        }
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), blocked.recoveryLifecycle);
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(paused.checkpointPath);
+        graph = createGenerationGraph(saver, "cli");
+        const resumed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg }));
+        assert.equal(resumed.recoveryLifecycle.active?.id, blocked.recoveryLifecycle.active?.id);
+        assert.deepEqual(resumed.recoveryLifecycle.decision, blocked.recoveryLifecycle.decision);
+        assert.equal(observed.length, negativeSupport ? 11 : 6);
+        const session = negativeSupport ? entries[0]!.reviewerSession! : entries[0]!.planner!.sessionFile;
+        appendFileSync(session, "\n");
+        const inspected = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
+        assert.ok(inspected?.inspectionFences.length, JSON.stringify(inspected));
+        // A terminal graph has no pending tasks; a real resume supplies the
+        // persisted state at START (the same route used by resumeGeneration).
+        const tampered = await withJobModelRuntime(runtime, () => graph.invoke({ ...resumed, pauseAfter: null }, { ...cfg }));
+        assert.equal(tampered.status, "blocked");
+        assert.equal(tampered.recoveryLifecycle.active?.id, blocked.recoveryLifecycle.active?.id);
+        assert.ok(tampered.recoveryLifecycle.inspectionFences.length);
+        assert.equal(observed.length, negativeSupport ? 11 : 6);
+        return;
+      }
       await crashAtSubmission("focused-committed", multi ? 9 : 7 + offset, { interruptAfter: ["assess_recovery"] });
       const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.ok(supported.recoveryLifecycle.discharged?.some(c => c.case.id === failed.recoveryLifecycle.active?.id),

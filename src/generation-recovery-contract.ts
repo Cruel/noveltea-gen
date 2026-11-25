@@ -146,6 +146,9 @@ export type RecoveryDecision = RecoveryDecisionBase &
         originalRef: RecoveryEvidence;
       }
     | { action: "continue-independent"; inventoryRef: RecoveryEvidence; blockedAssignmentId: string }
+    | { action: "strategy-unresolved";
+        reason: "planning-needed" | "authorization-refused" | "support-review-negative" | "unsupported-implementation";
+        scopeRef: RecoveryEvidence; receipt: RecoveryEvidence }
     | { action: "diagnostic-stop"; disposition: "operator-intervention";
         receipt: RecoveryEvidence; recommendation: "operator-intervention" | "inspect-existing-receipt";
         advisoryCategory: "software" | "unclassified" | "resources" | "integrity";
