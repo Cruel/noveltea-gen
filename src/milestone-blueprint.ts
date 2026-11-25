@@ -782,7 +782,7 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
     await reportControllerReviewPhase("diagnosing");
     await promptStorySpecialist(session.session, session.context.contextNote +
       "FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC. " +
-      "Read the pinned nt-event-design and nt-catalog skills and the exact selected " +
+      "Read skill://nt-event-design/SKILL.md and skill://nt-catalog/SKILL.md and the exact selected " +
       "Milestone and supporting canonical sources. You are NOT the original " +
       "reviewer; do not presume the previous verdict right or wrong. Judge " +
       "whether the current-stage defect is material, deferred to downstream work, " +
@@ -811,6 +811,7 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
       "current downstream array}}]}. Every assessment must cite exact CURRENT " +
       "Event or downstream evidence and an existing accepted task or contract; " +
       "never introduce requirements or return a PASS.");
+    await correctMissingReads(session, start, snapshot, assignment);
     const parse = () => {
       verifyReads(session.session.messages.slice(start), session.project.root, snapshot, assignment);
       return parseMilestoneDiagnosis(lastText(session.session), last.draft, { task, contract });
@@ -894,7 +895,7 @@ function assertLineage(actual: Lineage, expected: Lineage) {
 }
 
 function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Round) {
-  return "READ-ONLY LOCAL MILESTONE BLUEPRINT. Read pinned nt-event-design and nt-catalog " +
+  return "READ-ONLY LOCAL MILESTONE BLUEPRINT. Read skill://nt-event-design/SKILL.md and skill://nt-catalog/SKILL.md " +
     "skills and the current selected Milestone, its Arc and relevant Character/World sources. " +
     "Do NOT write Story files, claim new canonical records already exist or change protected decisions. " +
     "Design 1–5 causally ordered provisional Events ONLY for " + assignment.milestoneId + ". " +
@@ -911,6 +912,8 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "Choice/Puzzle implementation. A positive interactive owner REQUIRES Interactive work " +
     "for this Milestone: NEVER assign that owner for a claim that no Choice/Puzzle is needed, " +
     "for optional possibilities, or for an idea belonging to a different Milestone. " +
+    "An NPC stating their own wishes, consent, preferences or intentions is not a formal player Choice. " +
+    "The current rescue, discovery or testimony can be complete even when a subsequent Milestone owns the response decision. " +
     "An Event-only Milestone with no current Interactive obligation must still own Composition. " +
     "Unknown future Events remain provisional, not verified canon. " +
     "No unrelated Milestone or protected-canon changes. Return ONLY one JSON object " +
@@ -927,8 +930,9 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
 }
 function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, prior: Round[],
   task: string, contract: unknown) {
-  return "INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW. Read pinned nt-event-design and " +
-    "nt-catalog skills and the selected canonical Milestone/Arc/Character/World sources. " +
+  return "INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW. Read skill://nt-event-design/SKILL.md and " +
+    "skill://nt-catalog/SKILL.md and the selected canonical Milestone/Arc/Character/World sources. " +
+    "An NPC expressing wishes, consent or preferences is not itself a formal player Choice; reject an Interactive owner assigned only for a later Milestone response. " +
     "Assess ONLY whether this PROVISIONAL local plan can plausibly support future Event " +
     "implementation: all material Event and downstream plan fields, including causality, concrete " +
     "inspectable sources and access/custody, earned Character knowledge, branching consequences, " +
@@ -1042,13 +1046,43 @@ function lastText(session: { messages: any[]; getLastAssistantText(): string | u
     throw Error("Milestone Blueprint Pi session interrupted; inspect the original transcript.");
   return session.getLastAssistantText() ?? "";
 }
+export function missingMilestoneBlueprintReads(messages: Parameters<typeof completedPinnedSkillReads>[0],
+  project: string, snapshot: SkillSnapshot, assignment: Pick<EventAssignment, "milestonePath">, sources: string[] = []) {
+  const reads = completedPinnedSkillReads(messages, project, snapshot.path);
+  const missingSkills = REQUIRED.filter(path => !reads.includes(join(snapshot.path, "skills", path)))
+    .map(path => "skill://" + path);
+  const missingSources = [...new Set([assignment.milestonePath, ...sources])]
+    .filter(path => !reads.includes(join(project, path)));
+  return [...missingSkills, ...missingSources];
+}
+
 function verifyReads(messages: Parameters<typeof completedPinnedSkillReads>[0],
   project: string, snapshot: SkillSnapshot, assignment: EventAssignment, sources: string[] = []) {
-  const reads = completedPinnedSkillReads(messages, project, snapshot.path);
-  const required = [...REQUIRED.map(path => join(snapshot.path, "skills", path)),
-    join(project, assignment.milestonePath), ...sources.map(path => join(project, path))];
-  if (required.some(path => !reads.includes(path)))
-    throw Error("Milestone Blueprint agent did not inspect the pinned skills and source Milestone.");
+  const missing = missingMilestoneBlueprintReads(messages, project, snapshot, assignment, sources);
+  if (missing.length)
+    throw Error("Milestone Blueprint missing successful mandatory reads: " + missing.join(", "));
+}
+
+/** Missing source evidence is a correctable response defect, not permission to
+ * replace the planner/reviewer. Keep the exact round and original read-only tools. */
+async function correctMissingReads(original: Awaited<ReturnType<typeof sessionFor>>, start: number,
+  snapshot: SkillSnapshot, assignment: EventAssignment, sources: string[] = []) {
+  lastText(original.session); // Never prompt again after an interrupted response.
+  const missing = missingMilestoneBlueprintReads(original.session.messages.slice(start),
+    original.project.root, snapshot, assignment, sources);
+  if (missing.length) {
+    await original.context.beforeTurn(original.session.sessionManager.getSessionFile());
+    await reportControllerReviewPhase("correcting");
+    await promptStorySpecialist(original.session,
+      "READ-ONLY MILESTONE SOURCE-READ CORRECTION. The previous response omitted successful mandatory reads. " +
+      "Use the read tool with each EXACT address below. skill:// addresses are stable pinned skills; " +
+      "do not use absolute snapshot paths or search outside the Story. " +
+      "Reassess your previous response using those sources and return the complete original JSON contract. " +
+      "Keep the same assignment and reviewer role; no writing, new approval, or scope change. Missing reads: " +
+      JSON.stringify(missing));
+    lastText(original.session);
+  }
+  verifyReads(original.session.messages.slice(start), original.project.root, snapshot, assignment, sources);
 }
 
 /** Safe read-only status for a paused or completed local plan. This is not approval. */
@@ -1388,7 +1422,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       if (previousPhase === "revision") await reportControllerReviewPhase("correcting");
       await promptStorySpecialist(writer.session, writer.context.contextNote +
         plannerPrompt(assignment, task, receipt.rounds.at(-1)));
-      verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment, correction?.sources);
+      await correctMissingReads(writer, start, snapshot, assignment, correction?.sources);
       let draft: MilestoneBlueprint;
       try {
         draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
@@ -1479,7 +1513,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
             "evaluate the current exact draft and original accepted source scope. " +
             "Your verdict must meet the full current v5 review contract. " : "") +
         reviewerPrompt(assignment, receipt.draft, reviewHistory, task, plan.contract));
-      verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment, correction?.sources);
+      await correctMissingReads(reviewer, start, snapshot, assignment, correction?.sources);
       const parseVerdict = () => {
         const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft!,
           assignment, reviewHistory);

@@ -786,11 +786,12 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "diagnosis", "binding-diagnosis"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
   const needsCharacter = mode === "support";
-  const diagnosis = mode === "diagnosis";
+  const bindingDiagnosis = mode === "binding-diagnosis";
+  const diagnosis = mode === "diagnosis" || bindingDiagnosis;
   const f = setup("r14d-event-rounds-" + mode);
   if (needsCharacter) f.start[3] += " Include Mara, the central night witness, in the disclosure Event.";
   await useScriptedArchiveCli(f);
@@ -851,6 +852,8 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
     const manifest = { modifiedRecords: [path], architecturalConflicts: [], laterObligations: [
       "Formal Choice Point binding must enact the protect and challenge outcomes for this Milestone before fulfillment.",
     ] };
+    const invalidDraft = bindingDiagnosis ? authored : authored.replace("value: knows", "value: known");
+    const invalidManifest = bindingDiagnosis ? { ...manifest, laterObligations: [] } : manifest;
     const { runtime, observed } = await scriptedStoryRuntime((index, context) => {
       if ([0, 2, 4].includes(index)) return { content: scriptedReadCalls(readSources, index), reason: "toolUse" };
       if (index === 1) return { content: scriptedText(plan), reason: "stop" };
@@ -858,17 +861,28 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
         status: "pass", findings: [], prior: [] }), reason: "stop" };
       const write = (content: string) => ({ content: [{ type: "toolCall" as const,
         id: "r14d-event-" + index, name: "write", arguments: { path, content } }], reason: "toolUse" as const });
-      if (index === 5) return write(authored.replace("value: knows", "value: known"));
+      if (index === 5) return write(invalidDraft);
       if (diagnosis && index >= 7) {
-        if (index === 7 || index === 9) return write(authored.replace("value: knows", "value: known") + "\nRepeated invalid metadata.\n");
-        if (index === 8 || index === 10 || index === 13) return { content: scriptedText(manifest), reason: "stop" };
+        if (index === 7 || index === 9) {
+          if (bindingDiagnosis) assert.match(JSON.stringify(context.messages), /event-missing-binding/);
+          return write(invalidDraft + "\nRepeated unresolved defect.\n");
+        }
+        if (index === 6 || index === 8 || index === 10)
+          return { content: scriptedText(invalidManifest), reason: "stop" };
+        if (index === 13) return { content: scriptedText(manifest), reason: "stop" };
         if (index === 11) {
           const raw = JSON.stringify(context.messages);
           const signature = raw.match(/signature=([a-f0-9]{64})/)?.[1];
           const sourceRef = raw.match(/sourceRef=([^;]+); category=/)?.[1];
           assert.ok(signature && sourceRef);
+          if (bindingDiagnosis) {
+            assert.match(raw, /event-missing-binding/);
+            assert.match(raw, /local-repair: owner=event:milestone.disclosure/);
+          }
           return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
-            category: "defect", diagnosis: "The Event knowledge condition must use the valid enum value knows.",
+            category: "defect", diagnosis: bindingDiagnosis
+              ? "The Event is structurally sound but the manifest omitted the current Milestone's outstanding formal Choice binding. Restore that precise handoff without claiming fulfillment."
+              : "The Event knowledge condition must use the valid enum value knows.",
             strategy: "local-repair", owner: "event:milestone.disclosure", scopeRef: sourceRef, prerequisites: [],
             uncertainty: "The native validator must verify the exact original Event correction." }), reason: "stop" };
         }
@@ -883,11 +897,11 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
           const item = packet.items[0];
           return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
             evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
-              explanation: "Valid knowledge condition and exact bounded Event." }] }), reason: "stop" };
+              explanation: bindingDiagnosis ? "Source-grounded decision setup with the exact outstanding formal Choice handoff." : "Valid knowledge condition and exact bounded Event." }] }), reason: "stop" };
         }
         throw Error("Unexpected diagnostic Event call " + index);
       }
-      if (index === 6 || index === 8) return { content: scriptedText(manifest), reason: "stop" };
+      if (index === 6 || index === 8) return { content: scriptedText(index === 6 && bindingDiagnosis ? invalidManifest : manifest), reason: "stop" };
       if (index === 7) {
         assert.match(JSON.stringify(context.messages), /SOURCE-BOUND STORY CORRECTION/);
         return write(authored);

@@ -365,6 +365,8 @@ export function eventSpecialistPrompt(
       "For a nondecision Milestone, THIS Event assignment owns BOTH delivering " +
       "each material evidence clause and binding its reachable Event IDs in the " +
       "selected Milestone's fulfillment.any_of and completeness fields. " +
+      "An NPC expressing their own wishes, consent or future intentions does not enact a player Choice. " +
+      "A later response decision does not keep a completed recovery, testimony or preference-setting Milestone partial. " +
       "These two YAML fields are already writable for you; formal Milestone binding " +
       "is NOT a separate future reviewer/Choice assignment for nondecision work. " +
       "Independent review occurs AFTER the validated Event commit. " +

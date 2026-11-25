@@ -20,6 +20,7 @@ import { readReviewTurnEvidence } from '../../../src/fork-review-turn'
 import { readAdaptiveState } from '../../../src/adaptive-state'
 import { inspectJobReport } from '../../../src/job-report'
 import { openWebGenerationGraph } from '../../../src/web-fixture-runtime'
+import { authenticateAssignmentFailure, type GenerationOperationRecovery } from '../../../src/generation-operation-recovery'
 import { readChatApprovedFoundation } from '../../../src/chat-approved-foundation'
 import { fullStoryTimeouts } from '../../../scripts/live-new-story-timeout.mjs'
 import { parseQuestionResponses, type QuestionSet } from '../../../src/author-question-set'
@@ -59,6 +60,38 @@ const adaptiveBrief = adaptiveShape === 'narrative-led'
   : adaptiveShape === 'choice-heavy'
     ? 'Make a compact, Choice-heavy mystery with several justified player decisions distributed nonuniformly across Milestones, including a decision-rich confrontation and an observation-only Event. The Architecture Arc trajectory must explicitly name each major player decision, its causal prerequisites, and how knowledge or relationships remain different after routes reconverge. Include independent causal support for extra Events, and only a genuinely warranted formal Puzzle. Avoid uniform Milestone quotas. I delegate unprotected creative details; propose a complete playable baseline with these constraints.'
     : null
+
+/** Private run logs report controller status and bounded diagnostics, never
+ * raw Pi transcripts, auth tokens, or complete model request context. */
+export function certificationFailureSummary(evidence: {
+  terminal: string; checkpointState: unknown; nativeValidation: string;
+  validationError: string | null; recoveryError: string | null;
+  recoveryCheckpoints: Array<{ eligible: boolean; commitSha: string; workItem: string; nextWorkItem: string | null }>;
+}, observation: string) {
+  const state = evidence.checkpointState as { reason?: string; inspectionError?: string;
+    active?: { id?: string; stage?: string }; failures?: Record<string, string>;
+    originalFailure?: { operation?: string; reason?: string; defects?: Array<{ kind: string; path: string; code: string; detail?: string }> };
+    recoveryLifecycle?: { active?: { origin?: { assignmentId?: string; operation?: string } };
+      decision?: { action?: string; reason?: string; disposition?: string } } } | null
+  const bounded = (value: unknown) => typeof value === 'string' ? value.slice(0, 1200) : undefined
+  const latest = evidence.recoveryCheckpoints.filter(point => point.eligible).at(-1)
+  return {
+    terminal: evidence.terminal, stage: state?.active?.stage,
+    assignment: state?.recoveryLifecycle?.active?.origin?.assignmentId ?? state?.active?.id,
+    reason: bounded(state?.reason ?? state?.inspectionError ?? evidence.validationError ?? evidence.recoveryError)
+      ?? 'No terminal controller reason was available; inspect the saved observation.',
+    originalFailure: state?.originalFailure ? { operation: state.originalFailure.operation, reason: bounded(state.originalFailure.reason),
+      defects: state.originalFailure.defects?.slice(0, 12).map(d => ({ kind: d.kind, path: d.path, code: d.code, detail: bounded(d.detail) })) } : undefined,
+    recovery: state?.recoveryLifecycle?.decision ? {
+      action: state.recoveryLifecycle.decision.action, reason: bounded(state.recoveryLifecycle.decision.reason),
+      disposition: state.recoveryLifecycle.decision.disposition,
+    } : undefined,
+    failedAssignments: Object.fromEntries(Object.entries(state?.failures ?? {}).map(([id, reason]) => [id, bounded(reason)])),
+    nativeValidation: evidence.nativeValidation,
+    latestVerifiedCheckpoint: latest ? { commitSha: latest.commitSha, workItem: latest.workItem, nextWorkItem: latest.nextWorkItem } : null,
+    observation,
+  }
+}
 
 /** The only #158-specific preparation. Reuses normal Studio's real Chat and
  * discovery handlers; the common live runner owns auth, Docker and agent. */
@@ -317,10 +350,26 @@ export async function verifyLiveNewStory(
         if (execution?.threadId) {
           const saved = await runtime.graph.getState({ configurable: { thread_id: execution.threadId } })
           const state = saved.values as { status?: string; reason?: string; active?: unknown;
-            failures?: unknown; inventory?: { items?: unknown[] } }
+            failures?: unknown; recoveryLifecycle?: { active?: { id?: string; origin?: { assignmentId?: string; operation?: string } }; decision?: { action?: string; reason?: string; disposition?: string } };
+            recoverySources?: Array<{ caseId: string; channel: string; input: unknown }>;
+            operationRecovery?: GenerationOperationRecovery | null; inventory?: { items?: unknown[] } }
+          const caseId = state.recoveryLifecycle?.active?.id
+          const op = (state.recoverySources?.find(source => source.caseId === caseId && source.channel === 'operationRecovery')?.input
+            ?? state.operationRecovery) as GenerationOperationRecovery | undefined
+          let originalFailure: unknown = null
+          if (op) {
+            let defects: unknown = null
+            try {
+              if (op.evidence.assignmentFailure && op.source.headSha)
+                defects = (await authenticateAssignmentFailure(job, op.evidence, op.source.headSha))?.defects
+            } catch { /* Reporting must not replace the original controller reason. */ }
+            originalFailure = { operation: op.operation, reason: op.reason, defects }
+          }
           checkpointState = { status: state.status, reason: state.reason,
-            active: state.active, failures: state.failures,
+            active: state.active, failures: state.failures, originalFailure,
+            recoveryLifecycle: state.recoveryLifecycle,
             inventory: state.inventory?.items, pendingNodes: saved.next }
+
         }
       } finally { runtime.saver.db.close() }
     } catch (error) {
@@ -408,13 +457,13 @@ export async function verifyLiveNewStory(
   if (!existsSync(join(root, 'certification-observation.json')))
     writeFileSync(join(root, 'certification-observation.json'), JSON.stringify(evidence, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 })
-  // The full diagnostic (including reviewer reason) remains private in the
-  // owner-only observation file; console output contains no raw model context.
+  const failure = certificationFailureSummary(evidence, join(attempts, 'observation.json'))
   console.log('Live ' + mode + ' final:', JSON.stringify({ mode, jobId, finalHead,
     terminal, nativeValidation: validationStatus,
     eligibleCheckpoints: recoveryPoints.filter(point => point.eligible).length,
+    ...(terminal !== 'completed' ? { failure } : {}),
   }))
-  assert.equal(terminal, 'completed', 'The complete Story is required; Foundation alone is insufficient')
+  assert.equal(terminal, 'completed', 'Story certification did not complete: ' + JSON.stringify(failure))
   assert.equal(validationStatus, 'passed')
   if (adaptiveShape) {
     assert.equal(process.env.NT_ADAPTIVE_PLANNING, '1', 'Adaptive certification must run the enabled production scheduler')

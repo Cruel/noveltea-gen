@@ -89,9 +89,12 @@ function scripted(
   twoDistinctCases = false,
   downstreamCorrection = false,
   productive = false,
+  omitReads = false,
 ): Provider {
   let reviewerRound = 0;
   let writerRound = 0;
+  let pendingReadRole: "writer" | "reviewer" | null = null;
+  const omitted = new Set<string>();
   const correctedKnowledge = "The guard can verify only the dated gate register entry";
   const falseOwner = "No Choice or Puzzle is required for this current Milestone";
   const falseDownstream: MilestoneBlueprint = {
@@ -147,20 +150,34 @@ function scripted(
     calls.push({ prompt, lastRole, tools: [...tools] });
     const isDiagnostic = prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC");
     const isReplacement = prompt.includes("FRESH INDEPENDENT REPLACEMENT REVIEWER");
-    const isReview = prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW");
-    const isWriter = prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT");
+    const isCorrection = prompt.includes("READ-ONLY MILESTONE SOURCE-READ CORRECTION");
+    const isReview = prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") || isCorrection && pendingReadRole === "reviewer";
+    const isWriter = prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") || isCorrection && pendingReadRole === "writer";
+
     if (!isDiagnostic && !isReview && !isWriter)
       throw Error("Unexpected Milestone Pi prompt: " + prompt.slice(0, 200));
     let content: AssistantMessage["content"];
     let reason: "stop" | "toolUse" = "stop";
     if (lastRole !== "toolResult") {
-      content = reads.map((path): ToolCall => ({
+      const role = isReview ? "reviewer" : "writer";
+      if (isCorrection) {
+        assert.ok(pendingReadRole);
+        assert.match(prompt, /skill:\/\/nt-catalog\/SKILL.md/);
+        assert.ok(!tools.has("write") && !tools.has("edit") && !tools.has("bash"));
+      }
+      const missing = omitReads && !isDiagnostic && !isReplacement && !isCorrection && !omitted.has(role);
+      if (missing) { omitted.add(role); pendingReadRole = role; }
+      const readPaths = isCorrection ? [reads[1]!] : missing ? reads.filter(path => path !== reads[1]) : reads;
+      content = readPaths.map((path): ToolCall => ({
         type: "toolCall",
         id: randomUUID(),
         name: "read",
         arguments: { path },
       }));
       reason = "toolUse";
+    } else if (omitReads && !isCorrection && pendingReadRole && (isWriter || isReview)) {
+      // A complete-looking reply without its mandatory skill read is not accepted.
+      content = [{ type: "text", text: JSON.stringify(isWriter ? draft : productiveReview(reviewerRound)) }];
     } else if (isDiagnostic) {
       content = [{ type: "text", text: JSON.stringify({ ...diagnosticAnswer, action: diagnosticAction }) }];
     } else if (isReplacement) {
@@ -282,6 +299,7 @@ function scripted(
         ];
       }
     }
+    if (isCorrection && lastRole === "toolResult") pendingReadRole = null;
     const message: AssistantMessage = {
       role: "assistant",
       api: model.api,
@@ -658,10 +676,10 @@ The guard finds a dated register, but no evidence of a prior visit.
     const productiveJob = await startStoryJob({ story, job: productiveJobId, worktreeCacheRoot: scoped });
     const productiveCalls: Call[] = [];
     const productiveRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
-    productiveRuntime.registerNativeProvider(scripted(productiveCalls, "escalate", false, false, true));
+    productiveRuntime.registerNativeProvider(scripted(productiveCalls, "escalate", false, false, true, true));
     await productiveRuntime.refresh({ allowNetwork: false });
     await configurePiPolicy(productiveJob, { version: 1, profile: { provider: model.provider, model: model.id },
-      limits: { modelCalls: 24 } });
+      limits: { modelCalls: 30 } });
     const material = await withJobModelRuntime(productiveRuntime, () =>
       withStoryJobLock(productiveJob, "event-sample", () => ensureMilestoneBlueprint(productiveJob,
         plan, assignment, snapshot, model.provider, model.id, task, head, false)));
@@ -672,6 +690,8 @@ The guard finds a dated register, but no evidence of a prior visit.
     assert.equal(materialReceipt.diagnostics?.length ?? 0, 0);
     assert.deepEqual(await readReviewedMilestoneBlueprint(productiveJob, material.pin, assignment), material.blueprint);
     assert.equal(productiveCalls.filter(c => c.prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") && c.lastRole === "toolResult").length, 4);
+    assert.equal(productiveCalls.filter(c => c.prompt.includes("READ-ONLY MILESTONE SOURCE-READ CORRECTION") && c.lastRole === "toolResult").length, 2);
+    assert.ok(materialReceipt.writer.id !== materialReceipt.reviewer.id);
     assert.equal(productiveCalls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") && c.lastRole === "toolResult").length, 4);
 
     // A CONTINUE diagnosis must retain the exact original reviewer and writer

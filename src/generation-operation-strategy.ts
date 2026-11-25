@@ -598,11 +598,17 @@ function assignmentDiagnosticDecision(c: RecoveryCase,
   return { ...base(c, proof), action: "known-correction", adapter: "assignment-diagnostic", receipt: proof };
 }
 
-function assignmentDiagnosticDefects(failure: { defects: readonly import("./assignment-metadata-recovery.js").AssignmentDefect[] }) {
+export function assignmentDiagnosticDefects(failure: { defects: readonly import("./assignment-metadata-recovery.js").AssignmentDefect[];
+    workItem?: string; milestonePath?: string },
+  assignmentId?: string | null) {
+  const event = /^event:milestone\.([a-z][a-z0-9-]*)$/.exec(assignmentId ?? "");
   return failure.defects.length > 0 && failure.defects.every(d =>
     /^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(d.path) &&
     (d.kind === "metadata" && ["schema", "yaml", "frontmatter"].includes(d.code) ||
-     d.kind === "provenance" && d.code === "missing-author-provenance"));
+     d.kind === "provenance" && d.code === "missing-author-provenance" ||
+     !!event && failure.workItem === "event-" + event[1] && d.kind === "semantic" &&
+       d.path === failure.milestonePath && d.path.startsWith("milestones/") &&
+       ["event-missing-binding", "event-unreachable-binding", "event-local-evidence"].includes(d.code)));
 }
 
 /** A pause retains the original diagnostic decision's receipt, not a new
@@ -664,7 +670,7 @@ export async function authenticateAssignmentDiagnosticDecision(job: JobStartResu
       }
     })();
   if (!terminal || !isDeepStrictEqual(terminal.proof, source.evidence.assignmentFailure.proof) ||
-      terminal.ref !== d.receipt.ref || !assignmentDiagnosticDefects(terminal)) return null;
+      terminal.ref !== d.receipt.ref || !assignmentDiagnosticDefects(terminal, c.origin.assignmentId)) return null;
   return { terminal, authorization };
 }
 
@@ -707,7 +713,7 @@ export async function authorizeOperationDiagnosticStrategy(job: JobStartResult, 
   if (local) {
     const original = await originalAssignmentFailure(job, s, c);
     if (!original || original.proof.kind !== "nonconverging" ||
-        !assignmentDiagnosticDefects(original) || original.ref !== local.evidence.at(-1)?.ref ||
+        !assignmentDiagnosticDefects(original, c.origin.assignmentId) || original.ref !== local.evidence.at(-1)?.ref ||
         original.proof.receiptDigest !== local.evidence.at(-1)?.digest) return null;
     return local;
   }
@@ -985,11 +991,11 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
       if (originalDraft) {
         packet.existingFindings = {
           original: packet.existingFindings, assignmentDefects: originalDraft.defects,
-          observation: "Repeated source-bound native/provenance correction did not converge; draft remains uncommitted.",
+          observation: "Repeated source-bound assignment correction did not converge; draft remains uncommitted.",
         };
         if (diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
-            assignmentDiagnosticDefects(originalDraft))
-          packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef=exact sourceRef; only original native defects, no other owner or new prerequisites"];
+            assignmentDiagnosticDefects(originalDraft, c.origin.assignmentId))
+          packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef=exact sourceRef; only the exact original controller-verified defects within the existing write grant, no other owner or new prerequisites"];
       }
       await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider,
         s.request.model ?? policy.profile.model, packet);

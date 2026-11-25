@@ -6,8 +6,9 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { removeTestTree } from "./helpers.js";
 import { validateStoryJob } from "../src/validator.js";
+import { assignmentDiagnosticDefects } from "../src/generation-operation-strategy.js";
 import { changedPaths, eventPrerequisiteReportDigest, hasDeferredChoiceBinding,
-  currentMilestoneChoiceBinding } from "../src/event-work.js";
+  currentMilestoneChoiceBinding, eventFulfillmentDefect } from "../src/event-work.js";
 import { milestoneBodyOnlyDrift, milestoneBaselineBody,
   assertMilestoneFulfillmentOnly } from "../src/milestone-field-scope.js";
 import { parseMilestoneBlueprint, parseMilestoneBlueprintReview,
@@ -454,4 +455,21 @@ test("#207 Milestone plan validates local causality and rejects invented source/
     findings: [{ eventId: "observe-proof", anchorPath: "events/unwritten.md",
       requirement: "Evidence", reason: "Not plausible", correction: "Clarify" }] }), local as any, assignment),
   /source-bound verdict|current Event\/source/);
+});
+
+test("live Revelation missing fulfillment is a typed local binding defect, not an invented evidence rejection", () => {
+  const assignment = { milestoneId: "milestone.revelation", milestonePath: "milestones/mara-speaks.md" };
+  const defect = eventFulfillmentDefect(assignment, ["event.mara-account-and-wishes"], "missing-binding");
+  assert.equal(defect.code, "event-missing-binding");
+  assert.match(defect.detail, /formal binding omission, NOT a finding that the prose lacks evidence/);
+  assert.match(defect.detail, /NPC expressing their own wishes/);
+  assert.match(defect.detail, /Independent semantic Review must still verify/);
+  const terminal = { defects: [defect], workItem: "event-revelation", milestonePath: assignment.milestonePath };
+  assert.equal(assignmentDiagnosticDefects(terminal, "event:milestone.revelation"), true);
+  assert.equal(assignmentDiagnosticDefects(terminal, "event:milestone.other"), false);
+  assert.equal(assignmentDiagnosticDefects(terminal, "composition:milestone.revelation"), false);
+  assert.equal(assignmentDiagnosticDefects({ ...terminal, milestonePath: "milestones/other.md" }, "event:milestone.revelation"), false);
+  assert.equal(assignmentDiagnosticDefects({ ...terminal, defects: [{ ...defect, code: "generic-semantic-conflict" }] }, "event:milestone.revelation"), false);
+  for (const code of ["event-unreachable-binding", "event-local-evidence"])
+    assert.equal(assignmentDiagnosticDefects({ ...terminal, defects: [{ ...defect, code }] }, "event:milestone.revelation"), true);
 });

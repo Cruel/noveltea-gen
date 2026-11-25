@@ -199,7 +199,8 @@ export async function inspectEventFailure(job: JobStartResult, milestone: string
   }
   const terminal = await inspectAssignmentFailure({ ...options, effect, diagnostic });
   return terminal && { ...terminal, ref: options.directory + "/terminal.json", workItem: receipt.workItemId,
-    assignmentKey: receipt.assignmentKey, invocationProof: receipt.invocationProof, sessionId: receipt.sessionId! };
+    assignmentKey: receipt.assignmentKey, invocationProof: receipt.invocationProof, sessionId: receipt.sessionId!,
+    milestonePath: receipt.assignment?.milestonePath };
 }
 const gitEnv = () => {
   const env = { ...process.env };
@@ -392,6 +393,29 @@ export function currentMilestoneChoiceBinding(
         /\b(?:outcomes?|effects|branches|chooses?|decision)\b/i.test(obligation) &&
         /\b(?:must|required|needs?)\b/i.test(obligation)));
 }
+/** Structural fulfillment is not a verdict about narrative evidence.
+ * An explicitly authorized Event owner must supply the binding and native
+ * reachability, then the independent reviewer judges the actual prose. */
+export function eventFulfillmentDefect(assignment: Pick<EventAssignment, "milestoneId" | "milestonePath">,
+  eventIds: readonly string[], reason: "missing-binding" | "unreachable-binding") {
+  return { kind: "semantic" as const, path: assignment.milestonePath,
+    code: "event-" + reason, pointer: "fulfillment.any_of",
+    detail: "EVENT FULFILLMENT: " + assignment.milestoneId +
+      (reason === "missing-binding"
+        ? " is still partial or has no fulfillment route. This is a formal binding omission, NOT a finding that the prose lacks evidence."
+        : " has a declared fulfillment route that native coverage has not proven reachable.") +
+      " Inspect its exact change and existing Event prose. Distinguish an NPC expressing their own wishes from an actual player decision; " +
+      " a future decision in another Milestone is not a reason to leave this nondecision Milestone unbound. " +
+      " If the existing Event cluster fulfills the current promise, change ONLY the selected Milestone's YAML completeness and fulfillment.any_of to bind the real reachable Event IDs. " +
+      " Preserve its body, protected decisions, and all existing prerequisites. Candidate authored IDs: " + JSON.stringify(eventIds) +
+      ". Do not invent evidence or effects to satisfy a binding. If the narrative genuinely lacks required evidence, repair it within this same grant or report the specific dependency. " +
+      " Independent semantic Review must still verify the binding's narrative sufficiency. Run story_validate and report the complete cumulative manifest." };
+}
+
+class EventFulfillmentError extends Error {
+  constructor(readonly defect: ReturnType<typeof eventFulfillmentDefect>) { super(defect.detail); }
+}
+
 function acceptance(report: Report, assignment: EventAssignment, paths: string[], obligations: string[]) {
   const records = report.records.filter(r => r.metadata.status !== "superseded");
   if (paths.some(path => !records.some(r => r.path === path))) {
@@ -420,11 +444,13 @@ function acceptance(report: Report, assignment: EventAssignment, paths: string[]
     throw new Error("Unbound Choice obligation cannot certify a completed Milestone or authored fulfillment IDs.");
   }
   if (!deferredChoice && (!milestone.metadata.fulfillment.any_of.length ||
-      milestone.metadata.completeness === "partial" ||
-      routes.length !== milestone.metadata.fulfillment.any_of.length ||
-      !routes.some(r => r.status === "reachable") || routes.some(r => r.status === "impossible"))) {
-    throw new Error("Selected Milestone lacks a deterministically reachable Event fulfillment route.");
-  }
+      milestone.metadata.completeness === "partial"))
+    throw new EventFulfillmentError(eventFulfillmentDefect(assignment,
+      authored.map(r => r.metadata.id), "missing-binding"));
+  if (!deferredChoice && (routes.length !== milestone.metadata.fulfillment.any_of.length ||
+      !routes.some(r => r.status === "reachable") || routes.some(r => r.status === "impossible")))
+    throw new EventFulfillmentError(eventFulfillmentDefect(assignment,
+      authored.map(r => r.metadata.id), "unreachable-binding"));
   if (!deferredChoice && milestone.metadata.fulfillment.any_of.every((route: string[]) =>
     !route.some(id => authored.some(event => event.metadata.id === id)))) {
     throw new Error("Selected Milestone's fulfillment does not use the authored Event cluster.");
@@ -926,7 +952,8 @@ export async function runEventWorkItem(input: EventOptions) {
                 record.metadata.type === "event" && record.metadata.status !== "superseded")
               .map(record => record.metadata.id);
             if (localEvidenceGap)
-              return [eventEvidenceRepairFeedback(assign, candidate.conflicts, authoredEventIds)];
+              return [{ kind: "semantic" as const, path: assign.milestonePath, code: "event-local-evidence",
+                detail: eventEvidenceRepairFeedback(assign, candidate.conflicts, authoredEventIds) }];
             if (falseChoiceDeferral)
               return [eventNondecisionChoiceCorrection(
                 assign, candidate.conflicts, sourceChange, authoredEventIds)];
@@ -938,17 +965,8 @@ export async function runEventWorkItem(input: EventOptions) {
               return proof.diagnostics.map(d =>
                 `${d.path}:${d.line} ${d.event}/${d.step}/${d.branch} ${d.slot}: ${d.message}`);
             } catch (error) {
+              if (error instanceof EventFulfillmentError) return [error.defect];
               const message = String(error);
-              if (/Selected Milestone lacks a deterministically reachable Event fulfillment route\./.test(message)) {
-                // No formal Choice deferral was established. This nondecision
-                // milestone is not complete merely because the Event is
-                // structurally reachable; show the needed evidence in-scene.
-                return [eventEvidenceRepairFeedback(assign, [
-                  "Milestone " + assign.milestoneId +
-                  " lacks a deterministically reachable evidence route: the Event does not establish " +
-                  "the material observation or witness support promised by the selected Milestone.",
-                ], authoredEventIds)];
-              }
               return [message];
             }
           };
