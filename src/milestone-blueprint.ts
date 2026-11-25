@@ -22,6 +22,7 @@ import { preparePiContext, PiBudgetPause } from "./job-pi-policy.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { reportControllerReviewPhase } from "./controller-review-phase.js";
+import { recoverResponseContract, type ResponseContractFailure } from "./response-contract-recovery.js";
 import { completedPinnedSkillReads } from "./pinned-skill-reads.js";
 import { assertReviewCycleSession, reviewCycleId, reviewRoundProgress } from "./review-cycle.js";
 import { milestoneDiagnosticDecision, milestoneDiagnosticEvidence, milestoneDiagnosticFingerprint,
@@ -437,6 +438,31 @@ function parse(text: string): unknown {
   if (Buffer.byteLength(trimmed) > 18000) throw Error("Milestone plan exceeds its private planning budget.");
   return JSON.parse(trimmed) as unknown;
 }
+class MilestoneContractError extends Error {
+  constructor(readonly path: string, readonly expected: string) { super(path + ": " + expected); }
+}
+function invalid(path: string, expected: string): never { throw new MilestoneContractError(path, expected); }
+/** All historical identifiers are controller-generated, never inferred by a model. */
+export function milestoneReviewFindingIndex(previous: readonly Round[]) {
+  return previous.flatMap((round, i) => round.review.findings.map((finding, j) => ({
+    round: i, findingIndex: j, ...(finding.eventId ? { eventId: finding.eventId } : {}),
+    evidence: finding.evidence,
+  })));
+}
+function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">,
+  previous: readonly Round[]) {
+  return "Round and findingIndex are ZERO-BASED. The first review is round 0. " +
+    "Use each of these EXACT prior identities once, with its original Event ID or downstream target and field: " +
+    JSON.stringify(milestoneReviewFindingIndex(previous)) +
+    ". Current provisional Event IDs: " + JSON.stringify(draft.events.map(e => e.id)) +
+    ". Valid Event fields: " + MILESTONE_FIELDS.join(", ") +
+    ". Use a provisional Event ID, not a canonical event.* record ID. " +
+    "If a rejected Event ID was removed or replaced, cite the ORIGINAL eventId and field with kind:'removed' and before:the original rejected quote; omit after. " +
+    "Use kind:'revised' or 'added' only for changes to the same retained Event ID. " +
+    "For a retained Event use the exact original field/quote and a verified new excerpt. " +
+    "For downstream findings use the original zero-based entry index and field; for missing-downstream use the original owner. " +
+    "Current canonical source paths: " + JSON.stringify(assignment.sourcePaths) + ".";
+}
 export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssignment,
   "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">): MilestoneBlueprint {
   let raw: unknown;
@@ -447,36 +473,41 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
       !Array.isArray(raw.downstream) || raw.downstream.length < 1 || raw.downstream.length > 10)
     throw Error("Invalid bounded Milestone Blueprint or target identity.");
   const seen = new Set<string>();
-  for (const event of raw.events) {
-    if (!exact(event, ["id", "purpose", "dependsOn", "evidence", "participants", "knowledge", "routes"]) ||
-        !/^[a-z][a-z0-9-]{0,60}$/.test(String(event.id)) ||
-        seen.has(String(event.id)) || !string(event.purpose) || !string(event.knowledge) ||
-        !strings(event.dependsOn, 4) || event.dependsOn.some((id: string) => !seen.has(id)) ||
-        !strings(event.participants, 12) ||
-        event.participants.some((id: string) => !assignment.characterIds.includes(id)) ||
-        !Array.isArray(event.evidence) || !event.evidence.length || event.evidence.length > 8 ||
-        !Array.isArray(event.routes) || event.routes.length > 5) {
-      throw Error("Milestone plan has invalid Event causality, dependencies or Character knowledge.");
-    }
+  for (const [i, event] of raw.events.entries()) {
+    const path = "events[" + i + "]";
+    if (!exact(event, ["id", "purpose", "dependsOn", "evidence", "participants", "knowledge", "routes"]))
+      invalid(path, "expected exactly id, purpose, dependsOn, evidence, participants, knowledge, routes");
+    if (typeof event.id !== "string" || !/^[a-z][a-z0-9-]{0,60}$/.test(event.id) || seen.has(event.id))
+      invalid(path + ".id", "expected a unique provisional slug (not a canonical event.* ID)");
+    if (!string(event.purpose)) invalid(path + ".purpose", "expected nonempty bounded text");
+    if (!string(event.knowledge)) invalid(path + ".knowledge", "expected one nonempty bounded STRING, not an array/object");
+    if (!strings(event.dependsOn, 4) || event.dependsOn.some((id: string) => !seen.has(id)))
+      invalid(path + ".dependsOn", "expected at most four earlier provisional Event IDs: " + JSON.stringify([...seen]));
+    if (!strings(event.participants, 12) || event.participants.some((id: string) => !assignment.characterIds.includes(id)))
+      invalid(path + ".participants", "expected at most twelve exact Character IDs from " + JSON.stringify(assignment.characterIds));
+    if (!Array.isArray(event.evidence) || !event.evidence.length || event.evidence.length > 8)
+      invalid(path + ".evidence", "expected 1–8 concrete evidence entries");
+    if (!Array.isArray(event.routes) || event.routes.length > 5)
+      invalid(path + ".routes", "expected 0–5 route objects");
     seen.add(String(event.id));
-    for (const e of event.evidence) {
+    for (const [j, e] of event.evidence.entries()) {
       if (!exact(e, ["anchorPath", "source", "observation", "access", "establishes", "limits"]) ||
           !assignment.sourcePaths.includes(String(e.anchorPath)) ||
           ![e.source, e.observation, e.access, e.establishes, e.limits]
             .every(value => string(value)))
-        throw Error("Milestone Event evidence lacks a current canonical anchor, inspectable source or access.");
+        invalid(path + ".evidence[" + j + "]", "expected exact anchorPath, source, observation, access, establishes, limits; bounded nonempty strings and a canonical anchor from " + JSON.stringify(assignment.sourcePaths));
     }
-    for (const route of event.routes)
+    for (const [j, route] of event.routes.entries())
       if (!exact(route, ["condition", "consequence"]) ||
           !string(route.condition) || !string(route.consequence))
-        throw Error("Milestone plan has unbounded or missing lasting route consequences.");
+        invalid(path + ".routes[" + j + "]", "expected exactly nonempty bounded condition and consequence strings");
   }
-  for (const item of raw.downstream)
+  for (const [i, item] of raw.downstream.entries())
     if (!exact(item, ["owner", "obligation"]) ||
         typeof item.owner !== "string" ||
         !["event", "interactive", "composition"].includes(item.owner) ||
         !string(item.obligation))
-      throw Error("Milestone downstream obligation needs an explicit responsible stage.");
+      invalid("downstream[" + i + "]", "Milestone downstream obligation needs exact owner (event, interactive or composition) and nonempty obligation");
   if (!raw.downstream.some(item => item.owner === "composition"))
     throw Error("Milestone plan must identify the downstream Composition owner.");
   return raw as unknown as MilestoneBlueprint;
@@ -503,10 +534,11 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       !Array.isArray(raw.findings) || raw.findings.length > 12 ||
       (raw.status === "pass") !== (raw.findings.length === 0))
     throw Error("Independent Milestone review needs an explicit source-bound verdict.");
-  for (const item of raw.findings) {
+  for (const [i, item] of raw.findings.entries()) {
+    const path = "findings[" + i + "]";
     if (!object(item) || !assignment.sourcePaths.includes(String(item.anchorPath)) ||
         ![item.requirement, item.reason, item.correction].every(v => string(v)))
-      throw Error("Independent Milestone review finding lacks a current source citation.");
+      invalid(path, "expected canonical source anchorPath from " + JSON.stringify(assignment.sourcePaths) + ", and bounded nonempty requirement, reason and correction");
     const evidence = item.evidence;
     if (fifth && object(evidence) && evidence.target === "downstream") {
       const index = evidence.index;
@@ -522,7 +554,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
           !draft.downstream[index as number] ||
           !downstreamQuote(draft.downstream[index as number]!,
             field as "owner" | "obligation", evidence.quote))
-        throw Error("Independent Milestone review finding has no cited downstream field.");
+        invalid(path + ".evidence", "Invalid cited downstream field: expected target downstream, zero-based index from current downstream entries " + JSON.stringify(draft.downstream.map((_, i) => i)) + ", owner|obligation field and its exact quote, repair replace|extend (owner must replace), anchorPath " + assignment.milestonePath);
       continue;
     }
     if (fifth && object(evidence) && evidence.target === "missing-downstream") {
@@ -533,10 +565,13 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
           !["event", "interactive", "composition"].includes(evidence.owner) ||
           evidence.repair !== "extend" ||
           evidence.quote !== JSON.stringify(draft.downstream))
-        throw Error("Independent Milestone review finding has no cited missing downstream obligation.");
+        invalid(path + ".evidence", "expected target missing-downstream, owner event|interactive|composition, quote equal to the exact CURRENT serialized downstream array, repair extend, anchorPath " + assignment.milestonePath);
       continue;
     }
     const event = draft.events.find(e => e.id === item.eventId);
+    if (!event) invalid(path + ".eventId", "expected an exact current provisional Event ID: " + JSON.stringify(draft.events.map(e => e.id)));
+    if (modern && (!object(evidence) || !MILESTONE_FIELDS.includes(evidence.field as MilestoneField)))
+      invalid(path + ".evidence.field", "expected one of " + MILESTONE_FIELDS.join(", ") + "; canonical Event record fields such as consequences are not Blueprint fields");
     if (!exact(item, modern
           ? ["eventId", "anchorPath", "requirement", "reason", "correction", "evidence"]
           : ["eventId", "anchorPath", "requirement", "reason", "correction"]) ||
@@ -548,7 +583,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
           typeof evidence.quote !== "string" ||
           !milestoneFieldQuote(event, evidence.field as MilestoneField,
             evidence.quote))))
-      throw Error("Independent Milestone review finding has no cited defective Event field.");
+      invalid(path + ".evidence", "Independent Milestone review finding has no cited defective Event field: use exact keys field, quote" + (strict ? ", repair" : "") + "; cite the selected current field verbatim (whole value or 8+ characters) with repair replace|extend");
   }
   // Replay sealed historical reviews independently; new reviewer sessions
   // must emit v5, including source-bound downstream/omission findings.
@@ -560,9 +595,11 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
     const review = raw as unknown as MilestoneBlueprintReview;
     const count = previous.reduce((total, round) => total + round.review.findings.length, 0);
     if (!Array.isArray(review.prior) || review.prior.length !== count)
-      throw Error("Milestone review must account for every prior material finding.");
+      invalid("prior", "Milestone review must account for every prior material finding exactly once: " + JSON.stringify(milestoneReviewFindingIndex(previous)));
     const seen = new Set<string>();
-    for (const p of review.prior) {
+    for (const [i, p] of review.prior.entries()) {
+      const path = "prior[" + i + "]";
+      if (!object(p)) invalid(path, "expected an object with round, findingIndex, status, reason, evidence");
       const key = p.round + ":" + p.findingIndex;
       const source = previous[p.round];
       const original = source?.review.findings[p.findingIndex];
@@ -574,7 +611,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
             ? !fifth || !("target" in p.evidence) ||
               p.evidence.target !== original.evidence.target
             : p.evidence.eventId !== original.eventId))
-        throw Error("Milestone previous finding assessment lacks source-bound identity.");
+        invalid(path, "Milestone previous finding assessment lacks source-bound identity. Round and findingIndex are ZERO-BASED; valid original identifiers and fields: " + JSON.stringify(milestoneReviewFindingIndex(previous)) + ". Preserve the original target/Event ID, use resolved|improved|persisting|regressed and a nonempty reason.");
       if (modern) {
         const proof = p.evidence as MilestonePriorEvidence;
         const keys = "target" in proof && proof.target === "missing-downstream"
@@ -598,7 +635,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
             ((p.status === "resolved" || p.status === "improved")
               ? proof.kind === "current"
               : proof.kind !== "current"))
-          throw Error("Milestone finding correction needs a change to its rejected field or verified Event removal.");
+          invalid(path + ".evidence", "Milestone finding correction needs a change to its rejected field or verified Event removal. Original finding: " + JSON.stringify(original) + ". Expected exact keys " + keys.join(", ") + ". For a removed ID use kind removed with original field and before quote, no after. For retained IDs cite the same field with exact original and changed excerpts; honor replace vs extend. Resolved/improved cannot use current, and persisting/regressed require current.");
       } else {
         const proof = p.evidence as { eventId: string; quote: string };
         const event = original.eventId
@@ -611,7 +648,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       seen.add(key);
     }
     if (review.status === "pass" && review.prior.some(p => p.status !== "resolved"))
-      throw Error("Milestone reviewer cannot pass with unresolved historical blockers.");
+      invalid("status", "Milestone reviewer cannot pass with unresolved historical blockers; all prior statuses must be resolved and findings empty");
     if (review.status === "pass" && previous.length &&
         policy === "admission" && !fifth)
       throw Error("New Milestone approval requires v5 correction evidence.");
@@ -779,7 +816,7 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
         ...(receipt.diagnostics ?? []).map(d => d.session.id)].includes(session.session.sessionId))
       throw Error("Milestone diagnostician reused an original Pi session.");
     const start = session.session.messages.length;
-    await reportControllerReviewPhase("diagnosing");
+    await reportControllerReviewPhase("diagnosing", { milestone: assignment.milestoneId, activity: "blueprint-diagnosis", role: "diagnostic", round: index });
     await promptStorySpecialist(session.session, session.context.contextNote +
       "FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC. " +
       "Read skill://nt-event-design/SKILL.md and skill://nt-catalog/SKILL.md and the exact selected " +
@@ -812,23 +849,10 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
       "Event or downstream evidence and an existing accepted task or contract; " +
       "never introduce requirements or return a PASS.");
     await correctMissingReads(session, start, snapshot, assignment);
-    const parse = () => {
-      verifyReads(session.session.messages.slice(start), session.project.root, snapshot, assignment);
-      return parseMilestoneDiagnosis(lastText(session.session), last.draft, { task, contract });
-    };
-    let diagnosis: MilestoneDiagnosis;
-    try { diagnosis = parse(); }
-    catch (error) {
-      await session.context.beforeTurn(session.session.sessionManager.getSessionFile());
-      await reportControllerReviewPhase("correcting");
-      await promptStorySpecialist(session.session,
-        "READ-ONLY DIAGNOSTIC FORMAT CORRECTION. The previous response failed " +
-        "source/protocol validation: " + (error instanceof Error ? error.message : String(error)) +
-        ". Retain independent substantive analysis, re-read missing pinned sources, " +
-        "and return ONE complete valid strict diagnosis JSON with real citations. " +
-        "No approval, Story writes or new scope.");
-      diagnosis = parse();
-    }
+    const diagnosis = await correctMilestoneContract(session, job, assignment, "diagnostic",
+      raw => parseMilestoneDiagnosis(raw, last.draft, { task, contract }),
+      "Use exact current Event IDs and fields " + MILESTONE_FIELDS.join(", ") +
+      "; cite a current source field, or the original downstream owner/entry. Never approve a plan.", index);
     await session.context.completed(session.session.sessionManager.getSessionFile()!,
       session.session.sessionId);
     const result: DiagnosticReceipt = {
@@ -925,7 +949,7 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "\nCHARACTER IDS: " + JSON.stringify(assignment.characterIds) +
     "\nAUTHOR OBJECTIVE: " + task +
     (earlier ? "\nSAME REVIEW CYCLE: Revise the previous provisional plan to resolve material findings, " +
-      "without inventing protected authority. PRIOR PLAN: " + JSON.stringify(earlier.draft) +
+      "without inventing protected authority. Preserve provisional Event IDs for revisions; replace/remove only if substantively necessary so the independent reviewer can cite original identity. PRIOR PLAN: " + JSON.stringify(earlier.draft) +
       "\nINDEPENDENT REVIEW: " + JSON.stringify(earlier.review) : "");
 }
 function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, prior: Round[],
@@ -944,7 +968,7 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "obligation a current-stage blocker. Flag actual unsupported, contradictory or missing " +
     "obligations with a CURRENT canonical anchorPath. Preserve prior findings and assess the " +
     "new draft, distinguishing resolved blockers and regressions. Assess EACH prior " +
-    "finding by exact round and findingIndex, including distinct findings on the same " +
+    "finding by exact ZERO-BASED round and findingIndex, including distinct findings on the same " +
     "Event/source path. A NEW Event finding cites its eventId and defective FIELD " +
     "with its exact whole value or an 8+ character excerpt. A downstream finding instead " +
     "cites the exact current entry index, owner|obligation field and quote, with anchorPath " +
@@ -995,8 +1019,8 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
     "\nAUTHOR OBJECTIVE: " + JSON.stringify(task) +
     "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
-    "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map(r => ({ draftDigest: r.draftDigest,
-      review: r.review }))) + "\nCURRENT PLAN: " + JSON.stringify(draft);
+    "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map((r, round) => ({ round, draftDigest: r.draftDigest,
+      review: r.review }))) + "\nEXACT REVIEW CONTRACT: " + milestoneReviewContract(draft, assignment, prior) + "\nCURRENT PLAN: " + JSON.stringify(draft);
 }
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, model: string,
@@ -1072,7 +1096,7 @@ async function correctMissingReads(original: Awaited<ReturnType<typeof sessionFo
     original.project.root, snapshot, assignment, sources);
   if (missing.length) {
     await original.context.beforeTurn(original.session.sessionManager.getSessionFile());
-    await reportControllerReviewPhase("correcting");
+    await reportControllerReviewPhase("correcting", { milestone: assignment.milestoneId, activity: "source-read-correction" });
     await promptStorySpecialist(original.session,
       "READ-ONLY MILESTONE SOURCE-READ CORRECTION. The previous response omitted successful mandatory reads. " +
       "Use the read tool with each EXACT address below. skill:// addresses are stable pinned skills; " +
@@ -1083,6 +1107,39 @@ async function correctMissingReads(original: Awaited<ReturnType<typeof sessionFo
     lastText(original.session);
   }
   verifyReads(original.session.messages.slice(start), original.project.root, snapshot, assignment, sources);
+}
+
+async function correctMilestoneContract<T>(original: Awaited<ReturnType<typeof sessionFor>>,
+  job: JobStartResult, assignment: EventAssignment, role: "planner" | "reviewer" | "diagnostic",
+  parse: (raw: string) => T, guidance: string, round?: number) {
+  const session = original.session;
+  const responseOrdinal = session.messages.filter(m => m.role === "assistant" && m.stopReason === "stop").length;
+  let failuresForActivity: ResponseContractFailure[] = [];
+  return recoverResponseContract({
+    session, contract: "milestone-blueprint." + role + ".v1",
+    receiptFile: join(job.stateDir, "milestone-protocol", session.sessionId + "-" + responseOrdinal + ".json"),
+    validate: raw => {
+      try { parse(raw); return []; }
+      catch (error) {
+        const failure: ResponseContractFailure = error instanceof MilestoneContractError
+          ? { path: error.path, expected: error.expected }
+          : { path: "$", expected: error instanceof Error ? error.message : "exact source-bound JSON" };
+        failuresForActivity = [failure];
+        return failuresForActivity;
+      }
+    },
+    parse,
+    beforeCorrection: async () => {
+      await original.context.beforeTurn(session.sessionManager.getSessionFile());
+      await reportControllerReviewPhase("correcting", { milestone: assignment.milestoneId,
+        activity: "protocol-correction", round, role,
+        reason: failuresForActivity.map(f => f.path + ": " + f.expected).join("; ").slice(0, 1000) });
+    },
+    feedback: failures => "READ-ONLY MILESTONE " + role.toUpperCase() + " FORMAT CORRECTION. " +
+      "Keep the original substantive analysis and source scope. No tools, edits, fabricated evidence or manufactured approval. " +
+      "Return ONE complete exact JSON response. Validation errors: " + JSON.stringify(failures) + "\n" + guidance,
+    prompt: feedback => promptStorySpecialist(session, feedback),
+  });
 }
 
 /** Safe read-only status for a paused or completed local plan. This is not approval. */
@@ -1419,37 +1476,16 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     }
     try {
       const start = writer.session.messages.length;
-      if (previousPhase === "revision") await reportControllerReviewPhase("correcting");
+      await reportControllerReviewPhase(previousPhase === "revision" ? "correcting" : "planning",
+        { milestone: assignment.milestoneId, activity: previousPhase === "revision" ? "substantive-correction" : "blueprint-planning", role: "planner", round: receipt.rounds.length });
       await promptStorySpecialist(writer.session, writer.context.contextNote +
         plannerPrompt(assignment, task, receipt.rounds.at(-1)));
       await correctMissingReads(writer, start, snapshot, assignment, correction?.sources);
-      let draft: MilestoneBlueprint;
-      try {
-        draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
-      } catch (error) {
-        // This is a strict response-contract correction, not a fresh
-        // planner or authority to edit the Story. The original invalid
-        // reply stays in the SAME read-only Pi conversation; a crash before
-        // a sealed draft remains ambiguous and is never replayed.
-        await writer.context.beforeTurn(writer.session.sessionManager.getSessionFile());
-        await reportControllerReviewPhase("correcting");
-        await promptStorySpecialist(writer.session,
-          "READ-ONLY MILESTONE BLUEPRINT PROTOCOL CORRECTION. The previous " +
-          "plan was rejected by the canonical schema verifier: " +
-          (error instanceof Error ? error.message : String(error)) +
-          ". Keep the same source Milestone, approved causal obligations and " +
-          "protected Character IDs. Re-read any missing pinned sources. " +
-          "Return ONE complete valid noveltea-milestone-blueprint/v1 JSON " +
-          "object with existing sourcePaths, ordered existing event dependencies, " +
-          "participants ONLY from " + JSON.stringify(assignment.characterIds) +
-          " (or [] if empty), evidence, routes and a Composition owner. " +
-          "Each Event's knowledge MUST be ONE nonempty STRING, NOT an array " +
-          "of fact transitions, an object or nested JSON. Summarize concrete " +
-          "Character knowledge and its limits in this single prose string. " +
-          "Do not write any Story file or start a new plan.");
-        verifyReads(writer.session.messages.slice(start), writer.project.root, snapshot, assignment, correction?.sources);
-        draft = parseMilestoneBlueprint(lastText(writer.session), assignment);
-      }
+      const draft = await correctMilestoneContract(writer, job, assignment, "planner",
+        raw => parseMilestoneBlueprint(raw, assignment),
+        "Return schema noveltea-milestone-blueprint/v1 with milestoneId " + assignment.milestoneId +
+        ", events (id, purpose, dependsOn, evidence, participants, knowledge, routes), downstream (owner, obligation). " +
+        "Preserve retained provisional Event IDs, source citations, and earlier Event dependencies. Knowledge is a string.", receipt.rounds.length);
       await writer.context.completed(writer.session.sessionManager.getSessionFile()!, writer.session.sessionId);
       receipt.writer = await seal(writer.session);
       receipt.draft = checkCandidate(draft);
@@ -1506,6 +1542,8 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       }
       const start = reviewer.session.messages.length;
       const reviewHistory = receipt.rounds.slice(receipt.reviewStart ?? 0);
+      await reportControllerReviewPhase("reviewing", { milestone: assignment.milestoneId,
+        activity: "blueprint-review", role: "reviewer", round: reviewHistory.length });
       await promptStorySpecialist(reviewer.session, reviewer.context.contextNote +
         (receipt.reviewerRole === "replacement" && !reviewHistory.length
           ? "FRESH INDEPENDENT REPLACEMENT REVIEWER. Previous negative verdicts and " +
@@ -1514,30 +1552,12 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
             "Your verdict must meet the full current v5 review contract. " : "") +
         reviewerPrompt(assignment, receipt.draft, reviewHistory, task, plan.contract));
       await correctMissingReads(reviewer, start, snapshot, assignment, correction?.sources);
-      const parseVerdict = () => {
-        const verdict = parseMilestoneBlueprintReview(lastText(reviewer.session), receipt.draft!,
-          assignment, reviewHistory);
-        if (verdict.schema !== "noveltea-milestone-blueprint-review/v5")
-          throw Error("New Milestone reviews require the v5 full-obligation, source-bound contract.");
-        return verdict;
-      };
-      let verdict: MilestoneBlueprintReview;
-      try {
-        verdict = parseVerdict();
-      } catch (error) {
-        await reviewer.context.beforeTurn(reviewer.session.sessionManager.getSessionFile());
-        await reportControllerReviewPhase("correcting");
-        await promptStorySpecialist(reviewer.session,
-          "INDEPENDENT READ-ONLY MILESTONE REVIEW FORMAT CORRECTION. The " +
-          "previous verdict failed the strict schema/provenance verifier: " +
-          (error instanceof Error ? error.message : String(error)) +
-          ". Keep all substantive findings and previous-round assessments; " +
-          "do not manufacture a pass. Re-read pinned sources if missing. Return " +
-          "ONE complete v5 review JSON object with source-linked findings and " +
-          "a prior assessment for each sealed historical blocker.");
-        verifyReads(reviewer.session.messages.slice(start), reviewer.project.root, snapshot, assignment, correction?.sources);
-        verdict = parseVerdict();
-      }
+      const verdict = await correctMilestoneContract(reviewer, job, assignment, "reviewer", raw => {
+        const parsed = parseMilestoneBlueprintReview(raw, receipt.draft!, assignment, reviewHistory);
+        if (parsed.schema !== "noveltea-milestone-blueprint-review/v5")
+          invalid("schema", "expected noveltea-milestone-blueprint-review/v5");
+        return parsed;
+      }, milestoneReviewContract(receipt.draft!, assignment, reviewHistory), reviewHistory.length);
       await reviewer.context.completed(reviewer.session.sessionManager.getSessionFile()!, reviewer.session.sessionId);
       receipt.reviewer = await seal(reviewer.session);
       const previousRound = reviewHistory.at(-1);
@@ -1546,6 +1566,9 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
             !milestonePassCorrections(receipt.draft, reviewHistory, verdict)))
         throw Error("Milestone reviewer cannot approve without repairing the exact rejected material field.");
       await settleReview(verdict, receipt.draft);
+      await reportControllerReviewPhase("reviewed", { milestone: assignment.milestoneId, activity: "blueprint-review",
+        role: "reviewer", round: reviewHistory.length, verdict: verdict.status, findings: verdict.findings.length,
+        reason: verdict.findings.map(f => f.reason).join("; ").slice(0, 1000) });
     } finally { reviewer.session.dispose(); }
   };
   const assessNegative = async (round: number) => {

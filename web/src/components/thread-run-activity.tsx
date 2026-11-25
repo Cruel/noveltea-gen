@@ -55,7 +55,7 @@ export function ActivityRow({ step, onHover, onPin, pinned = false }: {
     <div className="min-w-0"><TraceTitle>{activityTitle(step)}</TraceTitle>
       {step.kind === 'report' && <TraceDescription>
         {step.detail?.reviewPhase
-          ? 'Controller-confirmed review phase; no new verdict or verified Story files claimed'
+          ? 'Controller-confirmed Blueprint or review activity; no new verified Story files claimed'
           : 'Studio-proposed, unverified' + (step.detail?.proposedPaths?.length
               ? ' · ' + step.detail.proposedPaths.join(', ') : '')}
       </TraceDescription>}

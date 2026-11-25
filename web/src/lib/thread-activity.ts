@@ -44,7 +44,7 @@ export function projectActivity(events: readonly ProgressEvent[], runStatus?: st
     } else if (event.kind === 'working' &&
       event.detail?.source === 'controller' &&
       event.detail.outcome === 'unknown-failure-assessing') {
-      steps.push({ id: event.id, kind: 'report', stage: 'review', milestone: null,
+      steps.push({ id: event.id, kind: 'report', stage: 'review', milestone: event.milestone,
         state: 'proposed', files: [], outcome: null, at: event.createdAt,
         detail: event.detail })
     } else if (event.kind === 'working' && event.detail?.approvalRevision) {
@@ -110,6 +110,10 @@ export function activityTitle(step: ActivityStep): string {
     if (step.detail?.source === 'controller' &&
         step.detail.outcome === 'unknown-failure-assessing')
       return 'Read-only unfamiliar-failure assessment in progress'
+    if (step.detail?.reviewPhase === 'planning') return 'Planning Milestone Blueprint'
+    if (step.detail?.reviewPhase === 'reviewing') return 'Independent Milestone Blueprint review in progress'
+    if (step.detail?.reviewPhase === 'reviewed') return step.detail.reviewActivity?.verdict === 'pass'
+      ? 'Milestone Blueprint approved' : 'Milestone Blueprint requires revision'
     if (step.detail?.reviewPhase === 'diagnosing')
       return 'Independent diagnostic review in progress'
     if (step.detail?.reviewPhase === 'correcting')

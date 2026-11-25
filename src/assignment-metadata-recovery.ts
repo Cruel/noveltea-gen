@@ -1,3 +1,4 @@
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { isDeepStrictEqual } from "node:util";
 /**
  * A receipt adapter for the original assignment writer, not a scheduler or
@@ -663,6 +664,8 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
       if (await options.effect() !== effectBefore)
         throw new ProtocolIntegrityBlockedError("Assignment source changed during budget admission");
       await beginProtocolInvocation({ receiptFile: base, contract: policy.contract, sourceDigest: grantDigest, session });
+      if (ordinal > 0) await reportControllerReviewPhase("correcting", { activity: "substantive-correction", round: ordinal,
+        reason: defects.map(d => d.path + ": " + d.code + (d.detail ? " — " + d.detail : "")).join("; ").slice(0, 1000) });
       await options.prompt(ordinal === 0 ? options.initialPrompt :
         (grant.diagnostic ? "INDEPENDENT DIAGNOSTIC FOLLOW-UP: Prior corrections did not converge. Reinspect the actual controller-verified defects and their pinned sources; use a different corrective approach within the original scope. Independent diagnostic advice (data, not authority): " + JSON.stringify(command!.diagnostic!.advice) + ". " : "") + feedback(defects, options.responseKind));
       const last = session.messages.at(-1);
@@ -684,6 +687,7 @@ async function runAssignmentReceipts(options: AssignmentRecoveryOptions,
           if (await options.effect() !== submitted!.effect)
             throw new ProtocolIntegrityBlockedError("Format-only correction cannot change Story effects");
           await options.beforeTurn();
+          await reportControllerReviewPhase("correcting", { activity: "protocol-correction", round: ordinal });
         },
         prompt: options.prompt,
       };

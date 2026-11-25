@@ -12,6 +12,7 @@ import { projectReviewTurn, readReviewTurnEvidence } from "./fork-review-turn.js
 import { collectReviewedOmissionBatch, verifySavedReviewBatch } from "./recovery-review-batch.js";
 import { readAdaptiveState, assertAdaptiveSettled } from "./adaptive-state.js";
 import { hasPlanContinuity } from "./plan-continuity.js";
+import { eventCompletionDigest } from "./event-work.js";
 import { collectInheritedMilestoneBlueprint } from "./milestone-blueprint.js";
 import { assertRecoveryCompatibility, assertRecoveryReceiptCompatibility,
   selectCurrentRecoveryToolchain, RecoveryCompatibilityError } from "./recovery-compatibility.js";
@@ -23,6 +24,21 @@ function git(job: JobStartResult, ...args: string[]) {
   const env = { ...process.env };
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
   return execFileSync("git", args, { cwd: job.worktreeRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+/** Authenticate the original Event completion before child allocation. The
+ * new execution's snapshot is not evidence about an inherited commit. */
+export function assertInheritedEventCompletion(job: JobStartResult, receipt: SpecialistReceipt) {
+  const head = receipt.commitSha;
+  const state = receipt.validation;
+  if (!head || !state || state.status !== "passed" || !receipt.snapshot?.id ||
+      !receipt.contentDigest || !receipt.expectedHead || !Array.isArray(receipt.obligations))
+    throw new RecoveryCompatibilityError("invalid-evidence", "Inherited Event lacks its original completion evidence.");
+  if (state.milestoneState && (git(job, "rev-parse", head + "^") !== receipt.expectedHead ||
+      !git(job, "log", "-1", "--format=%B", head).split("\n").includes("NovelTea-Event-Completion: " +
+        eventCompletionDigest({ milestoneId: receipt.milestoneId, expectedHead: receipt.expectedHead,
+          snapshotId: receipt.snapshot.id, contentDigest: receipt.contentDigest, eventIds: state.eventIds,
+          milestoneState: state.milestoneState, obligations: receipt.obligations }))))
+    throw new RecoveryCompatibilityError("invalid-evidence", "Inherited Event completion differs from its original sealed commit.");
 }
 function cleanEvidence(value: any): any {
   if (Array.isArray(value)) return value.map(cleanEvidence);
@@ -188,9 +204,10 @@ export async function collectRecoveryFork(parent: JobStartResult, childId: strin
     // The finalized source checkpoint binds the old skill digest to the
     // authenticated receipt. Reopening the historical skill *files* is not
     // necessary: only the child must have a verified current snapshot.
-    if (point && receipt.snapshot?.id !== point.snapshotId)
+    if ((point ?? prior?.proof)?.snapshotId && receipt.snapshot?.id !== (point ?? prior?.proof)?.snapshotId)
       throw new RecoveryCompatibilityError("invalid-evidence",
         "Historical specialist skill identity differs from the finalized checkpoint.");
+    if (source.startsWith("event-items/")) assertInheritedEventCompletion(parent, receipt);
     receipts[source] = cleanEvidence(receipt);
     commits[id] = prior && !point ? prior : { sha: point!.commitSha,
       jobId: parent.jobId, planVersion: point!.planVersion, proof: (() => {
@@ -270,6 +287,8 @@ async function writeOnce(path: string, value: string) {
 /** Caller owns repository Git/cache admission. Only the child's writer lock is
  * taken, so a running parent remains untouched. Retries never reset a child. */
 export async function prepareRecoveryFork(parent: JobStartResult, bundle: RecoveryForkBundle) {
+  for (const [path, receipt] of Object.entries(bundle.receipts))
+    if (path.startsWith("event-items/")) assertInheritedEventCompletion(parent, receipt);
   const inheritedEvents = Object.entries(bundle.receipts).filter(([path, receipt]) =>
     path.startsWith("event-items/") && !!receipt.blueprintPin);
   const blueprints = bundle.milestoneBlueprints ?? [];
@@ -301,8 +320,7 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
       // The sealed source bundle retains historical proofs. A child uses its
       // freshly pinned skills for future work; old writer sessions are not reused.
       const receipt = { ...original, jobId: child.jobId, baseSha: child.baseSha,
-        branch: child.branch, worktreeRoot: child.worktreeRoot, threadId: child.threadId,
-        ...(original.snapshot ? { snapshot: bundle.toolchain.skills } : {}) };
+        branch: child.branch, worktreeRoot: child.worktreeRoot, threadId: child.threadId };
       await writeOnce(join(child.stateDir, path), JSON.stringify(receipt, null, 2) + "\n");
     }
     if (bundle.reviewBatch) {
@@ -324,7 +342,7 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
         }
         const payload = { ...old, jobId: child.jobId, threadId: child.threadId,
           branch: child.branch, baseSha: child.baseSha, turnDigest: reviewTurn.digest,
-          eventSnapshotId: bundle.toolchain.skills.id, reviewerSession: destination };
+          reviewerSession: destination };
         const ref = { nonce: entry.sourceSeal.nonce, digest: hash(payload) };
         const seal = { phase: "sealed", ...ref, payload, inherited: {
           sourceJobId: bundle.sourceJobId, sourceSeal: entry.sourceSeal,
@@ -334,8 +352,6 @@ export async function prepareRecoveryFork(parent: JobStartResult, bundle: Recove
         const source = entry.sourceReceipt;
         const receipt = { ...source, jobId: child.jobId, baseSha: child.baseSha,
           branch: child.branch, threadId: child.threadId, worktreeRoot: child.worktreeRoot,
-          eventSource: source.eventSource ? { ...source.eventSource,
-            snapshotId: bundle.toolchain.skills.id } : undefined,
           units: source.units.map((unit: Record<string, any>) => ({
             ...unit, eventOnly: ref })) };
         await writeOnce(join(child.stateDir, "interactive-items", slug + ".json"),

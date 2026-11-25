@@ -183,7 +183,7 @@ async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
         p.reviewHead !== original.sourcePayload.reviewHead ||
         p.planDigest !== original.sourcePayload.planDigest ||
         p.planVersion !== original.sourcePayload.planVersion ||
-        p.eventSnapshotId !== fork?.toolchain.skills.id ||
+        p.eventSnapshotId !== original.sourcePayload.eventSnapshotId ||
         p.reviewerSnapshotId !== original.sourcePayload.reviewerSnapshotId ||
         p.reviewerSessionSha256 !== original.sourcePayload.reviewerSessionSha256 ||
         JSON.stringify(p.sourceHashes) !== JSON.stringify(original.sourcePayload.sourceHashes) ||

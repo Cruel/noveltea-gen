@@ -8,7 +8,7 @@ import type { JobStartResult } from '../../../src/job'
 import { generationStages } from '../../../src/generation'
 import type { GenerationStage } from '../../../src/generation-plan'
 import type { PiWorkStatus } from '../../../src/pi-work-status'
-import type { ControllerReviewPhase } from '../../../src/controller-review-phase'
+import type { ControllerReviewPhase, ControllerReviewActivity } from '../../../src/controller-review-phase'
 import { approvalRevisionSeverity, inspectApprovalRevisionIncidents,
   type ApprovalRevisionCause, type ApprovalRevisionSeverity } from '../../../src/repair-ledger'
 
@@ -29,6 +29,7 @@ export type ProgressDetail = {
   summary?: string
   proposedPaths?: string[]
   reviewPhase?: ControllerReviewPhase
+  reviewActivity?: ControllerReviewActivity
   /** Authenticated operator metadata, never Pi-authored Chat text. */
   approvalRevision?: { id: string;
     /** Story-wide Architecture changes are not Milestone IDs. */
@@ -47,6 +48,7 @@ type EventInput = {
   changedRecordIds?: string[]; validation?: ProgressDetail['validation']; diagnostics?: number
   piStatus?: PiWorkStatus
   reviewPhase?: ControllerReviewPhase
+  reviewActivity?: ControllerReviewActivity
   approvalRevision?: ProgressDetail['approvalRevision']
 }
 
@@ -63,13 +65,21 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
   if (input.milestone && !canonicalMilestone(input.milestone)) throw new Error('Invalid progress milestone')
   if (input.piStatus && (input.kind !== 'working' || input.files?.length || input.headSha ||
       input.outcome || input.specialist || input.status || input.changedRecordIds?.length ||
-      input.validation || input.diagnostics !== undefined || input.reviewPhase || input.approvalRevision))
+      input.validation || input.diagnostics !== undefined || input.reviewPhase || input.reviewActivity || input.approvalRevision))
     throw new Error('Model status cannot claim controller evidence')
+  if (input.reviewActivity && (!input.reviewPhase || input.kind !== 'working' || input.stage !== 'review' ||
+      input.reviewActivity.milestone && !canonicalMilestone(input.reviewActivity.milestone) ||
+      !['blueprint-planning', 'blueprint-review', 'blueprint-diagnosis', 'protocol-correction', 'source-read-correction', 'substantive-correction'].includes(input.reviewActivity.activity) ||
+      input.reviewActivity.round !== undefined && (!Number.isSafeInteger(input.reviewActivity.round) || input.reviewActivity.round < 0) ||
+      input.reviewActivity.findings !== undefined && (!Number.isSafeInteger(input.reviewActivity.findings) || input.reviewActivity.findings < 0) ||
+      input.reviewActivity.verdict && !['pass', 'revise'].includes(input.reviewActivity.verdict) ||
+      (input.reviewActivity.reason?.length ?? 0) > 1000))
+    throw new Error('Invalid trusted review activity')
   if (input.reviewPhase && (input.kind !== 'working' || input.stage !== 'review' ||
-      !['diagnosing', 'correcting'].includes(input.reviewPhase)))
+      !['diagnosing', 'correcting', 'planning', 'reviewing', 'reviewed'].includes(input.reviewPhase)))
     throw new Error('Invalid trusted review phase')
   if (input.approvalRevision && (input.kind !== 'working' || input.stage !== 'review' ||
-      input.piStatus || input.reviewPhase || input.outcome || input.files?.length ||
+      input.piStatus || input.reviewPhase || input.reviewActivity || input.outcome || input.files?.length ||
       !/^[a-f0-9]{64}$/.test(input.approvalRevision.id) ||
       !(input.approvalRevision.scope === 'story' && input.approvalRevision.milestoneId === null ||
         input.approvalRevision.scope === 'milestone' &&
@@ -101,6 +111,7 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
     ...(input.headSha ? { headSha: input.headSha } : {}),
     ...(input.outcome ? { outcome: input.outcome.slice(0, 160) } : {}),
     ...(input.reviewPhase ? { reviewPhase: input.reviewPhase } : {}),
+    ...(input.reviewActivity ? { reviewActivity: input.reviewActivity } : {}),
     ...(input.approvalRevision ? { approvalRevision: input.approvalRevision } : {}),
     ...(input.kind === 'verified' && input.stage === 'review' &&
       (input.outcome === 'complete-in-scope' || input.outcome === 'incomplete' ||

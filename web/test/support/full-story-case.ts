@@ -8,7 +8,7 @@ import { storyChatDiscoveryRequest } from '../../src/lib/story-chat-discovery.se
 import { authorizedStoryJob } from '../../src/lib/fixture-jobs.server'
 import { authorInteractionRequest } from '../../src/lib/author-interactions.server'
 import { generationControlRequest } from '../../src/lib/generation-controls.server'
-import { listGenerationEvents } from '../../src/lib/generation-progress.server'
+import { listGenerationEvents, type ProgressEvent } from '../../src/lib/generation-progress.server'
 import { queueRecord } from '../../src/lib/generation-queue.server'
 import type { StudioAuth } from '../../src/lib/auth'
 import type { TestStudioDatabase } from './studio-database'
@@ -229,6 +229,28 @@ export async function approveLiveNewStoryChat(args: ChatCase, proposed: Discover
   return job
 }
 
+/** Log each durable controller event once; Pi-authored activity is not a
+ * verification or correction admission. Keep private model transcripts out. */
+export function formatCertificationProgress(event: ProgressEvent, active?: string) {
+  const detail = event.detail
+  if (detail?.source === 'pi' || event.kind === 'started') return null
+  const label = event.milestone ?? detail?.reviewActivity?.milestone ?? active ?? event.stage ?? 'story'
+  if (event.kind === 'verified')
+    return '[' + label + '] verified ' + event.stage + ': ' + (detail?.outcome ?? 'verified') +
+      (detail?.headSha ? ' @ ' + detail.headSha : '')
+  if (event.kind === 'working') {
+    const activity = detail?.reviewActivity
+    const phase = detail?.reviewPhase
+    if (activity) return '[' + label + '] ' + activity.activity + (activity.role ? ' (' + activity.role + ')' : '') +
+      (activity.round !== undefined ? ' round ' + activity.round : '') +
+      (activity.verdict ? ': ' + activity.verdict + ' (' + (activity.findings ?? 0) + ' findings)' : '') +
+      (activity.reason ? ' — ' + activity.reason : '')
+    if (phase) return '[' + label + '] ' + phase
+    return '[' + label + '] ' + (event.stage ?? 'working') + (detail?.outcome ? ': ' + detail.outcome : '')
+  }
+  return '[' + label + '] ' + event.kind + (event.status ? ': ' + event.status : '')
+}
+
 /** Full-Story variant of the existing real-Pi integration runner. No new
  * controller, agent, auth provider, Docker service or harness is constructed. */
 export async function verifyLiveNewStory(
@@ -242,23 +264,38 @@ export async function verifyLiveNewStory(
   const { auth, store, headers, baseURL, ownerId, jobId, mode, job, sourceSha, root, skills } = args
   const deadline = Date.now() + fullStoryTimeouts(process.env.NT_TEST_WEB_PI_TIMEOUT_MINUTES).monitorMs
   let terminal = '',
-    finishedCount = 0,
+    cursor = 0,
     authorChoices = 0,
-    priorStage = ''
+    active: string | undefined
+  const checkpointShas = new Set<string>()
   while (Date.now() < deadline) {
-    const events = await listGenerationEvents(store, ownerId, jobId, 0)
-    const working = events.filter((event) => event.kind === 'working').at(-1)
-    if (working?.stage && working.stage !== priorStage) {
-      priorStage = working.stage
-      console.log('Live ' + mode + ' stage: ' + priorStage)
+    const events: ProgressEvent[] = []
+    for (;;) {
+      const page = await listGenerationEvents(store, ownerId, jobId, cursor)
+      if (!page.length) break
+      events.push(...page)
+      cursor = page.at(-1)!.id
+      if (page.length < 100) break
+    }
+    for (const event of events) {
+      if (event.kind === 'working' && event.stage !== 'review' && event.detail?.source !== 'pi')
+        active = event.milestone ?? event.stage ?? active
+      const line = formatCertificationProgress(event, active)
+      if (line) console.log('Live ' + mode + ' ' + line)
+    }
+    if (events.some(event => event.kind === 'verified')) {
+      for (const point of await inspectRecoveryCheckpoints(job).catch(() => [])) {
+        if (!point.eligible || checkpointShas.has(point.commitSha)) continue
+        checkpointShas.add(point.commitSha)
+        console.log('Live ' + mode + ' checkpoint: ' + point.workItem + ' @ ' + point.commitSha)
+      }
     }
     if (events.some((event) => event.kind === 'interrupted')) {
       terminal = 'interrupted'
       break
     }
     const finished = events.filter((event) => event.kind === 'finished')
-    if (finished.length > finishedCount) {
-      finishedCount = finished.length
+    if (finished.length) {
       terminal = finished.at(-1)?.status ?? 'unknown'
       if (['completed', 'blocked', 'cancelled'].includes(terminal)) break
       if (terminal === 'paused') {
@@ -457,7 +494,10 @@ export async function verifyLiveNewStory(
   if (!existsSync(join(root, 'certification-observation.json')))
     writeFileSync(join(root, 'certification-observation.json'), JSON.stringify(evidence, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 })
-  const failure = certificationFailureSummary(evidence, join(attempts, 'observation.json'))
+  const inheritedPoint = fork?.checkpoint
+  const failure = certificationFailureSummary({ ...evidence, recoveryCheckpoints: [
+    ...(inheritedPoint ? [{ ...inheritedPoint, eligible: true }] : []), ...recoveryPoints,
+  ] }, join(attempts, 'observation.json'))
   console.log('Live ' + mode + ' final:', JSON.stringify({ mode, jobId, finalHead,
     terminal, nativeValidation: validationStatus,
     eligibleCheckpoints: recoveryPoints.filter(point => point.eligible).length,

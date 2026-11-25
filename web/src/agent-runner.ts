@@ -295,8 +295,8 @@ export async function runPersistedGeneration(store: StudioDatabase, item: QueueR
   try {
     await withActiveExecutionTime(job, async () => {
       const executeWithStatus = () => withControllerReviewPhase(
-        phase => appendGenerationEvent(store, item.ownerId, row.id, {
-          kind: 'working', stage: 'review', reviewPhase: phase, turnId }),
+        (phase, detail) => appendGenerationEvent(store, item.ownerId, row.id, {
+          kind: 'working', stage: 'review', reviewPhase: phase, reviewActivity: detail, milestone: detail?.milestone, turnId }),
         () => withSteeringBoundary({
         receipts: async source => {
           if (!ownerThreadId || source.jobId !== row.id)

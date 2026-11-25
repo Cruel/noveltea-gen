@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { certificationFailureSummary } from './support/full-story-case'
+import { certificationFailureSummary, formatCertificationProgress } from './support/full-story-case'
 
 test('live certification identifies the actual terminal assignment and verified successor checkpoint', () => {
   const checkpoint = { eligible: true, commitSha: 'a'.repeat(40),
@@ -24,4 +24,18 @@ test('live certification identifies the actual terminal assignment and verified 
   assert.equal(summary.latestVerifiedCheckpoint?.commitSha, checkpoint.commitSha)
   assert.equal(summary.failedAssignments['event:milestone.accounts'], 'Missing skill read')
   assert.equal(summary.observation, '/private/observation.json')
+})
+
+test('certification progress distinguishes correction, verdict and verified commit', () => {
+  const base = { id: 101, kind: 'working' as const, stage: 'review' as const, milestone: 'milestone.accounts',
+    files: [], status: null, createdAt: 'now' }
+  assert.match(formatCertificationProgress({ ...base, detail: { source: 'controller', reviewPhase: 'correcting',
+    reviewActivity: { activity: 'protocol-correction', round: 1, role: 'reviewer', reason: 'prior[0].round must be 0' } } })!,
+    /milestone.accounts.*protocol-correction.*round 1.*prior\[0\]/)
+  assert.match(formatCertificationProgress({ ...base, detail: { source: 'controller', reviewPhase: 'reviewed',
+    reviewActivity: { activity: 'blueprint-review', verdict: 'revise', round: 0, findings: 2 } } })!,
+    /blueprint-review.*round 0: revise.*2 findings/)
+  assert.match(formatCertificationProgress({ ...base, kind: 'verified', detail: { source: 'controller', headSha: 'a'.repeat(40) } })!,
+    /verified review.*aaaaaaaa/)
+  assert.equal(formatCertificationProgress({ ...base, detail: { source: 'pi', summary: 'fake progress' } }), null)
 })

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHmac, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -275,7 +275,23 @@ test('authenticated recovery forks retain verified work through Composition and 
       return { job, turn, points: await inspectRecoveryCheckpoints(job),
         commits: git(job.worktreeRoot, 'log', '--format=%B', point.commitSha + '..HEAD') }
     }
+    // Changing the local skills checkout must not alter a sealed inherited Event.
+    const updatedSkills = join(root, 'updated-skills')
+    mkdirSync(updatedSkills)
+    cpSync(join(skills, 'skills'), join(updatedSkills, 'skills'), { recursive: true })
+    const updatedSkill = join(updatedSkills, 'skills', 'nt-event-design', 'SKILL.md')
+    writeFileSync(updatedSkill, readFileSync(updatedSkill, 'utf8') + '\n\nA test-only refinement to Event craft.\n')
+    git(updatedSkills, 'init', '-q'); git(updatedSkills, 'config', 'user.name', 'Test'); git(updatedSkills, 'config', 'user.email', 'test@example.test')
+    git(updatedSkills, 'add', '.'); git(updatedSkills, 'commit', '-qm', 'Updated test skills')
+    process.env.NT_STUDIO_SKILLS_SOURCE = updatedSkills
+    const originalEvent = JSON.parse(readFileSync(join(grand.stateDir, 'event-items/disclosure.json'), 'utf8'))
     const fourth = await runFork(grand, event, 'interactive', 'interactive-puzzle-disclosure')
+    const inheritedEvent = JSON.parse(readFileSync(join(fourth.job.stateDir, 'event-items/disclosure.json'), 'utf8'))
+    assert.equal(inheritedEvent.snapshot.id, originalEvent.snapshot.id)
+    assert.notEqual(readRecoveryFork(fourth.job)?.toolchain.skills.id, originalEvent.snapshot.id)
+    const authoredInteractive = JSON.parse(readFileSync(join(fourth.job.stateDir, 'interactive-items/disclosure.json'), 'utf8'))
+    assert.equal(authoredInteractive.eventSource.snapshotId, originalEvent.snapshot.id)
+    assert.equal(authoredInteractive.snapshot.id, readRecoveryFork(fourth.job)?.toolchain.skills.id)
     const choice = fourth.points.find(p => p.eligible && p.workItem === 'interactive-choice-disclosure')!
     const puzzle = fourth.points.find(p => p.eligible && p.workItem === 'interactive-puzzle-disclosure')!
     assert.ok(choice && puzzle)

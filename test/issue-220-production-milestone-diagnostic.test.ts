@@ -94,6 +94,8 @@ function scripted(
   let reviewerRound = 0;
   let writerRound = 0;
   let pendingReadRole: "writer" | "reviewer" | null = null;
+  let pendingProtocol: ReturnType<typeof productiveReview> | undefined;
+  let protocolCorrected = false;
   const omitted = new Set<string>();
   const correctedKnowledge = "The guard can verify only the dated gate register entry";
   const falseOwner = "No Choice or Puzzle is required for this current Milestone";
@@ -145,20 +147,30 @@ function scripted(
     for (const entry of ctx.messages) {
       if (entry.role !== "system") continue;
       for (const tool of entry.toolsAdded ?? []) tools.add(tool.name);
-      for (const name of entry.toolsRemoved ?? []) tools.delete(name);
+      for (const removed of entry.toolsRemoved ?? []) tools.delete(removed.name);
     }
     calls.push({ prompt, lastRole, tools: [...tools] });
     const isDiagnostic = prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC");
     const isReplacement = prompt.includes("FRESH INDEPENDENT REPLACEMENT REVIEWER");
     const isCorrection = prompt.includes("READ-ONLY MILESTONE SOURCE-READ CORRECTION");
+    const isProtocol = prompt.includes("READ-ONLY MILESTONE REVIEWER FORMAT CORRECTION");
     const isReview = prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") || isCorrection && pendingReadRole === "reviewer";
     const isWriter = prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") || isCorrection && pendingReadRole === "writer";
 
-    if (!isDiagnostic && !isReview && !isWriter)
+    if (!isDiagnostic && !isReview && !isWriter && !isProtocol)
       throw Error("Unexpected Milestone Pi prompt: " + prompt.slice(0, 200));
     let content: AssistantMessage["content"];
     let reason: "stop" | "toolUse" = "stop";
-    if (lastRole !== "toolResult") {
+    if (isProtocol) {
+      assert.ok(pendingProtocol);
+      assert.match(prompt, /ZERO-BASED/);
+      assert.match(prompt, /prior\[0\]/);
+      assert.match(prompt, /round.*0.*findingIndex.*0/);
+      assert.equal(tools.size, 0, "format correction must revoke all tools");
+      content = [{ type: "text", text: JSON.stringify(pendingProtocol) }];
+      pendingProtocol = undefined;
+      protocolCorrected = true;
+    } else if (lastRole !== "toolResult") {
       const role = isReview ? "reviewer" : "writer";
       if (isCorrection) {
         assert.ok(pendingReadRole);
@@ -194,7 +206,12 @@ function scripted(
       ];
     } else if (isReview) {
       if (productive) {
-        content = [{ type: "text", text: JSON.stringify(productiveReview(reviewerRound++)) }];
+        const reply = productiveReview(reviewerRound++);
+        if (omitReads && reply.prior.length && !protocolCorrected) {
+          pendingProtocol = reply;
+          content = [{ type: "text", text: JSON.stringify({ ...reply,
+            prior: reply.prior.map(p => ({ ...p, round: p.round + 1 })) }) }];
+        } else content = [{ type: "text", text: JSON.stringify(reply) }];
       } else if (downstreamCorrection) {
         content = [
           {
@@ -692,6 +709,7 @@ The guard finds a dated register, but no evidence of a prior visit.
     assert.equal(productiveCalls.filter(c => c.prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") && c.lastRole === "toolResult").length, 4);
     assert.equal(productiveCalls.filter(c => c.prompt.includes("READ-ONLY MILESTONE SOURCE-READ CORRECTION") && c.lastRole === "toolResult").length, 2);
     assert.ok(materialReceipt.writer.id !== materialReceipt.reviewer.id);
+    assert.equal(productiveCalls.filter(c => c.prompt.includes("READ-ONLY MILESTONE REVIEWER FORMAT CORRECTION")).length, 1);
     assert.equal(productiveCalls.filter(c => c.prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") && c.lastRole === "toolResult").length, 4);
 
     // A CONTINUE diagnosis must retain the exact original reviewer and writer

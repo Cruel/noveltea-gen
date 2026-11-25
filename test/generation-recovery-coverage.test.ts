@@ -255,7 +255,18 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["event-work.ts", "acceptance", "61d29cb62f670150f8539628ba8e844cc2ca915c2757ba1debf86c2fdfd6b37f"],
     ["milestone-blueprint.ts", "missingMilestoneBlueprintReads", "5b32d2429d59831900720d2a45fb2dea743607f5d54d450937085e96af7d594c"],
     ["milestone-blueprint.ts", "verifyReads", "9b70066d04c530a9146012db8713a8a1db04897c1241432bebf96a9a7cf69a49"],
-    ["milestone-blueprint.ts", "correctMissingReads", "8595b3a165431ea1d4b56e58b52987da7c86cd99694177248fd99fedb40a122d"],
+    ["milestone-blueprint.ts", "milestoneReviewFindingIndex", "4da05f8e0fc5f78672bf28b4214a5393e842ae2cc118d94248f7fd767477e5ae"],
+    ["milestone-blueprint.ts", "milestoneReviewContract", "b27f89c0c1dc2be48ae083cfbc02239cbc7942229567e7968ae9741206d6e786"],
+    ["milestone-blueprint.ts", "parseMilestoneBlueprint", "e1801c6b0107304ef9c26be7fe7c545adf2e1a87d3dd327e8a8bf425842f7621"],
+    ["milestone-blueprint.ts", "parseMilestoneBlueprintReview", "aa0608eed28298743a58e06cb6a007b82b0dee4205b9176c7dee2c82859a7143"],
+    ["milestone-blueprint.ts", "runMilestoneDiagnosis", "0578cc6349eecb80a80d16b1f590b455017e135dbd9026309dbd0874d25235fd"],
+    ["milestone-blueprint.ts", "correctMilestoneContract", "bdc40bad8d30c61af2a264932568e18bc0ab22c01ebff70ba501021d69d832e5"],
+    ["milestone-blueprint.ts", "ensureMilestoneBlueprint", "28a57557a249420d9b87360eb96858cdac58c6dc701a1cbc00d04dfa904e03d1"],
+    ["recovery-fork.ts", "assertInheritedEventCompletion", "98898fb9673ae7b955d4f2d28a5cd9418c00c6bb493063fdc602112ee1a8f170"],
+    ["recovery-fork.ts", "collectRecoveryFork", "0baf75974c2e88a7f11ee796eadd99e639579f651f7ba41294428469194cfd18"],
+    ["recovery-fork.ts", "prepareRecoveryFork", "e58dd3b8fa55c8588d372c8eb394ba0d1ff3a407012f790b0440bf40cc1ede48"],
+    ["interactive-event-only.ts", "readEventOnlyOmission", "0ac7ca3d392e935c0b77cf5596c3d5f83a3e585f72efd30c77de473cf1a68b54"],
+    ["milestone-blueprint.ts", "correctMissingReads", "d08aa56b1d1821f5ff6c38c26e3d6201cc0879ceca0bbd6c0a48281eeabeee91"],
     ["event-work.ts", "inspectEventFailure", "49b7b69ab1e0fd81d788b3afb74a864a4195c148a2cf2d5f08fd85c6bedc0fd6"],
     ["interactive-work.ts", "inspectInteractiveFailure", "265994bf883e4ad5d39f772c0dbd5cd1d4a7c1b0de19864ce6ca9f026e0ea5b0"],
     ["character-world.ts", "inspectCharacterWorldFailure", "5e357bd9e7cc39a609641af9dcd8ba08aa5ecf19ee25a5f53d5e67f85ef13740"],
@@ -295,7 +306,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["assignment-metadata-recovery.ts", "inspectSettledChain", "9ef5b424cc5cecaa981b47b2ee6b1f907a23b787a9b4fb3bdf5a85ac51cf8db7"],
     ["assignment-metadata-recovery.ts", "inspectAssignmentFailure", "67d438fdcf24e535d40514078d0c8e583aa5dee0c0a56b9b653a8c055f687170"],
     ["assignment-metadata-recovery.ts", "executeAssignmentRound", "5bf30230c0b323a25aa4e78454a8d135bbc7c9214c3e7b4ede556701f0a6f870"],
-    ["assignment-metadata-recovery.ts", "runAssignmentReceipts", "d6185578b906a3487a3b6c5720a724597aaff13fc53970b0faa8eda7b99fd775"],
+    ["assignment-metadata-recovery.ts", "runAssignmentReceipts", "9b1c994781ab5b1baa6d9b57fd428f6123fcbcb30dbdf5b0bd5fdde4223b03f1"],
     ["cross-domain-prerequisite-controller.ts", "preflightCompositionBoundary", "94902cc6798b2107653b0580fd56b1ce30cc756f9a0b7a9aee8032bcdb5273ea"],
     ["character-world.ts", "runCharacterWorldJob", "8bc5ba62d8035cca6db5bce5feb7149fba09c936c1701f44fa4511a201706e23"],
     ["character-world.ts", "invocationSource", "203ae344e2447dc4efef389cb44649b679f023b641f7fe861ee1ec98908ac04e"],
@@ -849,7 +860,7 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/agent-runner.ts",
       "runPersistedGeneration",
-      "f359e0ef11f54d06e88b00e86147ff6dcbfd627fc755b3e1d548bf9354196f3b"
+      "6f641f43838939359e1082b0a59f4f88ed79596af0f8339f3bade18992e43c59"
     ],
     [
       "web/src/lib/generation-controls.server.ts",

@@ -381,3 +381,22 @@ test("#227 prior Event-field findings remain verifiable in v5 and v4 seals remai
   assert.equal(parseMilestoneBlueprintReview(old, draft, assignment, [], "sealed-replay").status, "pass");
   assert.throws(() => parseMilestoneBlueprintReview(review("pass"), draft, assignment, previous), /prior/i);
 });
+
+test("R14 live Milestone review failures identify exact zero-based identities and allowed fields", () => {
+  const finding = { ...meta, eventId: draft.events[0]!.id, evidence: {
+    field: "purpose", quote: draft.events[0]!.purpose, repair: "replace" } };
+  const prior = history(draft, finding);
+  const proposed = JSON.parse(passProof({ kind: "removed", eventId: draft.events[0]!.id, field: "purpose", before: draft.events[0]!.purpose }));
+  proposed.prior[0].round = 1;
+  assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify(proposed), draft, assignment, prior),
+    /prior\[0\].*ZERO-BASED.*"round":0,"findingIndex":0/);
+  const invalidField = { ...finding, evidence: { ...finding.evidence, field: "consequences" } };
+  assert.throws(() => parseMilestoneBlueprintReview(review("revise", [invalidField]), draft, assignment),
+    /findings\[0\]\.evidence\.field.*purpose, knowledge, dependsOn, participants, evidence, routes/);
+  assert.throws(() => parseMilestoneBlueprintReview(review("revise", [{ ...finding, eventId: "event.not-provisional" }]), draft, assignment),
+    /findings\[0\]\.eventId.*exact current provisional Event ID/);
+  proposed.prior[0].round = 0;
+  proposed.prior[0].evidence.eventId = "renamed-event";
+  assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify(proposed), draft, assignment, prior),
+    /prior\[0\].*original target\/Event ID/);
+});
