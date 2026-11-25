@@ -155,7 +155,10 @@ jobs:
           - { label: generation-4-of-6, suite: generation, shard: "4/6", certify: false }
           - { label: generation-5-of-6, suite: generation, shard: "5/6", certify: false }
           - { label: generation-6-of-6, suite: generation, shard: "6/6", certify: false }
-          - { label: studio, suite: studio, shard: "", certify: false }
+          - { label: studio-1-of-4, suite: studio, shard: "1/4", certify: false }
+          - { label: studio-2-of-4, suite: studio, shard: "2/4", certify: false }
+          - { label: studio-3-of-4, suite: studio, shard: "3/4", certify: false }
+          - { label: studio-4-of-4, suite: studio, shard: "4/4", certify: false }
           - { label: integrated-recovery, suite: integrated-recovery, shard: "", certify: false }
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -258,7 +261,7 @@ jobs:
           echo "Skills commit: $(git -C ../noveltea-skills rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
       # Certification runs once. Root shards cover every test file except
       # generation.test.ts, which uses six timing-balanced case-level shards.
-      # Studio runs independently on its own runner.
+      # Studio uses four weighted file/case shards on independent runners.
       - name: Certify native Story contract (no skipped native gate)
         if: steps.skills-access.outputs.enabled == 'true' && matrix.certify
         run: pnpm certify:story
@@ -273,9 +276,11 @@ jobs:
         env:
           NT_GENERATION_TEST_SHARD: ${{ matrix.shard }}
         run: pnpm exec tsx --test test/generation.test.ts
-      - name: Run full Studio tests with native CLI and skills
+      - name: Run Studio test shard with native CLI and skills
         if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'studio'
-        run: pnpm --filter @noveltea/studio test
+        env:
+          NT_STUDIO_TEST_SHARD: ${{ matrix.shard }}
+        run: pnpm --filter @noveltea/studio test:shard
       - name: Qualify integrated Story recovery on SQLite and PostgreSQL
         if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'integrated-recovery'
         env:

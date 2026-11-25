@@ -10,6 +10,35 @@ NT_GENERATION_TEST_SHARD=1/6 pnpm exec tsx --test test/generation.test.ts
 
 Without that variable, the usual local suite still registers every scenario. The native integration gate requires all root, generation and Studio jobs to succeed. The private-skills-independent shard partition test also runs in the offline suite.
 
+## Studio test sharding
+
+The Studio suite uses four independent timing-balanced shards. Ordinary
+`web/test/*.test.ts` and `*.test.tsx` files are discovered automatically.
+The expensive revision-admission suite registers its cases from
+`web/test/support/story-revision-scenarios.ts`; the same registry gives the
+scheduler every case exactly once, including those whose existing skip
+conditions apply. Cases in one file still execute serially, preserving
+process-local environment and provider isolation.
+
+The timing estimates use CI run 45533379614 (the previous single Studio
+job took 648 seconds in its test step). Update the estimates in
+`web/test/support/studio-shards.ts` and the revision scenario registry
+when a suite grows. Unknown/new test files are scheduled with a default
+weight. The private-skills-independent partition regression checks
+complete, deterministic coverage, including newly added files.
+
+Run one Studio shard locally with the ordinary native CLI and skills
+configuration:
+
+```sh
+NT_STUDIO_TEST_SHARD=1/4 pnpm --filter @noveltea/studio test:shard
+```
+
+The usual unsharded Studio test command still runs every scenario.
+The aggregate native integration gate requires all four Studio shards
+to succeed. The separate SQLite/PostgreSQL integrated recovery
+qualification remains unchanged.
+
 ## November 23 recovery-test audit
 
 - Removed two artificial pre-#233 schema downgrade checks from the costly Blueprint correction scenarios. Current-format archival interruption, source and review validation, durable incidents and idempotent recovery remain covered.

@@ -8,6 +8,7 @@ import { inspectDependencyPlan, sourceDigest } from '../../src/dependency-state'
 import { withSteeringBoundary } from '../../src/steering-boundary'
 import { readSteeringPlan } from '../../src/steering-amendments'
 import { test } from 'node:test'
+import { selectRevisionScenarios, type RevisionKind } from './support/story-revision-scenarios'
 import { removeTestTree } from '../../test/helpers'
 import { openWebGenerationGraph } from '../../src/web-fixture-runtime'
 import { createStudioAuth } from '../src/lib/auth'
@@ -61,7 +62,7 @@ const catalog = [
     status: 'draft', events: ['event.confession'] } },
 ]
 
-async function exerciseRevisionAdmission(kind: 'broad' | 'narrow' | 'whole' | 'conversation' | 'create-conversation' | 'initial-focus' | 'dependency' | 'steering' | 'steering-protected' | 'steering-stale' | 'concurrent' | 'cancel' | 'cancel-inflight' | 'redirect' | 'multi-turn' | 'unverified-crash') {
+async function exerciseRevisionAdmission(kind: RevisionKind) {
   const root = mkdtempSync(join(tmpdir(), 'nt-story-scope-admission-'))
   const keys = ['NT_GIT_CACHE_DIR', 'NT_STATE_DIR', 'NT_NATIVE_CLI', 'NT_STUDIO_SKILLS_SOURCE',
     'NT_FOCUS_FIXTURE_DEPENDENCY', 'NT_SKILL_CACHE_DIR', 'NT_REQUIRE_USER_PI_RUNTIME', 'NT_PI_CREDENTIAL_KEY', 'PI_OFFLINE', 'NT_AGENT_RPC_URL', 'NT_AGENT_RPC_TOKEN']
@@ -800,36 +801,9 @@ process.stdout.write(JSON.stringify({protocolVersion: 1, exitCode: 0, success: t
   }
 }
 
-test('out-of-scope Character steering requires reviewed Milestone continuation with bounded downstream inventory',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('redirect'))
-test('reviewed Milestone expansion admits a scoped child and rejects changed approval',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('broad'))
-test('whole-story request in an existing Thread requires exact scope approval without inheriting old targets',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('whole'))
-test('first Chat Turn on verified canon admits a single conversation editor, not global creation',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('initial-focus'))
-test('authenticated live steer amends pending Story work at graph boundary and survives restart',
-  { timeout: 90_000 }, () => exerciseRevisionAdmission('steering'))
-test('protected steering pauses before any Story writer and retains a review fence',
-  { timeout: 90_000 }, () => exerciseRevisionAdmission('steering-protected'))
-test('unreachable steering source cannot replan a running Story',
-  { timeout: 90_000 }, () => exerciseRevisionAdmission('steering-stale'))
-test('authenticated Turn dispatches a discovered dependency and fences another owner across restart',
-  { timeout: 90_000, skip: !existsSync(join(skillsCheckout, 'src/cli.ts')) },
-  () => exerciseRevisionAdmission('dependency'))
-test('conversation revision in the same authenticated Thread grants only authored-content',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('conversation'))
-test('authenticated focused conversation creates only pinned missing support after review and reconnect',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('create-conversation'))
-test('unambiguous Character revision admits only its one focused path without a form',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('narrow'))
-test('simultaneous completed-Thread submissions both persist; only the first receives a scope',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('concurrent'))
-test('ambiguous queued instruction can be cancelled without rewriting its history or blocking the next',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('cancel'))
-test('two different-scope Turns continue a single Thread from exact verified Git HEAD across restart',
-  { timeout: 90_000 }, () => exerciseRevisionAdmission('multi-turn'))
-test('Git commit without final trusted checkpoint blocks further Turns and survives recovery',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('unverified-crash'))
-test('cancellation racing with asynchronous inference cannot resurrect or authorize the message',
-  { timeout: 60_000 }, () => exerciseRevisionAdmission('cancel-inflight'))
+for (const scenario of selectRevisionScenarios(process.env.NT_STUDIO_REVISION_CASES)) {
+  test(scenario.name, {
+    timeout: scenario.timeout,
+    skip: 'requiresSkills' in scenario && !existsSync(join(skillsCheckout, 'src/cli.ts')),
+  }, () => exerciseRevisionAdmission(scenario.kind))
+}

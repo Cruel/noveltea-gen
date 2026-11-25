@@ -1,3 +1,5 @@
+import { parseTimingShard, timingShards } from "./support/timing-shards.js";
+
 /** Balance serial generation scenarios across isolated CI runners.
  * Estimates are rounded seconds from native CI run 45322231869. Only the
  * expensive outliers need explicit weights; new tests participate automatically.
@@ -36,21 +38,10 @@ export function generationWeight(name: string): number {
  * the complete registered name list, including fixture and live-only cases;
  * every name belongs to exactly one bucket regardless of skip settings. */
 export function generationShards(names: readonly string[], count: number): string[][] {
-  if (!Number.isSafeInteger(count) || count < 1 || count > names.length)
-    throw Error("Invalid generation shard count");
-  if (new Set(names).size !== names.length) throw Error("Duplicate generation test name");
-  const buckets = Array.from({ length: count }, () => ({ names: [] as string[], weight: 0 }));
-  for (const name of [...names].sort((a, b) => generationWeight(b) - generationWeight(a) ||
-    (a < b ? -1 : a > b ? 1 : 0))) {
-    const bucket = buckets.reduce((least, next) => next.weight < least.weight ? next : least);
-    bucket.names.push(name);
-    bucket.weight += generationWeight(name);
-  }
-  return buckets.map(bucket => bucket.names);
+  return timingShards(names, count, generationWeight);
 }
 
 export function selectGenerationShard(names: readonly string[], shard: string): string[] {
-  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard);
-  if (!match || Number(match[1]) > Number(match[2])) throw Error("Invalid generation shard: " + shard);
-  return generationShards(names, Number(match[2]))[Number(match[1]) - 1]!;
+  const { index, count } = parseTimingShard(shard);
+  return generationShards(names, count)[index]!;
 }
