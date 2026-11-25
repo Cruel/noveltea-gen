@@ -39,15 +39,15 @@ const prosePaths = ["authored-content/disclosure-scene.md", "authored-content/af
 const secondProsePath = "authored-content/redacted-account.md";
 const secondProse = `---\nschema: '0.1'\ntype: authored-content\nid: authored-content.redacted-account\ntitle: The Redacted Account\nstatus: draft\ndecisions: []\nevents: [event.redacted-account]\nrevelations: []\n---\n\nAda sets the signed ledger beside the daily register. "The dates match. We can prove concealment without naming the witness." Neri checks both entries before handing the redacted account to the inquiry. The inquiry accepts the account; the matching entries establish concealment, not his motive.\n`;
 const worldPaths = ["world-entities/archive.md", "facts/evidence-concealed.md"];
-const castPaths = ["characters/ada.md", "characters/neri.md", "relationships/ada-neri.md", arc];
-const architecture: Record<string, string> = {
+const baselineCastPaths = ["characters/ada.md", "characters/neri.md", "relationships/ada-neri.md", arc];
+const baselineArchitecture: Record<string, string> = {
   [arc]: bytes(arc).replace(/^characters: .*$/m, "characters: []") +
     "\nAda compares Neri's ledger with the daily register before asking the inquiry to accept a redacted account. The two records can establish concealment without exposing the witness; the final disclosure changes their relationship.\n",
   [disclosure]: bytes(disclosure).replace(/^fulfillment: .*$/m, "completeness: partial\nfulfillment: {any_of: []}") +
     "\nNeri shows Ada the ledger entry. She compares its date with the independently maintained daily register before deciding whether to protect him or challenge his account. The register can establish concealment, but cannot prove motive.\n",
   [reckoning]: "---\nschema: '0.1'\ntype: milestone\nid: milestone.reckoning\ntitle: The Redacted Account\nstatus: draft\ndecisions: []\ncompleteness: partial\nchange: The inquiry receives an independently corroborated account of concealment\narcs: [arc.truth]\nfulfillment: {any_of: []}\n---\n\nAfter the ledger comparison, Ada offers the inquiry a redacted account supported by both the signed entry and the independent daily register. The inquiry accepts proof of concealment without exposing the witness. Protecting Neri preserves his cooperation; challenging him produces a wary alliance, but neither route erases the corroborated conclusion.\n",
 };
-const compact: CausalBlueprint = {
+const baselineCompact: CausalBlueprint = {
   schema: "noveltea-causal-blueprint/v2",
   premise: "Ada investigates a missing archive witness and Neri's concealed ledger.",
   arcs: [{ id: "truth", goal: "Establish concealment while deciding what loyalty requires." }],
@@ -73,6 +73,23 @@ const compact: CausalBlueprint = {
 };
 
 export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive = false, recoverEvent = false) {
+  // The production #250 regression uses native IDs deliberately unrelated to
+  // filenames, and a Milestone that belongs to two actual Arcs.
+  const multi = process.env.NT_TEST_SCRIPTED_MULTI_ARC === "1";
+  const truthPath = multi ? "arcs/archive-account.md" : arc;
+  const secondArc = "arcs/witness-safety.md";
+  const architecture = multi ? {
+    [truthPath]: baselineArchitecture[arc]!,
+    [secondArc]: baselineArchitecture[arc]!.replace("id: arc.truth", "id: arc.safety")
+      .replace('title: "arc.truth"', 'title: "Witness safety"'),
+    [disclosure]: baselineArchitecture[disclosure]!.replace("arcs: [arc.truth]", "arcs: [arc.truth, arc.safety]"),
+    [reckoning]: baselineArchitecture[reckoning]!.replace("arcs: [arc.truth]", "arcs: [arc.safety]"),
+  } : baselineArchitecture;
+  const castPaths = multi ? [...baselineCastPaths.filter(p => p !== arc), truthPath, secondArc] : baselineCastPaths;
+  const compact = multi ? { ...baselineCompact, arcs: [...baselineCompact.arcs,
+    { id: "safety", goal: "Protect the archive witness while corroborating the account." }],
+    beats: baselineCompact.beats.map(b => b.id === "reckoning" ? { ...b, arcId: "safety" } : b),
+  } : baselineCompact;
   const foundationPath = "creative-direction/foundation.md";
   const foundation = adaptive ? readFileSync(join(job.worktreeStoryRoot, foundationPath), "utf8") : renderFoundation({
     id: "foundation", title: "The Archive Witness",
@@ -274,8 +291,8 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const paths = domain === "world" ? worldPaths : castPaths;
       if (!phase) return read([domain === "world" ? "skill://nt-worldbuilding/SKILL.md" : "skill://nt-character-development/SKILL.md",
         ...["SKILL.md", "references/records.md", "references/progression.md", "references/authority-and-validation.md", "references/glossary.md"].map(p => "skill://nt-catalog/" + p)]);
-      if (phase === 1) return write(Object.fromEntries(paths.map(p => [p, p === arc
-        ? architecture[arc]!.replace(/^characters: \[\]$/m, "characters: [character.ada, character.neri]") : bytes(p)])));
+      if (phase === 1) return write(Object.fromEntries(paths.map(p => [p, p === truthPath || p === secondArc
+        ? architecture[p]!.replace(/^characters: \[\]$/m, "characters: [character.ada, character.neri]") : bytes(p)])));
       if (phase === 2) return validate();
       assert.equal(phase, 3);
       return manifest(paths);

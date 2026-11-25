@@ -786,16 +786,18 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
-  const prospective = mode === "prospective" || sourceRecovery;
+  const multi = mode === "prospective-multi";
+  const prospective = mode === "prospective" || sourceRecovery || multi;
   const needsCharacter = mode === "support";
   const bindingDiagnosis = mode === "binding-diagnosis";
   const diagnosis = mode === "diagnosis" || bindingDiagnosis;
   const f = setup("r14d-event-rounds-" + mode);
   if (needsCharacter) f.start[3] += " Include Mara, the central night witness, in the disclosure Event.";
+  if (multi) f.env.NT_TEST_SCRIPTED_MULTI_ARC = "1";
   await useScriptedArchiveCli(f);
   const log = f.contract + ".model-calls";
   assert.equal(f.cli([...f.start, "--pause-after", "foundation"]).status, "paused");
@@ -862,6 +864,14 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         characterSources: [{ id: "character.mara", availability: "prospective",
           role: "The archive night witness identifies the ledger signature." }] });
     }
+    if (multi) {
+      plan.events[0]!.participants.push("character.oren");
+      Object.assign(plan.events[0]!.evidence[0]!, { anchorPath: "milestones/disclosure.md",
+        characterSources: [
+          { id: "character.mara", availability: "prospective", role: "Mara identifies the ledger signature." },
+          { id: "character.oren", availability: "prospective", role: "Oren verifies the witness safety agreement." },
+        ] });
+    }
     const proposal = (round: number) => {
       const candidate = structuredClone(plan);
       if (round === 0) {
@@ -911,6 +921,68 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
           })) }), reason: "stop" };
       }
       if (sourceRecovery) index -= 18;
+      if (multi && index >= 4) {
+        const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+        const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
+        const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
+        const stop = (value: unknown) => ({ content: scriptedText(value), reason: "stop" as const });
+        if (index < 18) {
+          const turn = index < 11 ? 0 : 1;
+          const step = (index - 4) % 7;
+          const target = turn ? "character.oren" : "character.mara";
+          const targetPath = "characters/" + target.slice(10) + ".md";
+          const arcPath = turn ? "arcs/witness-safety.md" : "arcs/archive-account.md";
+          const title = turn ? "Oren" : "Mara";
+          if (step === 0) {
+            assert.match(prompt, /READ-ONLY dependency orchestrator/);
+            assert.match(prompt, /arc.truth/); assert.match(prompt, /arc.safety/);
+            return read(prompt.split("First read these pinned methods:\n")[1]!.split("\n\nInspect")[0]!.split("\n")
+              .concat("milestones/disclosure.md", "arcs/archive-account.md", "arcs/witness-safety.md"));
+          }
+          if (step === 1) {
+            const report = JSON.parse(prompt.split("\nDependency evidence: ")[1]!);
+            return stop({ target, specialist: "nt-character-development", title,
+              arcIds: [turn ? "arc.safety" : "arc.truth"], outcome: report.missing,
+              reason: "This role is required by the approved Milestone and belongs to the selected enclosing Arc." });
+          }
+          if (step === 2) return read(["nt-character-development/SKILL.md", "nt-catalog/SKILL.md",
+            "nt-catalog/references/records.md"].map(p => "skill://" + p));
+          if (step === 3) {
+            const arc = readFileSync(join(f.job.worktreeStoryRoot, arcPath), "utf8");
+            const next = arc.replace(/characters: \[([^\]]+)\]/, "characters: [$1, " + target + "]")
+              .replace(/(characters:\n(?:  - [^\n]+\n)+)/, "$1  - " + target + "\n");
+            assert.notEqual(next, arc);
+            return { content: [
+              { type: "toolCall", id: "multi-character-" + turn, name: "write", arguments: { path: targetPath, content: turn ? character.replaceAll("Mara", "Oren").replace("character.mara", target) : character } },
+              { type: "toolCall", id: "multi-arc-" + turn, name: "write", arguments: { path: arcPath, content: next } },
+            ], reason: "toolUse" };
+          }
+          if (step === 4) return stop({ modifiedRecords: [arcPath, targetPath], architecturalConflicts: [], laterObligations: [] });
+          if (step === 5) {
+            const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
+            return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths));
+          }
+          return stop({ verdict: "pass", findings: [], evidence: [targetPath + ":1: Required prospective role.", arcPath + ":1: Native Arc link."] });
+        }
+        if (index === 18) {
+          assert.match(prompt, /character.mara/); assert.match(prompt, /character.oren/);
+          return read(readSources);
+        }
+        if (index === 19) return { content: [{ type: "toolCall", id: "multi-event", name: "write", arguments: {
+          path, content: authored.replace("participants: [character.ada, character.neri]", "participants: [character.ada, character.neri, character.mara, character.oren]")
+            .replace("arcs: [arc.truth]", "arcs: [arc.truth, arc.safety]") + "\n" + quote + " Oren confirms the witness safety agreement.\n",
+        } }], reason: "toolUse" };
+        if (index === 20) return stop(manifest);
+        if (index === 21) return read(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p));
+        if (index === 22) {
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
+              explanation: "Both verified prospective witnesses participate in the Event." }] });
+        }
+        throw Error("Unexpected multi prospective call " + index);
+      }
       if (prospective && index >= 4) {
         const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
         const raw = JSON.stringify(messages);
@@ -1134,24 +1206,31 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
       assert.equal(before.sessionFile, undefined);
       const chosen = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.equal(chosen.recoveryLifecycle.decision?.adapter, "dependency-work");
-      await crashAtSubmission("focused-committed", 7 + offset, { interruptAfter: ["assess_recovery"] });
+      await crashAtSubmission("focused-committed", multi ? 9 : 7 + offset, { interruptAfter: ["assess_recovery"] });
       const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.ok(supported.recoveryLifecycle.discharged?.some(c => c.case.id === failed.recoveryLifecycle.active?.id),
         JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
       const { inspectDependencyPlan } = await import("../src/dependency-state.js");
-      const support = (await inspectDependencyPlan(f.job))!.entries[0]!;
-      assert.equal(support.phase, "verified");
+      const entries = (await inspectDependencyPlan(f.job))!.entries;
+      assert.equal(entries.length, multi ? 2 : 1);
+      assert.ok(entries.every(e => e.phase === "verified"));
+      if (multi) {
+        assert.deepEqual(entries.map(e => e.amendment!.assignment.authority.existingPaths),
+          [["arcs/archive-account.md"], ["arcs/witness-safety.md"]]);
+        assert.ok(entries.every(e => e.planner));
+      }
+      const support = entries.at(-1)!;
       const rebound = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
       assert.equal(rebound.expectedHead, support.commitSha);
       assert.deepEqual(rebound.blueprintPin, before.blueprintPin);
       assert.equal(rebound.sessionFile, undefined);
-      assert.equal(observed.length, 9 + offset);
+      assert.equal(observed.length, multi ? 18 : 9 + offset);
       saver.db.close();
       saver = SqliteSaver.fromConnString(paused.checkpointPath);
       graph = createGenerationGraph(saver, "cli");
       const after = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
       assert.equal(after.result?.status, "event-cluster-committed", JSON.stringify({ reason: after.reason, lifecycle: after.recoveryLifecycle, calls: observed.length }));
-      assert.equal(observed.length, 14 + offset);
+      assert.equal(observed.length, multi ? 23 : 14 + offset);
       assert.ok(existsSync(join(f.job.worktreeStoryRoot, supportPath)));
       if (blueprintCaseId) assert.equal(after.recoveryLifecycle.discharged.filter(d => d.case.id === blueprintCaseId).length, 1);
       assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");

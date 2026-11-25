@@ -8,7 +8,7 @@ import { sourceDigest } from "./dependency-state.js";
 /** Evidence only. The tool cannot approve an amendment, widen writes or restart
  * the caller. Identity and source hashes are stamped by the trusted host. */
 export function createDependencyTool(job: JobStartResult, binding: {
-  head: string; turnDigest: string; assignmentId: string; obligations: string[];
+  head: string; turnDigest: string; assignmentId: string; obligations: string[]; originTarget?: string;
 }, receive: (report: DependencyReport) => void | Promise<void>): ToolDefinition {
   return {
     name: "report_dependency", label: "Report a missing narrative prerequisite",
@@ -41,7 +41,7 @@ export function createDependencyTool(job: JobStartResult, binding: {
           (obligationIndex as number) >= binding.obligations.length)
         throw Error("Dependency obligation index must select a pinned original Turn obligation.");
       if (!Array.isArray(input.affectedIds) ||
-          !input.affectedIds.includes(binding.assignmentId.replace(/^focus:/, "")))
+          !input.affectedIds.includes(binding.originTarget ?? binding.assignmentId.replace(/^focus:/, "")))
         throw Error("Dependency report must include the originating assignment's typed record ID.");
       const value = parseDependencyReport({ ...evidence,
         obligation: binding.obligations[obligationIndex as number], sourceSha: binding.head,

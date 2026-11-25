@@ -75,7 +75,7 @@ const reviewed: Record<string, string> = {
   "src/dependency-planner.ts:proposeDependency": "4:419e9ea19b91cebd7974076c",
   "src/dependent-correction-specialist.ts:authorDependentCorrection": "2:a4c94c75e79027e58be00491",
   "src/event-specialist.ts:authorEventCluster": "3:701d1c814dec11399c9b5d87",
-  "src/focused-work.ts:writeWithPi": "3:691ec00d6390a45368bc3fc6",
+  "src/focused-work.ts:writeWithPi": "3:b729a541e6ed6b2bec34c3e1",
   "src/foundation.ts:piAuthor": "3:9e5ed08fab9b974df4cfca50",
   "src/idea-placement.ts:piWork": "4:c54673be05cced07b95826e1",
   "src/interactive-specialist.ts:authorInteractive": "3:2b1a97828469bbe007a5a73e",
@@ -150,7 +150,7 @@ const downstreamReviewed: Record<string, string> = {
   // Parent admission and source-linked proposal / Review gates.
   "src/adaptive-work.ts:reconcileAdaptiveWork": "1:4b7540ae585f448c5ea0ac64",
   "src/dependency-work.ts:admitDependency": "1:163c4f9f7318e7014e15d508",
-  "src/dependency-work.ts:advanceReviewDependency": "1:309a25ea0cae28bb3a47bd19",
+  "src/dependency-work.ts:advanceReviewDependency": "1:d29e558e0e58d345d6d295af",
   "src/dependency-work.ts:continueReviewDependency": "1:763cf4d2e8040ab5985f92bd",
   "src/generation.ts:independentAssignmentBoundary": "1:cd5885456ac1086a2ab87516",
   "src/generation.ts:createGenerationGraph": "3:fe5138c25fa72c5a69a3c5f9",
@@ -187,7 +187,7 @@ const downstreamReviewed: Record<string, string> = {
   "web/src/lib/discovery-evidence.server.ts:meterDiscoveryAttempts": "1:e815c68da3ec4e1c0762231d",
   "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
   "web/src/lib/story-chat-discovery.server.ts:storyChatDiscoveryRequest": "1:14222f0213a6d39fc9d6254d",
-  "src/dependency-work.ts:runSupportingDependency": "1:12553f7456408cdb4e16daf1",
+  "src/dependency-work.ts:runSupportingDependency": "1:0d5f8b408b75e6e8383fd8ba",
 };
 
 test("R14L downstream reply consumers cannot multiply or change their disposition silently", () => {
@@ -245,14 +245,14 @@ const effectReviewed: Record<string, string> = {
   "src/dependency-state.ts:registerReviewDependency": "1:dd782da866472074f06be72f",
   "src/dependency-state.ts:approveDependency": "1:04d359e0140aed467510f996",
   "src/dependency-state.ts:registerBlueprintDependency": "1:cb1ade2913b7acad17b3b7b9",
-  "src/dependency-work.ts:supportingWriterRounds": "1:cd9fc1f151ce829348909d3b",
+  "src/dependency-work.ts:supportingWriterRounds": "1:6ed19e6419c733f06d8cb2ed",
   "src/dependent-correction-work.ts:native": "1:c3469e6a1dcc5740024c502c",
   "src/event-manifest.ts:parseEventManifest": "1:9cd665fa6942929e0c38ccd3",
   "src/event-specialist.ts:authorEventCluster": "1:701d1c814dec11399c9b5d87",
   "src/event-work.ts:inspectEventBlueprintPrerequisite": "1:8a40c11de04a80ea1495dd84",
   "src/event-work.ts:runEventWorkItem": "1:3347ea4eaae14a41001163b1",
   "src/focused-work.ts:focusedSourceCatalog": "2:e6a96d7854b897f588b5b2bb",
-  "src/focused-work.ts:runFocusedWorkItem": "2:3297afb23b6e09258c793605",
+  "src/focused-work.ts:runFocusedWorkItem": "2:bcb1461b0edc2ee89ad1575b",
   "src/foundation.ts:piAuthor": "1:9e5ed08fab9b974df4cfca50",
   "src/foundation.ts:executeFoundationGraph": "1:c8b2027f7012552fd2c41366",
   "src/generation-operation-strategy.ts:executeOperationStrategy": "1:b51dfc4028998c09cbc71220",

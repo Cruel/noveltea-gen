@@ -226,33 +226,36 @@ export function authorizeDependency(input: {
 }): DependencyAmendment {
   const { plan, head, proposal, records } = input;
   const report = parseDependencyReport(input.report);
+  const parent = input.priorAmendments?.find(a => a.id === report.assignmentId);
   if (!keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason") ||
       proposal.sourceSha !== head || report.sourceSha !== head ||
       report.turnDigest !== plan.digest || proposal.reportDigest !== input.reportDigest ||
       !/^[a-f0-9]{64}$/.test(input.reportDigest) || !text(proposal.reason) ||
       !text(proposal.outcome) || proposal.outcome !== report.missing ||
       !plan.objective || !plan.objective.obligations.includes(report.obligation) ||
-      plan.kind !== "revision" || report.authorDecisionRequired ||
+      (plan.kind !== "revision" && !parent) || report.authorDecisionRequired ||
       !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8 ||
       JSON.stringify(report.sources) !== JSON.stringify(input.sources))
     throw Error("Dependency amendment has stale evidence, changed obligations or requires author approval.");
-  const origin = plan.assignments.find(a => a.id === report.assignmentId);
+  const origin = parent ?? plan.assignments.find(a => a.id === report.assignmentId);
   const record = records.find(r => r.metadata.id === proposal.target);
   // Write authority is path-based: supportingTargets may be in existingPaths
   // without appearing in targets. Check every existing writer, including
   // earlier dependency amendments, before approving a second writer.
   const priorOwners = [...plan.assignments, ...(input.priorAmendments ?? [])];
+  const originRecords = records.filter(r => origin?.targets.includes(r.metadata.id) ||
+    parent?.authority.existingPaths.includes(r.path));
   if (!origin || !record || record.metadata.status === "superseded" ||
       record.metadata.type !== proposal.target.split(".")[0] || !path.test(record.path) ||
       origin.targets.includes(proposal.target) || priorOwners.some(a =>
         a.targets.includes(proposal.target) || a.authority.existingPaths.includes(record.path) ||
         a.authority.newPaths?.includes(record.path)) ||
-      report.affectedIds.some(id => !records.some(r => r.metadata.id === id && r.metadata.status !== "superseded")) ||
+      report.affectedIds.some(id => !records.some(r => r.metadata.id === id && r.metadata.status !== "superseded") &&
+        !parent?.targets.includes(id)) ||
       !report.affectedIds.includes(proposal.target) || !origin.targets.some(id => report.affectedIds.includes(id)) ||
       !report.sources.some(s => s.path === record.path) ||
       report.sources.some(s => !records.some(r => r.path === s.path && report.affectedIds.includes(r.metadata.id))) ||
-      !origin.targets.some(id => records.some(r => r.metadata.id === id &&
-        (links(r, proposal.target) || links(record, id)))))
+      !originRecords.some(r => links(r, proposal.target) || links(record, r.metadata.id)))
     throw Error("Unknown, speculative, already assigned or unrelated dependency record.");
   if (proposal.specialist !== focusedSpecialist(proposal.target) ||
       report.likelySpecialist !== proposal.specialist || proposal.specialist === origin.specialist)

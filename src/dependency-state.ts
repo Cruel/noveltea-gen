@@ -71,6 +71,8 @@ export function blueprintSourceOf(entry: Pick<DependencyEntry, "blueprintSource"
 
 export interface DependencyEntry {
   blueprintSource?: BlueprintDependencySource;
+  /** Existing ledger edge: the child was reported by this exact admitted support writer. */
+  parent?: { reportDigest: string; suspensionDigest: string; planVersion: number };
   report: DependencyReport; reportDigest: string;
   /** The separate Event owner's reviewed correction; not part of the Character
    * specialist's new-record write grant. */
@@ -98,6 +100,34 @@ export interface DependencyPlan {
    * never writer authorization and do not consume an amendment version. */
   reviewRequests?: ReviewDependencyRequest[];
   digest: string;
+}
+/** The supporting writer retains its original logical grant; only a fully
+ * verified direct prerequisite can move its effective Git source forward. */
+export function dependencyWriterBase(plan: Pick<DependencyPlan, "entries">, entry: DependencyEntry): string {
+  const children = plan.entries.filter(e => e.parent?.reportDigest === entry.reportDigest);
+  if (children.length > 1) throw Error("Dependency has multiple competing suspensions.");
+  const child = children[0];
+  if (child?.phase === "verified") {
+    if (!child.commitSha || child.amendment?.resumes !== entry.amendment?.assignment.id ||
+        child.report.sourceSha !== entry.report.sourceSha)
+      throw Error("Dependency successor lacks exact predecessor authority.");
+    return child.commitSha;
+  }
+  return entry.report.sourceSha;
+}
+export function dependencyAncestors(entries: readonly DependencyEntry[], entry: DependencyEntry): Set<string> {
+  const ancestors = new Set<string>();
+  let cursor: DependencyEntry | undefined = entry;
+  while (cursor) {
+    if (ancestors.has(cursor.reportDigest)) throw Error("Cyclic dependency ancestry.");
+    ancestors.add(cursor.reportDigest);
+    if (!cursor.parent) break;
+    const parentDigest: string = cursor.parent.reportDigest;
+    const index = entries.indexOf(cursor);
+    cursor = entries.find(e => e.reportDigest === parentDigest);
+    if (!cursor || entries.indexOf(cursor) >= index) throw Error("Dependency ancestor must precede its child.");
+  }
+  return ancestors;
 }
 const file = (job: JobStartResult) => join(job.stateDir, "dependency-plan.json");
 export function dependencyGit(job: JobStartResult, ...args: string[]): string {
@@ -233,6 +263,27 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         entry.report.turnDigest !== turn.digest || typeof entry.fixture !== "boolean" ||
         !["reported", "planning", "authorized", "reviewing", "verified", "rejected"].includes(entry.phase))
       throw Error("Dependency report provenance is corrupt.");
+    if (entry.report.assignmentId.startsWith("dependency:") && !entry.parent)
+      throw Error("Nested dependency is missing its originating parent.");
+    if (entry.parent) {
+      dependencyAncestors(saved.entries, entry);
+      const parent = saved.entries.find(e => e.reportDigest === entry.parent!.reportDigest);
+      const grant = parent?.amendment;
+      if (!parent || !grant || !["authorized", "reviewing", "verified", "rejected"].includes(parent.phase) ||
+          !Number.isSafeInteger(entry.parent.planVersion) || entry.parent.planVersion < 1 ||
+          entry.blueprintSource || entry.reviewSourceSha ||
+          grant.assignment.id !== entry.report.assignmentId ||
+          entry.report.sourceSha !== parent.report.sourceSha ||
+          saved.entries.filter(e => e.parent?.reportDigest === parent.reportDigest).length !== 1 ||
+          (parent.phase === "verified" && entry.phase !== "verified"))
+        throw Error("Nested dependency lost its exact suspended parent grant.");
+      const origin = await (await import("./focused-work.js")).inspectFocusedPrerequisite(job,
+        grant.assignment.targets[0]!, turn.digest, false, entry.parent.planVersion, grant.assignment.id);
+      if (!origin || origin.seal.reportDigest !== entry.reportDigest ||
+          dependencyDigest(origin.seal) !== entry.parent.suspensionDigest ||
+          dependencyDigest(origin.report) !== entry.reportDigest)
+        throw Error("Nested dependency lost its original settled no-write evidence.");
+    }
     if (entry.blueprintSource) {
       const source = blueprintSourceOf(entry)!;
       const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(
@@ -348,20 +399,21 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
     }
     if (supportPassed) {
       const a = entry.amendment!;
+      const writerBase = dependencyWriterBase(saved, entry);
       const proof = JSON.parse(await readFile(join(job.stateDir, "dependency-items", a.assignment.id + ".json"), "utf8"));
       const authorizedPaths = [...a.assignment.authority.existingPaths,
         ...(a.assignment.authority.newPaths ?? [])].sort();
       if (proof.phase !== "committed" || proof.jobId !== job.jobId || proof.workItemId !== a.assignment.id ||
-          proof.commitSha !== entry.commitSha || proof.expectedHead !== a.sourceSha ||
+          proof.commitSha !== entry.commitSha || proof.expectedHead !== writerBase ||
           proof.assignmentDigest !== turn.digest || proof.worker !== (entry.fixture ? "fixture" : "pi") ||
           proof.validation?.status !== "passed" || proof.validation.validatorVersion !== job.validatorVersion ||
-          proof.validation.baseSha !== a.sourceSha ||
+          proof.validation.baseSha !== writerBase ||
           JSON.stringify(proof.paths) !== JSON.stringify(authorizedPaths))
         throw Error("Dependency work receipt is missing or no longer matches its native-validated assignment.");
       const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
       const paths = authorizedPaths;
-      if (dependencyGit(job, "rev-parse", entry.commitSha + "^") !== a.sourceSha ||
-          dependencyGit(job, "diff", "--name-only", a.sourceSha, entry.commitSha!).split("\n").join("\n") !==
+      if (dependencyGit(job, "rev-parse", entry.commitSha + "^") !== writerBase ||
+          dependencyGit(job, "diff", "--name-only", writerBase, entry.commitSha!).split("\n").join("\n") !==
             paths.map(p => prefix + p).join("\n") ||
           proof.sha256 !== dependencyDigest(paths.map(p => [p,
             sourceDigest(dependencyGit(job, "show", entry.commitSha + ":" + prefix + p))])))
@@ -370,7 +422,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         const { auditArcLink } = await import("./focused-work.js");
         for (const path of a.assignment.authority.existingPaths) {
           const arc = prefix + path;
-          auditArcLink(dependencyGit(job, "show", a.sourceSha + ":" + arc),
+          auditArcLink(dependencyGit(job, "show", writerBase + ":" + arc),
             dependencyGit(job, "show", entry.commitSha + ":" + arc), entry.blueprintSource.target);
         }
       }
@@ -577,20 +629,37 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
   const report = parseDependencyReport(value);
   const turn = await dependencyTurn(job);
   const head = await dependencyBoundary(job);
-  if (report.sourceSha !== head || report.turnDigest !== turn.digest ||
-      !turn.assignments.some(a => a.id === report.assignmentId))
-    throw Error("Dependency report has a stale Story or originating assignment.");
   const plan = await inspectDependencyPlan(job) ?? { schema: "noveltea-dependency-plan/v1" as const,
     jobId: job.jobId, threadId: job.threadId, turnDigest: turn.digest, version: 1, entries: [], digest: "" };
+  const parent = plan.entries.find(e => e.amendment?.assignment.id === report.assignmentId);
+  if (report.sourceSha !== head || report.turnDigest !== turn.digest ||
+      (!parent && !turn.assignments.some(a => a.id === report.assignmentId)))
+    throw Error("Dependency report has a stale Story or originating assignment.");
   const reportDigest = dependencyDigest(report);
   const prior = plan.entries.find(e => e.reportDigest === reportDigest);
   if (prior) {
     if (prior.fixture !== fixture || JSON.stringify(prior.blueprintSource) !== JSON.stringify(blueprintSource)) throw Error("Dependency worker mode or source changed.");
     return { plan, entry: prior };
   }
-  if (plan.entries.length >= 8 || plan.entries.some(e => e.phase !== "verified"))
+  const ancestors = parent ? dependencyAncestors(plan.entries, parent) : new Set<string>();
+  if (plan.entries.length >= 8 || plan.entries.some(e => e.phase !== "verified" && !ancestors.has(e.reportDigest)))
     throw Error("Unresolved dependency or amendment limit reached; author reconciliation required.");
-  const entry: DependencyEntry = { report, reportDigest, fixture, phase: "reported", ...(blueprintSource ? { blueprintSource } : {}) };
+  let parentSource: DependencyEntry["parent"];
+  if (parent) {
+    const grant = parent.amendment!;
+    if (parent.phase !== "authorized" || blueprintSource || parent.report.sourceSha !== head ||
+        plan.entries.some(e => e.parent?.reportDigest === parent.reportDigest))
+      throw Error("Nested dependency has no fresh suspended parent boundary.");
+    const arch = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8"));
+    const origin = await (await import("./focused-work.js")).inspectFocusedPrerequisite(job,
+      grant.assignment.targets[0]!, turn.digest, false, arch.plan.version, grant.assignment.id);
+    if (!origin || origin.phase !== "waiting-dependency" || origin.seal.reportDigest !== reportDigest)
+      throw Error("Nested dependency requires the original settled no-write support report.");
+    parentSource = { reportDigest: parent.reportDigest, suspensionDigest: dependencyDigest(origin.seal),
+      planVersion: arch.plan.version };
+  }
+  const entry: DependencyEntry = { report, reportDigest, fixture, phase: "reported",
+    ...(parentSource ? { parent: parentSource } : {}), ...(blueprintSource ? { blueprintSource } : {}) };
   plan.entries.push(entry);
   await saveDependencyPlan(job, plan);
   return { plan, entry };

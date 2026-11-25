@@ -207,13 +207,17 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       await verifyDependentCorrectionSuccessor(job, commit, parents[1]!, paths, trailers);
       continue;
     }
-    if (trailers.some(line => /^NovelTea-Work-Item: dependency:[0-9]+:character\.[a-z0-9-]+$/.test(line))) {
-      const { inspectDependencyPlan } = await import("./dependency-state.js");
-      const entry = (await inspectDependencyPlan(job))?.entries.find(e =>
-        e.blueprintSource && e.phase === "verified" && e.commitSha === commit &&
-        e.amendment && e.amendment.sourceSha === parents[1] &&
+    if (trailers.some(line => /^NovelTea-Work-Item: dependency:[0-9]+:[a-z][a-z-]*\.[a-z0-9-]+$/.test(line))) {
+      const { inspectDependencyPlan, dependencyWriterBase, dependencyAncestors } = await import("./dependency-state.js");
+      const plan = await inspectDependencyPlan(job);
+      const entry = plan?.entries.find(e =>
+        e.phase === "verified" && e.commitSha === commit && e.amendment &&
         trailers.includes("NovelTea-Work-Item: " + e.amendment.assignment.id));
-      if (entry && trailers.includes("NovelTea-Job: " + job.jobId)) continue;
+      // The existing Blueprint rebind exemption extends only to its authenticated
+      // predecessor chain, not arbitrary narrative changes from other callers.
+      if (plan && entry && dependencyWriterBase(plan, entry) === parents[1] &&
+          plan.entries.find(e => dependencyAncestors(plan.entries, entry).has(e.reportDigest))?.blueprintSource &&
+          trailers.includes("NovelTea-Job: " + job.jobId)) continue;
     }
     if (await verifyReviewedSpecialistSuccessor(job, commit, parents[1]!, paths, trailers))
       continue;

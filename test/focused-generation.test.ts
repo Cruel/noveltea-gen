@@ -246,11 +246,13 @@ test("focused revisions reject missing existing target IDs and unauthorized file
   assert.equal(git(f.repo, "rev-parse", "HEAD"), baseline);
 });
 
-for (const scenario of ["review", "writer", "support-no-write"] as const)
+for (const scenario of ["review", "writer", "support-no-write", "nested"] as const)
 test("R04 cross-owner prerequisite " + scenario + " uses the original logical assignment", {
   skip: !available, timeout: 300_000,
 }, async () => {
   const f = fixture("r04-prerequisite-" + scenario);
+  const writer = scenario === "writer" || scenario === "nested";
+  const nested = scenario === "nested";
   seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
   const oldState = process.env.NT_STATE_DIR, oldCache = process.env.NT_SKILL_CACHE_DIR;
@@ -262,16 +264,20 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
     const catalog = (native.report as { records: CanonicalScopeRecord[] }).records;
     const event = "event.disclose-ledger", character = "character.ada";
     const eventPath = "events/disclose-ledger.md", characterPath = "characters/ada.md";
-    const targets = scenario === "writer" ? [event] : [character, event];
+    const targets = writer ? [event] : [character, event];
     const contract: CompletionContract = { scope: { kind: "partial", depth: "interactive",
       targets, branches: [] }, constraints: [],
       envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
     const task = "Clarify Ada's reason to disclose the ledger in her profile and the Event.";
     const turn = planObjective({ kind: "revision", request: task, contract, base: job.baseSha,
       sourceJobId: "seed", catalog, targetIds: targets,
-      allowedPaths: scenario === "writer" ? [eventPath] : [characterPath, eventPath] });
+      allowedPaths: writer ? [eventPath] : [characterPath, eventPath] });
     await saveJobTurnPlan(job, turn);
     const correction = "Explain in Ada's Character profile why she discloses the ledger.";
+    const fact = "fact.evidence-concealed", factPath = "facts/evidence-concealed.md";
+    const factCorrection = "Clarify the source evidence of the concealment in the World Fact.";
+    let nestedYield = false, factWrites = 0;
+    let nestedOrigin: { phase: string; piSessionId: string; piSessionFile: string; assignmentKey: string } | undefined;
     const restore = fixtureSandboxClient(job.jobId, job.worktreeStoryRoot);
     let saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
     let originalNegative = false, repairYield = false, supportWrites = 0, originalReviews = 0;
@@ -291,9 +297,12 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         if (index === 1) return stop({ sourceSha: job.baseSha, turnDigest: turn.digest,
           assignments: turn.assignments.map(a => ({ id: a.id, reason: "Perform the authorized linked revision." })) });
         if (prompt.includes("READ-ONLY dependency orchestrator")) {
+          const factRequest = nested && prompt.includes(factCorrection);
           if (!phase) return read(["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
             "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"]
-            .map(p => "skill://" + p).concat(characterPath));
+            .map(p => "skill://" + p).concat(factRequest ? factPath : characterPath));
+          if (factRequest) return stop({ target: fact, specialist: "nt-worldbuilding", outcome: factCorrection,
+            reason: "Ada's typed initial knowledge identifies this canonical Fact." });
           return stop({ target: character, specialist: "nt-character-development", outcome: correction,
             reason: "The sealed Event finding identifies Ada's missing motivation in her owned Character record." });
         }
@@ -302,7 +311,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
           const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
           const item = packet.items[0];
           const path = item.assurance.changedPaths[0];
-          const fail = scenario !== "writer" && path === eventPath && !originalNegative;
+          const fail = !writer && path === eventPath && !originalNegative;
           if (fail) originalNegative = true;
           return stop({ sourceDigest: packet.sourceDigest, verdict: fail ? "fail" : "pass",
             findings: fail ? [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
@@ -329,33 +338,43 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
           return stop({ modifiedRecords: [eventPath], architecturalConflicts: [], laterObligations: [] });
         }
         if (prompt.includes("revision specialist. FIRST")) {
-          const path = prompt.includes("Only edit these PREEXISTING canonical Markdown files:\n" + eventPath) ? eventPath : characterPath;
+          const path = prompt.includes("Only edit these PREEXISTING canonical Markdown files:\n" + eventPath) ? eventPath :
+            prompt.includes("Only edit these PREEXISTING canonical Markdown files:\n" + factPath) ? factPath : characterPath;
           const support = prompt.includes("THIS IS A SEPARATELY AUTHORIZED SUPPORTING ASSIGNMENT");
-          const skill = path === eventPath ? "nt-event-design" : "nt-character-development";
+          const skill = path === eventPath ? "nt-event-design" : path === factPath ? "nt-worldbuilding" : "nt-character-development";
           if (!phase) return read([skill + "/SKILL.md", "nt-catalog/SKILL.md", "nt-catalog/references/records.md",
             ...(path === eventPath ? ["nt-catalog/references/progression.md"] : [])].map(p => "skill://" + p));
           if (phase === 1) {
             if (scenario === "support-no-write" && support) return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [] });
-            if (support && !supportQuestion) {
+            if (nested && support && path === characterPath && !nestedYield) {
+              nestedYield = true;
+              return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-nested-prerequisite", name: "report_dependency",
+                arguments: { obligationIndex: 0, missing: factCorrection, affectedIds: [character, fact],
+                  sources: [{ path: factPath, quote: "id: fact.evidence-concealed" }],
+                  likelySpecialist: "nt-worldbuilding", authorDecisionRequired: false } }] };
+            }
+            if (support && !supportQuestion && (!nested || path === factPath)) {
               supportQuestion = true;
               return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [],
                 authorDecisionRequest: { kind: "free-text", question: "Which motive should Ada disclose to protect the witness?" } });
             }
-            if (scenario === "writer" && !support && !writerYield) {
+            if (writer && !support && !writerYield) {
               writerYield = true;
               return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-prerequisite", name: "report_dependency",
                 arguments: { obligationIndex: 0, missing: correction, affectedIds: [event, character],
                   sources: [{ path: characterPath, quote: "id: character.ada" }],
                   likelySpecialist: "nt-character-development", authorDecisionRequired: false } }] };
             }
-            if (support) supportWrites++; else if (path === eventPath) originalWrites++;
+            if (path === factPath) factWrites++;
+            else if (support) supportWrites++; else if (path === eventPath) originalWrites++;
             const old = readFileSync(join(job.worktreeStoryRoot, path), "utf8");
             return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-edit-" + index, name: "edit",
               arguments: { path, edits: [{ oldText: old, newText: old + "\n" +
-                (support ? "Ada discloses the ledger to protect the witness from a false accusation." :
+                (path === factPath ? "The concealment is evidenced by the archived transfer record." : support ? "Ada discloses the ledger to protect the witness from a false accusation." :
                   "Ada hesitates before giving the witness her account of the ledger.") + "\n" }] } }] };
           }
-          return stop({ modifiedRecords: scenario === "writer" && writerYield && !support ? [] : [path], architecturalConflicts: [], laterObligations: [] });
+          if (nested && support && path === characterPath && supportWrites === 0) return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [] });
+          return stop({ modifiedRecords: writer && writerYield && !support ? [] : [path], architecturalConflicts: [], laterObligations: [] });
         }
         throw Error("Unexpected R04 model prompt: " + prompt.slice(0, 1000));
       });
@@ -387,28 +406,31 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
           }
           return putWrites(cfg, writes, task);
         };
-        await assert.rejects(withJobModelRuntime(runtime, () => createGenerationGraph(saver, "cli").invoke(input, {
-          ...config, ...options, signal: abort.signal, durability: "sync",
-        })), err => { if (!crashed) throw err; return true; });
+        await assert.rejects(withJobModelRuntime(runtime, async () => {
+          const result = await createGenerationGraph(saver, "cli").invoke(input, {
+            ...config, ...options, signal: abort.signal, durability: "sync",
+          });
+          throw Error("Missing intended crash: " + JSON.stringify({ reason: result.reason, status: result.status, factWrites, supportWrites, recoverySources: result.recoverySources }));
+        }), err => { if (!crashed) throw err; return true; });
         assert.ok(crashed, "Expected actual SQLite output loss: " + boundary);
         assert.equal(existsSync(join(job.stateDir, ".story-job")), false);
         saver.db.close();
         saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
       }
-      if (scenario === "writer") {
+      if (writer) {
         await crashAt(initialRequest, "returned no-write child outcome", (ns, writes) =>
           !ns && writes.some(([channel, value]) => channel === "focusedPrerequisite" &&
             !!value && (value as { supportRef?: string }).supportRef === null),
         { interruptBefore: ["dependency_amendment"] });
       }
-      const suspended = await invoke(scenario === "writer" ? null : initialRequest,
+      const suspended = await invoke(writer ? null : initialRequest,
         { ...config, interruptBefore: ["dependency_amendment"] });
-      const pin = scenario === "writer" ? suspended.focusedPrerequisite : suspended.reviewPrerequisite;
+      const pin = writer ? suspended.focusedPrerequisite : suspended.reviewPrerequisite;
       assert.ok(pin, JSON.stringify({ reason: suspended.reason, status: suspended.status }));
-      assert.equal(pin.suspension.pendingPhase, scenario === "writer" ? "writer" : "review");
+      assert.equal(pin.suspension.pendingPhase, writer ? "writer" : "review");
       assert.equal(pin.suspension.owner, "nt-character-development");
-      assert.equal(originalNegative, scenario !== "writer");
-      assert.equal(repairYield, scenario !== "writer");
+      assert.equal(originalNegative, !writer);
+      assert.equal(repairYield, !writer);
       const originalHead = git(job.worktreeRoot, "rev-parse", "HEAD");
       const receiptPath = join(job.stateDir, "focused-items", event + ".json");
       const originalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
@@ -421,15 +443,21 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         const snapshot = await graph.getState(config);
         const pending = await pendingGenerationQuestion(job, saver, snapshot, config.configurable.thread_id, "user:cli");
         assert.ok(pending, JSON.stringify({ reason: snapshot.values.reason, supportQuestion }));
-        const entry = (await inspectDependencyPlan(job))!.entries[0]!;
+        const entry = (await inspectDependencyPlan(job))!.entries.at(-1)!;
+        const questionTarget = nested ? fact : character;
         assert.equal(pending.choice.assignment?.identity.assignmentId, entry.amendment!.assignment.id);
-        assert.equal(pending.choice.workItem, focusedChoiceWorkItem(character, entry.amendment!.assignment.id));
-        assert.notEqual(pending.choice.workItem, focusedChoiceWorkItem(character));
+        assert.equal(pending.choice.workItem, focusedChoiceWorkItem(questionTarget, entry.amendment!.assignment.id));
+        assert.notEqual(pending.choice.workItem, focusedChoiceWorkItem(questionTarget));
         assert.equal(supportWrites, 0);
         assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), originalHead);
         await assert.rejects(pendingGenerationQuestion(job, saver, {
           ...snapshot, values: { ...snapshot.values, planVersion: 999 },
         }, config.configurable.thread_id, "user:cli"), /original assignment|dependency admission/);
+        if (nested) {
+          await assert.rejects(pendingGenerationQuestion(job, saver, {
+            ...snapshot, values: { ...snapshot.values, focusedPrerequisite: null },
+          }, config.configurable.thread_id, "user:cli"), /dependency admission/);
+        }
         const session = pending.choice.sessionId;
         await answerSpecialistChoice(job, pending.choice.id, pending.choice.proposalSha256,
           { kind: "custom", text: "Protect the witness from false accusation.", note: "" }, "user:cli");
@@ -441,7 +469,22 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(reopened.choice.sessionId, session);
         supportInput = generationQuestionResume(reopened);
       }
-      if (scenario === "writer") {
+      if (nested) {
+        await crashAt(supportInput, "nested support commit before parent support reentry", (ns, writes) =>
+          ns.includes("assignment-") && writes.some(([channel, value]) => channel === "submission" &&
+            (value as { status?: string; receiptRef?: string } | undefined)?.status === "focused-committed" &&
+            (value as { receiptRef?: string }).receiptRef?.endsWith(fact) === true),
+          { interruptAfter: ["dependency_amendment"] });
+        const ledger = (await inspectDependencyPlan(job))!;
+        assert.equal(ledger.entries.length, 2);
+        assert.equal(ledger.entries[1]!.parent?.reportDigest, ledger.entries[0]!.reportDigest);
+        nestedOrigin = JSON.parse(readFileSync(join(job.stateDir, "dependency-items",
+          ledger.entries[0]!.amendment!.assignment.id + ".json"), "utf8"));
+        assert.equal(nestedOrigin.phase, "waiting-dependency");
+        assert.equal(factWrites, 1);
+        assert.equal(supportWrites, 0);
+        assert.equal(originalWrites, 0);
+      } else if (writer) {
         await crashAt(supportInput, "support commit before original child reentry", (ns, writes) =>
           ns.includes("assignment-") && writes.some(([channel, value]) => channel === "submission" &&
             (value as { status?: string; receiptRef?: string } | undefined)?.status === "focused-committed" &&
@@ -451,7 +494,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(originalWrites, 0);
         assert.equal(git(job.worktreeRoot, "rev-list", "--count", originalHead + "..HEAD"), "1");
       }
-      const supported = await invoke(scenario === "writer" ? null : supportInput, { ...config, interruptAfter: ["dependency_amendment"] });
+      const supported = await invoke(writer ? null : supportInput, { ...config, interruptAfter: ["dependency_amendment"] });
       if (scenario === "support-no-write") {
         assert.equal(supportWrites, 0);
         assert.equal(originalReviews, 0);
@@ -465,12 +508,26 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(calls(), before);
         return;
       }
-      const supportPin = scenario === "writer" ? supported.focusedPrerequisite : supported.reviewPrerequisite;
+      const supportPin = writer ? supported.focusedPrerequisite : supported.reviewPrerequisite;
       assert.ok(supportPin?.supportRef, JSON.stringify({ reason: supported.reason, status: supported.status }));
       assert.deepEqual(supportPin.identity, pin.identity);
+      if (nested) {
+        const ledger = (await inspectDependencyPlan(job))!;
+        assert.equal(ledger.entries.length, 2);
+        assert.ok(ledger.entries.every(e => e.phase === "verified"));
+        assert.equal(factWrites, 1);
+        const resumed = JSON.parse(readFileSync(join(job.stateDir, "dependency-items",
+          ledger.entries[0]!.amendment!.assignment.id + ".json"), "utf8"));
+        assert.equal(resumed.piSessionId, nestedOrigin!.piSessionId);
+        assert.equal(resumed.piSessionFile, nestedOrigin!.piSessionFile);
+        assert.equal(resumed.assignmentKey, nestedOrigin!.assignmentKey);
+        assert.equal(resumed.expectedHead, ledger.entries[1]!.commitSha);
+        assert.equal(git(job.worktreeRoot, "rev-parse", ledger.entries[0]!.commitSha! + "^"), ledger.entries[1]!.commitSha);
+        assert.equal(git(job.worktreeRoot, "rev-list", "--count", originalHead + "..HEAD"), "2");
+      }
       assert.equal(supportWrites, 1);
       assert.equal(originalReviews, 0);
-      if (scenario === "writer") {
+      if (writer) {
         const resumed = await invoke(null, { ...config, interruptBefore: ["completion_decision", "specialist_dispatch"] });
         // The first dispatch boundary is the exact original continuation.
         assert.ok(resumed.focusedPrerequisite?.supportRef);
@@ -491,7 +548,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(finalReceipt.assignmentKey, pin.suspension.assignmentKey);
         assert.deepEqual(finalReceipt.paths, originalReceipt.paths);
         assert.equal(finalReceipt.invocationProof.ordinal, 1);
-        assert.equal(git(job.worktreeRoot, "rev-list", "--count", job.baseSha + "..HEAD"), "2");
+        assert.equal(git(job.worktreeRoot, "rev-list", "--count", job.baseSha + "..HEAD"), nested ? "3" : "2");
         assert.equal((await inspectDependencyPlan(job))!.entries[0]!.phase, "verified");
         return;
       }

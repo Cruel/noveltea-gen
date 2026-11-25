@@ -648,8 +648,15 @@ round-origin correction and the exhausted-reviewer parent disposition.
   Review sources. Blueprint candidates use native IDs and paths; ambiguous
   candidates require a read-only proposal. `approveDependency` validates
   narrowly scoped Character creation or existing-Character links to selected
-  Arcs; all authorized Arc edits are audited. Nested support and negative
-  supporting Review correction remain unqualified; neither is silently advanced.
+  Arcs; all authorized Arc edits are audited. Nested support uses the same
+  ledger, admission and child lifecycle, pins its original suspension, and
+  re-enters only after independent verification of its descendant. The
+  production focused-generation and multi-Arc Event regressions cover
+  nested author answers, SQLite checkpoint loss after support commits,
+  distinct canonical IDs and filenames, and original assignment advancement.
+  Receipt-only replay preserves earlier dynamic child invocation slots.
+  Negative supporting Review correction and generic selective dependent
+  revalidation remain unqualified; a rejected support is not advanced.
   `rebindEventAfterBlueprintPredecessors` validates the
   successor catalog and retains the original Blueprint pin. The active-case
   discharge reauthenticates the verified dependency chain and Event receipt.

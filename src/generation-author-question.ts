@@ -11,7 +11,7 @@ import { createAssignmentLifecycleGraph, logicalAssignmentKey,
 import { activeSpecialistChoice, bindSpecialistChoice, verifySpecialistChoice, inspectSpecialistChoice,
   SpecialistChoiceRequiredError, withSpecialistAnswerAuthority, type SpecialistChoiceReceipt } from "./specialist-choice.js";
 import { withStoryJobLock } from "./job-lock.js";
-import { inspectDependencyPlan, dependencyDigest } from "./dependency-state.js";
+import { inspectDependencyPlan, dependencyDigest, dependencyAncestors, blueprintSourceOf } from "./dependency-state.js";
 import { focusedChoiceWorkItem } from "./specialist-choice.js";
 import { readJobControl } from "./job-control.js";
 import { guardPiBudget, PiBudgetPause } from "./job-pi-policy.js";
@@ -120,22 +120,38 @@ export async function pendingGenerationQuestion(job: JobStartResult, saver: Sqli
       e.amendment?.assignment.id === binding.identity.assignmentId);
     const grant = entry?.amendment;
     const parent = snapshot.values;
+    const ancestors = entry && plan ? dependencyAncestors(plan.entries, entry) : undefined;
+    const root = plan?.entries.find(e => ancestors?.has(e.reportDigest));
+    const blueprint = root && blueprintSourceOf(root);
     const reviewPin = parent.reviewPrerequisite;
-    const reviewRequest = plan?.reviewRequests?.find(r => r.sourceSha === entry?.reviewSourceSha &&
+    const reviewRequest = plan?.reviewRequests?.find(r => r.sourceSha === root?.reviewSourceSha &&
       r.digest === reviewPin?.suspension?.suspensionRef);
-    if (question.task.name !== "dependency_amendment" || !grant || entry?.fixture ||
+    const lifecycle = parent.recoveryLifecycle;
+    const active = lifecycle?.active;
+    const decision = lifecycle?.decision;
+    const readiness = parent.recoverySources?.find((r: { caseId: string; channel: string }) =>
+      r.caseId === active?.id && r.channel === "operationRecovery")?.input?.evidence?.eventBlueprintPrerequisite;
+    const parentAdmitted = blueprint
+      ? question.task.name === "assess_recovery" && decision?.action === "plan-amendment" &&
+        decision.adapter === "dependency-work" && decision.caseId === active?.id &&
+        active?.origin?.assignmentId === "event:" + blueprint.milestoneId &&
+        active?.origin?.turnDigest === binding.identity.turnDigest &&
+        active?.origin?.planVersion === parent.planVersion &&
+        readiness?.reportDigest === blueprint.readinessDigest &&
+        readiness?.milestoneId === blueprint.milestoneId
+      : question.task.name === "dependency_amendment" && (root?.reviewSourceSha
+        ? !!reviewRequest && reviewPin.suspension.evidenceRef === reviewRequest.reviewDigest &&
+          reviewPin.submission.headSha === root.reviewSourceSha &&
+          reviewPin.identity.planVersion === parent.planVersion
+        : parent.focusedPrerequisite?.suspension?.evidenceRef === root?.reportDigest &&
+          parent.focusedPrerequisite?.identity?.planVersion === parent.planVersion);
+    if (!parentAdmitted || !root || !grant || entry?.fixture ||
         !["authorized", "reviewing", "verified"].includes(entry.phase) ||
         grant.afterVersion !== binding.identity.planVersion ||
         grant.turnDigest !== binding.identity.turnDigest ||
         grant.sourceSha !== binding.identity.sourceHeadSha ||
         dependencyDigest(grant.assignment) !== binding.identity.scopeDigest ||
-        choice.workItem !== focusedChoiceWorkItem(grant.assignment.targets[0]!, grant.assignment.id) ||
-        (entry.reviewSourceSha
-          ? !reviewRequest || reviewPin.suspension.evidenceRef !== reviewRequest.reviewDigest ||
-            reviewPin.submission.headSha !== entry.reviewSourceSha ||
-            reviewPin.identity.planVersion !== parent.planVersion
-          : parent.focusedPrerequisite?.suspension?.evidenceRef !== entry.reportDigest ||
-            parent.focusedPrerequisite?.identity?.planVersion !== parent.planVersion))
+        choice.workItem !== focusedChoiceWorkItem(grant.assignment.targets[0]!, grant.assignment.id))
       throw Error("Pending supporting question lost its exact parent dependency admission.");
   } else if (binding.identity.planVersion !== snapshot.values.planVersion)
     throw Error("Pending Generation question lost its original assignment plan version.");
