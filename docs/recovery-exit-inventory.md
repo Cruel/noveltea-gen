@@ -1267,3 +1267,36 @@ Logs: `/tmp/nt246-discovery-bounded-final.log`,
 `/tmp/nt246-commented-id-final.log`, `/tmp/nt246-supported-producer.log`,
 `/tmp/nt246-repaired-producer-final2.log`, `/tmp/nt246-review-deps-final.log`,
 `/tmp/nt246-audit-bounded-final.log`, `/tmp/nt246-audit-historical-final.log`.
+
+### Follow-up to `ac7b29f` and `93b1a8e`
+
+- The historical producer resolver now follows a failed last path-changing
+  checkpoint forward through the exact original repair chain before tracing
+  backwards to the original owner. Each successor must be independently
+  reviewed, reachable at the sealed source, and preserve the cited record's
+  Git blob/mode and last path-changing commit. The R07 repaired-sibling
+  scenario uses two real Events, repairs only the redacted-account Event,
+  then requests support against the untouched verify-register Event. It
+  retains the negative checkpoint and rejects pre-successor and tampered
+  repair proof controls.
+- The shared diagnostic quote matcher rejects empty/whitespace-only evidence;
+  the delegated empty-answer control tests the continuation branch.
+- Dependency ledger admission reserves inherited IDs, but uses the current
+  Job's base and entry count to enforce the eight-entry allowance. The
+  focused fork admission regression uses an already-admitted fork-bundle
+  fixture pinned to an actual isolated child Job, then submits a new report
+  and authorizes the new grant through native validation and the real ledger.
+  It asserts inherited ID 8, new ID 9, one local entry, no parent mutation,
+  and correct reinspection after reopening the child Job. Relative-version
+  controls exercise the eighth and rejected ninth grant. The fixture does
+  not replay eight historical specialist executions to construct the bundle.
+
+Targeted verification: 60 unit/compatibility/recovery-audit checks passed,
+one optional private historical fixture skipped; two onboarding integration
+tests passed; the new fork admission regression passed; both R07 repaired
+producer variants passed through support, original Composition continuation,
+independent Review and subsequent scheduling. Root typecheck, lint,
+formatting and diff checks passed. No paid inference or full #275
+qualification was run. Logs: `/tmp/nt246-follow-qualification.log`,
+`/tmp/nt246-follow-discovery.log`, `/tmp/nt246-fork8-final.log`,
+`/tmp/nt246-repaired-follow.log`, `/tmp/nt246-sibling-final.log`.

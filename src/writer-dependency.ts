@@ -61,31 +61,60 @@ export async function verifiedPathProducer(job: JobStartResult, turnDigest: stri
     const last = dependencyGit(job, "log", "-1", "--format=%H", at, "--", prefix + path);
     if (seen.has(last)) throw Error("Writer prerequisite has cyclic producer lineage.");
     seen.add(last);
-    const terminal = await pointAt(last);
-    if (!terminal.assurance.changedPaths.includes(path) ||
-        !["passed", "not-required"].includes(terminal.semanticReview))
+    const changed = await pointAt(last);
+    if (!changed.assurance.changedPaths.includes(path))
+      throw Error("Writer prerequisite lacks its exact path-changing checkpoint.");
+    const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
+    // Review rejects the assignment, not just the files named by findings.
+    // An untouched sibling becomes usable only after the original assignment's
+    // independently passed successor is reachable at this sealed source.
+    let terminal = changed;
+    const forward = new Set<string>([last]);
+    while (terminal.semanticReview === "failed") {
+      const repair = await inspectRejectedRepair(job, terminal.commitSha, "historical").catch(cause => {
+        throw Error("Writer prerequisite is not an independently verified earlier owner.", { cause });
+      });
+      if (!repair.repairedCommitSha || !["passed", "failed"].includes(repair.phase) ||
+          forward.has(repair.repairedCommitSha))
+        throw Error("Writer prerequisite is not an independently verified earlier owner.");
+      const next = await pointAt(repair.repairedCommitSha);
+      dependencyGit(job, "merge-base", "--is-ancestor", terminal.commitSha, next.commitSha);
+      try { dependencyGit(job, "merge-base", "--is-ancestor", next.commitSha, at); }
+      catch (cause) { throw Error("Writer prerequisite is not an independently verified earlier owner at this source.", { cause }); }
+      if (next.workItem !== "repair-" + terminal.commitSha ||
+          next.assurance.assignmentId !== changed.assurance.assignmentId ||
+          next.semanticReview !== repair.phase ||
+          dependencyGit(job, "log", "-1", "--format=%H", next.commitSha, "--", prefix + path) !== last ||
+          dependencyGit(job, "ls-tree", next.commitSha, "--", prefix + path) !==
+            dependencyGit(job, "ls-tree", last, "--", prefix + path))
+        throw Error("Writer prerequisite repair does not retain the exact cited record.");
+      forward.add(next.commitSha);
+      terminal = next;
+    }
+    if (!["passed", "not-required"].includes(terminal.semanticReview))
       throw Error("Writer prerequisite is not an independently verified earlier owner.");
     let root = terminal;
     const repairRoot = root.workItem.startsWith("repair-") ?
       (await readRepairCommitProof(job, root.workItem)).rootFailureSha : undefined;
     if (repairRoot && terminal.semanticReview !== "passed")
       throw Error("Writer prerequisite repair lacks independent acceptance.");
+    const lineage = new Set<string>([terminal.commitSha]);
     while (root.workItem.startsWith("repair-")) {
       const proof = await readRepairCommitProof(job, root.workItem);
       const prior = await pointAt(proof.sourceCommitSha);
-      if (seen.has(prior.commitSha) || proof.commitSha !== root.commitSha ||
+      if (lineage.has(prior.commitSha) || (seen.has(prior.commitSha) && prior.commitSha !== last) || proof.commitSha !== root.commitSha ||
           proof.rootFailureSha !== repairRoot || prior.semanticReview !== "failed" ||
-          prior.assurance.assignmentId !== root.assurance.assignmentId ||
-          !prior.assurance.changedPaths.includes(path))
+          prior.assurance.assignmentId !== root.assurance.assignmentId)
         throw Error("Writer prerequisite repair lost its original failed owner.");
-      const repair = await (await import("./rejected-review-repair.js")).inspectRejectedRepair(job, prior.commitSha, "historical");
+      const repair = await inspectRejectedRepair(job, prior.commitSha, "historical");
       if (repair.rootFailureSha !== repairRoot || repair.repairedCommitSha !== root.commitSha ||
           repair.phase !== (root.semanticReview === "passed" ? "passed" : "failed"))
         throw Error("Writer prerequisite repair has no settled original-owner successor.");
+      lineage.add(prior.commitSha);
       seen.add(prior.commitSha);
       root = prior;
     }
-    if (repairRoot && root.commitSha !== repairRoot)
+    if ((repairRoot && root.commitSha !== repairRoot) || !root.assurance.changedPaths.includes(path))
       throw Error("Writer prerequisite repair root differs from its original owner.");
     if (root.workItem.startsWith("dependency:")) {
       const entry = await (await import("./dependency-state.js")).inspectVerifiedHistoricalSupport(job,

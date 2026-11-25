@@ -73,9 +73,19 @@ const baselineCompact: CausalBlueprint & Required<Pick<CausalBlueprint, "arcs">>
     endings: "The corroborated redacted account is accepted on both routes, with distinct trust consequences." },
 };
 
-export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive = false, recoverEvent = false) {
+export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive = false, recoverEvent = false, repairSibling = false) {
   // The production #250 regression uses native IDs deliberately unrelated to
   // filenames, and a Milestone that belongs to two actual Arcs.
+  const siblingPath = "events/verify-register.md";
+  const siblingProsePath = "authored-content/verify-register.md";
+  const siblingProse = secondProse.replace("id: authored-content.redacted-account", "id: authored-content.verify-register")
+    .replace("title: The Redacted Account", "title: Verify the Daily Register")
+    .replace("events: [event.redacted-account]", "events: [event.verify-register]")
+    .replace(/\n---\n\n[\s\S]*$/, '\n---\n\nAda checks the register against the archive inventory. "This was maintained separately from the signed ledger." Neri confirms its origin. Ada marks the independent source before bringing the evidence to the inquiry.\n');
+  const sibling = secondEvent.replace("event.redacted-account", "event.verify-register")
+    .replace("The Redacted Account", "Verify the Daily Register")
+    .replace("The inquiry accepts independent proof of concealment without exposing the witness", "Ada establishes that the register is independent")
+    .replace(/\n---\n\n[\s\S]*$/, "\n---\n\nAda checks that the independent daily register was maintained separately from the signed ledger. She confirms its origin before presenting the redacted account.\n");
   const multi = process.env.NT_TEST_SCRIPTED_MULTI_ARC === "1";
   const truthPath = multi ? "arcs/archive-account.md" : arc;
   const secondArc = "arcs/witness-safety.md";
@@ -154,7 +164,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
         "event-disclosure": process.env.NT_TEST_SCRIPTED_COMPLETE_CHOICE_EVENT === "1" ? [eventPath, disclosure] : [eventPath], "event-reckoning": [secondEventPath, reckoning],
         "interactive-choice-disclosure": Object.keys(archiveInteractiveRecords[0]!),
         "interactive-puzzle-disclosure": Object.keys(archiveInteractiveRecords[1]!),
-        "composition-disclosure": prosePaths, "composition-reckoning": [secondProsePath],
+        "composition-disclosure": prosePaths, "composition-reckoning": [secondProsePath, ...(repairSibling ? [siblingProsePath] : [])],
       };
       if (recoverEvent && rejectedHead && item.assurance.commitSha !== rejectedHead &&
           item.assurance.changedPaths.length === 1 && item.assurance.changedPaths[0] === eventPath &&
@@ -206,7 +216,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const assignment = JSON.parse(tail.slice(0, tail.lastIndexOf("}") + 1));
       const records = assignment.milestoneId === "milestone.disclosure"
         ? Object.fromEntries(prosePaths.map(p => [p, bytes(p)]))
-        : { [secondProsePath]: secondProse };
+        : { [secondProsePath]: secondProse, ...(repairSibling ? { [siblingProsePath]: siblingProse } : {}) };
       if (!phase) return read([...new Set([...skills("nt-narrative-composition"), "skill://nt-catalog/references/glossary.md", ...assignment.sourcePaths])]);
       if (phase === 1) return write(records);
       if (phase === 2) return validate();
@@ -214,7 +224,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
     }
     if (prompt.includes("INDEPENDENT READ-ONLY Composition editorial reviewer")) {
       const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!.split("\nEARLIER SEALED VERDICTS:")[0]!);
-      const paths = assignment.milestoneId === "milestone.disclosure" ? prosePaths : [secondProsePath];
+      const paths = assignment.milestoneId === "milestone.disclosure" ? prosePaths : [secondProsePath, ...(repairSibling ? [siblingProsePath] : [])];
       if (!phase) return read([...prompt.split("\nPINNED SKILLS:\n")[1]!.split("\nCURRENT FILES:")[0]!.split("\n"), ...prompt.split("\nCURRENT FILES:\n")[1]!.split("\nREQUIREMENTS")[0]!.split("\n")]);
       for (const path of paths) assert.ok(onDisk(path).length > 100);
       const routes: string[] = JSON.parse(prompt.split("Current required routes: ")[1]!.replace(/\.$/, ""));
@@ -243,6 +253,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
         assert.equal(assignment.omission.assignmentId, "interactive:milestone.reckoning");
         assert.ok(onDisk(secondEventPath).includes("matching dates independently establish concealment"));
         evidence.push(cite(secondEventPath, "matching dates independently establish concealment", "No additional local player decision is necessary."));
+        if (repairSibling) evidence.push(cite(siblingPath, "Ada checks that the independent daily register", "Verification requires no further local player decision."));
       }
       for (const p of new Set((assignment.specialistAssignments ?? [])
         .flatMap(item => [...item.authority.existingPaths, ...(item.authority.newPaths ?? [])]))) {
@@ -310,9 +321,16 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       return stop(prompt.includes("MILESTONE PLAN REVIEW")
         ? { schema: "noveltea-milestone-blueprint-review/v5", status: "pass", findings: [], prior: [] }
         : { schema: "noveltea-milestone-blueprint/v1", milestoneId: first ? "milestone.disclosure" : "milestone.reckoning",
-          events: [{ id: first ? "disclose-ledger" : "redacted-account",
-            purpose: first ? "Neri shows Ada the ledger and offers a consequential choice" : "Submit the independently corroborated redacted account",
+          events: [...(!first && repairSibling ? [{
+            id: "verify-register", purpose: "Verify the independently maintained daily register",
             dependsOn: [], participants: ["character.ada", "character.neri"],
+            evidence: [{ anchorPath: milestonePath, source: "The independent daily register",
+              observation: "The register was maintained independently", access: "Ada checks the register's origin",
+              establishes: "The register is independent", limits: "The origin alone does not prove concealment", characterSources: [] }],
+            knowledge: "Ada confirms the register's independent origin", routes: [],
+          }] : []), { id: first ? "disclose-ledger" : "redacted-account",
+            purpose: first ? "Neri shows Ada the ledger and offers a consequential choice" : "Submit the independently corroborated redacted account",
+            dependsOn: !first && repairSibling ? ["verify-register"] : [], participants: ["character.ada", "character.neri"],
             evidence: [{ anchorPath: milestonePath, source: "The signed ledger and independent daily register",
               observation: "The matching dates establish concealment", access: "Neri presents both original records to Ada",
               establishes: "The concealed entry is corroborated by an independent record", limits: "The records do not prove private motive", characterSources: [] }],
@@ -327,7 +345,9 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const first = assignment.milestoneId === "milestone.disclosure";
       assert.ok(first || assignment.milestoneId === "milestone.reckoning");
       const records: Record<string, string> = first ? { [eventPath]: recoverEvent ? openingEvent.replace("value: knows", "value: known") : openingEvent } :
-        { [secondEventPath]: secondEvent, [reckoning]: secondMilestone(onDisk(reckoning)) };
+        { ...(repairSibling ? { [siblingPath]: sibling } : {}),
+          [secondEventPath]: repairSibling ? secondEvent.replace("completed: [event.disclose-ledger]", "completed: [event.verify-register]") : secondEvent,
+          [reckoning]: secondMilestone(onDisk(reckoning)) };
       const completeChoiceEvent = first && process.env.NT_TEST_SCRIPTED_COMPLETE_CHOICE_EVENT === "1";
       if (completeChoiceEvent) records[disclosure] = onDisk(disclosure).replace("completeness: partial\nfulfillment: {any_of: []}",
         "completeness: complete\nfulfillment: {any_of: [[event.disclose-ledger]]}");

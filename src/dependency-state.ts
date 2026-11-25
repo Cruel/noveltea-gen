@@ -15,7 +15,7 @@ import { deriveReviewDependencyRequest, reviewOtherOwners, type OtherOwnerCheckp
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
-import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, authorizeWriterDependency, selectBlueprintArcSources, parseDependencyReport,
+import { DEPENDENCY_ENTRY_LIMIT, authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, authorizeWriterDependency, selectBlueprintArcSources, parseDependencyReport,
   type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
   type DependencyAmendment, DependencyAuthorizationRefusedError } from "./dependency-amendments.js";
 export { DependencyAuthorizationRefusedError };
@@ -247,7 +247,7 @@ export function dependencyVersionBase(job: JobStartResult): number {
     return match ? [Number(match[1])] : [];
   });
   const base = 1 + Math.max(0, ...versions);
-  if (!Number.isSafeInteger(base) || base > Number.MAX_SAFE_INTEGER - 8)
+  if (!Number.isSafeInteger(base) || base > Number.MAX_SAFE_INTEGER - DEPENDENCY_ENTRY_LIMIT)
     throw Error("Inherited dependency identity exceeds the safe version range.");
   return base;
 }
@@ -259,9 +259,9 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
   const turn = await dependencyTurn(job);
   if (saved.schema !== "noveltea-dependency-plan/v1" || saved.jobId !== job.jobId ||
       saved.threadId !== job.threadId || saved.turnDigest !== turn.digest ||
-      digest !== dependencyDigest(body) || !Array.isArray(saved.entries) || saved.entries.length > 8 ||
+      digest !== dependencyDigest(body) || !Array.isArray(saved.entries) || saved.entries.length > DEPENDENCY_ENTRY_LIMIT ||
       (saved.reviewRequests !== undefined && (!Array.isArray(saved.reviewRequests) ||
-        saved.reviewRequests.length > 8 ||
+        saved.reviewRequests.length > DEPENDENCY_ENTRY_LIMIT ||
         new Set(saved.reviewRequests.map(r => r.sourceSha)).size !== saved.reviewRequests.length)) ||
       saved.version !== dependencyVersionBase(job) + saved.entries.filter(e => e.amendment).length)
     throw Error("Dependency plan identity, version or source evidence is corrupt.");
@@ -665,7 +665,7 @@ export async function recordReviewDependency(job: JobStartResult, request: Revie
   }
   if (head !== request.sourceSha)
     throw Error("New review dependency requires the exact reviewed Story HEAD.");
-  if ((plan.reviewRequests?.length ?? 0) >= 8 || plan.entries.some(e => e.phase !== "verified"))
+  if ((plan.reviewRequests?.length ?? 0) >= DEPENDENCY_ENTRY_LIMIT || plan.entries.some(e => e.phase !== "verified"))
     throw Error("Unresolved amendment budget reached; retain review for controlled reconciliation.");
   plan.reviewRequests ??= [];
   plan.reviewRequests.push(request);
@@ -822,7 +822,7 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
     return { plan, entry: prior };
   }
   const ancestors = parent ? dependencyAncestors(plan.entries, parent) : new Set<string>();
-  if (plan.entries.length >= 8 || plan.entries.some(e => e.phase !== "verified" && !ancestors.has(e.reportDigest)))
+  if (plan.entries.length >= DEPENDENCY_ENTRY_LIMIT || plan.entries.some(e => e.phase !== "verified" && !ancestors.has(e.reportDigest)))
     throw Error("Unresolved dependency or amendment limit reached; author reconciliation required.");
   let parentSource: DependencyEntry["parent"];
   if (parent) {
@@ -890,25 +890,26 @@ export async function inspectDependencyAdmission(job: JobStartResult, plan: Depe
     if (JSON.stringify(expected) !== JSON.stringify(source.arcCandidates))
       throw Error("Blueprint prerequisite candidates differ from native canonical source.");
   }
+  const versionBase = dependencyVersionBase(job);
   return entry.writerSource
     ? authorizeWriterDependency({ plan: turn, head, report: entry.report, reportDigest: entry.reportDigest,
-        proposal, records: report.records, sources, version: plan.version, source: entry.writerSource, priorAmendments: plan.entries.filter(e => e !== entry && e.amendment && e.phase !== "verified").map(e => e.amendment!.assignment) })
+        proposal, records: report.records, sources, version: plan.version, versionBase, source: entry.writerSource, priorAmendments: plan.entries.filter(e => e !== entry && e.amendment && e.phase !== "verified").map(e => e.amendment!.assignment) })
     : blueprintSource
     ? authorizeBlueprintCharacterDependency({ plan: turn, head, report: entry.report,
         reportDigest: entry.reportDigest, proposal: proposal as ReviewCharacterProposal,
-        records: report.records, sources, version: plan.version, source: blueprintSource,
+        records: report.records, sources, version: plan.version, versionBase, source: blueprintSource,
         priorAmendments })
     : request?.classification === "other-owner"
     ? authorizeReviewOtherOwnerDependency({ plan: turn, head, request,
         proposal, reportDigest: entry.reportDigest, records: report.records,
-        version: plan.version, priorAmendments })
+        version: plan.version, versionBase, priorAmendments })
     : request
     ? authorizeReviewCharacterDependency({ plan: turn, head, request,
         proposal: proposal as ReviewCharacterProposal,
-        reportDigest: entry.reportDigest, records: report.records, version: plan.version,
+        reportDigest: entry.reportDigest, records: report.records, version: plan.version, versionBase,
         priorAmendments })
     : authorizeDependency({ plan: turn, head, report: entry.report,
-        reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version,
+        reportDigest: entry.reportDigest, proposal, records: report.records, sources, version: plan.version, versionBase,
         priorAmendments });
 
 }

@@ -99,6 +99,10 @@ test("S14 #170: stale, duplicated, forged, unauthorized or protected Event depen
   const request = deriveReviewDependencyRequest(args());
   const valid = { plan: turn, head: sha, request, proposal,
     reportDigest: proposal.reportDigest, records: [record, ...existing], version: 1 };
+  assert.equal(authorizeReviewCharacterDependency({ ...valid, version: 9, versionBase: 9 }).assignment.id,
+    "dependency:9:character.mara");
+  assert.equal(authorizeReviewCharacterDependency({ ...valid, version: 16, versionBase: 9 }).afterVersion, 17);
+  assert.throws(() => authorizeReviewCharacterDependency({ ...valid, version: 17, versionBase: 9 }), /dependency|authorization/i);
   const invalid = [
     { ...valid, head: base },
     { ...valid, proposal: { ...proposal, sourceSha: base } },

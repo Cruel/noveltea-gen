@@ -87,10 +87,21 @@ function links(record: CanonicalScopeRecord, target: string): boolean {
  * Distinct from failures reconstructing the original source or receipt. */
 export class DependencyAuthorizationRefusedError extends Error {}
 
+/** IDs are monotonic across inherited Jobs; the allowance is local to the
+ * current Job. The controller separately caps all entries (including reports
+ * that have not received a grant) in its authenticated ledger. */
+export const DEPENDENCY_ENTRY_LIMIT = 8;
+function validDependencyVersion(version: number, base = 1): boolean {
+  return Number.isSafeInteger(base) && base >= 1 &&
+    Number.isSafeInteger(version) && version >= base &&
+    version - base < DEPENDENCY_ENTRY_LIMIT &&
+    Number.isSafeInteger(version + 1);
+}
+
 export function authorizeReviewCharacterDependency(input: {
   plan: TurnEvidence; head: string; request: ReviewDependencyRequest;
   proposal: ReviewCharacterProposal; reportDigest: string;
-  records: CanonicalScopeRecord[]; version: number;
+  records: CanonicalScopeRecord[]; version: number; versionBase?: number;
   priorAmendments?: TurnAssignmentEvidence[];
 }): DependencyAmendment {
   const { plan, head, request, proposal, records } = input;
@@ -151,7 +162,7 @@ export function authorizeReviewCharacterDependency(input: {
         a.authority.newPaths?.includes(proposedPath) ||
         (foundation && a.authority.existingPaths.includes(arc!.path)) ||
         a.targets.includes(proposal.target)) ||
-      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
+      !validDependencyVersion(input.version, input.versionBase))
     throw new DependencyAuthorizationRefusedError("Review dependency lacks exact approved full-Story creation, Arc source, owner or plan authorization.");
   // A Character prerequisite discovered in an Event review needs two
   // distinct writers: the Character specialist creates exactly one record;
@@ -185,7 +196,7 @@ export function authorizeReviewCharacterDependency(input: {
 export function authorizeReviewOtherOwnerDependency(input: {
   plan: TurnEvidence; head: string; request: ReviewDependencyRequest;
   proposal: DependencyProposal; reportDigest: string;
-  records: CanonicalScopeRecord[]; version: number;
+  records: CanonicalScopeRecord[]; version: number; versionBase?: number;
   priorAmendments?: TurnAssignmentEvidence[];
 }): DependencyAmendment {
   const { plan, head, request, proposal, records } = input;
@@ -227,7 +238,7 @@ export function authorizeReviewOtherOwnerDependency(input: {
       sourceHash(plan.contract.scope) !== request.scopeDigest ||
       sourceHash(plan.assignments) !== request.ownersDigest ||
       sourceHash(owner) !== request.originalAssignmentDigest ||
-      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
+      !validDependencyVersion(input.version, input.versionBase))
     throw new DependencyAuthorizationRefusedError("Cross-specialist prerequisite is not a proven in-scope, single-owner existing canonical correction.");
   return {
     beforeVersion: input.version, afterVersion: input.version + 1,
@@ -249,7 +260,7 @@ export function authorizeReviewOtherOwnerDependency(input: {
 export function authorizeWriterDependency(input: {
   plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
   proposal: DependencyProposal; records: CanonicalScopeRecord[]; sources: DependencySource[];
-  version: number; source: import("./writer-dependency.js").WriterDependencySource;
+  version: number; versionBase?: number; source: import("./writer-dependency.js").WriterDependencySource;
   priorAmendments: TurnAssignmentEvidence[];
 }): DependencyAmendment {
   const { plan, head, report, proposal, records, source } = input;
@@ -287,7 +298,7 @@ export function authorizeWriterDependency(input: {
       JSON.stringify(report.sources) !== JSON.stringify(input.sources) ||
       cited.some(r => r.metadata.decisions !== undefined && (!Array.isArray(r.metadata.decisions) || r.metadata.decisions.length)) ||
       input.priorAmendments.some(a => a.authority.existingPaths.includes(source.targetPath) || a.authority.newPaths?.includes(source.targetPath)) ||
-      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
+      !validDependencyVersion(input.version, input.versionBase))
     throw new DependencyAuthorizationRefusedError("Writer prerequisite is not a source-linked, unprotected existing owner correction.");
   return { beforeVersion: input.version, afterVersion: input.version + 1, sourceSha: head,
     turnDigest: plan.digest, reportDigest: input.reportDigest, reason: proposal.reason,
@@ -300,7 +311,7 @@ export function authorizeWriterDependency(input: {
 export function authorizeDependency(input: {
   plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
   proposal: DependencyProposal; records: CanonicalScopeRecord[];
-  sources: DependencySource[]; version: number;
+  sources: DependencySource[]; version: number; versionBase?: number;
   /** Controller-verified grants from earlier amendments in the same Turn. */
   priorAmendments?: TurnAssignmentEvidence[];
 }): DependencyAmendment {
@@ -314,7 +325,7 @@ export function authorizeDependency(input: {
       !text(proposal.outcome) || proposal.outcome !== report.missing ||
       !plan.objective || !plan.objective.obligations.includes(report.obligation) ||
       (plan.kind !== "revision" && !parent) || report.authorDecisionRequired ||
-      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8 ||
+      !validDependencyVersion(input.version, input.versionBase) ||
       JSON.stringify(report.sources) !== JSON.stringify(input.sources))
     throw new DependencyAuthorizationRefusedError("Dependency amendment has stale evidence, changed obligations or requires author approval.");
   const origin = parent ?? plan.assignments.find(a => a.id === report.assignmentId);
@@ -369,7 +380,7 @@ export function selectBlueprintArcSources(source: import("./dependency-state.js"
 export function authorizeBlueprintCharacterDependency(input: {
   plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
   proposal: ReviewCharacterProposal; records: CanonicalScopeRecord[]; sources: DependencySource[];
-  version: number; source: import("./dependency-state.js").BlueprintDependencySource;
+  version: number; versionBase?: number; source: import("./dependency-state.js").BlueprintDependencySource;
   priorAmendments: TurnAssignmentEvidence[];
 }): DependencyAmendment {
   const {plan, head, report, proposal, records, source} = input;
@@ -402,7 +413,7 @@ export function authorizeBlueprintCharacterDependency(input: {
       proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest || proposal.target !== target ||
       proposal.specialist !== report.likelySpecialist || proposal.outcome !== report.missing ||
       !text(proposal.reason) || !text(proposal.title, 120) || /[\r\n]/.test(proposal.title) ||
-      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8 ||
+      !validDependencyVersion(input.version, input.versionBase) ||
       (!existing && [...plan.assignments, ...input.priorAmendments].some(a => a.targets.includes(target) ||
         a.authority.existingPaths.includes(newPath) || a.authority.newPaths?.includes(newPath))))
     throw new DependencyAuthorizationRefusedError("Blueprint predecessor lacks exact whole-Story ownership, safe delegated Arc link or Character authority.");

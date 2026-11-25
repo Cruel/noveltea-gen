@@ -467,7 +467,7 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
   }
 });
 
-for (const producerMode of ["ordinary", "repaired", "supported"] as const) test("R07 integrated Event, Interactive and Composition carry cross-owner support through ordinary scheduling" + (producerMode === "ordinary" ? "" : " with " + producerMode + " producer"), {
+for (const producerMode of ["ordinary", "repaired", "repaired-sibling", "supported"] as const) test("R07 integrated Event, Interactive and Composition carry cross-owner support through ordinary scheduling" + (producerMode === "ordinary" ? "" : " with " + producerMode + " producer"), {
   skip: !available, timeout: 480_000,
 }, async () => {
   const f = setup("r07-integrated-writer-" + producerMode);
@@ -482,16 +482,20 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
     const graph = createGenerationGraph(saver, "cli");
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
     const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
-    const ordinary = (await import("./support/scripted-archive-stages.js")).archiveStages(f.job, turn);
-    const milestone = producerMode === "repaired" ? "milestone.reckoning" : "milestone.disclosure";
+    const repairedSibling = producerMode === "repaired-sibling";
+    const repaired = producerMode === "repaired" || repairedSibling;
+    const ordinary = (await import("./support/scripted-archive-stages.js")).archiveStages(f.job, turn, false, false, repairedSibling);
+    const milestone = repaired ? "milestone.reckoning" : "milestone.disclosure";
     const repairedPath = "events/redacted-account.md";
+    const targetPath = repairedSibling ? "events/verify-register.md" : repairedPath;
+    const targetId = repairedSibling ? "event.verify-register" : "event.redacted-account";
     const repairedQuote = "The inquiry verifies the visible signatures before accepting the redacted account.";
     let rejectedEventHead = "", repairedEventHead = "";
-    const cases = producerMode === "repaired" ? [{ stage: "composition", prompt: "You are a pinned nt-narrative-composition author",
-      target: "event.redacted-account", path: repairedPath, specialist: "nt-event-design",
+    const cases = repaired ? [{ stage: "composition", prompt: "You are a pinned nt-narrative-composition author",
+      target: targetId, path: targetPath, specialist: "nt-event-design",
       correction: "Ada states the exact matching dates before the inquiry accepts the redacted account.",
-      witnesses: ["milestones/reckoning.md", "arcs/truth.md", repairedPath],
-      ids: [milestone, "arc.truth", "event.redacted-account"], writer: "nt-narrative-composition" }] : [
+      witnesses: ["milestones/reckoning.md", "arcs/truth.md", targetPath],
+      ids: [milestone, "arc.truth", targetId], writer: "nt-narrative-composition" }] : [
       { stage: "event", prompt: "Author exactly ONE Event-design cluster", target: "character.neri",
         path: "characters/neri.md", specialist: "nt-character-development",
         correction: "Neri personally authenticates the signed archive register.",
@@ -521,7 +525,7 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
       const stop = (v: unknown) => ({ content: scriptedText(v), reason: "stop" as const });
       const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
       const skills = (name: string) => boundedPinnedSources(name).map(p => "skill://" + p);
-      if (producerMode === "repaired") {
+      if (repaired) {
         if (prompt.includes("Continue your ORIGINAL specialist Pi session to correct a rejected draft.") && rejectedEventHead && !repairedEventHead) {
           const old = readFileSync(join(f.job.worktreeStoryRoot, repairedPath), "utf8");
           if (!old.includes(repairedQuote)) return { reason: "toolUse", content: [{
@@ -565,7 +569,7 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
         }
         return stop({ modifiedRecords: [], architecturalConflicts: [c.correction], laterObligations: [],
           dependencyFinding: { targetId: c.target, obligationIndex: 0, missing: c.correction, affectedIds: c.ids,
-            sources: c.witnesses.map(p => ({ path: p, quote: producerMode === "repaired" && p === repairedPath ? repairedQuote : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))! })),
+            sources: c.witnesses.map(p => ({ path: p, quote: repaired && p === repairedPath ? repairedQuote : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))! })),
             likelySpecialist: c.specialist, authorDecisionRequired: false } });
       }
       if (negative && !written && prompt.includes("dependency") && prompt.includes("nt-story-orchestrate")) {
@@ -600,14 +604,22 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
     for (const c of cases) {
       const suspended = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
       assert.equal(suspended.focusedPrerequisite?.writerSource?.stage, c.stage, JSON.stringify({reason: suspended.reason, recovery: suspended.recoverySources, active: suspended.active}));
-      if (producerMode === "repaired") {
+      if (repaired) {
         assert.ok(rejectedEventHead && repairedEventHead);
         const source = suspended.focusedPrerequisite!.writerSource!;
         assert.equal(source.producer.workItem, "event-reckoning");
         assert.equal(source.producer.commitSha, rejectedEventHead);
         assert.equal(source.producer.verifiedCommitSha, repairedEventHead);
         const { verifiedPathProducer, inspectWriterDependency } = await import("../src/writer-dependency.js");
-        await assert.rejects(() => verifiedPathProducer(f.job, turn.digest, rejectedEventHead, repairedPath), /independently verified/);
+        await assert.rejects(() => verifiedPathProducer(f.job, turn.digest, rejectedEventHead, targetPath), /independently verified/);
+        if (repairedSibling) {
+          const prefix = f.job.storyRelativePath + "/";
+          assert.equal(git(f.job.worktreeRoot, "log", "-1", "--format=%H", repairedEventHead, "--", prefix + targetPath), rejectedEventHead);
+          assert.equal(git(f.job.worktreeRoot, "ls-tree", rejectedEventHead, "--", prefix + targetPath),
+            git(f.job.worktreeRoot, "ls-tree", repairedEventHead, "--", prefix + targetPath));
+          assert.equal(git(f.job.worktreeRoot, "diff", "--name-only", rejectedEventHead, repairedEventHead), prefix + repairedPath);
+          assert.equal((await verifiedPathProducer(f.job, turn.digest, repairedEventHead, targetPath)).verifiedCommitSha, repairedEventHead);
+        }
         const proof = join(f.job.stateDir, "review-repairs", "proofs", rejectedEventHead + ".json");
         const raw = readFileSync(proof, "utf8");
         try {
@@ -615,7 +627,8 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
           await assert.rejects(() => inspectWriterDependency(f.job, source));
         } finally { writeFileSync(proof, raw); }
         const sealed = await inspectWriterDependency(f.job, source);
-        assert.equal(sealed.report.sources.find(s => s.path === repairedPath)?.quote, repairedQuote);
+        assert.equal(sealed.report.sources.find(s => s.path === targetPath)?.quote,
+          repairedSibling ? "id: " + targetId : repairedQuote);
       }
       const original = readReceipt(c.stage);
       originals.push({ key: original.assignmentKey, session: original.sessionId ?? original.piSessionId ?? original.writerSessionId });
@@ -626,7 +639,7 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
       assert.ok(readFileSync(join(f.job.worktreeStoryRoot, c.path), "utf8").includes(c.correction));
       const revalidated = JSON.parse(readFileSync(join(f.job.stateDir, "revalidation-items", entry.commitSha + ".json"), "utf8"));
       assert.equal(revalidated.state, "completed");
-      if (c.stage === "composition" && producerMode !== "repaired") {
+      if (c.stage === "composition" && !repaired) {
         assert.equal(entry.writerSource?.producer.workItem, "interactive-choice-disclosure");
         assert.equal(revalidated.proposal.upstreamItemId, "event:" + milestone);
         assert.ok(revalidated.results.some((r: {itemId: string; status: string}) => r.itemId === "interactive:" + milestone && r.status === "passed"));
@@ -645,7 +658,7 @@ for (const producerMode of ["ordinary", "repaired", "supported"] as const) test(
         } finally { writeFileSync(reviewPath, originalReview); }
         await readEventOnlyOmission(f.job, omitted, omission);
       }
-      if (producerMode === "repaired") assert.equal(revalidated.proposal.upstreamItemId, "event:" + milestone);
+      if (repaired) assert.equal(revalidated.proposal.upstreamItemId, "event:" + milestone);
       if (producerMode === "supported" && c.stage === "choice") assert.equal(entry.writerSource?.producer.workItem, "character-foundations");
       assert.ok(!revalidated.results.some((r: { itemId: string }) => revalidated.proposal.unaffected.includes(r.itemId)));
       const result = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));

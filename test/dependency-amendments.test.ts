@@ -118,6 +118,45 @@ test("controller adds only the connected owning specialist while retaining the a
   assert.equal(result.resumes, "focus:authored-content.disclosure");
 });
 
+test("dependency allowance is relative to the authenticated Job base, not the inherited ID", () => {
+  const input = { plan, head, report, reportDigest: proposal.reportDigest,
+    proposal, records, sources: [source] };
+  for (let version = 9; version <= 16; version++) {
+    const grant = authorizeDependency({ ...input, version, versionBase: 9 });
+    assert.equal(grant.assignment.id, "dependency:" + version + ":event.disclosure");
+  }
+  for (const version of [8, 17, Number.MAX_SAFE_INTEGER])
+    assert.throws(() => authorizeDependency({ ...input, version, versionBase: 9 }), /dependency/i);
+  assert.throws(() => authorizeDependency({ ...input, version: 9 }), /dependency/i);
+});
+
+test("writer prerequisite shares the relative Job allowance", async () => {
+  const { authorizeWriterDependency } = await import("../src/dependency-amendments.js");
+  const full: TurnEvidence = { ...plan, kind: "full-story",
+    objective: { ...plan.objective, breadth: "whole-story" },
+    assignments: [
+      { ...plan.assignments[0], id: "composition" },
+      { ...plan.assignments[0], id: "event", specialist: "nt-event-design",
+        authority: { recordTypes: ["event"], existingPaths: [], mayCreate: true } },
+    ] };
+  const anchor = { path: "milestones/disclosure.md", metadata: { id: "milestone.disclosure",
+    type: "milestone", status: "draft", fulfillment: { any_of: [["event.disclosure"]] } } };
+  const sources = [source, { path: anchor.path, sha256: source.sha256, quote: anchor.metadata.id }];
+  const finding = { ...report, assignmentId: "composition",
+    affectedIds: ["event.disclosure", anchor.metadata.id], sources };
+  const input = { plan: full, head, report: finding, reportDigest: proposal.reportDigest,
+    proposal, records: [...records, anchor], sources, priorAmendments: [],
+    source: { stage: "composition" as const, milestoneId: anchor.metadata.id,
+      workItemId: "composition-disclosure", planVersion: 1, sealDigest: "e".repeat(64),
+      targetId: proposal.target, targetPath: source.path, producer: {
+        assignmentId: "event", workItem: "event-disclosure", commitSha: head, assuranceDigest: "f".repeat(64),
+      } } };
+  assert.equal(authorizeWriterDependency({ ...input, version: 9, versionBase: 9 }).assignment.id,
+    "dependency:9:event.disclosure");
+  assert.equal(authorizeWriterDependency({ ...input, version: 16, versionBase: 9 }).afterVersion, 17);
+  assert.throws(() => authorizeWriterDependency({ ...input, version: 17, versionBase: 9 }), /prerequisite/i);
+});
+
 test("controller rejects stale evidence, invented authority, wrong owners and protected or unrelated work", () => {
   const valid = { plan, head, report, reportDigest: proposal.reportDigest,
     proposal, records, sources: [source], version: 1 };
@@ -278,6 +317,10 @@ test("ambiguous reviewed prerequisite selects only necessary native Arc links an
   const proposed = { ...proposal, specialist: evidence.likelySpecialist, target: blueprint.target,
     outcome: evidence.missing, title: "Mara" };
   const input = { ...base, source: blueprint, proposal: { ...proposed, arcIds: ["arc.investigation"] } };
+  assert.equal(authorizeBlueprintCharacterDependency({ ...input, version: 9, versionBase: 9 }).assignment.id,
+    "dependency:9:character.mara");
+  assert.equal(authorizeBlueprintCharacterDependency({ ...input, version: 16, versionBase: 9 }).afterVersion, 17);
+  assert.throws(() => authorizeBlueprintCharacterDependency({ ...input, version: 17, versionBase: 9 }), /dependency|authority/i);
   assert.deepEqual(authorizeBlueprintCharacterDependency(input).assignment.authority, {
     recordTypes: ["arc", "character"], existingPaths: ["arcs/second-file.md"],
     newPaths: ["characters/mara.md"], mayCreate: true,

@@ -74,6 +74,75 @@ function seedArchiveWitness(story: string) {
   git(story, "commit", "-qm", "Author-provided archive witness Story");
 }
 
+// The fork bundle is a fixture at the already-admitted boundary (as in
+// plan-continuity-fork.test.ts). The child request, native catalog, controller
+// approval and ledger are real; the inherited entry must not become a grant.
+test("fork with inherited dependency 8 admits its first new support in the child ledger", {
+  skip: !available, timeout: 60_000,
+}, async () => {
+  const f = fixture("fork-dependency-allowance");
+  seedArchiveWitness(f.story);
+  const oldState = process.env.NT_STATE_DIR;
+  process.env.NT_STATE_DIR = f.env.NT_STATE_DIR;
+  try {
+    const parent = await startStoryJob({ story: f.story, job: "parent" });
+    const { forkDigest, readRecoveryFork } = await import("../src/recovery-fork-state.js");
+    const { recordDependency, approveDependency, inspectDependencyPlan, dependencyVersionBase, sourceDigest } =
+      await import("../src/dependency-state.js");
+    const target = "event.disclose-ledger", path = "events/disclose-ledger.md";
+    const ownTarget = "authored-content.disclosure-scene", ownPath = "authored-content/disclosure-scene.md";
+    const contract: CompletionContract = { scope: { kind: "partial", depth: "composition",
+      targets: [ownTarget], branches: [] }, constraints: [],
+      envelope: { presentation: "Visual novel", hardLimits: [], preferences: [] } };
+    const inheritedId = "dependency:8:character.ada";
+    const bundle = { version: 2, childId: "child", sourceJobId: parent.jobId,
+      sourceBaseSha: parent.baseSha, storyRoot: parent.storyRoot,
+      toolchain: { graphSchema: "noveltea-generation/v1",
+        runtime: { continuationSchema: "noveltea-fork/v2", nodeVersion: process.version },
+        validator: { implementation: "native-cli", contract: "noveltea-validator/v1", version: parent.validatorVersion },
+        skills: { id: "a".repeat(64) } },
+      checkpoint: { commitSha: parent.baseSha, workItem: inheritedId, completedWorkItems: [inheritedId] },
+      reviewCoverage: [{ workItem: inheritedId, commitSha: parent.baseSha, status: "passed" }],
+      contract, receipts: {}, commits: {}, completedStages: [] };
+    const bundleSha256 = forkDigest(bundle);
+    const child = await startStoryJob({ story: f.story, job: "child", pinnedBaseSha: parent.baseSha,
+      recoveryFork: { sourceJobId: parent.jobId, sourceBaseSha: parent.baseSha,
+        commitSha: parent.baseSha, bundleSha256 } });
+    writeFileSync(join(child.stateDir, "recovery-fork.json"), JSON.stringify(bundle));
+    writeFileSync(join(child.stateDir, "recovery-fork-ready"), bundleSha256 + "\n");
+    assert.equal(readRecoveryFork(child)?.checkpoint.completedWorkItems[0], inheritedId);
+    assert.equal(dependencyVersionBase(child), 9);
+    assert.equal(await inspectDependencyPlan(child), null);
+    const native = await validateStoryJob(child, source, { ...child, baseSha: child.baseSha });
+    assert.equal(native.status, "passed");
+    const catalog = (native.report as { records: CanonicalScopeRecord[] }).records;
+    const turn = planObjective({ kind: "revision", request: "Clarify the proof in the disclosure scene", contract,
+      base: child.baseSha, sourceJobId: "parent", catalog, targetIds: [ownTarget], allowedPaths: [ownPath] });
+    await saveJobTurnPlan(child, turn);
+    const bytes = readFileSync(join(child.worktreeStoryRoot, path), "utf8");
+    const report = { sourceSha: child.baseSha, turnDigest: turn.digest, assignmentId: "focus:" + ownTarget,
+      obligation: turn.objective.obligations[0], missing: "Clarify the Event evidence needed by the disclosure scene",
+      affectedIds: [ownTarget, target], sources: [{ path, sha256: sourceDigest(bytes), quote: "id: " + target }],
+      likelySpecialist: "nt-event-design", authorDecisionRequired: false };
+    const { plan, entry } = await recordDependency(child, report, false);
+    assert.equal(plan.version, 9);
+    await approveDependency(child, plan, entry, { sourceSha: child.baseSha, reportDigest: entry.reportDigest,
+      target, specialist: report.likelySpecialist, outcome: report.missing, reason: "The scene consumes this Event." });
+    const reopened = await startStoryJob({ story: f.story, job: "child" }, false);
+    const saved = (await inspectDependencyPlan(reopened))!;
+    assert.equal(saved.version, 10);
+    assert.equal(saved.entries.length, 1);
+    assert.equal(saved.entries[0]?.phase, "authorized");
+    assert.equal(saved.entries[0]?.amendment?.assignment.id, "dependency:9:" + target);
+    assert.deepEqual(saved.entries[0]?.amendment?.assignment.authority.existingPaths, [path]);
+    assert.equal(git(child.worktreeRoot, "rev-parse", "HEAD"), child.baseSha);
+    assert.equal(await inspectDependencyPlan(parent), null);
+    assert.equal(readRecoveryFork(reopened)?.checkpoint.completedWorkItems[0], inheritedId);
+  } finally {
+    if (oldState === undefined) delete process.env.NT_STATE_DIR; else process.env.NT_STATE_DIR = oldState;
+  }
+});
+
 test("completion contract accepts typed deep targets, presets, and rejects ambiguous or invalid scope", () => {
   const input = { scope: { kind: "partial", preset: "interactive-development",
     targets: ["event.disclose-ledger", "character.ada"], branches: ["protect"] },

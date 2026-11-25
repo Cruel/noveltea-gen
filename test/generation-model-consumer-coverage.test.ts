@@ -243,7 +243,7 @@ const effectReviewed: Record<string, string> = {
   "src/cross-domain-closeout-work.ts:reviewerAssignment": "1:880610212e10fddd54a39ce8",
   "src/cross-domain-prerequisite-controller.ts:preflightCompositionBoundary": "1:93cd9ea2199739db5e6988ea",
   "src/dependency-state.ts:registerReviewDependency": "1:5ddcfd4f862723bd975fb444",
-  "src/dependency-state.ts:inspectDependencyAdmission": "1:8b899cc1c47a0e2a6bb9b9fb",
+  "src/dependency-state.ts:inspectDependencyAdmission": "1:d67f707b674accd802fa7b5d",
   "src/dependency-state.ts:registerBlueprintDependency": "1:cb1ade2913b7acad17b3b7b9",
   "src/dependency-work.ts:supportingWriterRounds": "1:180cbfacbc22d6eb2499f374",
   "src/dependent-correction-work.ts:native": "1:c3469e6a1dcc5740024c502c",

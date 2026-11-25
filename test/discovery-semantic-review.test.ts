@@ -148,6 +148,7 @@ test('a confirmed negative permits only source-bound diagnostic correction', () 
     { statement: 'A hopeful ending and twenty illustrations', authority: 'delegated', source: ending },
   ], [], evidence, context)
   const claim = packet.claims[0]!
+  assert.equal(claim.submittedAnswer, '')
   const assessment = { claimId: claim.id, verdict: 'unsupported', reason: 'The ending delegation does not cover illustrations.' }
   const correction = { claimId: claim.id, claimQuote: claim.statement, sourceQuote: claim.question,
     correction: 'Narrow the decision to a hopeful ending.' }
@@ -161,6 +162,9 @@ test('a confirmed negative permits only source-bound diagnostic correction', () 
     { ...correction, claimQuote: 'invented' },
     { ...correction, sourceQuote: evidence[2]!.statement },
     { ...correction, correction: '' },
+    { ...correction, claimQuote: '' },
+    { ...correction, sourceQuote: '' },
+    { ...correction, sourceQuote: '   ' },
   ]) assert.throws(() => parse([invalid]), /Discovery diagnostic/)
   assert.throws(() => parse([correction, correction]), /Invalid Discovery diagnostic/)
   assert.throws(() => parse([correction], [{ ...assessment, verdict: 'supported' }]), /exact rejected claim/)

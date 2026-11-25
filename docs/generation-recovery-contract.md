@@ -1173,3 +1173,24 @@ All Event, Interactive, Composition and Character writer prerequisite adapters
 use the same continuation-binding and original writer identity checks.
 Domain-specific receipt transitions are retained; a pre-writer Blueprint
 finding does not fabricate a Pi writer session.
+
+Assignment acceptance also covers unchanged sibling records in a
+multi-record assignment. A failed last path-changing checkpoint is not
+sufficient to authorize a later prerequisite. The historical resolver must
+follow its exact settled repair receipts to an independently passed successor
+reachable at the consuming source, reattest each rejected predecessor, and
+prove the cited record's Git blob/mode and path history stayed unchanged
+through the successor. The owner remains the original assignment and the
+verified tip remains a separate SHA. An unreviewed, failed, foreign, cyclic,
+or later-than-source successor cannot supply authority.
+
+A Discovery corrective quotation must contain non-whitespace text even when
+the cited delegated answer is empty. The submitted question remains available
+as a source, and an empty answer cannot be used as a quotation.
+
+A recovery fork reserves inherited dependency IDs for collision avoidance.
+Each Job has a separate eight-entry limit for new dependency reports/grants;
+all five admission adapters use the current Job's authenticated initial
+version as the base of their eight-version allowance. The current ledger
+also counts reports without grants. No inherited entry confers a new grant
+or consumes a current Job's entry budget.

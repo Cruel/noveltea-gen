@@ -79,6 +79,9 @@ test("#221: sealed other-owner report yields a single existing-record controller
   assert.equal(request.otherOwnerPath, "characters/witness.md");
   assert.equal(request.digest, hash((({ digest: _, ...body }) => body)(request)));
   const approved = authorize();
+  assert.equal(authorize({ version: 9, versionBase: 9 }).assignment.id, "dependency:9:character.witness");
+  assert.equal(authorize({ version: 16, versionBase: 9 }).afterVersion, 17);
+  assert.throws(() => authorize({ version: 17, versionBase: 9 }), /prerequisite/i);
   assert.equal(approved.resumes, "event");
   assert.deepEqual(approved.assignment.authority, {
     recordTypes: ["character"], existingPaths: ["characters/witness.md"], mayCreate: false,

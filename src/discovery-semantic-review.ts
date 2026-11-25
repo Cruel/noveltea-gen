@@ -145,7 +145,7 @@ export function parseDiscoverySemanticDiagnostic(raw: string, packet: DiscoveryS
     throw Error('Invalid Discovery diagnostic contract.')
   const verdict = parseDiscoverySemanticVerdict(JSON.stringify({ assessments: parsed.assessments }), packet)
   const exactQuote = (source: string, quote: string) =>
-    quote.trim().length >= Math.min(12, source.trim().length) && source.includes(quote)
+    quote.trim().length > 0 && quote.trim().length >= Math.min(12, source.trim().length) && source.includes(quote)
   const disputed = new Set<string>()
   for (const item of parsed.disputes) {
     if (!plain(item) || Object.keys(item).sort().join(',') !== 'claimId,claimQuote,sourceQuote' ||
