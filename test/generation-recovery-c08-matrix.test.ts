@@ -38,44 +38,63 @@ const dedicatedChildren = {
 
 /** Original-operation assessment and authentic regression anchor for each
  * current graph node. C01 additionally fingerprints every return and throw. */
-const nodeChecks = {
-  schedule: ["scheduling", "production resume assesses failed scheduling"],
-  assess_recovery: [null, "C03 production graph diagnoses a source-authenticated unknown scheduling exception once"],
-  author_update_intake: ["author-update-intake", "production start assesses thrown author-update intake"],
-  idea_integration: ["idea-integration", "C02 production deferred idea later placement"],
-  verify_idea_integration: ["idea-verification", "unknown original idea dispatch is fenced"],
-  specialist_dispatch: ["specialist-dispatch", "#225 unaccepted specialist result reaches assessment"],
-  dependency_amendment: ["dependency-amendment", "#225 failed dependency amendment is assessed"],
-  independent_assignment_review: ["independent-review", "C04 Review strategy demands the original sealed failed Pi cycle"],
-  verify_committed_work: ["commit-verification", "parent restart reconciles a specialist commit"],
-  completion_decision: ["completion-verification", "#225 untrusted completion preflight is assessed"],
-} as const satisfies Record<string, readonly [Operation | null, string]>;
+// A parameterized production regression is anchored both to its test name
+// and to the exact registered scenario. A generic passing test in the same
+// file is not a replacement for a removed recovery boundary.
+type Regression = readonly [file: string, name: string, variant?: string];
+const generation = (name: string, variant?: string): Regression =>
+  ["test/generation.test.ts", name, variant];
+const foundationRound = (variant: string) => generation(
+  "R01 production Foundation enters checkpointed child before scripted Pi; native Git and independent Review remain authoritative", variant);
+const eventRound = (variant: string) => generation(
+  "R14D Event native correction and negative Review recover in the original SQLite assignment", variant);
+const ideaRound = (variant: string) => generation(
+  "C08 parent Idea dispatch and verification authenticate the original task", variant);
+function assertRegression([file, name, variant]: Regression, boundary: string) {
+  const content = source(file);
+  assert.ok(content.includes(name), boundary + ": " + file + " lost its regression: " + name);
+  if (variant) assert.ok(content.includes(JSON.stringify(variant)),
+    boundary + ": " + file + " lost its registered scenario: " + variant);
+}
 
-/** Actions are typed from the normative RecoveryDecision union; each must
- * have an original-controller regression, not only a mocked future graph. */
+const nodeChecks = {
+  schedule: ["scheduling", generation("C05 unfamiliar scheduling failure is resolved by source-bound recheck")],
+  assess_recovery: [null, eventRound("diagnosis")],
+  author_update_intake: ["author-update-intake", generation("production start assesses thrown author-update intake")],
+  idea_integration: ["idea-integration", ideaRound("foreign-dispatch")],
+  verify_idea_integration: ["idea-verification", ideaRound("unverified-result")],
+  specialist_dispatch: ["specialist-dispatch", foundationRound("protocol-exhausted")],
+  dependency_amendment: ["dependency-amendment", generation("#225 failed dependency amendment is assessed")],
+  independent_assignment_review: ["independent-review", foundationRound("review-native")],
+  verify_committed_work: ["commit-verification", ["test/focused-generation.test.ts", "R07 focused commit before checkpoint finalization resumes without replay"]],
+  completion_decision: ["completion-verification", generation("#225 untrusted completion preflight is assessed")],
+} as const satisfies Record<string, readonly [Operation | null, Regression]>;
+
+/** Decisions and lifecycle states must remain tied to their actual
+ * production boundary, even when the legacy structural fixture is removed. */
 const actionChecks = {
-  "known-correction": ["test/generation.test.ts", "C04 Review strategy demands the original sealed failed Pi cycle"],
-  "plan-amendment": ["test/generation.test.ts", "C04 real Pi World negative selects source-bound owner strategy"],
-  "diagnostic": ["test/generation.test.ts", "C03 production graph diagnoses a source-authenticated unknown scheduling exception once"],
-  "diagnostic-stop": ["test/generation.test.ts", "C03 production graph diagnoses a source-authenticated unknown scheduling exception once"],
-  "reconcile-effects": ["test/generation.test.ts", "C05 unfamiliar scheduling failure is resolved by source-bound recheck"],
-  "continue-independent": ["test/generation-recovery-graph.test.ts", "C02 verified independent no-write progress keeps the failed obligation pending"],
-  "pause": ["test/generation.test.ts", "C02 production graph preserves authenticated author controls"],
-  "exhausted": ["test/response-contract-recovery.test.ts", "two invalid corrections exhaust with typed protocol result"],
-  "integrity-fence": ["test/generation.test.ts", "C02 current-format checkpoint tampering cannot grant a new recovery"],
-} as const satisfies Record<RecoveryDecision["action"], readonly [string, string]>;
+  "known-correction": foundationRound("review-native"),
+  "plan-amendment": generation("C04 real Pi World negative selects source-bound owner strategy"),
+  "diagnostic": eventRound("diagnosis"),
+  "diagnostic-stop": foundationRound("review-native-stall"),
+  "reconcile-effects": generation("C05 unfamiliar scheduling failure is resolved by source-bound recheck"),
+  "continue-independent": ideaRound("deferred"),
+  "pause": foundationRound("author-pause"),
+  "exhausted": foundationRound("review-native-protocol"),
+  "integrity-fence": generation("C02 current-format checkpoint tampering cannot grant a new recovery"),
+} as const satisfies Record<RecoveryDecision["action"], Regression>;
 
 const phaseChecks = {
-  idle: "C02 a settled original failure cannot be re-admitted",
-  assessing: "C02 production bridge has only one phase",
-  reconciling: "C02 production bridge has only one phase",
-  diagnosing: "C02 no model attempt is inferred",
-  correcting: "C04 Review strategy demands the original sealed failed Pi cycle",
-  verifying: "C02 original source with authenticated reconciliation enters verifying",
-  paused: "C02 authenticated author pause and cancellation",
-  fenced: "C02 failed re-verification fences",
-  resolved: "C07 verified correction persists original identity",
-} as const satisfies Record<RecoveryLifecycle["phase"], string>;
+  idle: ["test/generation-recovery-graph.test.ts", "C02 a settled original failure cannot be re-admitted"],
+  assessing: ["test/generation-recovery-graph.test.ts", "C02 production bridge has only one phase"],
+  reconciling: generation("C05 unfamiliar scheduling failure is resolved by source-bound recheck"),
+  diagnosing: ["test/generation-recovery-lifecycle.test.ts", "C02 no model attempt is inferred"],
+  correcting: foundationRound("review-native"),
+  verifying: ["test/generation-recovery-graph.test.ts", "C02 original source with authenticated reconciliation enters verifying"],
+  paused: foundationRound("author-pause"),
+  fenced: ["test/generation-recovery-graph.test.ts", "C02 failed re-verification fences"],
+  resolved: ["test/generation-recovery-lifecycle.test.ts", "C07 verified correction persists original identity"],
+} as const satisfies Record<RecoveryLifecycle["phase"], Regression>;
 
 function dispatchCases(): Record<string, string> {
   const file = ts.createSourceFile("generation.ts", source("src/generation.ts"),
@@ -159,13 +178,12 @@ test("C08 each real graph node retains a source-linked failure/Review check and 
     .map(match => match[1]!);
   assert.deepEqual(declared.sort(), Object.keys(nodeChecks).sort(),
     "New graph nodes need typed C08 evidence, proof and regression before release");
-  for (const [node, [operation, name]] of Object.entries(nodeChecks)) {
+  for (const [node, [operation, regression]] of Object.entries(nodeChecks)) {
     assert.deepEqual(node === "assess_recovery" ? null : nodeFailureSource[
       node as keyof typeof nodeFailureSource]?.[0], operation,
       `${node}: original failed-check owner changed`);
     if (operation) assert.ok(operationChecks[operation], `${node}: missing versioned failed check`);
-    assert.ok(source("test/generation.test.ts").includes(name),
-      `${node}: production-graph regression anchor removed or renamed`);
+    assertRegression(regression, node);
   }
 });
 
@@ -184,13 +202,8 @@ test("C08 every decision and lifecycle phase has a maintained certification anch
     "known-correction", "plan-amendment", "diagnostic", "diagnostic-stop",
     "reconcile-effects", "continue-independent", "pause", "exhausted", "integrity-fence",
   ].sort());
-  for (const [action, [file, anchor]] of Object.entries(actionChecks))
-    assert.ok(source(file).includes(anchor), `${action}: ${file} lost its regression`);
-  for (const [phase, anchor] of Object.entries(phaseChecks)) {
-    const path = phase === "correcting" ? "test/generation.test.ts" :
-      "test/generation-recovery-lifecycle.test.ts";
-    const content = source(path) +
-      (path === "test/generation.test.ts" ? "" : source("test/generation-recovery-graph.test.ts"));
-    assert.ok(content.includes(anchor), `${phase}: no source-backed transition regression`);
-  }
+  for (const [action, regression] of Object.entries(actionChecks))
+    assertRegression(regression, action);
+  for (const [phase, regression] of Object.entries(phaseChecks))
+    assertRegression(regression, phase);
 });

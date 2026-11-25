@@ -1318,7 +1318,8 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     await crashRuntime.refresh({ allowNetwork: false });
     const crashRun = () => withJobModelRuntime(crashRuntime, () =>
       runArchitectureJob({ story: graphStory, job: crashGraphJobId!,
-        action: "run", contract: graphContract, task, provider: model.provider,
+        action: "run", round: { assignmentKey: "production-blueprint-crashGraphJobId", command: { phase: "invoke" } },
+        contract: graphContract, task, provider: model.provider,
         model: model.id, skillsSource: source, validatorSource: source }));
     const crashInspect = () => runArchitectureJob({
       story: graphStory, job: crashGraphJobId!, action: "inspect",
@@ -1380,7 +1381,8 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     };
     const activeRun = () => withJobModelRuntime(activeRuntime, () =>
       runArchitectureJob({ story: graphStory, job: activeGraphJobId!,
-        action: "run", contract: graphContract, task, provider: model.provider,
+        action: "run", round: { assignmentKey: "production-blueprint-activeGraphJobId", command: { phase: "invoke" } },
+        contract: graphContract, task, provider: model.provider,
         model: model.id, skillsSource: source, validatorSource: source }));
     const activeInspect = () => runArchitectureJob({
       story: graphStory, job: activeGraphJobId!, action: "inspect",

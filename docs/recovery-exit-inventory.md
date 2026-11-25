@@ -377,3 +377,30 @@ the subsequent integrated qualification. The hosted sandbox smoke now uses
 a scripted provider on the same authenticated Generation graph and real
 rootless Docker controller. The cooperative live interruption test also
 starts an authenticated Turn; paid interruption is not claimed here.
+
+#### R14K CI follow-up
+
+The C08 crosswalk binds each live graph node, decision and lifecycle phase to
+the current regression, including the registered variants of parameterized
+tests. The production-graph tests now cover a foreign Idea dispatch receipt,
+a forged integration result, a genuine deferred read-only selection, an
+unaccepted specialist result, an unreadable completion plan and a failed
+dependency amendment. The Studio approval regression builds an authenticated
+Turn through independently reviewed Architecture, proposes the real plan
+amendment, and retains the owner, nonce, replay and historical-worker
+rejection checks. The rootless Blueprint adapter's reviewer-crash and
+active-time admission regressions invoke the original assignment round, not
+the retired standalone Architecture command. The same suite independently
+exercises the authenticated Generation parent.
+
+Native Review recovery also requires the corrected native catalog protection
+semantics in Cruel/nt. A malformed record retaining the exact protected
+identity and decisions must not be misreported as deletion of those decisions;
+an actual changed or missing protected decision must still be rejected.
+The older native artifact from Build 45475149240 reproduced the Review
+recovery failure. The native Git regression and the five Foundation
+native-correction variants pass with the corrected CLI. Publish a successful
+native master Build containing that correction before certifying the
+generator against the downloaded artifact. Do not relax the generator's
+protected-record refusal or substitute fixture evidence for the native
+contract.

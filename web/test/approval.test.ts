@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
+import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { openStudioDatabase } from './support/studio-database'
 import { migrateStudio } from './support/studio-database'
@@ -20,6 +20,10 @@ import { runArchitectureJob } from '../../src/architecture'
 import { verifyAuthorEvidence } from '../../src/author-evidence'
 import { planWholeStory } from '../src/lib/turn-plan'
 import { saveJobTurnPlan } from '../src/lib/turn-plan-receipt.server'
+import { runStoryGeneration } from '../../src/generation'
+import { withJobModelRuntime } from '../../src/model-runtime'
+import { fixtureSandboxClient, scriptedModel, scriptedStoryRuntime } from '../../test/c03-scripted-story-helpers'
+import { archiveStages } from '../../test/support/scripted-archive-stages'
 
 const config = { baseURL: 'http://localhost:3000', secret: 'approval-test-secret-0123456789abcdefghijklmnopqrstuvwxyz',
   github: { clientId: 'github', clientSecret: 'secret' }, gitlab: { clientId: 'gitlab', clientSecret: 'secret' } }
@@ -47,7 +51,7 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     }
     const aliceCookie = await cookie(alice.id), bobCookie = await cookie(bob.id)
     const repo = join(root, 'source'); mkdirSync(join(repo, 'story'), { recursive: true })
-    writeFileSync(join(repo, 'story/README.md'), 'Approval fixture\n')
+    writeFileSync(join(repo, 'story/.gitkeep'), '')
     const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim()
     git('init', '-q'); git('config', 'user.name', 'Author'); git('config', 'user.email', 'author@test.example')
     git('add', '.'); git('commit', '-qm', 'baseline')
@@ -62,7 +66,7 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     })
     await store.persistence.generation.jobs.register(alice.id, jobId, storyId,
       'Job', commit, '2026-10-31')
-    const firstContract = { scope: { kind: 'partial', depth: 'architecture', targets: [], branches: [] },
+    const firstContract = { scope: { kind: 'full-story' as const, depth: 'composition' as const, targets: [], branches: [] },
       constraints: ['Preserve the original mystery'],
       envelope: { presentation: 'Visual novel', hardLimits: [], preferences: [] } }
     const contract = { ...firstContract, constraints: [...firstContract.constraints, 'Reveal the witness'] }
@@ -102,13 +106,31 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     // plan-approval evidence in this disposable job.
     rmSync(join(job.stateDir, 'turn-plan.json'))
     ;(await store.testing.records.update('studio_sessions', { id: jobId }, { generationConfigJson: null }))
-    const plan = { version: 1, contract: firstContract, items: [] }
-    const digest = createHash('sha256').update(JSON.stringify({ plan, head: commit, contract })).digest('hex')
-    writeFileSync(join(job.stateDir, 'architecture.json'), JSON.stringify({ format: 1,
-      jobId, threadId: job.threadId, branch: job.branch, worktreeRoot: job.worktreeRoot,
-      baseSha: commit, expectedHead: commit, phase: 'ready', mode: 'autonomous',
-      worker: 'fixture', provider: 'openai', model: 'gpt-6-luna', history: [], plan,
-      proposal: { version: 2, digest, baselineHead: commit, contract } }))
+    // Create real, independently reviewed Architecture under a fresh Turn.
+    // The previous missing-sandbox test never admitted a writer; replacing
+    // that unstarted draft here is only setup for this separate approval test.
+    const task = 'A missing archive witness; invent unspecified details'
+    const turn = planWholeStory(task, firstContract, commit)
+    await saveJobTurnPlan(job, turn)
+    const skills = resolve(process.env.NT_SKILLS_CHECKOUT ?? '../../noveltea-skills')
+    const runtime = await scriptedStoryRuntime(archiveStages(job, turn))
+    const restoreSandbox = fixtureSandboxClient(job.jobId, job.worktreeStoryRoot)
+    try {
+      const generation = await withJobModelRuntime(runtime.runtime, () => runStoryGeneration({
+        story: job.storyRoot, job: jobId, action: 'start', task, contract: firstContract,
+        skillsSource: skills, provider: scriptedModel.provider, model: scriptedModel.id,
+        pauseAfter: 'architecture',
+      }))
+      assert.equal(generation.status, 'paused', JSON.stringify(generation))
+      assert.equal(generation.reason, 'Requested safe-boundary pause')
+    } finally { restoreSandbox() }
+    const verifiedHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: job.worktreeRoot, encoding: 'utf8' }).trim()
+    assert.notEqual(verifiedHead, commit)
+    const proposed = await runArchitectureJob({ story: job.storyRoot, job: jobId,
+      action: 'propose', contract })
+    assert.ok(proposed.proposal)
+    const digest = proposed.proposal.digest
+    assert.equal(proposed.proposal.baselineHead, verifiedHead)
     const post = (body: unknown, session = aliceCookie, origin = config.baseURL) => approvalRequest(auth, store,
       new Request(config.baseURL + '/api/approvals', { method: 'POST', headers: {
         origin, cookie: session, 'content-type': 'application/json' }, body: JSON.stringify(body) }), config.baseURL)
@@ -172,7 +194,7 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     const applied = (await answered.json() as any).acknowledgement
     assert.equal(applied.phase, 'applied')
     assert.equal(applied.webController.principal, 'user:' + alice.id)
-    assert.equal(applied.webController.headSha, commit)
+    assert.equal(applied.webController.headSha, verifiedHead)
     assert.equal((await author(answer)).status, 200, 'exact replay is idempotent')
     assert.equal((await author({ ...answer, answer: 'Someone else' })).status, 409)
     const authorView = await (await inspectAuthor()).json() as any
@@ -187,13 +209,21 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     const exact = (await stagedWeb.json() as any).approval
     assert.equal(exact.phase, 'awaiting-controller')
     assert.equal(exact.proposalSha256, digest)
-    assert.equal(exact.verifiedHead, commit)
+    assert.equal(exact.verifiedHead, verifiedHead)
     assert.deepEqual(exact.review.proposed.contract, contract)
     const decision = { action: 'decide', messageId: 'plan-message', receiptId: exact.id,
       nonce: exact.nonce, proposalSha256: digest, decision: 'approved' }
     assert.equal((await author({ ...decision, receiptId: 'plan-one' })).status, 409)
     assert.equal((await author(decision, bobCookie)).status, 404)
     assert.equal((await author({ ...decision, nonce: randomUUID() })).status, 409)
+    const architectureFile = join(job.stateDir, 'architecture.json')
+    const currentArchitecture = readFileSync(architectureFile, 'utf8')
+    try {
+      const historical = { ...JSON.parse(currentArchitecture), worker: 'fixture' }
+      writeFileSync(architectureFile, JSON.stringify(historical))
+      await assert.rejects(runArchitectureJob({ story: job.storyRoot, job: jobId, action: 'propose', contract }), /Historical Architecture evidence/)
+      assert.equal(JSON.parse(readFileSync(architectureFile, 'utf8')).plan.version, 1)
+    } finally { writeFileSync(architectureFile, currentArchitecture) }
     const accepted = await author(decision)
     assert.equal(accepted.status, 200, await accepted.clone().text())
     const resolved = await accepted.json() as any
@@ -205,11 +235,11 @@ test('authenticated owner records an exact durable decision; foreign users, inli
     const inspected = await (await inspectAuthor()).json() as any
     assert.equal(inspected.items[1].approval.decision, 'approved')
     assert.equal(inspected.items[1].phase, 'applied')
-    const architectureFile = join(job.stateDir, 'architecture.json')
     const approvedPlan = JSON.parse(readFileSync(architectureFile, 'utf8'))
     assert.equal(approvedPlan.plan.version, 2)
     assert.equal(approvedPlan.history[0].signed.receiptId, exact.id)
     assert.equal(git('rev-parse', 'HEAD'), commit)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: job.worktreeRoot, encoding: 'utf8' }).trim(), verifiedHead)
 
     const revised = { ...contract, constraints: [...contract.constraints, 'A second proposed path'] }
     const proposal = await runArchitectureJob({ story: job.storyRoot, job: jobId,

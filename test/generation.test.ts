@@ -246,7 +246,7 @@ test("R14K current archive reaches actual reviewed Composition and Turn fulfillm
     assert.ok(points.some(p => p.workItem === workItem && p.eligible && p.semanticReview === (workItem === "composition-reckoning" ? "not-required" : "passed")), JSON.stringify(points.map(p => ({ workItem: p.workItem, eligible: p.eligible, semanticReview: p.semanticReview, reason: p.reason }))));
 });
 
-function captureRecoveryIdea(f: ReturnType<typeof setup>, id: string) {
+function captureRecoveryIdea(f: ReturnType<typeof setup>, id: string, prerequisites = ["milestone.disclosure"]) {
   const file = join(root, id + "-recovery-idea.json");
   writeFileSync(file, JSON.stringify({
     id, kind: "event-concept",
@@ -255,7 +255,7 @@ function captureRecoveryIdea(f: ReturnType<typeof setup>, id: string) {
     requirements: { meaning: [{ text: "The bell establishes the chronology", binding: true }],
       wording: [], participants: [] },
     identities: { known: [], unresolved: [] },
-    prerequisites: ["milestone.disclosure"],
+    prerequisites,
     placement: { scopeIds: ["arc.truth"], flexible: true, earliest: "event" },
     upstreamConstraints: [],
   }));
@@ -387,6 +387,232 @@ test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and 
       else process.env[key] = value;
     }
   }
+});
+
+for (const mode of ["foreign-dispatch", "unverified-result", "deferred"] as const)
+test("C08 parent Idea dispatch and verification authenticate the original task " + mode, {
+  skip: !available, timeout: 120_000,
+}, async () => {
+  const f = setup("c08-idea-" + mode);
+  await useScriptedArchiveCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "interactive"]);
+  assert.equal(paused.status, "paused", paused.reason);
+  captureRecoveryIdea(f, "c08-bell", []);
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const calls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+    const runtime = await scriptedStoryRuntime((index, context) => {
+      assert.equal(mode === "foreign-dispatch", false, "A foreign dispatch receipt cannot invoke Pi");
+      if (index === 0) {
+        const messages = context.messages as Array<{role: string; content: unknown}>;
+        const prompt = messages.filter(m => m.role === "user").map(m => JSON.stringify(m.content)).join("\n").replaceAll("\\n", "\n");
+        const paths = prompt.split("READ ALL EXACT FILE PATHS FIRST:\n")[1]!
+          .split("\nRead-only independent semantic assessment")[0]!.split("\n");
+        return { content: scriptedReadCalls(paths, index), reason: "toolUse" };
+      }
+      assert.equal(index, 1, "No writer may be dispatched from a blocked selection");
+      return { content: scriptedText({ verdict: "block", target: null, evidence: [],
+        reason: "No suitable candidate preserves the causal context." }), reason: "stop" };
+    });
+    const selected = await withJobModelRuntime(runtime.runtime, () => graph.invoke(
+      { request: paused.request, pauseAfter: null }, { ...cfg, interruptAfter: ["author_update_intake"] }));
+    assert.equal(selected.status, "running", selected.reason ?? "");
+    assert.equal(selected.ideaTask?.id, "c08-bell", JSON.stringify({ task: selected.ideaTask, active: selected.active }));
+    assert.equal(selected.ideaTask?.priorHead, head);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, calls);
+    const file = join(f.job.stateDir, "generation-idea-dispatch.json");
+    if (mode === "foreign-dispatch") {
+      const receipt = { jobId: "different-job", task: selected.ideaTask, phase: "running" };
+      writeFileSync(file, JSON.stringify(receipt));
+      const result = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, cfg));
+      assert.equal(result.status, "blocked", result.reason ?? "");
+      assert.equal(result.recoveryLifecycle.active?.origin.operation, "idea-integration");
+      assert.equal(result.recoveryLifecycle.phase, "fenced");
+      assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), receipt);
+      assert.equal(runtime.calls(), 0);
+    } else {
+      const returned = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, {
+        ...cfg, interruptAfter: ["idea_integration"],
+      }));
+      assert.equal(returned.ideaResult?.status, "deferred", JSON.stringify(returned.ideaResult));
+      assert.equal(runtime.calls(), 2);
+      assert.ok(runtime.observed.every(call => !call.tools.includes("write") && !call.tools.includes("edit")));
+      if (mode === "unverified-result") {
+        await graph.updateState(cfg, { ideaResult: { status: "integrated", commitSha: "f".repeat(40) } }, "idea_integration");
+        const rejected = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, cfg));
+        assert.equal(rejected.status, "blocked");
+        assert.equal(rejected.recoveryLifecycle.active?.origin.operation, "idea-verification");
+        assert.equal(rejected.recoveryLifecycle.phase, "fenced");
+      } else {
+        const deferred = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, {
+          ...cfg, interruptAfter: ["assess_recovery"],
+        }));
+        const original = deferred.recoveryLifecycle.active ?? deferred.recoveryLifecycle.pending[0];
+        assert.equal(original?.origin.operation, "idea-integration");
+        assert.ok(deferred.recoveryLifecycle.decision?.action === "continue-independent" ||
+          deferred.recoveryLifecycle.deferredCaseIds?.includes(original!.id),
+          "A deferred Idea permits independent work without resolving its original obligation");
+        assert.equal(deferred.ideaHistory.at(-1)?.status, "deferred");
+        assert.equal(deferred.recoveryLifecycle.discharged.length, 0);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), deferred.recoveryLifecycle);
+      }
+      assert.equal(runtime.calls(), 2, "Verification cannot replay the model or start an Idea writer");
+    }
+    assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+    assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  } finally {
+    restoreSandbox();
+    saver.db.close();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+
+test("#225 unaccepted specialist result reaches assessment and remains fenced across inspect/resume", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-unaccepted-specialist-result");
+  await useScriptedArchiveCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const calls = readFileSync(f.contract + ".model-calls", "utf8");
+  const foundation = paused.inventory.items.find((item: { id: string }) => item.id === "foundation");
+  assert.ok(foundation);
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    // The original worker has returned, but its result is not an admitted
+    // completed status. Verify the production checkpoint edge, not a private
+    // operation-classifier unit test.
+    await graph.updateState(config, {
+      status: "running", active: foundation,
+      result: { status: "in-progress", headSha: head }, pauseAfter: null,
+    }, "independent_assignment_review");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(currentOperationRecovery(result)?.operation, "specialist-result");
+  assert.equal(currentOperationRecovery(result)?.outcome, "returned-failure");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
+  assert.equal(currentOperationRecovery(result)?.evidence.assignmentId, "foundation");
+  assert.equal(result.completedStages.length, paused.completedStages.length,
+    "an unaccepted worker result must not become a verified checkpoint");
+  const inspected = f.cli(["generate", "inspect"]);
+  assert.deepEqual(inspected.operationRecovery, currentOperationRecovery(result));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resumed = f.cli(["generate", "resume"]);
+    assert.equal(resumed.status, "blocked");
+    assert.deepEqual(resumed.operationRecovery, currentOperationRecovery(result));
+  }
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8"), calls,
+    "Unaccepted or unauthenticated effects cannot dispatch another model.");
+});
+
+test("#225 untrusted completion preflight is assessed, not treated as complete or retried", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-completion-preflight");
+  await useScriptedArchiveCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const calls = readFileSync(f.contract + ".model-calls", "utf8");
+  const corrupted = join(f.job.stateDir, "architecture.json");
+  assert.ok(!existsSync(corrupted));
+  writeFileSync(corrupted, "{broken planning receipt");
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      status: "running", active: null, result: null, pauseAfter: null,
+    }, "author_update_intake");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    unlinkSync(corrupted);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(currentOperationRecovery(result)?.operation, "completion-verification");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
+  assert.equal(result.completedStages.length, paused.completedStages.length);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, currentOperationRecovery(result));
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8"), calls,
+    "Unaccepted or unauthenticated effects cannot dispatch another model.");
+});
+
+test("#225 failed dependency amendment is assessed without dispatching another writer", {
+  skip: !available,
+}, async () => {
+  const f = setup("recovery-dependency-amendment");
+  await useScriptedArchiveCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "foundation"]);
+  assert.equal(paused.status, "paused");
+  const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+  const calls = readFileSync(f.contract + ".model-calls", "utf8");
+  const active = { ...paused.inventory.items.find((item: { id: string }) => item.id === "foundation"),
+    id: "focus:missing.target", stage: "focus", milestone: "missing.target" };
+  const previous = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  let result: any;
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const config = { configurable: { thread_id: paused.threadId } };
+    await graph.updateState(config, {
+      status: "running", active, result: { status: "dependency-required" }, pauseAfter: null,
+    }, "specialist_dispatch");
+    result = await graph.invoke(null, config);
+  } finally {
+    saver.db.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(result.status, "blocked");
+  assert.equal(currentOperationRecovery(result)?.operation, "dependency-amendment");
+  assert.equal(currentOperationRecovery(result)?.phase, "fenced");
+  assert.equal(currentOperationRecovery(result)?.evidence.assignmentId, active.id);
+  assert.deepEqual(f.cli(["generate", "inspect"]).operationRecovery, currentOperationRecovery(result));
+  assert.deepEqual(f.cli(["generate", "resume"]).operationRecovery, currentOperationRecovery(result));
+  assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+  assert.equal(git(f.repo, "rev-parse", "HEAD"), f.initial);
+  assert.equal(readFileSync(f.contract + ".model-calls", "utf8"), calls,
+    "Unaccepted or unauthenticated effects cannot dispatch another model.");
 });
 
 test("generation rejects a lost orchestrator selection after checkpoint without repinning or replay", { skip: !available }, async () => {
