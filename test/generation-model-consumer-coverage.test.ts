@@ -262,7 +262,7 @@ const effectReviewed: Record<string, string> = {
   "src/generation.ts:applyLiveSteeringAtBoundary": "1:d3696b97d784629df921bf9a",
   "src/generation.ts:dispatch": "5:2527ecada0aa445518aa2b04",
   "src/generation.ts:runFoundationAssignmentChild": "1:54310f9aab8bb157fe7103b1",
-  "src/generation.ts:runNarrativeAssignmentChild": "5:d3027432638f22079ec6f9f6",
+  "src/generation.ts:runNarrativeAssignmentChild": "5:fc9c84b0665f7094101746a9",
   "src/generation.ts:runInteractiveAssignmentChildren": "4:084ebecd948cb454fc9e8049",
   "src/idea-placement.ts:verifyDraft": "1:c79724362888c72927074984",
   "src/interactive-specialist.ts:parseInteractiveManifest": "1:80675c862737d958a4a7abb8",

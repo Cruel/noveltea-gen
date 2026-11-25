@@ -212,7 +212,7 @@ test("R01 admission and nested assignment lifecycle retain reviewed proof gates"
     [file, "runArchitectureAssignmentChild", "7b53c67a122144b38135ed4aafcdc1cb5e720e22b47768e0b47b82abff8c00ee"],
     [file, "runCharacterWorldAssignmentChild", "b7f100f0973f37b77c0a1145ad6ded751dcd2ea3c994f008d6e23ff8f70f4e90"],
     [child, "assignmentChildConfig", "0f3ddbb4224e60f73a9b5aa6035ebdc13a9740cbe09e598077467f0b4653e69a"],
-    [file, "runNarrativeAssignmentChild", "bf1e5f29aae1a5a7254ec84b3b7f2a94fbd2f700dd30092d27661120d93917ba"],
+    [file, "runNarrativeAssignmentChild", "b7313166957a15bf3a562229d4695eb49539da1c61238d25f17a334a4f47d90c"],
     [file, "runReviewPrerequisiteChild", "c6a53b49698b64634f54128c33d3f176101129e6d4c330b84a1bac525b0ef000"],
     [file, "pendingNarrativeForResume", "fd9a869e198615e191c6143a4e8cb75fe4fc3d79c5cce6ccdecd923aafa8131d"],
     [file, "inspectOriginalSpecialistCommitForResume", "9f127bc2631027cef2b60ef0181883dfebe1210e8470afb6a775283ff7d54d1f"],

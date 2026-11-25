@@ -788,3 +788,7 @@ scheduler or Case ledger. R01/R02 and R14/R14L fingerprints cover the
 changed shared child, native invocation, manifest and admission gates.
 All 21 AST audit tests pass. The bounded scripted production regressions
 are not evidence of completion of the remaining transferred requirements.
+
+### #274 Review-origin suspension routing follow-up
+
+The narrative child routes Review-origin prerequisite outcomes to the existing authenticated Review suspension adapter, not the settled no-write writer inspector. The R14D World-owner Review case and original-writer owner case exercise both branches.

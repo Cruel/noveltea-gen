@@ -2163,7 +2163,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Narrative child returned without an authenticated disposition.");
   assertReviewProjection(patch, finished.outcome, ref);
-  if (finished.outcome.status === "needs-prerequisite") {
+  if (!checkpointedReview && finished.outcome.status === "needs-prerequisite") {
     const original = await inspectWriterFinding();
     if (!original) throw Error("Writer prerequisite lost its exact source report.");
     if (!isDeepStrictEqual(suspensionOf(original), finished.outcome))
