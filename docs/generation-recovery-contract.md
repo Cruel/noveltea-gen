@@ -905,3 +905,15 @@ or protected scope remains unresolved rather than fabricating authority.
 #275 owns the complete compositional cross-lane qualification, including the
 Studio persistence matrix. No separate scheduler, retry allowance, Case
 ledger, or writer grant is introduced by this work.
+
+### #274 Event no-write assessor authentication
+
+For a settled Event no-write result without a causal amendment, the parent
+assessor must reopen the same original assignment used by dispatch through
+`inspectEventNoWrite`. A digest and a Pi transcript are necessary but not
+sufficient: the settled invocation, exact assignment, clean original HEAD and
+response manifest must all agree. An assessor can reuse only its named,
+already-held Story lease; it cannot acquire a second writer lease. Selecting
+the diagnostic neither spends a model allowance nor authorizes corrective
+writes. This closes the Event diagnostic admission gap, not the remaining
+cross-owner execution gaps in #274.

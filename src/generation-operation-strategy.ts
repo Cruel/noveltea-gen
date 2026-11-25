@@ -31,7 +31,8 @@ import { inspectRejectedRepair, authenticateFoundationReviewHead, inspectFoundat
 import { inspectJobReport } from "./job-report.js";
 import { isTrustedFinalVerdictAnomaly } from "./generation-final-verdict.js";
 import { authorizedInventoryComplete } from "./generation-plan.js";
-import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
+import type { EventNoWriteSource } from "./event-prerequisite-auth.js";
+import { inspectEventNoWrite } from "./event-work.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
 import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, inspectDiagnosticExhaustion,
@@ -199,7 +200,8 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         original.expectedHead !== head || original.claimedPaths?.length ||
         original.prerequisite?.reportDigest !== report.reportDigest)
       return null;
-    await authenticateEventNoWrite(job, original);
+    const settled = await inspectEventNoWrite(job, report.milestoneId, head, planVersion);
+    if (settled.prerequisite.reportDigest !== report.reportDigest) return null;
     return { store: "specialist-receipt", ref: relative, digest: report.reportDigest };
   }
   // A settled clean Interactive contradiction is different from an interrupted

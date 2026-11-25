@@ -1,11 +1,10 @@
-/** C03: a genuinely settled Event no-write report reaches an original-case
- * diagnostic, rather than disappearing into a bare blocked inventory. This
- * constructs source-bound Pi and Git fixtures and tests the production
- * selector's independent receipt authentication (not a fake writer grant). */
+/** C03: a report digest and transcript alone are not an original settled
+ * Event assignment. The positive production path is exercised in R14D;
+ * these fixtures verify rejection and the independent scheduling diagnostic. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -47,7 +46,7 @@ function fixture() {
       stopReason: "stop", content: [{ type: "text",
         text: "No Story write: protected evidence remains unavailable." }] } }) + "\n";
   writeFileSync(sessionFile, transcript);
-  const assignment = { id: assignmentId, milestoneId };
+  const assignment = { id: assignmentId, milestoneId, workItemId };
   const snapshotId = "b".repeat(64), planDigest = "c".repeat(64);
   const conflicts = ["The witness cannot establish the missing Event evidence."];
   const payload = { jobId: job.jobId, workItemId, expectedHead: head,
@@ -55,7 +54,7 @@ function fixture() {
     assignmentDigest: sha(JSON.stringify(assignment)), snapshotId,
     sessionFile, worker: "pi" as const, conflicts, obligations: [] };
   const reportDigest = eventPrerequisiteReportDigest(payload);
-  const receipt = { version: 1, jobId: job.jobId, phase: "prerequisite-reported",
+  const receipt = { version: 1, jobId: job.jobId, baseSha: head, phase: "prerequisite-reported",
     workItemId, milestoneId, planVersion: 2, worker: "pi",
     expectedHead: head, planDigest, assignment, snapshot: { id: snapshotId },
     sessionFile, claimedPaths: [], conflicts, obligations: [],
@@ -98,26 +97,9 @@ function fixture() {
   return { root, repo, job, s, c, receipt, receiptFile,
     reportDigest, assignmentId, sessionFile, transcript };
 }
-test("C03 authenticates an original Event Pi no-write once and selects advisory diagnosis, not a writer", async t => {
+test("C03 refuses a digest-only Event report without original settled assignment evidence", async t => {
   const f = fixture(); t.after(() => removeTestTree(f.root));
-  const selected = await selectOperationStrategy(f.job, f.s, f.c);
-  assert.equal(selected?.action, "diagnostic");
-  assert.equal(selected?.adapter, "unknown-diagnostic");
-  assert.equal(selected?.mode, "read-only");
-  assert.equal(selected?.attemptRef, null, "Selection does not count as a model attempt");
-  assert.equal(selected?.evidence.at(-1)?.digest, f.reportDigest);
-  assert.equal(selected?.evidence.at(-1)?.store, "specialist-receipt");
-  assert.equal(await authenticateOperationDiagnosticProof(f.job, f.s, f.c, selected!), true);
-  assert.equal(diagnosticCaseForDecision(f.c, selected!).operation, "specialist-result");
-  assert.deepEqual(await selectOperationStrategy(f.job, f.s, f.c), selected,
-    "Repeated assessor selection cannot mint a new case or model entitlement");
-  // The fixture bit cannot waive a source-authenticated original disposition.
-  const fixtureRequest = { ...f.s, request: { ...f.s.request, fixture: true } };
-  assert.deepEqual(await selectOperationStrategy(f.job, fixtureRequest, f.c), selected);
-  assert.equal(await authenticateOperationDiagnosticProof(f.job, fixtureRequest, f.c, selected!), true);
-  assert.equal(await selectOperationStrategy(f.job, { ...fixtureRequest,
-    request: { ...fixtureRequest.request, turnPlanDigest: undefined } }, f.c), null,
-    "A fixture bit cannot replace the original Turn identity.");
+  await assert.rejects(selectOperationStrategy(f.job, f.s, f.c), /settled invocation proof/);
   assert.equal(git(f.repo, "status", "--porcelain", "--untracked-files=all"), "");
 });
 test("C03 source-bound unknown scheduling exception selects exactly one read-only diagnosis", async t => {
@@ -173,11 +155,8 @@ test("C03 source-bound unknown scheduling exception selects exactly one read-onl
     "An already selected diagnostic cannot rebind its immutable original inventory");
 });
 
-test("C03 rejects changed, unsigned, uncompleted or ambiguous original Event reports", async t => {
+test("C03 rejects changed, unsigned or ambiguous original Event reports", async t => {
   const f = fixture(); t.after(() => removeTestTree(f.root));
-  const original = readFileSync(f.receiptFile, "utf8");
-  const selected = await selectOperationStrategy(f.job, f.s, f.c);
-  assert.ok(selected);
   for (const tamper of [
     { ...f.receipt, worker: "fixture" }, { ...f.receipt, phase: "writing" },
     { ...f.receipt, claimedPaths: ["events/unverified.md"] },
@@ -186,14 +165,8 @@ test("C03 rejects changed, unsigned, uncompleted or ambiguous original Event rep
   ]) {
     writeFileSync(f.receiptFile, JSON.stringify(tamper));
     assert.equal(await selectOperationStrategy(f.job, f.s, f.c), null);
-    assert.equal(await authenticateOperationDiagnosticProof(f.job, f.s, f.c, selected!), false);
   }
-  writeFileSync(f.receiptFile, original);
-  writeFileSync(f.sessionFile, f.transcript + JSON.stringify({ type: "message",
-    message: { role: "assistant", stopReason: "stop", content: [
-      { type: "text", text: "Forged new answer" }] } }) + "\n");
-  await assert.rejects(selectOperationStrategy(f.job, f.s, f.c), /transcript changed/);
-  writeFileSync(f.sessionFile, f.transcript);
+  writeFileSync(f.receiptFile, JSON.stringify(f.receipt));
   const noPending = { ...f.s, causalAmendment: { pending: true } } as unknown as GenerationGraphState;
   assert.equal(await selectOperationStrategy(f.job, noPending, f.c), null,
     "An already admitted causal amendment has priority over generic advice");

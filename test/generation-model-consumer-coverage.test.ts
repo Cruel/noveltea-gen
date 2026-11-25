@@ -251,7 +251,7 @@ const effectReviewed: Record<string, string> = {
   "src/event-manifest.ts:parseEventManifest": "1:1ce0048147ebfc3a5835b022",
   "src/event-specialist.ts:authorEventCluster": "1:4fefeb603eda1afc0e8b5937",
   "src/event-work.ts:inspectEventBlueprintPrerequisite": "1:8a40c11de04a80ea1495dd84",
-  "src/event-work.ts:inspectEventNoWrite": "1:03d40956d83aee1d1d5c6f80",
+  "src/event-work.ts:inspectEventNoWrite": "1:32e28c7f90ad0ec701c1325d",
   "src/event-work.ts:runEventWorkItem": "1:dabbbfe1f75c7181bbc1484a",
   "src/focused-work.ts:focusedSourceCatalog": "2:e6a96d7854b897f588b5b2bb",
   "src/focused-work.ts:runFocusedWorkItem": "2:bcb1461b0edc2ee89ad1575b",

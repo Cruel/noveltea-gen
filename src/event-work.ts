@@ -24,7 +24,7 @@ import { startStoryJob, type JobStartResult } from "./job.js";
 import { trustedHead } from "./revision.js";
 import { finalizeRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import { verifyJobPiSession } from "./job-session.js";
-import { withStoryJobLock } from "./job-lock.js";
+import { withStoryJobLock, withStoryJobLockOrReuse } from "./job-lock.js";
 import { buildEventConsequenceProof, eventConsequenceProofDigest,
   type EventConsequenceProof } from "./event-consequence-proof.js";
 import { assertPlanContinuity, assertFoundationArchitectureContinuity } from "./plan-continuity.js";
@@ -769,7 +769,10 @@ export async function inspectEventNoWrite(job: JobStartResult, milestone: string
   head: string, planVersion: number | null) {
   if (!idPattern.test(milestone)) throw new ProtocolIntegrityBlockedError("Invalid Event no-write target.");
   const workItemId = "event-" + milestone.slice(10);
-  return withStoryJobLock(job, "event-no-write-admission", async () => {
+  return withStoryJobLockOrReuse(job, "event-no-write-admission", [
+    "assess-source-bound-operation", "assess-original-operation-diagnostic",
+    "generation-c05-resolution-proof", "generation-inspect",
+  ], async () => {
     const original = JSON.parse(await readFile(join(job.stateDir, "event-items",
       milestone.slice(10) + ".json"), "utf8")) as EventReceipt;
     if (original.jobId !== job.jobId || original.baseSha !== job.baseSha ||

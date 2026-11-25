@@ -296,7 +296,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["dependency-work.ts", "inspectInterruptedBlueprintSupport", "192b8e7b2351904d29884d64b3d3926387afa6636a4321ea20be74c3fdfcff21"],
     ["generation-recovery-inspection.ts", "inspectModernGenerationRecovery", "a6c86c65759d0ce691649eba18e3d59db12a34365dfb2aebfa1d009285e33b36"],
     ["assignment-metadata-recovery.ts", "materialProgress", "2357f7530030b88d019879e4f74c7b8dcaf5f7f93e70a682059395bc07da3869"],
-    ["generation-operation-strategy.ts", "diagnosticEvidence", "c5e45b7e68015b995be3dc0b8f131437ef144d9ead205819a6a490c6b19fb10e"],
+    ["generation-operation-strategy.ts", "diagnosticEvidence", "cc6d2c83b075f9e8e25e7ee5cc57fbf444f18ae17b335d69f127418a6b65129c"],
     ["generation.ts", "runAssignmentDiagnosticRecovery", "d11bc78dea972ebebfb7fbae2b1d5fd32405cfa72527cdbc41992ac048937635"],
     ["foundation.ts", "inspectFoundationDiagnosticFailure", "8be57baab6b4a0ce1b2821ec78b9f354d4090a1aeccc6f9731df548f236317c8"],
     ["generation-operation-strategy.ts", "assignmentDiagnosticDecision", "3791042364f885f5840ea3ff0d17aca32c497ddb1efc0d01b561ce85b2f7af2e"],

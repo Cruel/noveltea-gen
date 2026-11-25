@@ -1286,10 +1286,25 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
       const { inspectEventNoWrite } = await import("../src/event-work.js");
       const original = await inspectEventNoWrite(f.job, receipt.milestoneId, head, receipt.planVersion);
       assert.deepEqual(original.conflicts, [plan.downstream[0]!.obligation]);
-      writeFileSync(join(f.job.stateDir, "event-items/disclosure.json"), JSON.stringify({ ...receipt,
+      const recoveryCase = failed.recoveryLifecycle.active!;
+      const decision = await selectOperationStrategy(f.job, failed, recoveryCase);
+      assert.equal(decision?.action, "diagnostic");
+      assert.equal(decision?.evidence.at(-1)?.digest, receipt.prerequisite.reportDigest);
+      const assessed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.deepEqual(assessed.recoveryLifecycle.decision, decision);
+      assert.equal(assessed.recoveryLifecycle.active?.id, recoveryCase.id);
+      // Even a self-consistent receipt and graph pin cannot replace the actual
+      // settled writer invocation. The diagnostic must reauthenticate it.
+      const receiptFile = join(f.job.stateDir, "event-items/disclosure.json");
+      writeFileSync(receiptFile, JSON.stringify({ ...receipt, invocationProof: undefined }));
+      await assert.rejects(selectOperationStrategy(f.job, failed, recoveryCase), /settled invocation proof/);
+      writeFileSync(receiptFile, JSON.stringify({ ...receipt,
         conflicts: ["A substituted upstream requirement"] }));
       await assert.rejects(inspectEventNoWrite(f.job, receipt.milestoneId, head, receipt.planVersion),
         /differs from the original settled response/);
+      writeFileSync(receiptFile, JSON.stringify(receipt));
+      assert.deepEqual(await selectOperationStrategy(f.job, failed, recoveryCase), decision);
+      assert.equal(observed.length, 7, "Inspection never starts another model call");
       return;
     }
     if (prospective) {

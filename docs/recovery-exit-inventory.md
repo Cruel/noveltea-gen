@@ -720,3 +720,28 @@ regressions; remaining specialist adapter admission and lane integration
 (including the legacy review-source root) belong to #274. Full cross-lane
 and persistence qualification belongs to #275. Neither is implied by this
 parent-boundary audit.
+
+## #274 production adapter integration (partial)
+
+The Event dispatch and C03 assessor now share the complete settled-invocation
+proof gate. `diagnosticEvidence` calls `inspectEventNoWrite` under the existing
+parent lease, rejecting a report whose digest is intact but whose invocation
+proof is missing. R14D settled-no-write and stale-choice-finding exercise the
+real SQLite graph, preserving the original Case and model-call count. The
+digest-only synthetic test is a negative control, not evidence of a settled
+writer. Reviewed AST gates reflect the strengthened authentication.
+
+Current traceability (not final acceptance):
+
+| Transferred issue | Production boundary and evidence | Outstanding integration |
+| --- | --- | --- |
+| #252 | `originalNoWriteOwnerProof`, `originalOwnerAdapter`, `executeOperationStrategy`: existing Interactive omission path retained. | General Choice/Puzzle and declined-omission corrective dispatch and original continuation. |
+| #253 | `advanceFocusedDependency`, `runSupportingDependency`: existing #273 nested support and independent Review. | R07 across owner types, including existing out-of-authority records. |
+| #254 | `correctPendingBlueprint`, `inspectCausalAmendment`: existing approved-source gates retained. | R08 actual upstream correction and affected-only continuation across Blueprint and Architecture. |
+| #264 | Prior #274 keyword-route retirement; `inspectEventNoWrite` and `diagnosticEvidence` strengthened here. R14D future-choice, scene-evidence, settled-no-write, stale-choice-finding. | Generic owner-bound repair execution rather than diagnostic-only outcome; broader non-Character admission. |
+| #265 | `preflightCompositionBoundary`, `advanceCrossDomainCloseout`: existing Event/Choice closeout retained. | General upstream prerequisite suspension and verified reentry for Composition. |
+| #266 | Existing signed Architecture revision and independent Review boundaries retained. | Full residual boundary audit and qualification. |
+| #267 | `inspectEventBlueprintPrerequisite`, `rebindEventAfterBlueprintPredecessors`, existing #250/#273 prospective support. | Authenticated pre-dispatch cross-assignment upstream contradiction and correction; no prospective pass as substitute. |
+
+Other adapter audit and mandatory R07/R08 qualification remain open. No
+additional corrective controller or writer grant is introduced.
