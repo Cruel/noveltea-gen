@@ -433,7 +433,7 @@ were executed in this qualification.
 | Actual downstream producer → consumer | Validation, disposition and next authority | Regression |
 | --- | --- | --- |
 | `proposeAdaptiveWork` → [reconcileAdaptiveWork](../src/adaptive-work.ts) | Proposal admission and source/plan checks precede reconciliation; invalid/stale proposal cannot authorize dispatch; parent retains plan admission. | [adaptive operation recovery](../test/adaptive-operation-recovery.test.ts) |
-| `proposeDependency`, `reviewNarrative` → [advanceFocusedDependency, advanceReviewDependency, continueReviewDependency](../src/dependency-work.ts) | Exact dependency source/authority and independently verified support before original continuation; no reviewer output grants a writer; unmet/negative support cannot advance original assignment. | [R14D/R04](../test/generation.test.ts), [dependency amendments](../test/dependency-amendments.test.ts) |
+| `proposeDependency`, `reviewNarrative` → [admitDependency, runSupportingDependency, advanceReviewDependency, continueReviewDependency](../src/dependency-work.ts) | Exact dependency source/authority and independently verified support before original continuation; no reviewer output grants a writer; unmet/negative support cannot advance original assignment. | [R14D/R04](../test/generation.test.ts), [dependency amendments](../test/dependency-amendments.test.ts) |
 | `runPiAssignmentReview` → [independentAssignmentBoundary](../src/generation.ts); `runPinnedObjectivePlanner`, `assessTurnFulfillment`, `reviewTurnCompleteness` → [createGenerationGraph](../src/generation.ts) | Authenticate native checkpoint/Turn; negative Review enters parent recovery; planner output does not bypass plan admission; final objective verdict must independently pass. | [production archive and Event recovery](../test/generation.test.ts), [Turn fulfillment](../test/turn-fulfillment.test.ts) |
 | `diagnoseUnknownCompletion` → [executeOperationStrategy](../src/generation-operation-strategy.ts); `independentReviewResults` → authenticateSettledReviewVerdict | Diagnostic proposal is not a corrective grant; compare sealed original verdict and source before parent strategy admission. Untrusted evidence fences. | [operation Event diagnostic](../test/generation-operation-event-diagnostic.test.ts) |
 | `parseSpecialistJson` → [authorMilestoneCloseout](../src/cross-domain-closeout-specialist.ts), [recoveredCloseoutReview, verifyLegacyCloseoutReviewTranscript](../src/cross-domain-closeout-work.ts); `reviewNarrative` → advanceCrossDomainCloseout | Parse/validate exact closeout scope and source; legacy evidence re-read is not executable permission; require independent review/native proof before original closure. | [closeout successor](../test/cross-domain-closeout-successor.test.ts) |
@@ -644,8 +644,13 @@ round-origin correction and the exhausted-reviewer parent disposition.
   ledger and Focused writer/Review child as existing supporting work.
   `advanceFocusedDependency` delegates its former reviewer call to
   `runSupportingDependency`; no duplicate Review allowance is added.
-  `approveDependency` validates a narrowly scoped Character creation and
-  audited Arc link; `rebindEventAfterBlueprintPredecessors` validates the
+  `admitDependency` shares planner admission across focused, Blueprint and
+  Review sources. Blueprint candidates use native IDs and paths; ambiguous
+  candidates require a read-only proposal. `approveDependency` validates
+  narrowly scoped Character creation or existing-Character links to selected
+  Arcs; all authorized Arc edits are audited. Nested support and negative
+  supporting Review correction remain unqualified; neither is silently advanced.
+  `rebindEventAfterBlueprintPredecessors` validates the
   successor catalog and retains the original Blueprint pin. The active-case
   discharge reauthenticates the verified dependency chain and Event receipt.
   The parent recovery node passes its original graph configuration to the
