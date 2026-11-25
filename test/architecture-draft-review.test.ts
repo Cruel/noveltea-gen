@@ -81,6 +81,8 @@ test("Architecture draft review accepts only source-bound current-stage findings
   });
   const guidance = architectureDraftFormatCorrection(paths);
   assert.match(guidance, /same read-only session/);
+  assert.match(guidance, /every finding origin MUST be initial/);
+  assert.match(architectureDraftFormatCorrection(paths, 2), /Round 2:.*initial is forbidden/);
   assert.match(guidance, /forward slashes, not periods/);
   assert.match(guidance, /milestones\/milestone-one.md/);
   assert.match(guidance, /grants no write scope/i);

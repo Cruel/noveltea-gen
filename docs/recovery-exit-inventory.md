@@ -592,3 +592,18 @@ live-steering regressions. The private historical captures (#158, #161,
 #162) were not available; current deterministic equivalents, not those
 captured runs, support the acceptance claim. The two opt-in paid tests
 and further live provider validation remain #260.
+
+### R14 live qualification: precommit Review protocol exhaustion (#260)
+
+The Architecture and Composition draft-review adapters retain the exact
+review-round origin constraint in their model-visible protocol corrections.
+The new `specialist_dispatch/return#19` is a recovery assessment exit, not a
+writer-result or a commit-reconciliation grant. A typed precommit Review
+protocol failure goes to the existing independent-review assessment, using
+the originating review contract's transcript, admitted cycle, round, pinned
+sources and prior verdict chain. The original writer's latest settlement is
+verified separately against the unchanged draft. No writer terminal receipt
+is created for a malformed reviewer verdict. Exhausted or untrusted evidence
+remains blocked without writer replay, false Review approval or a renewed
+protocol allowance. The production Blueprint regression exercises same-session
+round-origin correction and the exhausted-reviewer parent disposition.

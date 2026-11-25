@@ -85,7 +85,11 @@ export function parseCompositionReview(
     (!expectedPath || expectedPath === ref.path) &&
     filled(ref.quote, 8) &&
     (sources[ref.path]?.includes(ref.quote) ?? false);
-  for (const f of review.findings) {
+  for (const [index, f] of review.findings.entries()) {
+    if (f && (previous.length ? f.origin === "initial" : f.origin !== "initial"))
+      throw Error("findings[" + index + "].origin: " + (previous.length
+        ? "use continuing, introduced or overlooked; initial is forbidden after round zero."
+        : "must be initial in round zero."));
     if (
       !exact(f, ["path", "reason", "correction", "requirement", "evidence", "origin"]) ||
       !paths.includes(f.path) ||

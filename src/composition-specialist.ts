@@ -8,7 +8,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { promptStorySpecialist, StoryCancelledError } from "./story-interruption.js";
 import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentDefect, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
 import { readJobControl } from "./job-control.js";
-import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolResponse, ProtocolIntegrityBlockedError } from "./response-contract-recovery.js";
+import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolResponse, ProtocolIntegrityBlockedError, authenticateSealedProtocolFailure, type SealedProtocolFailure } from "./response-contract-recovery.js";
 import { selectSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { canonicalPinnedReadPath, requirePinnedSkillReads } from "./pinned-skill-reads.js";
 import type { JobStartResult } from "./job.js";
@@ -649,6 +649,41 @@ export async function verifyCompositionReviewPin(
   return sealedReview;
 }
 
+export async function authenticateCompositionDraftProtocol(job: JobStartResult,
+  snapshot: SkillSnapshot, assignment: CompositionAssignment, provider: string, model: string,
+  baseHead: string, planVersion: number, planDigest: string, writer: SessionIdentity,
+  reviewerFile: string, paths: string[], proof: SealedProtocolFailure) {
+  const cycleId = compositionReviewCycleId(job, snapshot, assignment, provider, model, baseHead, planVersion, planDigest);
+  const admitted = JSON.parse(await readFile(admissionFile(job, cycleId), "utf8"));
+  if (admitted.schema !== "noveltea-composition-review-admission/v1" ||
+      admitted.cycleId !== cycleId || JSON.stringify(admitted.writer) !== JSON.stringify(writer) ||
+      admitted.reviewer?.id !== proof.sessionId || admitted.reviewer.file !== reviewerFile)
+    return false;
+  assertReviewCycleSession(writer, admitted.reviewer);
+  const bytes = await reviewerTranscript(job, admitted.reviewer);
+  const history: CompositionReviewRound[] = [];
+  let previous: string | null = null;
+  for (let round = 0; existsSync(reviewRoundFile(job, cycleId, round)); round++) {
+    const saved = JSON.parse(await readFile(reviewRoundFile(job, cycleId, round), "utf8")) as CompositionReviewReceipt;
+    if (saved.cycleId !== cycleId || saved.round !== round || saved.previousDigest !== previous ||
+        JSON.stringify(saved.writer) !== JSON.stringify(writer) ||
+        JSON.stringify(saved.reviewer) !== JSON.stringify(admitted.reviewer) ||
+        hash(bytes.subarray(0, saved.transcriptBytes)) !== saved.transcriptDigest ||
+        JSON.stringify(Object.fromEntries(Object.entries(saved.sourceText).map(([p,v]) => [p,hash(v)]))) !== JSON.stringify(saved.sources))
+      throw Error("Original Composition reviewer history changed");
+    await verifyCompositionRoundAuthority(job, assignment, saved, history);
+    if (saved.verdict.status !== "revise") return false;
+    history.push({sources: saved.sourceText, verdict: saved.verdict});
+    previous = hash(JSON.stringify(saved));
+  }
+  const sources = await compositionSource(job.worktreeStoryRoot, paths);
+  const round = history.length;
+  if (proof.contract !== "composition.draft-review.v2" ||
+      proof.receiptFile !== join(reviewDirectory(job, cycleId), "round-" + round + ".protocol") ||
+      proof.sourceDigest !== compositionReviewRoundSource(cycleId, round, writer, admitted.reviewer, previous, sources)) return false;
+  return await authenticateSealedProtocolFailure(proof, [join(job.stateDir, "composition-sessions", assignment.workItemId, "review")]) === reviewerFile;
+}
+
 export async function createCompositionReviewCycle(
   job: JobStartResult,
   snapshot: SkillSnapshot,
@@ -832,7 +867,8 @@ export async function createCompositionReviewCycle(
           "status:'pass'|'revise',findings:[],prior:[],sourceEvidence:[]}. " +
           "For each current material finding: {path,reason,correction,requirement:{source:" +
           "'assignment'|'policy',quote},evidence:{path,quote},origin:'initial'|'continuing'|" +
-          "'introduced'|'overlooked'}. Quotes must be exact 8+ character substrings " +
+          "'introduced'|'overlooked'}. " + (history.length ? "Origin initial is forbidden after round zero. " : "All findings must be initial in round zero. ") +
+          "Quotes must be exact 8+ character substrings " +
           "of the cited requirement and current Authored Content path. On follow-ups " +
           "include one prior entry for EVERY historical finding: " +
           "{round,findingIndex,status:'resolved'|'improved'|'persisting'|'regressed'," +
@@ -882,7 +918,7 @@ export async function createCompositionReviewCycle(
         };
         const verdict = await recoverResponseContract({
           session, contract, sourceDigest, receiptFile: protocolBase + ".initial.json", sealTranscript: true,
-          validate: raw => { try { parse(raw); return []; } catch { return [{ path: "$", expected: "exact source-bound independent verdict" }]; } },
+          validate: raw => { try { parse(raw); return []; } catch (error) { return [{ path: "$", expected: error instanceof Error && /^(findings\[\d+\]\.origin:|Composition (?:review|reviewer|finding|continuing|previous|editorial) )/.test(error.message) ? error.message : "exact source-bound independent verdict" }]; } },
           parse,
           beforeCorrection: async () => {
             if (JSON.stringify(await compositionSource(project.root, paths)) !== JSON.stringify(sources))
@@ -892,8 +928,9 @@ export async function createCompositionReviewCycle(
             if (control !== "running") throw new AssignmentAuthorPauseError();
             await guardPiBudget(job, "composition:" + assignment.workItemId + ":editorial-review:" + history.length, reviewer.file);
           },
-          feedback: () => "Return the exact source-linked editorial JSON contract, including every historical finding. " +
-            "No tools or new source claims; correct only the response format.",
+          feedback: failures => "Return the exact source-linked editorial JSON contract, including every historical finding. " +
+            (history.length ? "Origin initial is forbidden; use continuing, introduced or overlooked. " : "Every finding origin must be initial. ") +
+            "No tools or new source claims; correct only the response format. Validation: " + failures.map(f => f.expected).join("; "),
           prompt: async text => {
             await registerPendingPiSession(job, reviewer.file);
             await promptStorySpecialist(session, text);

@@ -1397,6 +1397,7 @@ async function runArchitectureAssignmentChild(
     } catch (error) {
       if (error instanceof AssignmentAuthorPauseError)
         return outcome("paused", "job-control", { controlRef: "job-control" });
+      if (error instanceof ProtocolExhaustedError && error.proof && error.contract === "architecture.draft-review.v2") throw error;
       if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError))
         throw error;
       const terminal = await (await import("./architecture.js")).inspectArchitectureFailure(job, sourceHead);
@@ -2004,6 +2005,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       return saved;
     } catch (error) {
       if (error instanceof AssignmentAuthorPauseError) return disposition("paused", "job-control");
+      if (error instanceof ProtocolExhaustedError && error.proof && error.contract === "composition.draft-review.v2") throw error;
       if (!(error instanceof ProtocolExhaustedError || error instanceof AssignmentNonconvergenceError)) throw error;
       const terminal = await inspectTerminal();
       if (!terminal) throw error;
@@ -4473,6 +4475,10 @@ export function createGenerationGraph(
           return operationFailure(s, job, "specialist-result", error,
             { reference: "specialist-receipt", assignmentId: s.active?.id,
               resultStatus: "blueprint-assessment", blueprintAssessment: error.ref }, "returned-failure");
+        if (error instanceof ProtocolExhaustedError && error.proof &&
+            ["architecture.draft-review.v2", "composition.draft-review.v2"].includes(error.contract))
+          return operationFailure(s, job, "independent-review", error,
+            { reference: "specialist-receipt", assignmentId: s.active?.id });
         const assessment = await operationFailure(s, job, "specialist-dispatch", error,
           { reference: "specialist-receipt", assignmentId: s.active?.id });
         // The failure may belong only to this cluster. Record it as blocked

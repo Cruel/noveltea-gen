@@ -172,6 +172,21 @@ export async function verifyCompositionReviewOrigin(job: JobStartResult, point: 
   if (verdict.sessionFile !== r.reviewSessionFile) throw Error("Original Composition reviewer identity changed");
   assertCompositionReviewerMatch(verdict, r.reviewedEvidence);
 }
+export async function authenticateCompositionReviewerFailure(job: JobStartResult, milestone: string,
+  sourceHead: string, proof: import("./response-contract-recovery.js").SealedProtocolFailure) {
+  const r = await inspectPendingCompositionInvocation(job, milestone, sourceHead);
+  if (!r || r.phase !== "writing" || r.worker !== "pi" || r.beforeHead !== sourceHead ||
+      !r.snapshot || !r.invocationAssignment || !r.sessionFile || !r.writerSessionId || !r.reviewSessionFile ||
+      git(job, "rev-parse", "HEAD") !== sourceHead) return false;
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const paths = await auditCompositionPaths(job, r.invocationAssignment, changes(job).map(change => change.slice(3 + prefix.length)));
+  await (await import("./assignment-metadata-recovery.js")).verifyLatestSettledWriter({
+    ...compositionInvocationOptions(job, r), effect: await assignmentDraftEffect(job, sourceHead) });
+  return (await import("./composition-specialist.js")).authenticateCompositionDraftProtocol(job,
+    r.snapshot, r.invocationAssignment, r.provider, r.model, sourceHead, r.planVersion, r.planDigest,
+    { id: r.writerSessionId, file: r.sessionFile }, r.reviewSessionFile, paths, proof);
+}
+
 export async function inspectCompositionFailure(job: JobStartResult, milestone: string, sourceHead: string,
   diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
   if (!milestonePattern.test(milestone)) return null;

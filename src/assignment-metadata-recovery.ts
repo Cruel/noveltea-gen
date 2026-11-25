@@ -372,6 +372,24 @@ export async function verifySettledAssignment(options: {
   await inspectSettledChain(options);
 }
 
+/** A precommit reviewer may fail only after its original writer settled.
+ * Reauthenticate that exact latest effect without mistaking it for a failure. */
+export async function verifyLatestSettledWriter(options: Omit<Parameters<typeof verifySettledAssignment>[0], "proof"> & {
+  sourceDigest: string;
+}) {
+  let ordinal = 0;
+  while (await optionalJson(join(options.directory, String(ordinal + 1) + ".settled.json"))) ordinal++;
+  const settled = await optionalJson<Settlement>(join(options.directory, String(ordinal) + ".settled.json"));
+  if (!settled || await optionalJson(join(options.directory, String(ordinal + 1) + ".started.json")))
+    throw new ProtocolIntegrityBlockedError("Original writer has no latest settled effect");
+  await verifySettledAssignment({ ...options, proof: { sourceDigest: options.sourceDigest,
+    ordinal, settlementDigest: digest(settled) } });
+  const current = await transcriptPrefix(options.sessionFile);
+  if (current.transcriptBytes !== settled.transcriptBytes || current.transcriptSha256 !== settled.transcriptSha256)
+    throw new ProtocolIntegrityBlockedError("Original writer transcript advanced after settlement");
+  return current.transcriptSha256;
+}
+
 /** The terminal reference is not itself a verdict. Reauthenticate the
  * exact grant, submitted effect, protocol transcript and prior settlements.
  * Inspection is read-only and cannot spend a new model allowance. */

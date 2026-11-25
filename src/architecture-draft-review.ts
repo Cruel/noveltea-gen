@@ -22,7 +22,7 @@ import { authorizedArchitectureRecordPath } from "./architecture-record-path.js"
 import { openSkillSnapshot } from "./snapshot.js";
 import { reviewCycleId, assertReviewCycleSession, sourceReviewConvergence,
   sourceReviewDiagnosticTrigger } from "./review-cycle.js";
-import { beginProtocolInvocation, inspectCompletedProtocolResponse, recoverResponseContract } from "./response-contract-recovery.js";
+import { beginProtocolInvocation, inspectCompletedProtocolResponse, recoverResponseContract, authenticateSealedProtocolFailure, type SealedProtocolFailure } from "./response-contract-recovery.js";
 import { parseArchitectureDraftDiagnosis } from "./architecture-draft-diagnosis.js";
 
 const sha = (input: unknown) =>
@@ -85,7 +85,7 @@ type RoundReceipt = {
   transcriptDigest: string;
 };
 
-export function architectureDraftFormatCorrection(paths: readonly string[]): string {
+export function architectureDraftFormatCorrection(paths: readonly string[], round = 0): string {
   if (!paths.length || paths.length > 32 || paths.some((path) => !authorizedArchitectureRecordPath(path)))
     throw Error("Architecture draft format correction lacks authorized record paths.");
   return (
@@ -96,7 +96,8 @@ export function architectureDraftFormatCorrection(paths: readonly string[]): str
     "Schema is noveltea-architecture-draft-review/v2. Each finding has EXACT keys " +
     "path,reason,correction,requirement,evidence,origin. Requirement is {source,quote} from " +
     "foundation,contract,task,blueprint; evidence is {path,quote} with an EXACT 8+ character " +
-    "quote in the currently read file. Origin is initial,continuing,introduced,overlooked. " +
+    "quote in the currently read file. " + (round === 0 ? "Round 0: every finding origin MUST be initial. " :
+      "Round " + round + ": origin MUST be continuing, introduced or overlooked; initial is forbidden. Omit resolved findings from findings; account for them in prior. ") +
     "Prior entries must account for EVERY earlier finding in the given history with EXACT " +
     "keys round,findingIndex,status,reason,evidence, where status is resolved,improved," +
     "persisting,regressed and evidence is {path,quote} from the CURRENT file. " +
@@ -146,7 +147,11 @@ export function parseArchitectureDraftReview(
     (!expected || expected === p.path) &&
     filled(p.quote, 8) &&
     (!current || (current[p.path]?.includes(p.quote) ?? false));
-  for (const finding of review.findings) {
+  for (const [index, finding] of review.findings.entries()) {
+    if (finding && (previous.length ? finding.origin === "initial" : finding.origin !== "initial"))
+      throw Error("findings[" + index + "].origin: " + (previous.length
+        ? "use continuing, introduced or overlooked; initial is forbidden after round zero."
+        : "must be initial in round zero."));
     if (
       !exact(finding, ["path", "reason", "correction", "requirement", "evidence", "origin"]) ||
       !authorizedArchitectureRecordPath(finding.path) ||
@@ -318,6 +323,47 @@ async function authenticateDraftVerdict(job: JobStartResult, receipt: RoundRecei
   });
   if (sha(verdict) !== sha(receipt.verdict)) throw Error("Architecture saved verdict differs from original accepted response.");
   return verdict;
+}
+
+/** Read-only authentication of an exhausted independent reviewer, not a
+ * writer terminal receipt. Reconstruct the same admitted cycle and source. */
+export async function authenticateArchitectureDraftProtocol(job: JobStartResult,
+  snapshot: SkillSnapshot, plan: Plan, provider: string, model: string, paths: string[],
+  writer: Writer, task: string, blueprint: CausalBlueprint, writerRound: string,
+  proof: SealedProtocolFailure) {
+  const cycleId = reviewCycleId(cycleScope(job, snapshot, plan, provider, model, paths, task, blueprint));
+  const admitted = JSON.parse(await readFile(admissionPath(job, cycleId), "utf8")) as AdmissionReceipt;
+  if (admitted.schema !== "noveltea-architecture-draft-admission/v1" ||
+      admitted.cycleId !== cycleId || sha(admitted.writer) !== sha(writer) ||
+      admitted.reviewer.id !== proof.sessionId || await openSkillSnapshot(snapshot.id) !== snapshot.path)
+    throw Error("Original Architecture reviewer admission changed.");
+  assertReviewCycleSession(writer, admitted.reviewer);
+  const bytes = await transcriptEvidence(job, admitted.reviewer);
+  const history: ArchitectureDraftRound[] = [];
+  let previous: string | null = null;
+  const requirements = { foundation: await readFile(join(job.worktreeStoryRoot, "creative-direction/foundation.md"), "utf8"),
+    contract: JSON.stringify(plan.contract), task, blueprint: JSON.stringify(blueprint) };
+  for (let i = 0; existsSync(roundPath(job, cycleId, i)); i++) {
+    const saved = JSON.parse(await readFile(roundPath(job, cycleId, i), "utf8")) as RoundReceipt;
+    if (saved.cycleId !== cycleId || saved.round !== i || saved.previousDigest !== previous ||
+        sha(saved.writer) !== sha(writer) || sha(saved.reviewer) !== sha(admitted.reviewer) ||
+        paths.some(p => sha(saved.draft[p]) !== saved.sources[p]) ||
+        sha(bytes.subarray(0, saved.transcriptBytes).toString("utf8")) !== saved.transcriptDigest)
+      throw Error("Original Architecture reviewer history changed.");
+    const verdict = await authenticateDraftVerdict(job, saved, paths, requirements, history);
+    if (verdict.status !== "revise") throw Error("Passing Architecture verdict cannot authorize another review.");
+    history.push({ sources: saved.draft, verdict });
+    previous = sha(saved);
+  }
+  const round = history.length, sources = await sourceDraft(job, paths);
+  const base = join(cycleDirectory(job, cycleId), "round-" + round);
+  const started = JSON.parse(await readFile(base + ".started.json", "utf8"));
+  if (proof.contract !== "architecture.draft-review.v2" || proof.receiptFile !== base + ".protocol" ||
+      sha(started) !== sha({cycleId, round, writerRound, reviewer: admitted.reviewer,
+        sources: Object.fromEntries(Object.entries(sources).map(([p,v]) => [p,sha(v)]))}) ||
+      proof.sourceDigest !== sha({cycleId, round, writerRound, sources, previous}))
+    throw Error("Original Architecture reviewer source changed.");
+  return await authenticateSealedProtocolFailure(proof, [join(job.stateDir, "architecture-draft-review-sessions")]) === admitted.reviewer.file;
 }
 
 export async function verifyArchitectureDraftReviewPin(
@@ -692,7 +738,8 @@ export async function createArchitectureDraftReviewCycle(
             "Source must be foundation,contract,task or blueprint; quote must be an EXACT " +
             "8+ character substring of that source. Evidence quote must be EXACT text in " +
             "the current finding path. Origin initial (first round), continuing, introduced " +
-            "or overlooked. For EVERY prior finding provide {round,findingIndex,status,reason," +
+            "or overlooked. " + (round ? "Do not use initial after round zero. " : "All findings must be initial in round zero. ") +
+            "For EVERY prior finding provide {round,findingIndex,status,reason," +
             "evidence:{path,quote}} with resolved/improved/persisting/regressed and a quote " +
             "from that finding's CURRENT path. If pass use findings:[] and mark ALL prior " +
             "findings resolved. Be clear about material source improvements, not text volume.\n",
@@ -713,14 +760,15 @@ export async function createArchitectureDraftReviewCycle(
         const parse = (text: string) => parseArchitectureDraftReview(text, paths, sources, requirements, history);
         const verdict = await recoverResponseContract({
           session, contract, sourceDigest, receiptFile: protocolBase + ".initial.json", sealTranscript: true,
-          validate: text => { try { parse(text); return []; } catch { return [{ path: "$", expected: "exact source-bound independent verdict" }]; } },
+          validate: text => { try { parse(text); return []; } catch (error) { return [{ path: "$", expected: error instanceof Error && /^(findings\[\d+\]\.origin:|Independent Architecture draft |Architecture continuing finding |Independent draft reviewer )/.test(error.message) ? error.message : "exact source-bound independent verdict" }]; } },
           parse,
           beforeCorrection: async () => {
             if (sha(await sourceDraft(job, paths)) !== sha(sources))
               throw Error("Architecture reviewer source changed before format repair.");
             await guardPiBudget(job, step + ":" + round, reviewer.file);
           },
-          feedback: () => architectureDraftFormatCorrection(paths) +
+          feedback: failures => architectureDraftFormatCorrection(paths, round) +
+            "\nValidation: " + failures.map(f => f.expected).join("; ") +
             "\nHistory: " + JSON.stringify(history.map(h => h.verdict)),
           prompt: async text => {
             await registerPendingPiSession(job, reviewer.file);

@@ -166,6 +166,13 @@ export async function authenticateNonSpecialistProtocolFailure(job: JobStartResu
         !isDeepStrictEqual(saved.protocolFailure, proof)) return null;
     const root = join(job.stateDir, "idea-placement-sessions");
     await authenticateSealedProtocolFailure(proof, [root]);
+  } else if (op.operation === "independent-review" && op.evidence.reference === "specialist-receipt" &&
+      proof.contract === "architecture.draft-review.v2" && op.evidence.assignmentId === "architecture") {
+    if (!await (await import("./architecture.js")).authenticateArchitectureReviewerFailure(job, op.source.headSha!, proof)) return null;
+  } else if (op.operation === "independent-review" && op.evidence.reference === "specialist-receipt" &&
+      proof.contract === "composition.draft-review.v2") {
+    const match = /^composition:(milestone\.[a-z][a-z0-9-]*)$/.exec(op.evidence.assignmentId ?? "");
+    if (!match || !await (await import("./composition-work.js")).authenticateCompositionReviewerFailure(job, match[1]!, op.source.headSha!, proof)) return null;
   } else if (proof.contract === "dependency.proposal.v1" &&
       /^dependency-sessions\/[a-f0-9]{64}\/plan\/response$/.test(path)) {
     const { inspectDependencyPlan } = await import("./dependency-state.js");

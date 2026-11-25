@@ -226,7 +226,7 @@ function promptText(messages: readonly unknown[]): string {
 }
 type Call = { prompt: string; tools: string[]; messages: readonly unknown[]; lastRole: string };
 function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-pass" | "continue" | "repeat" = "productive",
-  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean; architectureRecovery?: boolean; architectureStall?: boolean; postcommitRepair?: boolean; parentPlan?: ReturnType<typeof planWholeStory> }): Provider {
+  crashFirstReviewer = false, format?: { diagnostic?: boolean; replacement?: boolean; architectureRecovery?: boolean; architectureStall?: boolean; reviewerExhaustion?: boolean; postcommitRepair?: boolean; parentPlan?: ReturnType<typeof planWholeStory> }): Provider {
   let reviewerRound = 0;
   let reviewerCrashed = false;
   let malformedDiagnosticSent = false;
@@ -234,6 +234,8 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
   let writerRound = 0;
   let protocolRepaired = false;
   let architectureDraftRound = 0;
+  let rejectedDraftVerdict: any;
+  let draftFormatRepaired = false;
   let postcommitNegative = false;
   const postcommitQuote = "The archived roster establishes the entry sequence before the witness is asked to testify.";
   const improvements = [
@@ -373,6 +375,16 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
       if (lastRole !== "toolResult" && (empty || native || protection || review)) {
         content = writeVariant(empty ? "invalid" : native ? "protection" : protection ? "canonical" : "review"); reason = "toolUse";
       } else content = asText(protection ? "CAUSAL_MILESTONE_ORDER: milestone.arrival" : orderReport);
+    } else if (format?.architectureRecovery && prompt.includes("INDEPENDENT DRAFT VERDICT PROTOCOL CORRECTION")) {
+      assert.deepEqual([...active], [], "independent format correction has no tools");
+      assert.match(prompt, /initial is forbidden/i);
+      assert.match(prompt, /findings\[0\]\.origin/);
+      assert.ok(rejectedDraftVerdict);
+      if (!format.reviewerExhaustion) {
+        rejectedDraftVerdict.findings[0].origin = "introduced";
+        draftFormatRepaired = true;
+      }
+      content = asText(JSON.stringify(rejectedDraftVerdict));
     } else if (format?.architectureRecovery && draftReviewer) {
       if (lastRole !== "toolResult") { content = draftReadCalls(); reason = "toolUse"; }
       else {
@@ -389,8 +401,13 @@ function scripted(calls: Call[], scenario: "productive" | "stalled" | "replace-p
           reason: format.architectureStall ? "The same material gap remains." : "The revised draft supplies new source evidence.",
           evidence: { path: archPath, quote: format.architectureStall ? oldQuote : improvements[i]! },
         }));
-        content = asText(JSON.stringify({schema: "noveltea-architecture-draft-review/v2",
-          status: findings.length ? "revise" : "pass", findings, prior}));
+        const draft = {schema: "noveltea-architecture-draft-review/v2",
+          status: findings.length ? "revise" : "pass", findings, prior};
+        if (round === 1 && !format.architectureStall && !draftFormatRepaired) {
+          draft.findings[0]!.origin = "initial";
+          rejectedDraftVerdict = draft;
+        }
+        content = asText(JSON.stringify(draft));
       }
     } else if (draftReviewer) {
       const toolNames = ctx.messages.flatMap(m => m.role === "assistant"
@@ -1139,10 +1156,11 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
     "canonical draft must receive an independent source-reading early review");
 
     // Actual Generation parent, with current-format Turn and real sandbox.
-    for (const scenario of ["productive", "canonical-stall", "blueprint-replacement", "postcommit-repair"] as const) {
+    for (const scenario of ["productive", "canonical-stall", "blueprint-replacement", "postcommit-repair", "reviewer-exhaustion"] as const) {
       const stalled = scenario === "canonical-stall";
       const replacement = scenario === "blueprint-replacement";
       const postcommitRepair = scenario === "postcommit-repair";
+      const reviewerExhaustion = scenario === "reviewer-exhaustion";
       const parentId = randomUUID();
       parentJobIds.push(parentId);
       const parentDb = new DatabaseSync(join(app, "studio.sqlite"));
@@ -1154,7 +1172,7 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
       const calls: Call[] = [];
       const runtime = await ModelRuntime.create({modelsPath: null, refreshOnCreate: false});
       runtime.registerNativeProvider(scripted(calls, replacement ? "replace-pass" : "productive", false, {
-        parentPlan: turn, architectureRecovery: true, architectureStall: stalled, postcommitRepair,
+        parentPlan: turn, architectureRecovery: true, architectureStall: stalled, postcommitRepair, reviewerExhaustion,
       }));
       await runtime.refresh({allowNetwork: false});
       await configurePiPolicy(parentJob, {version: 1, profile: {provider: model.provider, model: model.id},
@@ -1210,6 +1228,20 @@ test("#202/#203: production Blueprint review converges after three revisions, pr
           assert.throws(() => assertArchitectureProseOnly(before, after.replace("decisions: []", "decisions: [invented]")), /metadata/);
           const next = await invoke({interruptBefore: ["specialist_dispatch"]});
           assert.equal(next.active?.stage, "foundations", JSON.stringify({reason: next.reason, active: next.active}));
+        } else if (reviewerExhaustion) {
+          const finished = await invoke();
+          started = true;
+          assert.equal(finished.status, "blocked", JSON.stringify({reason: finished.reason, lifecycle: finished.recoveryLifecycle}));
+          assert.equal(finished.recoveryLifecycle.active?.origin.operation, "independent-review");
+          assert.equal(finished.recoveryLifecycle.decision?.action, "exhausted", JSON.stringify(finished.recoveryLifecycle));
+          const receipt = JSON.parse(readFileSync(join(parentJob.stateDir, "architecture.json"), "utf8"));
+          assert.equal(existsSync(join(parentJob.stateDir, "architecture-assignment", receipt.sourceDigest, "terminal.json")), false);
+          assert.equal(git(parentJob.worktreeRoot, "rev-parse", "HEAD"), graphBase);
+          assert.notEqual(git(parentJob.worktreeRoot, "status", "--porcelain"), "");
+          const before = calls.length;
+          await invoke();
+          assert.equal(calls.length, before, "reviewer exhaustion must not replay the original writer or reviewer");
+          assert.equal(calls.filter(c => c.prompt.includes("INDEPENDENT DRAFT VERDICT PROTOCOL CORRECTION")).length, 2);
         } else if (!stalled) {
           const cuts = ["blueprint-draft", "blueprint-negative", "blueprint-pin", "initial", "admitted", "corrected", "accepted", "committed"] as const;
           let writer: string | undefined;

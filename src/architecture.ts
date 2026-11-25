@@ -307,6 +307,32 @@ function architectureRoundSource(job: JobStartResult, state: Receipt, originalHe
     amendment: state.plan?.causalAmendment, snapshot: state.snapshot?.id, blueprint: state.blueprint,
     task: state.blueprintTask, provider: state.provider, model: state.model, prior: state.priorProtection }));
 }
+export async function authenticateArchitectureReviewerFailure(job: JobStartResult, sourceHead: string,
+  proof: import("./response-contract-recovery.js").SealedProtocolFailure) {
+  const state = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as Receipt;
+  if (state.jobId !== job.jobId || state.threadId !== job.threadId || state.baseSha !== job.baseSha ||
+      state.phase !== "writing" || state.worker !== "pi" || !state.sourceDigest || !state.assignmentKey ||
+      !state.piSessionId || !state.piSessionFile || !state.snapshot || !state.plan || !state.blueprint ||
+      (state.executionHead ?? state.expectedHead) !== sourceHead ||
+      architectureRoundSource(job, state, sourceHead) !== state.sourceDigest) return false;
+  assertHead(job, sourceHead);
+  const paths = await changedPaths(job);
+  assertCausalPaths(state.plan, paths);
+  if (JSON.stringify(paths) !== JSON.stringify(state.reviewPaths)) return false;
+  await verifyJobPiSession(job, "architecture", state.piSessionFile, state.piSessionId);
+  const writerRound = await (await import("./assignment-metadata-recovery.js")).verifyLatestSettledWriter({
+    directory: join(job.stateDir, "architecture-assignment", state.sourceDigest),
+    sourceDigest: state.sourceDigest, sessionId: state.piSessionId, sessionFile: state.piSessionFile,
+    sessionRoots: [join(job.stateDir, "architecture-sessions")], responseKind: "architecture-order",
+    effect: await contentDigest(job, paths) });
+  const approved = await readApprovedBlueprint(job, state.plan, state.snapshot, state.provider,
+    state.model, state.blueprintTask ?? "", sourceHead);
+  if (!approved || JSON.stringify(approved.pin) !== JSON.stringify(state.blueprint)) return false;
+  return (await import("./architecture-draft-review.js")).authenticateArchitectureDraftProtocol(job,
+    state.snapshot, state.plan, state.provider, state.model, paths,
+    { id: state.piSessionId, file: state.piSessionFile }, state.blueprintTask ?? "", approved.blueprint, writerRound, proof);
+}
+
 export async function inspectArchitectureFailure(job: JobStartResult, sourceHead: string,
     diagnostic?: AssignmentDiagnosticAuthorization, historicalHead?: string) {
   const state = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as Receipt;
