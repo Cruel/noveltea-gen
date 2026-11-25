@@ -576,3 +576,19 @@ than relying on the ordinary Studio shard's optional PostgreSQL skip.
 
 All deterministic execution uses the current source-bound production
 controller. No paid or live provider certification was performed.
+
+Final verification on implementation commit `259e70b`:
+
+- For each `i=1..6`, `NT_GENERATION_TEST_SHARD="$i/6" pnpm exec tsx --test --test-name-pattern='^(?!opt-in real Pi)' test/generation.test.ts`: all six shards passed; 62 deterministic cases passed, zero failures, two paid live cases intentionally skipped.
+- With mandatory PostgreSQL proof, `pnpm --filter @noveltea/studio exec tsx --test test/integrated-story-turn.test.ts`: both actual backends passed, zero skips. The strengthened final assertions prove the original Event writer session, independent reviewer, exact failing commit and passing successor, one active-verified Case discharge, and cumulative meter.
+- `pnpm exec tsx --test test/rejected-review-repair.test.ts test/focused-generation.test.ts`: 20 passed, zero failures, one unavailable private historical Event replay skipped (`NT_TEST_EVENT_REPAIR_STATE`, #162). Current deterministic repair, cancellation, focused support/END re-entry and restart paths passed.
+- `pnpm --filter @noveltea/studio exec tsc --noEmit -p tsconfig.json`: passed with the final identity assertions.
+- Workflow YAML parsed locally; hosted Actions execution is not claimed.
+
+The parent author-intake boundary executes in the integrated run. The
+actual queued author change and protected steering handoff are exercised
+separately in the passing Generation `review-native-steer` and Studio
+live-steering regressions. The private historical captures (#158, #161,
+#162) were not available; current deterministic equivalents, not those
+captured runs, support the acceptance claim. The two opt-in paid tests
+and further live provider validation remain #260.
