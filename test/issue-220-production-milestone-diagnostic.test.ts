@@ -20,7 +20,7 @@ import {
 import { createControllerServer, SandboxController,
   type ControllerConfig } from "../web/src/sandbox-controller.js";
 import { ensureMilestoneBlueprint, inspectMilestoneBlueprint,
-  readReviewedMilestoneBlueprint, type MilestoneBlueprint } from "../src/milestone-blueprint.js";
+  readReviewedMilestoneBlueprint, milestoneCharacterPrerequisites, type MilestoneBlueprint } from "../src/milestone-blueprint.js";
 import { startStoryJob } from "../src/job.js";
 import { withStoryJobLock } from "../src/job-lock.js";
 import { configurePiPolicy, inspectPiPolicy, PiBudgetPause } from "../src/job-pi-policy.js";
@@ -29,6 +29,12 @@ import { createSkillSnapshot } from "../src/snapshot.js";
 import type { Plan } from "../src/architecture.js";
 import type { EventAssignment } from "../src/event-specialist.js";
 import { removeTestTree } from "./helpers.js";
+import { BlueprintAssessmentRequired, readBlueprintAssessment, verifyBlueprintAssessmentResolution,
+  type BlueprintAssessmentGrant } from "../src/blueprint-reassessment.js";
+import { selectOperationStrategy, authenticateOperationReviewProof } from "../src/generation-operation-strategy.js";
+import { recoveryCaseId } from "../src/generation-recovery-lifecycle.js";
+import type { RecoveryCase, RecoveryOrigin } from "../src/generation-recovery-contract.js";
+import type { GenerationGraphState } from "../src/generation.js";
 
 const sha = (v: string) => createHash("sha256").update(v).digest("hex");
 const skillSource = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
@@ -90,6 +96,7 @@ function scripted(
   downstreamCorrection = false,
   productive = false,
   omitReads = false,
+  sourceRecovery = false,
 ): Provider {
   let reviewerRound = 0;
   let writerRound = 0;
@@ -137,6 +144,32 @@ function scripted(
       round: index, findingIndex: 0, status: "resolved", reason: "The specific unsupported source claim was replaced.",
       evidence: { kind: "revised", eventId: "arrival", field: change.field, before: change.before, after: change.after },
     })),
+  });
+  const sourceDraft = (round: number): MilestoneBlueprint => {
+    const event = structuredClone(draft.events[0]!);
+    event.knowledge = "A witness reports who entered the gate; the subject does not provide testimony.";
+    event.participants = round === 0 ? [] : ["character.witness"];
+    event.evidence[0]!.source = "The gate witness describes character.subject";
+    event.evidence[0]!.characterSources = [round === 0
+      ? { id: "character.subject", availability: "prospective", role: "Person discussed by the witness." }
+      : { id: "character.witness", availability: round < 4 ? "existing" : "prospective", role: "Provides eyewitness testimony." }];
+    return { ...draft, events: [event] };
+  };
+  const sourceQuote = (round: number) => JSON.stringify(sourceDraft(round).events[0]!.evidence);
+  const sourceReview = (round: number) => ({
+    schema: "noveltea-milestone-blueprint-review/v5", status: round === 4 ? "pass" : "revise",
+    findings: round === 4 ? [] : [{ ...finding,
+      requirement: "Actual material evidence providers must be authorized or declared prospective",
+      reason: round === 0 ? "The evidence subject is not the witness and is not a participant." :
+        "The witness is claimed to exist outside the authorized Character inventory.",
+      correction: round === 0 ? "Identify the actual witness." : "Declare the actual necessary witness prospective.",
+      evidence: { field: "evidence", quote: sourceQuote(round), repair: "replace" } }],
+    prior: Array.from({ length: round }, (_, i) => {
+      const resolved = i === 0 || round === 4;
+      return { round: i, findingIndex: 0, status: resolved ? "resolved" : "persisting",
+        reason: resolved ? "The exact rejected evidence field was substantively replaced." : "The invalid availability claim persists.",
+        evidence: { kind: resolved ? "revised" : "current" } };
+    }),
   });
   const reads = ["skill://nt-event-design/SKILL.md", "skill://nt-catalog/SKILL.md", milestonePath];
   const stream = (_model: Model, ctx: TranscriptContext, _opts?: SimpleStreamOptions) => {
@@ -191,7 +224,11 @@ function scripted(
       // A complete-looking reply without its mandatory skill read is not accepted.
       content = [{ type: "text", text: JSON.stringify(isWriter ? draft : productiveReview(reviewerRound)) }];
     } else if (isDiagnostic) {
-      content = [{ type: "text", text: JSON.stringify({ ...diagnosticAnswer, action: diagnosticAction }) }];
+      content = [{ type: "text", text: JSON.stringify(sourceRecovery ? {
+        ...diagnosticAnswer, action: "continue",
+        explanation: "The same unverified witness availability has persisted; retain the real prospective provider and do not invent canon.",
+        assessments: [{ ...diagnosticAnswer.assessments[0], evidence: { eventId: "arrival", field: "evidence", quote: sourceQuote(3) } }],
+      } : { ...diagnosticAnswer, action: diagnosticAction }) }];
     } else if (isReplacement) {
       content = [
         {
@@ -205,7 +242,13 @@ function scripted(
         },
       ];
     } else if (isReview) {
-      if (productive) {
+      if (sourceRecovery) {
+        if (reviewerRound < 4) {
+          assert.match(prompt, /CONTROLLER SOURCE FINDINGS/);
+          assert.match(prompt, reviewerRound === 0 ? /character.subject/ : /character.witness/);
+        }
+        content = [{ type: "text", text: JSON.stringify(sourceReview(reviewerRound++)) }];
+      } else if (productive) {
         const reply = productiveReview(reviewerRound++);
         if (omitReads && reply.prior.length && !protocolCorrected) {
           pendingProtocol = reply;
@@ -275,7 +318,11 @@ function scripted(
         reviewerRound++;
       }
     } else {
-      if (productive) {
+      if (sourceRecovery) {
+        if (writerRound > 0) assert.match(prompt, /CONTROLLER SOURCE FINDINGS/);
+        if (writerRound === 4) assert.match(prompt, /INDEPENDENT DIAGNOSTIC ADVICE/);
+        content = [{ type: "text", text: JSON.stringify(sourceDraft(writerRound++)) }];
+      } else if (productive) {
         content = [{ type: "text", text: JSON.stringify(productiveDraft(writerRound++)) }];
       } else if (downstreamCorrection) {
         content = [{ type: "text", text: JSON.stringify(writerRound++ === 0 ? falseDownstream : draft) }];
@@ -387,6 +434,7 @@ test("#220: three stalled Milestone reviews actually dispatch a fresh independen
   let continuationJobId: string | undefined;
   let secondCaseJobId: string | undefined;
   let downstreamJobId: string | undefined;
+  let sourceJobId: string | undefined;
   try {
     const app = join(tmp, "app"), state = join(tmp, "state"), cache = join(tmp, "cache"),
       socketDir = join(tmp, "controller");
@@ -959,11 +1007,101 @@ The guard finds a dated register, but no evidence of a prior visit.
         }).trim(),
         "",
       );
+    // #248: real child admission rejects distinct source defects without
+    // protocol retries. The production parent selector authenticates the
+    // original negative Review and reenters the exact Blueprint with its grant.
+    sourceJobId = randomUUID();
+    const sourceDb = new DatabaseSync(join(app, "studio.sqlite"));
+    try { sourceDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+      .run(sourceJobId, owner, "story", head, null); } finally { sourceDb.close(); }
+    const sourceJob = await startStoryJob({ story, job: sourceJobId, worktreeCacheRoot: scoped });
+    const sourceCalls: Call[] = [];
+    const sourceRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    sourceRuntime.registerNativeProvider(scripted(sourceCalls, "continue", false, false, false, false, true));
+    await sourceRuntime.refresh({ allowNetwork: false });
+    await configurePiPolicy(sourceJob, { version: 1, profile: { provider: model.provider, model: model.id },
+      limits: { modelCalls: 40 } });
+    const sourceSaver = SqliteSaver.fromConnString(join(sourceJob.stateDir, "source-assignment.sqlite"));
+    const graphThreadId = sourceJob.threadId + ":source-generation";
+    const turnDigest = sha("original Turn"), parentKey = sha("original Event assignment");
+    const sourceChannels = Annotation.Root({
+      grant: Annotation<BlueprintAssessmentGrant | null>(),
+      result: Annotation<Awaited<ReturnType<typeof ensureMilestoneBlueprint>> | null>(),
+    });
+    const sourceReceipt = join(sourceJob.stateDir, "milestone-blueprints", "sample.json");
+    let originalSeal: { writer: { id: string }; reviewer: { id: string }; assignmentKey: string } | undefined;
+    const execute = (grant?: BlueprintAssessmentGrant) => ensureMilestoneBlueprint(sourceJob, plan,
+      assignment, snapshot, model.provider, model.id, task, head, false, undefined, parentKey, turnDigest, grant);
+    const sourceParent = new StateGraph(sourceChannels)
+      .addNode("original", async () => {
+        try { await execute(); assert.fail("Invalid proposal must reach parent reassessment"); }
+        catch (error) {
+          assert.ok(error instanceof BlueprintAssessmentRequired);
+          const ref = error.ref;
+          const proof = await readBlueprintAssessment(sourceJob, ref);
+          assert.equal(proof.trigger, "stagnation");
+          assert.equal(proof.round, 3);
+          const before = JSON.parse(readFileSync(sourceReceipt, "utf8"));
+          assert.equal(before.phase, "revision");
+          assert.deepEqual(before.rounds.map((r: any) => r.review.status), ["revise", "revise", "revise", "revise"]);
+          assert.notEqual(before.rounds[0].draftDigest, before.rounds[1].draftDigest);
+          assert.equal(before.rounds[1].draftDigest, before.rounds[3].draftDigest);
+          originalSeal = before;
+          const assignmentId = "event:" + milestoneId;
+          const origin: RecoveryOrigin = { jobId: sourceJob.jobId, jobThreadId: sourceJob.threadId,
+            graphThreadId, turnDigest, planVersion: plan.version, sourceHeadSha: head, assignmentId,
+            operation: "specialist-result", check: "specialist-result.v1", checkVersion: 1,
+            failureAnchor: { store: "graph-checkpoint", ref: graphThreadId + ":original", failedCheckInstanceId: randomUUID() } };
+          const c: RecoveryCase = { schema: "noveltea-generation-recovery-case/v1", id: recoveryCaseId(origin), origin,
+            kind: "semantic", observation: "returned-failure", effect: "writer-effects-uncertain",
+            evidence: [{ store: "graph-checkpoint", ref: origin.failureAnchor.ref }] };
+          const s = { request: { job: sourceJob.jobId, turnPlanDigest: turnDigest }, planVersion: plan.version,
+            inventory: { headSha: head }, active: { id: assignmentId, milestone: milestoneId, stage: "event" },
+            result: null, recoverySources: [{ caseId: c.id, channel: "operationRecovery", input: {
+              evidence: { reference: "specialist-receipt", resultStatus: "blueprint-assessment", blueprintAssessment: ref },
+            } }] } as unknown as GenerationGraphState;
+          const decision = await selectOperationStrategy(sourceJob, s, c);
+          assert.equal(decision?.action, "known-correction");
+          assert.equal(decision?.adapter, "review-cycle");
+          assert.equal(await authenticateOperationReviewProof(sourceJob, s, c, decision!), true);
+          assert.deepEqual(await selectOperationStrategy(sourceJob, s, c), decision);
+          return { grant: { caseId: c.id, ref } };
+        }
+      })
+      .addNode("reassess", async state => ({ result: await execute(state.grant!) }))
+      .addEdge(START, "original").addEdge("original", "reassess").addEdge("reassess", END)
+      .compile({ checkpointer: sourceSaver });
+    try {
+      const settled = await withJobModelRuntime(sourceRuntime, () =>
+        withStoryJobLock(sourceJob, "event-sample", () => sourceParent.invoke({ grant: null, result: null },
+          { configurable: { thread_id: graphThreadId }, durability: "sync", recursionLimit: 10000 })));
+      const result = settled.result!;
+      const final = JSON.parse(readFileSync(sourceReceipt, "utf8"));
+      assert.equal(final.assignmentKey, originalSeal!.assignmentKey);
+      assert.equal(final.writer.id, originalSeal!.writer.id);
+      assert.equal(final.reviewer.id, originalSeal!.reviewer.id);
+      assert.notEqual(final.writer.id, final.reviewer.id);
+      assert.deepEqual(final.rounds.map((r: any) => r.review.status), ["revise", "revise", "revise", "revise", "pass"]);
+      assert.equal(final.diagnostics.length, 1);
+      assert.equal(sourceCalls.filter(c => c.prompt.includes("FORMAT CORRECTION")).length, 0);
+      assert.ok(sourceCalls.every(c => !c.tools.some(t => ["write", "edit", "bash"].includes(t))));
+      assert.equal(milestoneCharacterPrerequisites(result.blueprint, assignment)[0]?.characterId, "character.witness");
+      assert.equal(await verifyBlueprintAssessmentResolution(sourceJob, settled.grant!.ref, {
+        store: "specialist-receipt", ref: "milestone-blueprints/sample.json", digest: sha(JSON.stringify(result.pin)),
+      }, head), true);
+      assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceJob.worktreeRoot, encoding: "utf8" }).trim(), "");
+      const approved = readFileSync(sourceReceipt, "utf8");
+      final.rounds[0].draft.events[0].participants.push("character.subject");
+      writeFileSync(sourceReceipt, JSON.stringify(final));
+      await assert.rejects(readReviewedMilestoneBlueprint(sourceJob, result.pin, assignment), /evidence changed|sealed|provenance/);
+      writeFileSync(sourceReceipt, approved);
+    } finally { sourceSaver.db.close(); }
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
+    if (controller && sourceJobId) await controller.dispose(sourceJobId);
     if (controller && downstreamJobId) await controller.dispose(downstreamJobId);
     if (controller && secondCaseJobId) await controller.dispose(secondCaseJobId);
     if (controller && continuationJobId) await controller.dispose(continuationJobId);

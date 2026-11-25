@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  parseMilestoneBlueprint, milestoneCharacterPrerequisites,
+  parseMilestoneBlueprint, milestoneCharacterPrerequisites, milestoneBlueprintSourceFindings, MilestoneSourceError,
   parseMilestoneBlueprintReview,
   milestoneReviewStagnation,
   type MilestoneBlueprint,
@@ -472,4 +472,32 @@ test("#260 missing Interactive obligation can resolve by explicitly removing a m
   const proof = { kind: "not-required", eventId: "register", field: "routes" };
   assert.equal(parseMilestoneBlueprintReview(passProof(proof), corrected, assignment, prior).status, "pass");
   assert.throws(() => parseMilestoneBlueprintReview(passProof(proof), original, assignment, prior));
+});
+
+test("#248 valid JSON with an evidence subject and unauthorized witness is a substantive rejection, not a format failure", () => {
+  const proposed = structuredClone(draft);
+  proposed.events[0]!.participants = ["character.witness"];
+  proposed.events[0]!.evidence[0]!.characterSources = [
+    { id: "character.subject", availability: "existing", role: "The person discussed in the testimony." },
+    { id: "character.witness", availability: "existing", role: "Provides the testimony." },
+  ];
+  const scope = { ...assignment, characterIds: ["character.subject"] };
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify(proposed), scope), MilestoneSourceError);
+  const rejected = parseMilestoneBlueprint(JSON.stringify(proposed), scope, "review-draft");
+  assert.deepEqual(rejected, proposed);
+  const findings = milestoneBlueprintSourceFindings(rejected, scope);
+  assert.deepEqual(findings.map(f => [f.category, f.path, f.offendingId]), [
+    ["source", "events[0].evidence[0].characterSources[0].id", "character.subject"],
+    ["authority", "events[0].evidence[0].characterSources[1].availability", "character.witness"],
+    ["source", "events[0].participants[0]", "character.witness"],
+  ]);
+  assert.deepEqual(findings[0]!.submittedContext?.participants, ["character.witness"]);
+  assert.throws(() => parseMilestoneBlueprint("{", scope, "review-draft"), /invalid or oversized JSON/);
+  assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...proposed, events: [{ ...proposed.events[0], knowledge: [] }] }), scope, "review-draft"), /knowledge/);
+  const repaired = structuredClone(proposed);
+  repaired.events[0]!.evidence[0]!.characterSources = [
+    { id: "character.witness", availability: "prospective", role: "Provides the testimony." },
+  ];
+  assert.deepEqual(milestoneBlueprintSourceFindings(parseMilestoneBlueprint(JSON.stringify(repaired), scope), scope), []);
+  assert.equal(milestoneCharacterPrerequisites(repaired, scope)[0]!.characterId, "character.witness");
 });

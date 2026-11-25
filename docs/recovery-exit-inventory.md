@@ -662,3 +662,5 @@ round-origin correction and the exhausted-reviewer parent disposition.
   Remaining qualification includes arbitrary downstream no-write reports,
   ambiguous/existing out-of-lease or non-Character dependencies, and live
   full Story certification.
+
+- #248 Milestone planner correction: `parseMilestoneBlueprint` separates mechanical shape admission from deterministic `milestoneBlueprintSourceFindings`. The planner response receipt accepts only the wire shape, not narrative validity. Negative source/authority findings are delivered to the existing independent Review and original planner with source scope and exact offending fields; an unchanged negative draft uses the existing Blueprint parent assessment. `ensureMilestoneBlueprint` refuses any PASS with unresolved deterministic source findings; `assertRounds` replays rejected draft shapes and strictly validates approvals. No additional model consumer, retry allowance, canonical authority, or scheduler. Regressions: `issue-227-milestone-review.test.ts`, `issue-220-production-milestone-diagnostic.test.ts`, and `response-contract-recovery.test.ts`.

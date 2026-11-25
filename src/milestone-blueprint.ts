@@ -485,7 +485,7 @@ function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<Eve
 }
 export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssignment,
   "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">,
-  policy: "admission" | "sealed-replay" = "admission"): MilestoneBlueprint {
+  policy: "admission" | "sealed-replay" | "review-draft" | "sealed-rejected" = "admission"): MilestoneBlueprint {
   let raw: unknown;
   try { raw = parse(text); } catch { throw Error("Milestone planner returned invalid or oversized JSON."); }
   if (!exact(raw, ["schema", "milestoneId", "events", "downstream"]) ||
@@ -502,8 +502,8 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
       invalid(path + ".id", "expected a unique provisional slug (not a canonical event.* ID)");
     if (!string(event.purpose)) invalid(path + ".purpose", "expected nonempty bounded text");
     if (!string(event.knowledge)) invalid(path + ".knowledge", "expected one nonempty bounded STRING, not an array/object");
-    if (!strings(event.dependsOn, 4) || event.dependsOn.some((id: string) => !seen.has(id)))
-      invalid(path + ".dependsOn", "expected at most four earlier provisional Event IDs: " + JSON.stringify([...seen]));
+    if (!strings(event.dependsOn, 4))
+      invalid(path + ".dependsOn", "expected at most four provisional Event ID strings");
     if (!strings(event.participants, 12) || new Set(event.participants).size !== event.participants.length ||
         event.participants.some(id => !/^character\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)))
       invalid(path + ".participants", "expected at most twelve unique typed Character IDs");
@@ -512,37 +512,29 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
     if (!Array.isArray(event.routes) || event.routes.length > 5)
       invalid(path + ".routes", "expected 0–5 route objects");
     seen.add(String(event.id));
-    const declared = new Map<string, string>();
     for (const [j, e] of event.evidence.entries()) {
       if (!exact(e, ["anchorPath", "source", "observation", "access", "establishes", "limits",
           ...(object(e) && "characterSources" in e ? ["characterSources"] : [])]) ||
-          !assignment.sourcePaths.includes(String(e.anchorPath)) ||
+          !string(e.anchorPath, 300) ||
           ![e.source, e.observation, e.access, e.establishes, e.limits]
             .every(value => string(value)))
         invalid(path + ".evidence[" + j + "]", "expected exact anchorPath, source, observation, access, establishes, limits; bounded nonempty strings and a canonical anchor from " + JSON.stringify(assignment.sourcePaths));
-      if (policy === "admission" && !("characterSources" in e))
+      if ((policy === "admission" || policy === "review-draft") && !("characterSources" in e))
         invalid(path + ".evidence[" + j + "].characterSources",
           "required explicit material Character source array; use [] for non-Character evidence");
       if ("characterSources" in e) {
         const sourcePath = path + ".evidence[" + j + "].characterSources";
         if (!Array.isArray(e.characterSources) || e.characterSources.length > 12)
           invalid(sourcePath, "expected at most twelve material Character sources");
-        const local = new Set<string>();
         for (const source of e.characterSources) {
           if (!exact(source, ["id", "availability", "role"]) ||
-              typeof source.id !== "string" || !event.participants.includes(source.id) ||
-              local.has(source.id) || !string(source.role, 400) ||
-              (source.availability !== "existing" && source.availability !== "prospective") ||
-              (source.availability === "existing" && !assignment.characterIds.includes(source.id)) ||
-              (declared.has(source.id) && declared.get(source.id) !== source.availability))
-            invalid(sourcePath, "expected unique participant IDs, existing only for authorized Characters; prospective is a design declaration independent of later realization, with a material evidence role");
-          local.add(source.id);
-          declared.set(source.id, source.availability as string);
+              typeof source.id !== "string" || !/^character\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(source.id) ||
+              !string(source.role, 400) ||
+              (source.availability !== "existing" && source.availability !== "prospective"))
+            invalid(sourcePath, "expected typed Character ID, existing|prospective availability and bounded material evidence role");
         }
       }
     }
-    if (event.participants.some(id => !assignment.characterIds.includes(id) && declared.get(id) !== "prospective"))
-      invalid(path + ".participants", "unknown Character requires a prospective material source declaration; existing authorized IDs: " + JSON.stringify(assignment.characterIds));
     for (const [j, route] of event.routes.entries())
       if (!exact(route, ["condition", "consequence"]) ||
           !string(route.condition) || !string(route.consequence))
@@ -554,10 +546,81 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
         !["event", "interactive", "composition"].includes(item.owner) ||
         !string(item.obligation))
       invalid("downstream[" + i + "]", "Milestone downstream obligation needs exact owner (event, interactive or composition) and nonempty obligation");
-  if (!raw.downstream.some(item => item.owner === "composition"))
-    throw Error("Milestone plan must identify the downstream Composition owner.");
-  return raw as unknown as MilestoneBlueprint;
+  const draft = raw as unknown as MilestoneBlueprint;
+  if (policy === "admission" || policy === "sealed-replay")
+    assertMilestoneSources(draft, assignment);
+  return draft;
 }
+/** A well-shaped rejected proposal is evidence, not an authorized plan.
+ * Reconstruct findings exclusively from the submitted draft and trusted assignment.
+ * Never infer who actually provided testimony from the subject's name or role prose. */
+type SourceScope = Pick<EventAssignment, "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">;
+export interface MilestoneSourceFinding {
+  category: "source" | "authority" | "semantic";
+  path: string;
+  offendingId: string;
+  eventId?: string;
+  expected: string;
+  trustedContext: { sourcePaths: string[]; characterIds: string[] };
+  submittedContext?: { participants: string[]; earlierEvents: string[] };
+}
+export function milestoneBlueprintSourceFindings(draft: MilestoneBlueprint, assignment: SourceScope): MilestoneSourceFinding[] {
+  const findings: MilestoneSourceFinding[] = [];
+  const context = { sourcePaths: assignment.sourcePaths, characterIds: assignment.characterIds };
+  const earlierEvents: string[] = [];
+  for (const [i, event] of draft.events.entries()) {
+    const path = "events[" + i + "]";
+    const report = (category: MilestoneSourceFinding["category"], field: string, offendingId: string, expected: string) =>
+      findings.push({ category, path: path + field, offendingId, eventId: event.id, expected,
+        trustedContext: context, submittedContext: { participants: event.participants, earlierEvents: [...earlierEvents] } });
+    for (const [j, dependency] of event.dependsOn.entries())
+      if (!earlierEvents.includes(dependency))
+        report("semantic", ".dependsOn[" + j + "]", dependency, "Dependency must identify an earlier provisional Event.");
+    const declared = new Map<string, string>();
+    for (const [j, evidence] of event.evidence.entries()) {
+      const field = ".evidence[" + j + "]";
+      if (!assignment.sourcePaths.includes(evidence.anchorPath))
+        report("authority", field + ".anchorPath", evidence.anchorPath, "Use an authorized canonical anchor from the original source scope.");
+      const local = new Set<string>();
+      for (const [k, source] of (evidence.characterSources ?? []).entries()) {
+        const sourceField = field + ".characterSources[" + k + "]";
+        if (!event.participants.includes(source.id))
+          report("source", sourceField + ".id", source.id, "Declare actual material providers, not merely evidence subjects. Verify whether this Character provides evidence or should be removed, and include actual providers in participants.");
+        if (source.availability === "existing" && !assignment.characterIds.includes(source.id))
+          report("authority", sourceField + ".availability", source.id, "Existing Character must belong to the authorized inventory; a genuinely needed unrealized provider may be prospective.");
+        if (local.has(source.id) || (declared.has(source.id) && declared.get(source.id) !== source.availability))
+          report("source", sourceField + ".id", source.id, "Character source declarations must be unique per evidence and have consistent availability within the Event.");
+        local.add(source.id);
+        declared.set(source.id, source.availability);
+      }
+    }
+    for (const [j, participant] of event.participants.entries())
+      if (!assignment.characterIds.includes(participant) && declared.get(participant) !== "prospective")
+        report("source", ".participants[" + j + "]", participant, "Unknown Character requires a prospective material source declaration.");
+    earlierEvents.push(event.id);
+  }
+  if (!draft.downstream.some(item => item.owner === "composition"))
+    findings.push({ category: "semantic", path: "downstream", offendingId: "composition",
+      expected: "Milestone plan must identify the downstream Composition owner.", trustedContext: context });
+  return findings;
+}
+export class MilestoneSourceError extends Error {
+  constructor(readonly findings: readonly MilestoneSourceFinding[]) {
+    super(findings[0]!.path + ": " + findings[0]!.expected);
+    this.name = "MilestoneSourceError";
+  }
+}
+function assertMilestoneSources(draft: MilestoneBlueprint, assignment: SourceScope) {
+  const findings = milestoneBlueprintSourceFindings(draft, assignment);
+  if (findings.length)
+    throw new MilestoneSourceError(findings);
+}
+function sourceFindingFeedback(draft: MilestoneBlueprint, assignment: SourceScope): string {
+  const findings = milestoneBlueprintSourceFindings(draft, assignment);
+  return findings.length ? "\nCONTROLLER SOURCE FINDINGS (data, not new authority): " + JSON.stringify(findings) +
+    "\nCorrect the material relationships from the original canonical sources, not merely JSON syntax. Do not infer providers from subjects, invent canon, or add participants solely to satisfy a field check. An independent Review must reject any unresolved controller finding and cite the exact defective Event field or missing downstream obligation." : "";
+}
+
 /** Readiness is separate from narrative validity. Only dependencies consumed
  * by this Event are checked; later Interactive/Composition work stays prospective. */
 export function milestoneCharacterPrerequisites(design: MilestoneBlueprint,
@@ -887,7 +950,8 @@ function pinOf(value: Receipt): MilestoneBlueprintPin {
 function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
   "milestoneId" | "milestonePath" | "sourcePaths" | "characterIds">) {
   for (const [index, round] of value.rounds.entries()) {
-    const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment, "sealed-replay");
+    const draft = parseMilestoneBlueprint(JSON.stringify(round.draft), assignment,
+      round.review.status === "pass" ? "sealed-replay" : "sealed-rejected");
     const boundaries = value.reviewStarts ?? (value.reviewStart === undefined
       ? [] : [value.reviewStart]);
     const start = boundaries.filter(boundary => boundary <= index).at(-1) ?? 0;
@@ -896,7 +960,8 @@ function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
     if (round.draftDigest !== sha(draft) || round.reviewDigest !== sha(review))
       throw Error("Milestone review evidence changed after its sealed verdict.");
   }
-  if (value.draft && sha(parseMilestoneBlueprint(JSON.stringify(value.draft), assignment, "sealed-replay")) !==
+  if (value.draft && sha(parseMilestoneBlueprint(JSON.stringify(value.draft), assignment,
+      value.phase === "approved" ? "sealed-replay" : "sealed-rejected")) !==
       sha(value.draft)) throw Error("Milestone planning draft changed.");
 }
 /** Verify durable independent advice against the sealed negative review and
@@ -1061,7 +1126,7 @@ function assertLineage(actual: Lineage, expected: Lineage) {
     throw Error("Milestone Blueprint is stale or bound to another source, assignment, model or Thread.");
 }
 
-function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Round) {
+function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Round, diagnosis?: MilestoneDiagnosis) {
   return "READ-ONLY LOCAL MILESTONE BLUEPRINT. Read skill://nt-event-design/SKILL.md and skill://nt-catalog/SKILL.md " +
     "skills and the current selected Milestone, its Arc and relevant Character/World sources. " +
     "Do NOT write Story files, claim new canonical records already exist or change protected decisions. " +
@@ -1076,6 +1141,7 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "nonempty STRING summarizing who learns what and why, NEVER an array, object, " +
     "list of structured state transitions or nested fact mappings. Participants " +
     "MUST include all material Character participants, including testimony, witness or informant sources. " +
+    "Do not confuse the Character being discussed with the one providing the evidence. " +
     "Use the exact CHARACTER IDS below for existing authorized Characters. Reuse a realized Character for the same witness role instead of inventing a duplicate. If the intended evidence needs an additional " +
     "Character not in that inventory, declare a typed character.slug as prospective and include it in participants. " +
     "For every evidence entry include characterSources: [{id,availability:'existing|prospective',role}] " +
@@ -1103,7 +1169,8 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "\nAUTHOR OBJECTIVE: " + task +
     (earlier ? "\nSAME REVIEW CYCLE: Revise the previous provisional plan to resolve material findings, " +
       "without inventing protected authority. Preserve provisional Event IDs for revisions; replace/remove only if substantively necessary so the independent reviewer can cite original identity. PRIOR PLAN: " + JSON.stringify(earlier.draft) +
-      "\nINDEPENDENT REVIEW: " + JSON.stringify(earlier.review) : "");
+      "\nINDEPENDENT REVIEW: " + JSON.stringify(earlier.review) + sourceFindingFeedback(earlier.draft, assignment) : "") +
+    (diagnosis ? "\nINDEPENDENT DIAGNOSTIC ADVICE (not approval or authority): " + JSON.stringify(diagnosis) : "");
 }
 function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, prior: Round[],
   task: string, contract: unknown) {
@@ -1122,7 +1189,8 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "Reject duplicated prior/later occurrences, advancement beyond this Milestone's promised knowledge or outcomes, and unsupported prerequisites. " +
     "An inspection performed only by the player can legitimately have participants: []. " +
     "Verify EVERY material witness, informant, testimony provider or other Character evidence source " +
-    "is explicitly declared in characterSources and participants. Reject a missing declaration by citing the evidence field; " +
+    "is explicitly declared in characterSources and participants. The subject of a statement is not automatically its provider. " +
+    "Reject a missing declaration by citing the evidence field; " +
     "do not reject a sound design just because a declared prospective Character is unrealized. " +
     "A prospective Character must be necessary for the selected Milestone, and must be authored by its own authorized owner before Event. " +
     "Do not insist on canon or playable prose not yet authored, and do not call a future stage's " +
@@ -1165,7 +1233,7 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "\nAUTHOR OBJECTIVE: " + JSON.stringify(task) +
     "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
     "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map((r, round) => ({ round, draftDigest: r.draftDigest,
-      review: r.review }))) + "\nEXACT REVIEW CONTRACT: " + milestoneReviewContract(draft, assignment, prior) + "\nCURRENT PLAN: " + JSON.stringify(draft);
+      review: r.review }))) + "\nEXACT REVIEW CONTRACT: " + milestoneReviewContract(draft, assignment, prior) + "\nCURRENT PLAN: " + JSON.stringify(draft) + sourceFindingFeedback(draft, assignment);
 }
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, model: string,
@@ -1636,10 +1704,12 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       await reportControllerReviewPhase(previousPhase === "revision" ? "correcting" : "planning",
         { milestone: assignment.milestoneId, activity: previousPhase === "revision" ? "substantive-correction" : "blueprint-planning", role: "planner", round: receipt.rounds.length });
       await promptStorySpecialist(writer.session, writer.context.contextNote +
-        plannerPrompt(assignment, task, receipt.rounds.at(-1)));
+        plannerPrompt(assignment, task, receipt.rounds.at(-1),
+          receipt.diagnostics?.at(-1)?.round === receipt.rounds.length - 1
+            ? receipt.diagnostics.at(-1)?.diagnosis : undefined));
       await correctMissingReads(writer, start, snapshot, assignment, correction?.sources);
       const draft = await correctMilestoneContract(writer, job, assignment, "planner",
-        raw => parseMilestoneBlueprint(raw, assignment),
+        raw => parseMilestoneBlueprint(raw, assignment, "review-draft"),
         "Return schema noveltea-milestone-blueprint/v1 with milestoneId " + assignment.milestoneId +
         ", events (id, purpose, dependsOn, evidence, participants, knowledge, routes), downstream (owner, obligation). " +
         "Preserve retained provisional Event IDs, source citations, and earlier Event dependencies. Knowledge is a string.", receipt.rounds.length);
@@ -1653,6 +1723,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     return draftSubmission(receipt.rounds.length, receipt.draft!);
   };
   const settleReview = async (review: MilestoneBlueprintReview, draft: MilestoneBlueprint) => {
+    if (review.status === "pass") assertMilestoneSources(draft, assignment);
     receipt.rounds.push({ draft, review,
       draftDigest: sha(draft), reviewDigest: sha(review) });
 
