@@ -1065,7 +1065,7 @@ export async function archiveInteractiveWriterDependency(job: JobStartResult, mi
 }
 export async function rebindInteractiveAfterWriterDependency(job: JobStartResult,
     source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
-  if (source.stage !== "choice" && source.stage !== "puzzle") throw Error("Invalid Interactive prerequisite stage");
+  if ((source.stage !== "choice" && source.stage !== "puzzle") || !source.milestoneId) throw Error("Invalid Interactive prerequisite stage");
   const { verifiedWriterSupport } = await import("./writer-dependency.js");
   const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
   const archive = interactiveWriterArchive(job, source.milestoneId, source.stage, source.sealDigest);

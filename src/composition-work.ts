@@ -164,6 +164,7 @@ async function authenticateCompositionContinuation(job: JobStartResult, s: Recei
 }
 export async function rebindCompositionAfterWriterDependency(job: JobStartResult,
     source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
+  if (source.stage !== "composition" || !source.milestoneId) throw Error("Invalid composition prerequisite scope.");
   const { verifiedWriterSupport } = await import("./writer-dependency.js");
   const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
   const original = JSON.parse(await readFile(compositionNegativePath(job, source.milestoneId, source.sealDigest), "utf8")) as Receipt;

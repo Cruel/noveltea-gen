@@ -144,7 +144,14 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
   const originalPoints: Record<string, RecoveryInspection[]> = {};
   const originalOmissions: Record<string, EventOnlyPayload> = {};
   for (const item of inventory.items.filter(i => i.status === "verified")) {
-    const matches = workItems(item);
+    // The writer-support controller may cite the independently reviewed
+    // World checkpoint while Character is still suspended. Only that exact
+    // historical subunit is a completed source, not the composite assignment.
+    const partialWorld = item.stage === "foundations" && item.id === correction.upstreamItemId &&
+      item.verifiedSha === correction.predecessorCommitSha &&
+      checkpoints.some(p => p.workItem === "world-foundations" && p.commitSha === item.verifiedSha && p.semanticReview === "passed") &&
+      !checkpoints.some(p => p.workItem === "character-foundations" && ancestor(job, p.commitSha, correction.baseSha));
+    const matches = partialWorld ? ["world-foundations"] : workItems(item);
     let points = checkpoints.filter(point => matches.includes(point.workItem));
     // A repaired upstream Event is still the same inventory assignment.
     // Authenticate its exact passing successor; never promote the failed

@@ -1366,6 +1366,131 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
   }
 });
 
+test("C04 typed Character prerequisite supports reviewed World and resumes the original assignment", {
+  skip: !available, timeout: 240_000,
+}, async () => {
+  const f = setup("c04-character-world-support");
+  await useScriptedArchiveCli(f);
+  const paused = f.cli([...f.start, "--pause-after", "architecture"]);
+  assert.equal(paused.status, "paused", paused.reason);
+  const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  let saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    let graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+    const { archiveStages } = await import("./support/scripted-archive-stages.js");
+    const ordinary = archiveStages(f.job, turn);
+    const target = "fact.evidence-concealed", path = "facts/evidence-concealed.md";
+    const correction = "The signed ledger entry is already visible to Ada when she enters the archive.";
+    const receipt = () => JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
+    const skills = (name: string) => boundedPinnedSources(name).map(p => "skill://" + p);
+    let negative = false, planned = false, written = false, supported = false;
+    const runtime = await scriptedStoryRuntime((index, context) => {
+      const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
+      const prompt = messages.filter(m => m.role === "user").flatMap(m =>
+        typeof m.content === "string" ? [m.content] : m.content.map(c => c.text ?? "")).at(-1) ?? "";
+      const stop = (v: unknown) => ({ content: scriptedText(v), reason: "stop" as const });
+      const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
+      if (prompt.includes("assigned ONE bounded canonical Story work item") && prompt.includes('"domain": "character"') && !supported) {
+        if (!negative) { negative = true; return read([...new Set([...skills("nt-character-development"), "skill://nt-catalog/references/glossary.md", path])]); }
+        return stop({ modifiedRecords: [], architecturalConflicts: [correction], laterObligations: [],
+          dependencyFinding: { targetId: target, obligationIndex: 1, missing: correction, affectedIds: [target],
+            sources: [{ path, quote: readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").split("\n").find(l => l.startsWith("id:"))! }],
+            likelySpecialist: "nt-worldbuilding", authorDecisionRequired: false } });
+      }
+      if (prompt.includes("dependency") && prompt.includes("nt-story-orchestrate") && !supported && !written) {
+        if (!planned) { planned = true; return read(["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+          "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"].map(p => "skill://" + p).concat(path)); }
+        return stop({ target, specialist: "nt-worldbuilding", outcome: correction, reason: "Correct the existing World prerequisite for honest initial knowledge." });
+      }
+      if (planned && !supported && prompt.includes("nt-worldbuilding") && !prompt.includes("IMMUTABLE REVIEW PACKET")) {
+        if (!written) { written = true; return read(skills("nt-worldbuilding")); }
+        const before = readFileSync(join(f.job.worktreeStoryRoot, path), "utf8");
+        if (!before.includes(correction)) return { content: [{ type: "toolCall", name: "edit", id: "world-support-edit",
+          arguments: { path, edits: [{ oldText: before, newText: before + "\n" + correction + "\n" }] } }], reason: "toolUse" };
+        return stop({ modifiedRecords: [path], architecturalConflicts: [], laterObligations: [] });
+      }
+      if (written && !supported && prompt.includes("IMMUTABLE REVIEW PACKET")) {
+        const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        if (!messages.some(m => m.role === "toolResult" && JSON.stringify(m.content).includes("nt-narrative-review"))) return read(skills("nt-narrative-review"));
+        const item = packet.items[0];
+        supported = true;
+        return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+          evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
+            explanation: "Verified the bounded World prerequisite." }] });
+      }
+      return ordinary(index, context);
+    });
+    const item = paused.inventory.items.find((i: { id: string }) => i.id === "foundations");
+    assert.ok(item);
+    const initialCalls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+    await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null }, "author_update_intake");
+    const suspended = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
+    assert.ok(suspended.focusedPrerequisite?.writerSource, JSON.stringify({ reason: suspended.reason, recovery: suspended.recoverySources }));
+    const original = receipt();
+    assert.equal(original.units[1].phase, "conflicted");
+    assert.equal(suspended.focusedPrerequisite!.writerSource!.producer.workItem, "world-foundations");
+    assert.equal(suspended.focusedPrerequisite!.writerSource!.stage, "character");
+    const verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+    assert.ok(verified.focusedPrerequisite?.supportRef, JSON.stringify({ reason: verified.reason, recovery: verified.recoverySources }));
+    const ledger = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!;
+    const support = ledger.entries.find(e => e.writerSource)!;
+    assert.equal(support.phase, "verified");
+    assert.equal(support.review?.verdict, "pass");
+    assert.equal(git(f.job.worktreeRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", support.commitSha!), "story/" + path);
+    const revalidated = JSON.parse(readFileSync(join(f.job.stateDir, "revalidation-items", support.commitSha + ".json"), "utf8"));
+    assert.equal(revalidated.state, "completed");
+    assert.equal(revalidated.proposal.upstreamItemId, "foundations");
+    assert.ok(revalidated.proposal.unaffected.includes("foundation"));
+    assert.ok(!revalidated.results.some((r: { itemId: string }) => revalidated.proposal.unaffected.includes(r.itemId)));
+    const source = suspended.focusedPrerequisite!.writerSource!;
+    const archive = join(f.job.stateDir, "character-writer-prerequisites", source.sealDigest + ".json");
+    const bytes = readFileSync(archive, "utf8");
+    const { inspectWriterDependency } = await import("../src/writer-dependency.js");
+    const forged = JSON.parse(bytes);
+    forged.units[1].dependencyFinding.missing = "Invent another unsupported correction";
+    const calls = (await inspectPiPolicy(f.job)).budget.modelCalls;
+    try {
+      writeFileSync(archive, JSON.stringify(forged));
+      await assert.rejects(inspectWriterDependency(f.job, source), /original accepted Pi response|digest changed/);
+    } finally { writeFileSync(archive, bytes); }
+    await inspectWriterDependency(f.job, source);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, calls);
+    // Reopen the actual SQLite checkpoint after support and before the
+    // original writer re-enters; no graph instance or in-memory approval survives.
+    saver.db.close();
+    saver = SqliteSaver.fromConnString(paused.checkpointPath);
+    graph = createGenerationGraph(saver, "cli");
+    const next = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+    // Resume the suspended child and stop before the next ordinary assignment.
+    const finished = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["verify_committed_work"] }));
+    const current = receipt();
+    assert.equal(current.units[0].commitSha, original.units[0].commitSha);
+    assert.equal(current.units[1].phase, "committed", JSON.stringify({ reason: finished.reason, recovery: finished.recoverySources, next: next.reason }));
+    assert.equal(current.units[1].assignmentKey, original.units[1].assignmentKey);
+    assert.deepEqual(current.units[1].assignment, original.units[1].assignment);
+    assert.equal(current.units[1].piSessionFile, original.units[1].piSessionFile);
+    assert.equal(current.units[1].piSessionId, original.units[1].piSessionId);
+    assert.equal(finished.inventory?.items.find(i => i.id === "foundations")?.status, "verified");
+    const scheduled = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+    assert.ok(scheduled.active && scheduled.active.id !== item.id, JSON.stringify({ reason: scheduled.reason, active: scheduled.active, recovery: scheduled.recoverySources }));
+    assert.equal(scheduled.focusedPrerequisite, null);
+    assert.equal(scheduled.recoveryLifecycle.active, null);
+    await inspectWriterDependency(f.job, source);
+    assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, initialCalls + runtime.observed.length);
+    assert.equal((await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries.filter(e => e.writerSource).length, 1);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  } finally {
+    saver.db.close(); restoreSandbox();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 /** R14C negative controls use a real admitted Case and its sealed Review.
  * A different owner or plan cannot borrow that Case or the native source. */
 async function assertSubunitReviewAuthority(job: Awaited<ReturnType<typeof startStoryJob>>,

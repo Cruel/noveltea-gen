@@ -894,6 +894,7 @@ export async function archiveEventWriterDependency(job: JobStartResult, mileston
  * onto different canonical bytes. The original writer/session is retained. */
 export async function rebindEventAfterWriterDependency(job: JobStartResult,
   source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
+  if (source.stage !== "event" || !source.milestoneId) throw Error("Invalid event prerequisite scope.");
   const { inspectDependencyPlan, dependencyDigest } = await import("./dependency-state.js");
   const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   if (!entry?.writerSource || dependencyDigest(entry.writerSource) !== dependencyDigest(source) ||

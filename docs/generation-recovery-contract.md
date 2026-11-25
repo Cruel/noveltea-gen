@@ -997,6 +997,20 @@ assignment or support receipt is a classified exception.
 
 ### #275 deterministic acceptance boundary
 
+Character can report a typed, clean precommit prerequisite on an existing
+World Fact or World Entity in its original source paths. The independently
+passing World subunit (not the still-pending composite Foundations item)
+provides the historical producer checkpoint. The existing DependencyPlan
+admission and focused writer grant exactly that unprotected path; neither
+Architecture edits nor a replacement Character assignment are authorized.
+Impact inspection projects only the proven World subunit as complete; the
+parent does not complete Foundations until Character has independently passed.
+The original negative manifest and transcript prefix remain sealed, and the
+support-bound child namespace re-enters the same logical Character assignment
+and Pi session at the verified successor. A free-text contradiction remains
+non-authorizing. This does not create a generic authority for arbitrary
+World or Architecture revisions.
+
 The [consolidated qualification](recovery-exit-inventory.md#275-consolidated-deterministic-qualification)
 links the #273/#274 integration to executed production-seam evidence and
 records what remains unverified. Strategy selection, a returned END,

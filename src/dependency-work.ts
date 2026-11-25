@@ -491,11 +491,13 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
     if (!entry || entry.phase !== "authorized" || !plan?.entries.some(e => e.parent?.reportDigest === reportDigest))
       await supportingBoundary(job, entry);
     if (!entry) {
-      if (source.stage === "event")
-        await (await import("./event-work.js")).archiveEventWriterDependency(job, source.milestoneId, source.sealDigest);
+      if (source.stage === "character")
+        await (await import("./character-world.js")).archiveCharacterWriterDependency(job, source.sealDigest);
+      else if (source.stage === "event")
+        await (await import("./event-work.js")).archiveEventWriterDependency(job, source.milestoneId!, source.sealDigest);
       else if (source.stage === "composition")
-        await (await import("./composition-work.js")).archiveCompositionWriterDependency(job, source.milestoneId, source.sealDigest);
-      else await (await import("./interactive-work.js")).archiveInteractiveWriterDependency(job, source.milestoneId, source.stage, source.sealDigest);
+        await (await import("./composition-work.js")).archiveCompositionWriterDependency(job, source.milestoneId!, source.sealDigest);
+      else await (await import("./interactive-work.js")).archiveInteractiveWriterDependency(job, source.milestoneId!, source.stage, source.sealDigest);
       ({ plan, entry } = await recordDependency(job, report, false, undefined, source));
     }
     if (!plan || !entry) throw Error("Missing original writer dependency ledger entry.");
@@ -510,7 +512,13 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
   const support = entry;
   await withStoryJobLock(job, "writer-dependency-revalidation", async () => {
     const { executionId } = await import("./checkpoint-assurance.js");
-    const producer = input.inventory.items.find(i => i.id === executionId(source.producer.workItem) &&
+    // A verified World subunit is an upstream producer even while its
+    // composite parent remains pending. Project only its historical proof
+    // for impact analysis; never mark the actual Generation item complete.
+    const inventory = source.stage === "character" ? { ...input.inventory, items: input.inventory.items.map(item =>
+      item.id === "foundations" && item.status === "pending"
+        ? { ...item, status: "verified" as const, verifiedSha: source.producer.commitSha } : item) } : input.inventory;
+    const producer = inventory.items.find(i => i.id === executionId(source.producer.workItem) &&
       i.status === "verified" && i.verifiedSha);
     if (!producer?.verifiedSha) throw Error("Writer prerequisite producer is not a completed original inventory item.");
     dependencyGit(job, "merge-base", "--is-ancestor", source.producer.commitSha, producer.verifiedSha);
@@ -526,7 +534,7 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
         first !== job.baseSha && dependencyGit(job, "merge-base", first, job.baseSha) !== first) {
       const { inspectHistoricalRecoveryCheckpoint } = await import("./recovery-checkpoints.js");
       const original = await inspectHistoricalRecoveryCheckpoint(job, first);
-      const item = input.inventory.items.find(i => i.id === executionId(original.workItem) &&
+      const item = inventory.items.find(i => i.id === executionId(original.workItem) &&
         i.status === "verified" && i.verifiedSha);
       if (!item?.verifiedSha || original.assurance?.turnDigest !== report.turnDigest ||
           !original.assurance.changedPaths.includes(source.targetPath) ||
@@ -537,7 +545,7 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
     }
     const { revalidateAfterReviewedCorrection } = await import("./selective-revalidation-work.js");
     await revalidateAfterReviewedCorrection({ job, otherOwnerPath: source.targetPath,
-      inventory: { ...input.inventory, headSha: report.sourceSha },
+      inventory: { ...inventory, headSha: report.sourceSha },
       correction: { version: 1, planVersion: source.planVersion, baseSha: report.sourceSha,
         successorSha: support.commitSha!, upstreamItemId: upstream.id, predecessorCommitSha: upstream.verifiedSha!,
         turnDigest: report.turnDigest, reviewDigest: dependencyDigest(support.review),
@@ -545,7 +553,9 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
       contract: input.contract, task: input.task,
       provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
       skillsSource: input.skillsSource, validatorSource: input.validatorSource });
-    if (source.stage === "event")
+    if (source.stage === "character")
+      await (await import("./character-world.js")).rebindCharacterAfterWriterDependency(job, source, reportDigest, dependencyDigest(support));
+    else if (source.stage === "event")
       await (await import("./event-work.js")).rebindEventAfterWriterDependency(job, source, reportDigest, dependencyDigest(support));
     else if (source.stage === "composition")
       await (await import("./composition-work.js")).rebindCompositionAfterWriterDependency(job, source, reportDigest, dependencyDigest(support));

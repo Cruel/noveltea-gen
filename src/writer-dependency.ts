@@ -11,8 +11,8 @@ import { checkpointRecordType } from "./checkpoint-assurance.js";
 import { focusedSpecialist } from "./focused-specialist.js";
 
 export interface WriterDependencySource {
-  stage: "event" | "choice" | "puzzle" | "composition";
-  milestoneId: string;
+  stage: "event" | "choice" | "puzzle" | "composition" | "character";
+  milestoneId?: string;
   workItemId: string;
   planVersion: number;
   sealDigest: string;
@@ -25,7 +25,7 @@ export interface WriterDependencySource {
 
 export interface OriginalWriterDependency {
   stage: WriterDependencySource["stage"];
-  milestoneId: string;
+  milestoneId?: string;
   workItemId: string;
   planVersion: number;
   sealDigest: string;
@@ -53,11 +53,13 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
   points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>) {
   const turn = await dependencyTurn(job);
   const f = parseWriterDependencyFinding(original.finding);
-  const origin = original.stage === "choice" || original.stage === "puzzle" ? "interactive" : original.stage;
+  const origin = original.stage === "character" ? "foundations" : original.stage === "choice" || original.stage === "puzzle" ? "interactive" : original.stage;
   const owner = turn.assignments.find(a => a.id === origin);
   const obligation = turn.objective?.obligations[f.obligationIndex];
   if (!owner || !obligation || dependencyDigest(original.obligations) !== dependencyDigest(turn.objective!.obligations) ||
-      !f.affectedIds.includes(original.milestoneId) ||
+      (original.stage === "character" ? original.milestoneId !== undefined || original.workItemId !== "character-foundations" ||
+        !["fact", "world-entity"].includes(f.targetId.split(".")[0]!) :
+        !original.milestoneId || !f.affectedIds.includes(original.milestoneId)) ||
       f.sources.some(s => !original.sourcePaths.includes(s.path)) ||
       f.likelySpecialist !== focusedSpecialist(f.targetId))
     throw Error("Writer prerequisite lacks exact original Turn, assignment, scope or owner.");
@@ -78,6 +80,7 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
   if (!point || !(point.assurance?.turnDigest === turn.digest &&
     point.assurance.changedPaths.includes(targetPath) &&
     ["passed", "not-required"].includes(point.semanticReview) &&
+    (original.stage !== "character" || point.workItem === "world-foundations" && point.semanticReview === "passed") &&
     point.workItem !== original.workItemId && !point.workItem.startsWith("repair-") && !point.workItem.startsWith("dependency:")))
     throw Error("Writer prerequisite is not an independently verified earlier owner.");
   const priorOwner = point?.assurance && turn.assignments.find(a => a.id === point.assurance!.assignmentId);
@@ -91,7 +94,7 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
     throw Error("Writer prerequisite has no independently verified earlier owner checkpoint.");
   const producer: OtherOwnerCheckpoint = { assignmentId: priorOwner.id, workItem: point.workItem,
     commitSha: last, assuranceDigest: dependencyDigest(point.assurance) };
-  const source: WriterDependencySource = { stage: original.stage, milestoneId: original.milestoneId,
+  const source: WriterDependencySource = { stage: original.stage, ...(original.milestoneId ? { milestoneId: original.milestoneId } : {}),
     workItemId: original.workItemId, planVersion: original.planVersion, sealDigest: original.sealDigest,
     ...(original.origin ? { origin: original.origin } : {}),
     targetId: f.targetId, targetPath, producer,
@@ -104,11 +107,13 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
 
 export async function inspectWriterDependency(job: JobStartResult, source: WriterDependencySource,
   points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>) {
-  const original = source.stage === "event"
-    ? await (await import("./event-work.js")).inspectEventWriterDependency(job, source.milestoneId, source.sealDigest)
+  const original = source.stage === "character"
+    ? await (await import("./character-world.js")).inspectCharacterWriterDependency(job, source.sealDigest)
+    : source.stage === "event"
+    ? await (await import("./event-work.js")).inspectEventWriterDependency(job, source.milestoneId!, source.sealDigest)
     : source.stage === "composition"
-      ? await (await import("./composition-work.js")).inspectCompositionWriterDependency(job, source.milestoneId, source.sealDigest)
-      : await (await import("./interactive-work.js")).inspectInteractiveWriterDependency(job, source.milestoneId, source.stage, source.sealDigest);
+      ? await (await import("./composition-work.js")).inspectCompositionWriterDependency(job, source.milestoneId!, source.sealDigest)
+      : await (await import("./interactive-work.js")).inspectInteractiveWriterDependency(job, source.milestoneId!, source.stage, source.sealDigest);
   const rebuilt = await reconstructWriterDependency(job, original, points);
   if (dependencyDigest(rebuilt.source) !== dependencyDigest(source))
     throw Error("Writer prerequisite differs from its authenticated original owner/source.");
@@ -167,7 +172,7 @@ export async function verifiedWriterSupport(job: JobStartResult, source: WriterD
   return entry;
 }
 export async function authenticateWriterContinuation(job: JobStartResult, pin: WriterContinuation,
-    stage: WriterDependencySource["stage"], milestone: string, assignmentKey?: string) {
+    stage: WriterDependencySource["stage"], milestone: string | undefined, assignmentKey?: string) {
   const { inspectDependencyPlan } = await import("./dependency-state.js");
   const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === pin.reportDigest);
   if (!entry?.writerSource || entry.writerSource.stage !== stage || entry.writerSource.milestoneId !== milestone ||

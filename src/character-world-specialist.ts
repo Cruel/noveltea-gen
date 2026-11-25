@@ -15,6 +15,7 @@ import { openStoryProject } from "./project.js";
 import { createStoryValidateTool } from "./validator.js";
 import { preparePiContext, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { executeAssignmentRound, AssignmentAuthorPauseError, type AssignmentRoundCommand, type AssignmentRoundResult, type AssignmentDefect, type AssignmentInvocationProof } from "./assignment-metadata-recovery.js";
+import { parseWriterDependencyFinding } from "./dependency-amendments.js";
 import { lastSpecialistManifest } from "./specialist-manifest.js";
 import { readJobControl } from "./job-control.js";
 import { StoryCancelledError } from "./story-interruption.js";
@@ -31,6 +32,7 @@ export interface FoundationAssignment {
   sourcePaths: string[];
   scope: CompletionContract;
   authorTask?: string;
+  dependencyObligations?: string[];
   creativePolicy?: CreativePolicy;
   decisionAuthority: {
     existingAuthorChoices: "protected-no-retcon";
@@ -50,6 +52,7 @@ export interface SpecialistEvidence {
   piSessionId?: string;
   skillReads: string[];
   architecturalConflicts?: string[];
+  dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
   laterObligations?: string[];
   invocationProof?: AssignmentInvocationProof;
 }
@@ -145,6 +148,7 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
     authorize: () => Promise<void>;
     effect: () => Promise<string>;
     savedSession?: { id: string; file: string };
+    continuation?: import("./writer-dependency.js").WriterContinuation;
   },
   resume: SpecialistChoiceReceipt | undefined, round: AssignmentRoundCommand): Promise<SpecialistEvidence | SpecialistChoiceProposal | { round: AssignmentRoundResult }> {
   const selected = DOMAINS[assignment.domain];
@@ -216,6 +220,11 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       '`{"modifiedRecords":["characters/example.md"],"architecturalConflicts":[],"laterObligations":["Bind the disclosure to an Event"]}` (replace example with reality). ' +
       "Report any blocked architectural conflict in architecturalConflicts and all deferred Event/branch dependencies in laterObligations. " +
       "A truthful, exactly clean no-write with a named original-plan/owner contradiction is valid negative evidence for controller Repair; do not invent files just to return a nonempty modifiedRecords list. " +
+      (assignment.domain === "character" && assignment.dependencyObligations ?
+        "If a necessary existing World Fact or World Entity in your sourcePaths blocks your authorized work, return a clean no-write manifest with architecturalConflicts and dependencyFinding: " +
+        JSON.stringify({ obligationIndex: 1, targetId: "fact.example", missing: "exact required correction", affectedIds: ["fact.example"],
+          sources: [{ path: "facts/example.md", quote: "exact source quote" }], likelySpecialist: "nt-worldbuilding", authorDecisionRequired: false }) +
+        ". Select the original obligation by index from dependencyObligations. Never grant yourself a World or Architecture edit. " : "") +
       "List ALL paths changed since the beginning of this work item, not just the latest edits. " +
       "Call story_validate with no arguments, inspect diagnostics and coverage, repair and revalidate before reporting. " +
       "The graph will check this claim against the actual Git diff; your self-report is not acceptance evidence.";
@@ -233,15 +242,18 @@ export async function authorCharacterWorld(job: JobStartResult, snapshot: SkillS
       claimedPaths: manifest.modifiedRecords as string[], skillReads,
       architecturalConflicts: manifest.architecturalConflicts as string[],
       laterObligations: manifest.laterObligations as string[],
+      ...(manifest.dependencyFinding !== undefined ? { dependencyFinding: parseWriterDependencyFinding(manifest.dependencyFinding) } : {}),
       piSessionId: session.sessionId, piSessionFile: sessionFile,
     });
     const result = await executeAssignmentRound({
       session, directory: invocation.directory(session.sessionId),
       sourceDigest: invocation.sourceDigest, sessionRoots: [dir],
       responseKind: "manifest-or-choice",
-      initialTranscriptSha256: resume?.sessionSha256,
+      initialTranscriptSha256: resume?.sessionSha256 ?? invocation.continuation?.sessionSha256,
       authorize: invocation.authorize, effect: invocation.effect,
       initialPrompt: context.contextNote +
+        (invocation.continuation ? "\nAUTHENTICATED VERIFIED PREREQUISITE " + invocation.continuation.reportDigest +
+          ": The controller independently verified the World correction. Re-read the current source and continue YOUR original Character assignment in this same session; do not repeat the previous no-write report.\n" : "") +
         (direction ? direction + "\nContinue this same Pi session and carry out this choice without modifying protected decisions.\n" : "") + prompt,
       beforeTurn: async () => {
         const control = await readJobControl(job);

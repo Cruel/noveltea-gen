@@ -25,7 +25,8 @@ import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./sn
 import { validateStoryJob, type ValidationResult } from "./validator.js";
 import type { CompletionContract, Plan } from "./architecture.js";
 import { nativeMetadataDefects, inspectAssignmentFailure, verifySettledAssignment, type AssignmentInvocationProof, type AssignmentRoundCommand, type AssignmentRoundResult } from "./assignment-metadata-recovery.js";
-import { lastSpecialistManifest } from "./specialist-manifest.js";
+import { parseWriterDependencyFinding, type WriterDependencyFinding } from "./dependency-amendments.js";
+import type { OriginalWriterDependency, WriterContinuation, WriterDependencySource } from "./writer-dependency.js";
 import { authorCharacterWorld,
   type FoundationAssignment, type FoundationDomain, type SpecialistEvidence,
   type SpecialistChoiceProposal } from "./character-world-specialist.js";
@@ -50,6 +51,8 @@ interface Unit {
   laterObligations?: string[];
   architecturalConflicts?: string[];
   conflictDigest?: string;
+  dependencyFinding?: WriterDependencyFinding;
+  writerContinuation?: WriterContinuation;
   piSessionSha256?: string;
   invocationProof?: AssignmentInvocationProof;
   assignmentKey?: string;
@@ -292,17 +295,18 @@ function verifyCommit(job: JobStartResult, unit: Unit, before: string, commit: s
 }
 function invocationDirectory(job: JobStartResult, unit: Unit, sessionId: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(sessionId) ||
-      unit.invocationChoiceId && !/^[a-zA-Z0-9-]+$/.test(unit.invocationChoiceId))
+      unit.invocationChoiceId && !/^[a-zA-Z0-9-]+$/.test(unit.invocationChoiceId) ||
+      unit.writerContinuation && !/^[a-f0-9]{64}$/.test(unit.writerContinuation.reportDigest))
     throw Error("Unsafe foundation invocation identity.");
   return join(job.stateDir, "character-world-invocations", unit.domain, sessionId,
-    unit.invocationChoiceId ?? "initial");
+    unit.invocationChoiceId ?? unit.writerContinuation?.reportDigest ?? "initial");
 }
 function invocationSource(job: JobStartResult, receipt: Receipt, unit: Unit, turn: string | null) {
   return digest(JSON.stringify({ job: job.jobId, thread: job.threadId, branch: job.branch,
     base: job.baseSha, source: unit.beforeHead, workItem: unit.id, planVersion: receipt.planVersion,
     contract: receipt.contractDigest, snapshot: receipt.snapshot?.id, provider: receipt.provider,
     model: receipt.model, assignment: unit.assignment, validator: job.validatorVersion,
-    turn, assignmentKey: unit.assignmentKey, authorChoiceId: unit.invocationChoiceId ?? null }));
+    turn, assignmentKey: unit.assignmentKey, authorChoiceId: unit.invocationChoiceId ?? null, writerContinuation: unit.writerContinuation }));
 }
 async function ownedEffect(job: JobStartResult, unit: Unit, assign: FoundationAssignment) {
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
@@ -317,7 +321,7 @@ async function verifyUnitInvocation(job: JobStartResult, receipt: Receipt, unit:
       unit.invocationProof.sourceDigest !== unit.invocationSource)
     throw Error("Original foundation writer lacks its current-format invocation receipt.");
   await verifyJobPiSession(job, unit.domain, unit.piSessionFile, unit.piSessionId);
-  await verifySettledAssignment({ proof: unit.invocationProof,
+  return verifySettledAssignment({ proof: unit.invocationProof,
     directory: invocationDirectory(job, unit, unit.piSessionId),
     sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
     sessionRoots: [join(job.stateDir, "character-world-sessions", unit.domain)],
@@ -426,6 +430,7 @@ function foundationConflictDigest(receipt: Receipt, unit: Unit) {
     unitId: unit.id, domain: unit.domain, beforeHead: unit.beforeHead,
     assignment: unit.assignment, paths: unit.claimedPaths, skillReads: unit.skillReads,
     conflicts: unit.architecturalConflicts, obligations: unit.laterObligations,
+    dependencyFinding: unit.dependencyFinding,
     sessionFile: unit.piSessionFile ?? null, sessionId: unit.piSessionId ?? null,
     sessionSha256: unit.piSessionSha256 ?? null,
   }));
@@ -433,14 +438,17 @@ function foundationConflictDigest(receipt: Receipt, unit: Unit) {
 /** Re-read the original settled Pi manifest and clean Story HEAD before the
  * parent Recovery assessor can route a no-write World/Character contradiction.
  * The next Foundation worker is never started or presumed complete. */
-export async function inspectFoundationConflict(job: JobStartResult, domain: FoundationDomain) {
-  const relative = "character-world.json";
-  const receipt = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as Receipt;
+export async function inspectFoundationConflict(job: JobStartResult, domain: FoundationDomain,
+    archived?: string) {
+  const relative = archived ?? "character-world.json";
+  const file = join(job.stateDir, relative);
+  if (await realpath(file) !== file || !(await lstat(file)).isFile()) throw Error("Unsafe Foundation conflict source.");
+  const receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
   const index = domain === "world" ? 0 : 1;
   const unit = receipt.units?.[index];
   const other = receipt.units?.[1 - index];
   const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as ArchitectureReceipt;
-  const head = await trustedHead(job);
+  const head = archived ? unit?.beforeHead : await trustedHead(job);
   if (receipt.jobId !== job.jobId || receipt.threadId !== job.threadId ||
       receipt.baseSha !== job.baseSha || receipt.branch !== job.branch ||
       receipt.worktreeRoot !== job.worktreeRoot || !receipt.snapshot?.id ||
@@ -457,42 +465,107 @@ export async function inspectFoundationConflict(job: JobStartResult, domain: Fou
       !Array.isArray(unit.laterObligations) ||
       (index === 0 && (other?.phase !== "pending" || other.beforeHead || other.commitSha)) ||
       (index === 1 && (other?.phase !== "committed" || !other.commitSha)) ||
-      dirty(job).length)
+      (!archived && dirty(job).length))
     throw Error("Settled Foundation no-write conflict has stale or untrusted source evidence.");
   if (index === 1) {
     // A Character contradiction depends on the original committed World,
     // not merely a mutable claim that World previously completed.
     verifyCommit(job, other!, receipt.startHead ?? receipt.architectureHead, other!.commitSha!);
-    await verifiedWorldReviewHandoff(job, other!.commitSha!, unit.beforeHead!);
+    if (!archived || !unit.writerContinuation)
+      await verifiedCharacterSource(job, other!.commitSha!, unit, unit.beforeHead!);
+    else git(job, "merge-base", "--is-ancestor", other!.commitSha!, unit.beforeHead!);
   }
   if (receipt.worker === "pi") {
     await verifyJobPiSession(job, domain, unit.piSessionFile, unit.piSessionId);
     const path = unit.piSessionFile!;
     if ((await lstat(path)).size > 64 * 1024 * 1024 ||
-        !unit.piSessionSha256 || digest(await readFile(path)) !== unit.piSessionSha256)
+        !unit.piSessionSha256 || (!archived && digest(await readFile(path)) !== unit.piSessionSha256))
       throw Error("Foundation no-write original Pi transcript changed.");
-    const entries = (await readFile(path, "utf8")).trim().split("\n").map(line =>
-      JSON.parse(line) as { type?: string; message?: { role?: string; stopReason?: string;
-        content?: Array<{ type?: string; text?: string }> } });
-    const final = entries.filter(entry => entry.type === "message" && entry.message?.role === "assistant")
-      .at(-1)?.message;
-    if (!final || final.stopReason !== "stop") throw Error("Foundation no-write Pi report never settled.");
-    const text = (final.content ?? []).filter(c => c.type === "text").map(c => c.text ?? "").join("\n");
-    await verifyUnitInvocation(job, receipt, unit, await fileDigest(job, []));
-    const parsed = lastSpecialistManifest(text);
+    const parsed = await verifyUnitInvocation(job, receipt, unit, await fileDigest(job, []), !!archived);
     if (!parsed || JSON.stringify(parsed.modifiedRecords) !== "[]" ||
         JSON.stringify(parsed.architecturalConflicts) !== JSON.stringify(unit.architecturalConflicts) ||
-        JSON.stringify(parsed.laterObligations) !== JSON.stringify(unit.laterObligations))
+        JSON.stringify(parsed.laterObligations) !== JSON.stringify(unit.laterObligations) ||
+        JSON.stringify(parsed.dependencyFinding) !== JSON.stringify(unit.dependencyFinding))
       throw Error("Foundation no-write receipt differs from the original accepted Pi response.");
   } else if (receipt.worker !== "fixture" || unit.piSessionFile || unit.piSessionSha256) {
     throw Error("Foundation no-write worker identity is not authenticated.");
   }
   const reportDigest = foundationConflictDigest(receipt, unit);
   if (reportDigest !== unit.conflictDigest) throw Error("Foundation negative report digest changed.");
-  return { relative, expectedHead: head, reportDigest, domain,
+  return { relative, expectedHead: head!, reportDigest, domain,
     planVersion: receipt.planVersion, worker: receipt.worker,
     conflicts: unit.architecturalConflicts, obligations: unit.laterObligations,
+    dependencyFinding: unit.dependencyFinding,
     piSessionFile: unit.piSessionFile ?? null };
+}
+function characterNegativePath(seal: string) {
+  if (!/^[a-f0-9]{64}$/.test(seal)) throw Error("Invalid original Character prerequisite seal.");
+  return "character-writer-prerequisites/" + seal + ".json";
+}
+export async function inspectCharacterWriterDependency(job: JobStartResult, seal: string): Promise<OriginalWriterDependency> {
+  const relative = characterNegativePath(seal);
+  const archived = existsSync(join(job.stateDir, relative));
+  const report = await inspectFoundationConflict(job, "character", archived ? relative : undefined);
+  const receipt = JSON.parse(await readFile(join(job.stateDir, report.relative), "utf8")) as Receipt;
+  const unit = receipt.units[1];
+  if (report.reportDigest !== seal || report.worker !== "pi" || !unit.dependencyFinding ||
+      !unit.assignmentKey || !unit.assignment?.dependencyObligations)
+    throw Error("Character prerequisite lacks its exact typed finding and original assignment.");
+  git(job, "merge-base", "--is-ancestor", report.expectedHead, "HEAD");
+  return { stage: "character", workItemId: unit.id, planVersion: receipt.planVersion, sealDigest: seal,
+    assignmentKey: unit.assignmentKey, head: report.expectedHead, sourcePaths: unit.assignment.sourcePaths,
+    obligations: unit.assignment.dependencyObligations, finding: parseWriterDependencyFinding(unit.dependencyFinding),
+    predecessor: (await import("./writer-dependency.js")).writerPredecessor(unit.writerContinuation) };
+}
+export async function archiveCharacterWriterDependency(job: JobStartResult, seal: string) {
+  const original = await inspectCharacterWriterDependency(job, seal);
+  const path = join(job.stateDir, characterNegativePath(seal));
+  if (!existsSync(path)) {
+    if (await trustedHead(job) !== original.head || dirty(job).length)
+      throw Error("Character prerequisite must be archived before supporting writes.");
+    await mkdir(dirname(path), { recursive: true });
+    await persist(path, JSON.parse(await readFile(join(job.stateDir, "character-world.json"), "utf8")));
+  }
+  return original;
+}
+export async function rebindCharacterAfterWriterDependency(job: JobStartResult, source: WriterDependencySource,
+    reportDigest: string, supportRef: string) {
+  if (source.stage !== "character" || source.workItemId !== "character-foundations" || source.milestoneId !== undefined)
+    throw Error("Invalid Character prerequisite scope.");
+  const { verifiedWriterSupport } = await import("./writer-dependency.js");
+  const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
+  const original = JSON.parse(await readFile(join(job.stateDir, characterNegativePath(source.sealDigest)), "utf8")) as Receipt;
+  const file = join(job.stateDir, "character-world.json");
+  const current = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  const unit = current.units[1];
+  const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.units[1].piSessionSha256! };
+  if (unit.writerContinuation?.reportDigest === reportDigest) {
+    if (!isDeepStrictEqual(unit.writerContinuation, binding) ||
+        unit.assignmentKey !== original.units[1].assignmentKey ||
+        !isDeepStrictEqual(unit.assignment, original.units[1].assignment) ||
+        unit.piSessionId !== original.units[1].piSessionId || unit.piSessionFile !== original.units[1].piSessionFile)
+      throw Error("Character continuation changed its original writer.");
+    return;
+  }
+  if (dirty(job).length || !isDeepStrictEqual(original, current))
+    throw Error("Character prerequisite changed before reentry.");
+  const { invocationSource, invocationProof, conflictDigest, architecturalConflicts, laterObligations,
+    paths, claimedPaths, piSessionSha256, dependencyFinding, ...rest } = unit;
+  current.units[1] = { ...rest, phase: "pending", beforeHead: await trustedHead(job), writerContinuation: binding };
+  await persist(file, current);
+}
+async function verifiedCharacterSource(job: JobStartResult, worldSha: string, unit: Unit, requested: string) {
+  if (!unit.writerContinuation) return verifiedWorldReviewHandoff(job, worldSha, requested);
+  const { authenticateWriterContinuation, verifiedWriterSupport } = await import("./writer-dependency.js");
+  const pin = unit.writerContinuation;
+  const source = await authenticateWriterContinuation(job, pin, "character", undefined, unit.assignmentKey);
+  const archived = JSON.parse(await readFile(join(job.stateDir, characterNegativePath(source.sealDigest)), "utf8")) as Receipt;
+  if (archived.units[0].commitSha !== worldSha || !isDeepStrictEqual(archived.units[1].assignment, unit.assignment) ||
+      archived.units[1].piSessionId !== unit.piSessionId ||
+      archived.units[1].piSessionFile !== unit.piSessionFile || archived.units[1].piSessionSha256 !== pin.sessionSha256)
+    throw Error("Character continuation lost its original World or Pi session.");
+  await verifiedWriterSupport(job, source, pin.reportDigest, pin.supportRef, requested);
+  return requested;
 }
 function output(job: JobStartResult, receipt: Receipt) {
   const conflicted = receipt.units.find(unit => unit.phase === "conflicted");
@@ -608,7 +681,7 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
       }
       const characterParent = character.beforeHead ?? world.commitSha;
       if (characterParent !== world.commitSha)
-        await verifiedWorldReviewHandoff(job, world.commitSha, characterParent);
+        await verifiedCharacterSource(job, world.commitSha, character, characterParent);
       verifyCommit(job, character, characterParent, last);
       if (actualHead !== last) {
         if (actualHead !== await trustedHead(job)) return blocked("Foundations HEAD is not a verified successor.");
@@ -628,7 +701,7 @@ async function inspectRecovery(job: JobStartResult, receipt: Receipt): Promise<R
       if (unit.beforeHead && unit.beforeHead !== worldSha ||
           unit.phase === "pending" && actualHead !== worldSha) {
         const requested = unit.beforeHead ?? actualHead;
-        before = await verifiedWorldReviewHandoff(job, worldSha, requested);
+        before = await verifiedCharacterSource(job, worldSha, unit, requested);
       }
     }
     if (unit.beforeHead && unit.beforeHead !== before)
@@ -887,7 +960,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       verifyCommit(job, world, receipt.startHead ?? receipt.architectureHead, world.commitSha!);
       const characterParent = character.beforeHead ?? world.commitSha!;
       if (characterParent !== world.commitSha!)
-        await verifiedWorldReviewHandoff(job, world.commitSha!, characterParent);
+        await verifiedCharacterSource(job, world.commitSha!, character, characterParent);
       verifyCommit(job, character, characterParent, character.commitSha!);
       // A later independently verified inbox capture is not a reason to replay
       // specialists. Restore a missing final verified-head publication only if
@@ -923,7 +996,7 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
       if (unit.beforeHead && unit.beforeHead !== before)
         throw new Error("Work-unit head changed since reviewed correction assignment.");
       if (index && before !== prior)
-        await verifiedWorldReviewHandoff(job, prior, before);
+        await verifiedCharacterSource(job, prior, unit, before);
       if (unit.phase === "conflicted") {
         await inspectFoundationConflict(job, unit.domain);
         return;
@@ -984,13 +1057,14 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         assertHead(job, before);
         if (unit.phase === "pending" && dirty(job).length) throw new Error("Specialist requires a clean work-item boundary.");
       }
-      const assign = resumingChoice || resumingInvocation
+      const assign = resumingChoice || resumingInvocation || unit.writerContinuation
         ? unit.assignment
         : { ...deriveFoundationAssignment(unit.domain, plan,
           reportOf(await validate(before), before),
           state.units.slice(0, index).flatMap(item => item.paths ?? []).filter(p => !p.startsWith("arcs/"))),
           ...(steeredTask ? { authorTask: steeredTask } : {}),
-          creativePolicy: policy };
+          creativePolicy: policy,
+          ...(unit.domain === "character" && turnEvidence?.objective ? { dependencyObligations: turnEvidence.objective.obligations } : {}) };
       if (JSON.stringify(assign?.creativePolicy ?? DEFAULT_CREATIVE_POLICY) !== JSON.stringify(policy))
         throw new Error("Foundation assignment creative policy differs from the original Turn receipt.");
       if (!assign || assign.domain !== unit.domain) throw Error("Saved specialist assignment missing or mismatched.");
@@ -1061,8 +1135,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
               }
             }, {
               sourceDigest: unit.invocationSource!,
-              ...(resumingInvocation && unit.piSessionId && unit.piSessionFile ?
+              ...((resumingInvocation || unit.writerContinuation) && unit.piSessionId && unit.piSessionFile ?
                 { savedSession: { id: unit.piSessionId, file: unit.piSessionFile } } : {}),
+              continuation: unit.writerContinuation,
               directory: id => invocationDirectory(job, unit, id),
               authorize: async () => {
                 assertHead(job, before);
@@ -1097,6 +1172,9 @@ export async function runCharacterWorldJob(input: CharacterWorldOptions) {
         }
         unit.claimedPaths = evidence.claimedPaths;
         unit.architecturalConflicts = evidence.architecturalConflicts;
+        if (evidence.dependencyFinding && (unit.domain !== "character" || evidence.claimedPaths.length || !evidence.architecturalConflicts?.length))
+          throw Error("Typed Character prerequisite must be an original clean no-write conflict.");
+        unit.dependencyFinding = evidence.dependencyFinding;
         unit.laterObligations = evidence.laterObligations;
         unit.skillReads = evidence.skillReads;
         unit.invocationProof = evidence.invocationProof;

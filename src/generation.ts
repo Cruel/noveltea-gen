@@ -1675,6 +1675,7 @@ async function runCharacterWorldAssignmentChild(
   if (typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId)
     throw Error("World/Character child lacks its authenticated parent Thread.");
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
+  const writerPin = s.focusedPrerequisite?.writerSource ? s.focusedPrerequisite : null;
   const receiptPath = join(job.stateDir, "character-world.json");
   const saved = existsSync(receiptPath) ? JSON.parse(await readFile(receiptPath, "utf8")) as {
     jobId: string; planVersion: number; startHead?: string; architectureHead: string;
@@ -1714,7 +1715,7 @@ async function runCharacterWorldAssignmentChild(
   }
   const workItem = domain + "-foundations";
   const unit = saved?.units[domain === "world" ? 0 : 1];
-  const sourceHead = original?.parentSha ?? unit?.beforeHead ??
+  const sourceHead = writerPin?.identity.sourceHeadSha ?? original?.parentSha ?? unit?.beforeHead ??
     (domain === "world" ? saved?.startHead ?? saved?.architectureHead : undefined) ??
     await trustedHead(job);
   const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...assignmentScope } = s.active;
@@ -1729,7 +1730,30 @@ async function runCharacterWorldAssignmentChild(
   };
   const key = logicalAssignmentKey(identity);
   const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
-  const continuation = correction?.id ?? diagnosis.ref;
+  const continuation = correction?.id ?? diagnosis.ref ?? writerPin?.supportRef ?? null;
+  if (writerPin && (domain !== "character" || writerPin.writerSource?.stage !== domain ||
+      logicalAssignmentKey(writerPin.identity) !== key))
+    throw Error("Character prerequisite reentry changed its logical assignment.");
+  const suspensionOf = (original: Awaited<ReturnType<typeof import("./writer-dependency.js").reconstructWriterDependency>>): AssignmentPrerequisiteSuspension => ({
+    status: "needs-prerequisite", assignmentKey: key, evidenceRef: original.reportDigest,
+    suspensionRef: dependencyDigest(original.source), owner: original.report.likelySpecialist,
+    scopeRef: original.reportDigest, pendingPhase: "writer",
+  });
+  const authenticateSupport = async () => {
+    if (!writerPin?.writerSource || !writerPin.supportRef) return false;
+    const { inspectWriterDependency, verifiedWriterSupport } = await import("./writer-dependency.js");
+    const original = await inspectWriterDependency(job, writerPin.writerSource);
+    await verifiedWriterSupport(job, writerPin.writerSource, original.reportDigest, writerPin.supportRef, s.inventory!.headSha);
+    return original.original.assignmentKey === key && isDeepStrictEqual(suspensionOf(original), writerPin.suspension);
+  };
+  const inspectWriterFinding = async () => {
+    if (domain !== "character") return null;
+    const { inspectFoundationConflict, inspectCharacterWriterDependency } = await import("./character-world.js");
+    const report = await inspectFoundationConflict(job, domain);
+    if (!report.dependencyFinding) return null;
+    const { reconstructWriterDependency } = await import("./writer-dependency.js");
+    return reconstructWriterDependency(job, await inspectCharacterWriterDependency(job, report.reportDigest));
+  };
   const ref = "character-world.json#" + workItem;
   const resultStatus = domain === "world" ? "review-handoff" : "foundations-committed";
   const outcome = (status: AssignmentOutcome["status"], evidenceRef: string,
@@ -1763,7 +1787,9 @@ async function runCharacterWorldAssignmentChild(
         if (domain === "character") await assertNativeReviewDependencies(job, workItem);
         const current = existsSync(receiptPath) ? JSON.parse(await readFile(receiptPath, "utf8")) as typeof saved : null;
         const originalUnit = current?.units[domain === "world" ? 0 : 1];
-        if (originalUnit?.beforeHead ? originalUnit.beforeHead !== sourceHead : await trustedHead(job) !== sourceHead)
+        const effectiveHead = writerPin ? s.inventory!.headSha : sourceHead;
+        if (writerPin && !await authenticateSupport()) throw Error("Character continuation lacks verified support.");
+        if (originalUnit?.beforeHead ? originalUnit.beforeHead !== effectiveHead : await trustedHead(job) !== effectiveHead)
           throw new ProtocolIntegrityBlockedError("World/Character source advanced before the original invocation.");
       }
       return null;
@@ -1772,7 +1798,18 @@ async function runCharacterWorldAssignmentChild(
       try {
         const stopped = await preflight();
         if (stopped) return stopped;
-        return subunitWriterResult(await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command) }), ref);
+        const result = await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command) });
+        if (result.status === "foundations-conflict-reported" && !correction && !diagnostic) {
+          const original = await inspectWriterFinding();
+          if (original) {
+            if (original.original.assignmentKey !== key ||
+                !!writerPin !== !!original.source.predecessor ||
+                writerPin && original.source.predecessor?.supportRef !== writerPin.supportRef)
+              throw Error("Character prerequisite replaced its original suspended assignment.");
+            return suspensionOf(original);
+          }
+        }
+        return subunitWriterResult(result, ref);
       } catch (error) {
         if (error instanceof AssignmentAuthorPauseError)
           return outcome("paused", "job-control", { controlRef: "job-control" });
@@ -1799,7 +1836,7 @@ async function runCharacterWorldAssignmentChild(
       if (submission.status !== resultStatus || !submission.headSha)
         return outcome("unresolved", ref, { dispositionRef: submission.status });
       const native = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
-        p.commitSha === submission.headSha && p.workItem === workItem && p.parentSha === sourceHead &&
+        p.commitSha === submission.headSha && p.workItem === workItem && p.parentSha === (writerPin ? s.inventory!.headSha : sourceHead) &&
         p.planVersion === s.planVersion && p.validation.status === "passed");
       if (!native || native.assurance?.turnDigest !== s.request.turnPlanDigest)
         throw Error("World/Character submission lost its original native/source checkpoint.");
@@ -1824,9 +1861,9 @@ async function runCharacterWorldAssignmentChild(
       return outcome("verified", "recovery-checkpoints:" + head,
         { headSha: head, reviewRef: "review-checkpoints:" + head });
   };
-  const child = (correction || diagnostic ? createAssignmentLifecycleGraph :
-    createGenerationQuestionGraph.bind(null, job, identity, workItem))({
-    authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
+  const adapter: Parameters<typeof createGenerationQuestionGraph>[3] = {
+    authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : writerPin ? await authenticateSupport() : await authenticateCorrection()),
+    reenterWriter: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
     preflight: async state => { assertIdentity(state); return preflight(); },
     invoke: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
     correct: async state => {
@@ -1849,20 +1886,31 @@ async function runCharacterWorldAssignmentChild(
       }
       return { submission, outcome: await verifyCommitted(submission) };
     },
-  });
+  };
+  const child = correction || diagnostic ? createAssignmentLifecycleGraph(adapter) :
+    createGenerationQuestionGraph(job, identity, workItem, adapter,
+      async head => !!writerPin && await authenticateSupport() && head === await trustedHead(job));
   const finished = await child.invoke({
     identity, submission: diagnostic ? diagnosis.submission : correction && s.result
       ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
     submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
-  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
+    suspension: writerPin?.suspension ?? null,
+  }, { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original", writerPin?.supportRef ?? undefined), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("World/Character child did not settle its original assignment.");
   const patch = reviewPatch as Partial<State> | null;
   assertReviewProjection(patch, finished.outcome, "review-checkpoints");
   const result = finished.submission
     ? { status: finished.submission.status, headSha: finished.submission.headSha } : null;
+  if (finished.outcome.status === "needs-prerequisite") {
+    const original = await inspectWriterFinding();
+    if (!original || !isDeepStrictEqual(suspensionOf(original), finished.outcome))
+      throw Error("Character prerequisite lost its exact original source.");
+    return { result: { status: "dependency-required" }, focusedPrerequisite: {
+      identity, suspension: finished.outcome, supportRef: null, writerSource: original.source } };
+  }
   if (finished.outcome.status === "verified")
-    return { ...patch, result: domain === "world" ? null :
+    return { ...patch, ...(writerPin ? { focusedPrerequisite: null } : {}), result: domain === "world" ? null :
       { status: resultStatus, headSha: finished.outcome.headSha } };
   if (correction) return subunitReviewStop(s, job, identity, correction, finished.outcome);
   if (patch && (patch.status || patch.operationRecovery || patch.recovery || patch.unknownRecovery ||
@@ -2979,6 +3027,11 @@ async function authorBoundary(job: JobStartResult, s: State): Promise<Partial<St
  * the original Choice obligation. This is not a new scheduling lane. */
 /** Authenticate and advance the same suspended writer in either the ordinary
  * parent dependency node or an already admitted recovery case. */
+function writerSourceMatches(active: CoreState["active"], source: import("./writer-dependency.js").WriterDependencySource) {
+  return !!active && (source.stage === "character" ? active.stage === "foundations" && source.milestoneId === undefined :
+    (active.stage === source.stage || active.stage === "interactive" && ["choice", "puzzle"].includes(source.stage))) &&
+    active.milestone === source.milestoneId;
+}
 export async function advanceSuspendedWriter(s: CoreState, config: RunnableConfig) {
   const job = await openJob(s);
   const pin = s.focusedPrerequisite;
@@ -2987,12 +3040,14 @@ export async function advanceSuspendedWriter(s: CoreState, config: RunnableConfi
   const { inspectWriterDependency } = await import("./writer-dependency.js");
   const original = await inspectWriterDependency(job, source);
   const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active!;
-  if ((s.active?.stage !== source.stage && !(s.active?.stage === "interactive" && ["choice", "puzzle"].includes(source.stage))) || s.active?.milestone !== source.milestoneId || !s.inventory ||
+  if (!writerSourceMatches(s.active, source) || !s.inventory ||
       pin.supportRef || pin.identity.assignmentId !== source.workItemId ||
       pin.identity.graphThreadId !== config.configurable?.thread_id ||
       pin.identity.jobId !== job.jobId || pin.identity.jobThreadId !== job.threadId ||
       pin.identity.planVersion !== s.planVersion || pin.identity.turnDigest !== s.request.turnPlanDigest ||
-      pin.identity.scopeDigest !== dependencyDigest({ scope, ...(["choice", "puzzle"].includes(source.stage) ? { domain: source.stage } : {}), task: s.request.task, contract: s.request.contract }) ||
+      pin.identity.scopeDigest !== (source.stage === "character"
+        ? dependencyDigest({ task: s.request.task, contract: s.request.contract, assignmentScope: scope, workItem: source.workItemId })
+        : dependencyDigest({ scope, ...(["choice", "puzzle"].includes(source.stage) ? { domain: source.stage } : {}), task: s.request.task, contract: s.request.contract })) ||
       logicalAssignmentKey(pin.identity) !== original.original.assignmentKey ||
       pin.suspension.assignmentKey !== original.original.assignmentKey ||
       pin.suspension.pendingPhase !== "writer" || pin.suspension.evidenceRef !== original.reportDigest ||
@@ -4233,7 +4288,7 @@ export function createGenerationGraph(
             const pin = s.focusedPrerequisite;
             const { inspectWriterDependency, verifiedWriterSupport } = await import("./writer-dependency.js");
             const original = await inspectWriterDependency(job, pin.writerSource!);
-            if (!s.active || s.active.milestone !== pin.writerSource!.milestoneId ||
+            if (!writerSourceMatches(s.active, pin.writerSource!) ||
                 (receipt?.plan?.version ?? null) !== pin.identity.planVersion ||
                 logicalAssignmentKey(pin.identity) !== original.original.assignmentKey)
               throw Error("Verified support lost its suspended original assignment.");
@@ -4521,7 +4576,7 @@ export function createGenerationGraph(
     .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async (s, config) => {
       if (s.crossDomainCloseout || s.reviewPrerequisite || s.focusedPrerequisite &&
           (s.focusedPrerequisite.writerSource ?
-            (s.active?.stage !== s.focusedPrerequisite.writerSource.stage && !(s.active?.stage === "interactive" && ["choice", "puzzle"].includes(s.focusedPrerequisite.writerSource.stage))) || s.active?.milestone !== s.focusedPrerequisite.writerSource.milestoneId ||
+            !writerSourceMatches(s.active, s.focusedPrerequisite.writerSource) ||
               !s.focusedPrerequisite.supportRef :
             s.active?.stage !== "focus" || s.active.id !== s.focusedPrerequisite.identity.assignmentId))
         throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");

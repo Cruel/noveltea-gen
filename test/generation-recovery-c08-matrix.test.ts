@@ -74,11 +74,12 @@ const nodeChecks = {
  * production boundary, even when the legacy structural fixture is removed. */
 const actionChecks = {
   "known-correction": foundationRound("review-native"),
-  "plan-amendment": generation("C04 real Pi World negative selects source-bound owner strategy"),
+  "plan-amendment": eventRound("prospective-multi"),
+  "strategy-unresolved": eventRound("prospective-refused"),
   "diagnostic": eventRound("diagnosis"),
   "diagnostic-stop": foundationRound("review-native-stall"),
   "reconcile-effects": generation("C05 unfamiliar scheduling failure is resolved by source-bound recheck"),
-  "continue-independent": ideaRound("deferred"),
+  "continue-independent": ideaRound("deferred-two"),
   "pause": foundationRound("author-pause"),
   "exhausted": foundationRound("review-native-protocol"),
   "integrity-fence": generation("C02 current-format checkpoint tampering cannot grant a new recovery"),
@@ -200,7 +201,7 @@ test("C08 every decision and lifecycle phase has a maintained certification anch
   const actionNames = Object.keys(actionChecks).sort();
   assert.deepEqual(actionNames, [
     "known-correction", "plan-amendment", "diagnostic", "diagnostic-stop",
-    "reconcile-effects", "continue-independent", "pause", "exhausted", "integrity-fence",
+    "reconcile-effects", "continue-independent", "pause", "exhausted", "integrity-fence", "strategy-unresolved",
   ].sort());
   for (const [action, regression] of Object.entries(actionChecks))
     assertRegression(regression, action);

@@ -266,7 +266,12 @@ export function authorizeWriterDependency(input: {
         cited.some(c => c.metadata.id === id && links(c, r.metadata.id))))
       reached.add(r.metadata.id);
   if (plan.kind !== "full-story" || plan.objective?.breadth !== "whole-story" ||
-      !origin || !owner || !target || !anchor || !reached.has(source.targetId) ||
+      !origin || !owner || !target ||
+      (source.stage === "character" ?
+        source.workItemId !== "character-foundations" || source.producer.workItem !== "world-foundations" ||
+        origin.id !== "foundations" || owner.id !== origin.id || source.milestoneId !== undefined ||
+        !["fact", "world-entity"].includes(target.metadata.type) :
+        !anchor || !reached.has(source.targetId)) ||
       target.metadata.type !== source.targetId.split(".")[0] ||
       !plan.assignments.some(a => a.authority.recordTypes.includes(target.metadata.type)) ||
       target.metadata.status === "superseded" || cited.some(r => r.metadata.status === "superseded") ||
