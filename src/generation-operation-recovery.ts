@@ -44,6 +44,11 @@ export interface GenerationOperationRecovery {
     assignmentId?: string; resultStatus?: string;
     /** Settled original child failure at its unpublished draft source. */
     assignmentFailure?: { sourceHeadSha: string; proof: AssignmentFailureProof };
+    /** Exact native terminal of an admitted supporting child; original root
+     * report and ancestry remain the dependency ledger's authority. */
+    supportFailure?: { rootReportDigest: string; reportDigest: string } & (
+      { proof: AssignmentFailureProof; reviewAssessment?: never } |
+      { proof?: never; reviewAssessment: import("./generation-recovery-contract.js").SupportingReviewAssessment });
     blueprintAssessment?: import("./blueprint-reassessment.js").BlueprintAssessmentRef;
     interactiveDomain?: "choice" | "puzzle";
     closeout?: { milestoneId: string; proposalDigest: string; repairId: string };

@@ -1093,9 +1093,9 @@ postcommit independent editorial Review.
 
 A native metadata terminal inside a Review repair or a separately authorized
 support writer is not an untrusted effect merely because the original parent
-owns another obligation. For Blueprint-origin support the parent authenticates
-the exact dependency ancestry, native owner, original invocation and terminal
-before selecting the existing read-only diagnosis. Ordinary Review repair uses
+owns another obligation. For Blueprint-, writer-, Focused- and Review-origin support the parent
+authenticates the exact suspended obligation, dependency ancestry, native owner,
+original invocation and terminal before selecting the existing read-only diagnosis. Ordinary Review repair uses
 the sealed original negative Review. The diagnosis can select only local repair
 of the exact verified defects, with the actual work item as owner and exact
 terminal reference as scope; no extra prerequisites or author authority.
@@ -1120,3 +1120,23 @@ reattests the same decision on restart. The C01 added return #9 / status #8 are
 controls, #10 / status #9 are authenticated continuation, and #11 / status #10
 are receipt fences. R01/R02/R14L gates cover the changed child, assessor,
 Focused, publication and inspection functions.
+
+For a writer or Focused suspension, a failed supporting child is admitted as
+a source-bound dependency-amendment Case; the original suspended parent
+remains pinned. A Review-origin suspension retains its existing negative
+Review Case. In either case the assessor uses the same dependency adapter
+as Blueprint prerequisites, with the actual supporting child owner and
+invocation identity. An independently selected supporting Review assessment
+can use the shared read-only Review boundary. Completion of support does not
+complete the consumer: the original writer resumes only after independently
+reviewed support, required selective revalidation and a verified support
+reference; the original Review resumes its own negative finding. Historical
+discharge checks the original supporting subtree and published diagnostic
+grants, including the captured native terminal, rather than trusting a
+newly returned success status.
+
+For an invalid existing owned record, dependent broken-reference diagnostics
+are derived only if the original native catalog identifies the exact assigned
+canonical ID and the referencing file outside the write grant is byte-for-byte
+unchanged from the verified Git source. All unrelated diagnostics and
+unauthorized effects remain subject to the existing integrity fences.

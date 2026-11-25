@@ -246,12 +246,13 @@ test("focused revisions reject missing existing target IDs and unauthorized file
   assert.equal(git(f.repo, "rev-parse", "HEAD"), baseline);
 });
 
-for (const scenario of ["review", "writer", "support-no-write", "nested"] as const)
+for (const scenario of ["review", "writer", "support-no-write", "nested", "writer-native-diagnosis", "review-native-diagnosis"] as const)
 test("R04 cross-owner prerequisite " + scenario + " uses the original logical assignment", {
   skip: !available, timeout: 300_000,
 }, async () => {
   const f = fixture("r04-prerequisite-" + scenario);
-  const writer = scenario === "writer" || scenario === "nested";
+  const nativeDiagnosis = scenario.endsWith("-native-diagnosis");
+  const writer = scenario === "writer" || scenario === "nested" || scenario === "writer-native-diagnosis";
   const nested = scenario === "nested";
   seedArchiveWitness(f.story);
   f.contract(["arc.truth", "milestone.disclosure"], "composition", ["protect", "challenge"]);
@@ -283,6 +284,8 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
     let originalNegative = false, repairYield = false, supportWrites = 0, originalReviews = 0;
     let writerYield = false, originalWrites = 0, localCorrections = 0;
     let supportQuestion = false;
+    let cleanSupport = "";
+    let diagnosticCalls = 0;
     let lastPrompt = "", step = 0;
     try {
       const { runtime, calls } = await scriptedStoryRuntime((index, context) => {
@@ -332,6 +335,26 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
           repairYield = true;
           return stop("OUT_OF_AUTHORITY: " + characterPath);
         }
+        if (nativeDiagnosis && cleanSupport && !prompt.includes("IMMUTABLE REVIEW PACKET")) {
+          if (prompt.includes("local-repair: owner=dependency:")) {
+            const raw = JSON.stringify(context.messages);
+            const signature = raw.match(/signature=([a-f0-9]{64})/)?.[1];
+            const sourceRef = raw.match(/sourceRef=([^;]+); category=/)?.[1];
+            const owner = raw.match(/local-repair: owner=(dependency:[0-9]+:character\.ada)/)?.[1];
+            assert.ok(signature && sourceRef && owner);
+            diagnosticCalls++;
+            return stop({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+              category: "defect", diagnosis: "Remove the invalid metadata field without broadening the original scope.",
+              strategy: "local-repair", owner, scopeRef: sourceRef, prerequisites: [],
+              uncertainty: "Require native validation and independent Review." });
+          }
+          if (prompt.includes("INDEPENDENT DIAGNOSTIC FOLLOW-UP") &&
+              readFileSync(join(job.worktreeStoryRoot, characterPath), "utf8").includes("unsupported_field:"))
+            return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-diagnosed-support", name: "edit",
+              arguments: { path: characterPath, edits: [{ oldText: readFileSync(join(job.worktreeStoryRoot, characterPath), "utf8"), newText: cleanSupport }] } }] };
+          if (prompt.includes("SOURCE-BOUND STORY CORRECTION") && !prompt.includes("focused-manifest-path-mismatch"))
+            return stop({ modifiedRecords: [characterPath], architecturalConflicts: [], laterObligations: [] });
+        }
         if (prompt.includes("SOURCE-BOUND STORY CORRECTION") &&
             prompt.includes("focused-manifest-path-mismatch")) {
           localCorrections++;
@@ -353,7 +376,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
                   sources: [{ path: factPath, quote: "id: fact.evidence-concealed" }],
                   likelySpecialist: "nt-worldbuilding", authorDecisionRequired: false } }] };
             }
-            if (support && !supportQuestion && (!nested || path === factPath)) {
+            if (support && !supportQuestion && !nativeDiagnosis && (!nested || path === factPath)) {
               supportQuestion = true;
               return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [],
                 authorDecisionRequest: { kind: "free-text", question: "Which motive should Ada disclose to protect the witness?" } });
@@ -368,10 +391,13 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
             if (path === factPath) factWrites++;
             else if (support) supportWrites++; else if (path === eventPath) originalWrites++;
             const old = readFileSync(join(job.worktreeStoryRoot, path), "utf8");
-            return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-edit-" + index, name: "edit",
-              arguments: { path, edits: [{ oldText: old, newText: old + "\n" +
+            const content = old + "\n" +
                 (path === factPath ? "The concealment is evidenced by the archived transfer record." : support ? "Ada discloses the ledger to protect the witness from a false accusation." :
-                  "Ada hesitates before giving the witness her account of the ledger.") + "\n" }] } }] };
+                  "Ada hesitates before giving the witness her account of the ledger.") + "\n";
+            if (nativeDiagnosis && support) cleanSupport = content;
+            return { reason: "toolUse", content: [{ type: "toolCall", id: "r04-edit-" + index, name: "edit",
+              arguments: { path, edits: [{ oldText: old, newText: nativeDiagnosis && support
+                ? content.replace("id: " + character, "id: " + character + "\nunsupported_field: true") : content }] } }] };
           }
           if (nested && support && path === characterPath && supportWrites === 0) return stop({ modifiedRecords: [], architecturalConflicts: [], laterObligations: [] });
           return stop({ modifiedRecords: writer && writerYield && !support ? [] : [path], architecturalConflicts: [], laterObligations: [] });
@@ -435,7 +461,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
       const receiptPath = join(job.stateDir, "focused-items", event + ".json");
       const originalReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
       let supportInput: Parameters<ReturnType<typeof createGenerationGraph>["invoke"]>[0] = null;
-      if (scenario !== "support-no-write") {
+      if (scenario !== "support-no-write" && !nativeDiagnosis) {
         const { pendingGenerationQuestion, generationQuestionResume } = await import("../src/generation-author-question.js");
         const { answerSpecialistChoice, focusedChoiceWorkItem } = await import("../src/specialist-choice.js");
         await invoke(null, { ...config, interruptAfter: ["dependency_amendment"] });
@@ -484,7 +510,7 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(factWrites, 1);
         assert.equal(supportWrites, 0);
         assert.equal(originalWrites, 0);
-      } else if (writer) {
+      } else if (writer && !nativeDiagnosis) {
         await crashAt(supportInput, "support commit before original child reentry", (ns, writes) =>
           ns.includes("assignment-") && writes.some(([channel, value]) => channel === "submission" &&
             (value as { status?: string; receiptRef?: string } | undefined)?.status === "focused-committed" &&
@@ -494,7 +520,27 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         assert.equal(originalWrites, 0);
         assert.equal(git(job.worktreeRoot, "rev-list", "--count", originalHead + "..HEAD"), "1");
       }
-      const supported = await invoke(writer ? null : supportInput, { ...config, interruptAfter: ["dependency_amendment"] });
+      let supported = await invoke(writer ? null : supportInput, { ...config, interruptAfter: ["dependency_amendment"] });
+      if (nativeDiagnosis) {
+        const c = supported.recoveryLifecycle.active;
+        assert.ok(c, JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle }));
+        if (!writer) assert.equal(c.id, suspended.recoveryLifecycle.active?.id);
+        if (supported.recoveryLifecycle.decision?.action !== "diagnostic")
+          supported = await invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
+        assert.equal(supported.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify(supported.recoveryLifecycle));
+        const diagnosed = await invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
+        assert.equal(diagnosed.recoveryLifecycle.decision?.action, "plan-amendment", JSON.stringify(diagnosed.recoveryLifecycle));
+        assert.equal(diagnosed.recoveryLifecycle.active?.id, c.id);
+        assert.equal(diagnosticCalls, 1);
+        const { inspectModernGenerationRecovery } = await import("../src/generation-recovery-inspection.js");
+        assert.deepEqual(await inspectModernGenerationRecovery(job, saver, config.configurable.thread_id), diagnosed.recoveryLifecycle);
+        saver.db.close(); saver = SqliteSaver.fromConnString(join(job.stateDir, "generation.sqlite"));
+        supported = await invoke(null, { ...config, interruptAfter: ["assess_recovery"] });
+        if (writer) assert.ok(supported.recoveryLifecycle.discharged.some(d => d.case.id === c.id),
+          JSON.stringify({reason: supported.reason, lifecycle: supported.recoveryLifecycle}));
+        else assert.equal(supported.recoveryLifecycle.active?.id, c.id);
+        assert.deepEqual(await inspectModernGenerationRecovery(job, saver, config.configurable.thread_id), supported.recoveryLifecycle);
+      }
       if (scenario === "support-no-write") {
         assert.equal(supportWrites, 0);
         assert.equal(originalReviews, 0);

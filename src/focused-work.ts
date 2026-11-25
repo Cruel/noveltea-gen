@@ -927,7 +927,22 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
         // reports a derived broken reference. Authenticate the link-only
         // change before classifying this as a scoped metadata correction.
         const derivedReferences: { path: string; target: string }[] = [];
-        const diagnostics = (after.report as { diagnostics?: { code?: string; path?: string }[] } | undefined)?.diagnostics;
+        const diagnostics = (after.report as { diagnostics?: { code?: string; path?: string; target?: string }[] } | undefined)?.diagnostics ?? [];
+        // Existing owned records can likewise temporarily disappear from the
+        // native catalog. Only unchanged, read-only consumers of the exact
+        // baseline canonical ID are derived diagnostics, never write grants.
+        const invalidTargets = new Set(catalog.filter(record => paths.includes(record.path) &&
+          turnAssignment?.targets.includes(record.metadata.id) && diagnostics.some(d =>
+            d.path === record.path && ["schema", "yaml", "frontmatter"].includes(d.code ?? "")))
+          .map(record => record.metadata.id));
+        for (const d of diagnostics) {
+          if (d.code !== "broken-reference" || !d.path || !d.target || !invalidTargets.has(d.target) ||
+              paths.includes(d.path) || !/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*\.md$/.test(d.path)) continue;
+          const full = join(job.worktreeStoryRoot, d.path);
+          if (await realpath(full) !== full || !(await lstat(full)).isFile()) continue;
+          if (git(job, "show", current + ":" + repoPath(job, d.path)) !== await readFile(full, "utf8")) continue;
+          derivedReferences.push({ path: d.path, target: d.target });
+        }
         if (create && create.id === input.target && create.id.startsWith("character.") &&
             diagnostics?.some(d => d.path === create.path && ["schema", "yaml", "frontmatter"].includes(d.code ?? ""))) {
           for (const arc of reviewArcs) {

@@ -200,11 +200,12 @@ export async function inspectModernGenerationRecovery(
     const source = sourceFor(active.id);
     const readiness = source?.channel === "operationRecovery"
       ? (source.input as unknown as GenerationOperationRecovery).evidence.eventBlueprintPrerequisite : undefined;
-    if (!readiness) return null;
     try {
+      const supportSource = readiness ?? (await (await import("./generation-operation-strategy.js")).originalSuspendedDependency(job, values as GenerationGraphState, active))?.source;
+      if (!supportSource) return null;
       const { inspectInterruptedBlueprintSupport } = await import("./dependency-work.js");
       if (!await authenticateOperationOwnerProof(job, values as GenerationGraphState, active, decision)) return null;
-      return await inspectInterruptedBlueprintSupport(job, readiness, threadId);
+      return await inspectInterruptedBlueprintSupport(job, supportSource, threadId);
     } catch { return null; }
   })();
   const authenticate = async (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) => {

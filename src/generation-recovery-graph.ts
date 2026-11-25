@@ -134,7 +134,13 @@ function originalMatchesCase(s: RecoverySource, c: RecoveryCase): boolean {
         op.operation === "specialist-result" && op.outcome === "returned-failure" &&
         op.evidence.assignmentFailure.sourceHeadSha === c.origin.sourceHeadSha &&
         op.evidence.assignmentFailure.proof.kind === op.evidence.resultStatus &&
-        c.kind === (op.evidence.assignmentFailure.proof.kind === "protocol-exhausted" ? "protocol" : "semantic"))
+        c.kind === (op.evidence.assignmentFailure.proof.kind === "protocol-exhausted" ? "protocol" : "semantic")) &&
+      (op.evidence.supportFailure === undefined ||
+        op.operation === "dependency-amendment" && op.outcome === "returned-failure" &&
+        op.evidence.reference === "dependency-plan" &&
+        /^[a-f0-9]{64}$/.test(op.evidence.supportFailure.rootReportDigest) &&
+        /^[a-f0-9]{64}$/.test(op.evidence.supportFailure.reportDigest) &&
+        c.kind === (op.evidence.supportFailure.proof?.kind === "protocol-exhausted" ? "protocol" : "semantic"))
     );
   }
   if (s.channel === "recovery") {
@@ -257,7 +263,7 @@ function derive(
         assignmentId: op.evidence?.assignmentId ?? null,
       },
       input: strip(raw),
-      kind: op.evidence.assignmentFailure?.proof.kind === "protocol-exhausted"
+      kind: (op.evidence.assignmentFailure?.proof.kind ?? op.evidence.supportFailure?.proof?.kind) === "protocol-exhausted"
         ? "protocol" : op.evidence.failureKind ?? (op.outcome === "exception" ? "infrastructure" : "semantic"),
       observation: op.outcome,
       effect: "writer-effects-uncertain",

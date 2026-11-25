@@ -1366,10 +1366,10 @@ test("C04 real Pi World negative selects source-bound owner strategy in the orig
   }
 });
 
-test("C04 typed Character prerequisite supports reviewed World and resumes the original assignment", {
+for (const nativeDiagnosis of [false, true]) test("C04 typed Character prerequisite supports reviewed World and resumes the original assignment" + (nativeDiagnosis ? " with native diagnosis" : ""), {
   skip: !available, timeout: 240_000,
 }, async () => {
-  const f = setup("c04-character-world-support");
+  const f = setup("c04-character-world-support" + (nativeDiagnosis ? "-diagnosis" : ""));
   await useScriptedArchiveCli(f);
   const paused = f.cli([...f.start, "--pause-after", "architecture"]);
   assert.equal(paused.status, "paused", paused.reason);
@@ -1388,6 +1388,8 @@ test("C04 typed Character prerequisite supports reviewed World and resumes the o
     const receipt = () => JSON.parse(readFileSync(join(f.job.stateDir, "character-world.json"), "utf8"));
     const skills = (name: string) => boundedPinnedSources(name).map(p => "skill://" + p);
     let negative = false, planned = false, written = false, supported = false;
+    let diagnosedSupport = false;
+    let cleanSupport = "";
     const runtime = await scriptedStoryRuntime((index, context) => {
       const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
       const prompt = messages.filter(m => m.role === "user").flatMap(m =>
@@ -1406,11 +1408,33 @@ test("C04 typed Character prerequisite supports reviewed World and resumes the o
           "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"].map(p => "skill://" + p).concat(path)); }
         return stop({ target, specialist: "nt-worldbuilding", outcome: correction, reason: "Correct the existing World prerequisite for honest initial knowledge." });
       }
+      if (nativeDiagnosis && written && !supported) {
+        if (prompt.includes("local-repair: owner=dependency:")) {
+          const raw = JSON.stringify(context.messages);
+          const signature = raw.match(/signature=([a-f0-9]{64})/)?.[1];
+          const sourceRef = raw.match(/sourceRef=([^;]+); category=/)?.[1];
+          const owner = raw.match(/local-repair: owner=(dependency:[0-9]+:fact\.evidence-concealed)/)?.[1];
+          assert.ok(signature && sourceRef && owner);
+          diagnosedSupport = true;
+          return stop({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
+            category: "defect", diagnosis: "Remove the unsupported metadata field, retaining the World correction.",
+            strategy: "local-repair", owner, scopeRef: sourceRef, prerequisites: [],
+            uncertainty: "Native validation and independent Review remain required." });
+        }
+        if (prompt.includes("INDEPENDENT DIAGNOSTIC FOLLOW-UP") && readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes("unsupported_field:"))
+          return { content: [{ type: "toolCall", name: "edit", id: "world-diagnostic-successor", arguments: { path, edits: [{ oldText: readFileSync(join(f.job.worktreeStoryRoot, path), "utf8"), newText: cleanSupport }] } }], reason: "toolUse" };
+        if (cleanSupport && !prompt.includes("IMMUTABLE REVIEW PACKET"))
+          return stop({ modifiedRecords: [path], architecturalConflicts: [], laterObligations: [] });
+      }
       if (planned && !supported && prompt.includes("nt-worldbuilding") && !prompt.includes("IMMUTABLE REVIEW PACKET")) {
         if (!written) { written = true; return read(skills("nt-worldbuilding")); }
         const before = readFileSync(join(f.job.worktreeStoryRoot, path), "utf8");
-        if (!before.includes(correction)) return { content: [{ type: "toolCall", name: "edit", id: "world-support-edit",
-          arguments: { path, edits: [{ oldText: before, newText: before + "\n" + correction + "\n" }] } }], reason: "toolUse" };
+        if (!before.includes(correction)) {
+          cleanSupport = before + "\n" + correction + "\n";
+          return { content: [{ type: "toolCall", name: "edit", id: "world-support-edit",
+            arguments: { path, edits: [{ oldText: before, newText: nativeDiagnosis
+              ? cleanSupport.replace("id: " + target, "id: " + target + "\nunsupported_field: true") : cleanSupport }] } }], reason: "toolUse" };
+        }
         return stop({ modifiedRecords: [path], architecturalConflicts: [], laterObligations: [] });
       }
       if (written && !supported && prompt.includes("IMMUTABLE REVIEW PACKET")) {
@@ -1434,7 +1458,22 @@ test("C04 typed Character prerequisite supports reviewed World and resumes the o
     assert.equal(original.units[1].phase, "conflicted");
     assert.equal(suspended.focusedPrerequisite!.writerSource!.producer.workItem, "world-foundations");
     assert.equal(suspended.focusedPrerequisite!.writerSource!.stage, "character");
-    const verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+    let verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+    if (nativeDiagnosis) {
+      assert.ok(verified.recoveryLifecycle.active, JSON.stringify({ reason: verified.reason, lifecycle: verified.recoveryLifecycle }));
+      const failedCase = verified.recoveryLifecycle.active.id;
+      const selected = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.equal(selected.recoveryLifecycle.decision?.action, "diagnostic", JSON.stringify(selected.recoveryLifecycle));
+      const diagnosed = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.equal(diagnosed.recoveryLifecycle.decision?.action, "plan-amendment", JSON.stringify(diagnosed.recoveryLifecycle));
+      assert.equal(diagnosed.recoveryLifecycle.active?.id, failedCase);
+      assert.equal(diagnosedSupport, true);
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), diagnosed.recoveryLifecycle);
+      saver.db.close(); saver = SqliteSaver.fromConnString(paused.checkpointPath); graph = createGenerationGraph(saver, "cli");
+      verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      assert.ok(verified.recoveryLifecycle.discharged.some(e => e.case.id === failedCase), JSON.stringify({reason: verified.reason, lifecycle: verified.recoveryLifecycle}));
+      assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), verified.recoveryLifecycle);
+    }
     assert.ok(verified.focusedPrerequisite?.supportRef, JSON.stringify({ reason: verified.reason, recovery: verified.recoverySources }));
     const ledger = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!;
     const support = ledger.entries.find(e => e.writerSource)!;

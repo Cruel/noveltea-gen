@@ -23,14 +23,25 @@ import type { SupportingReviewAssessment } from "./generation-recovery-contract.
 import { isDeepStrictEqual } from "node:util";
 import { proposeDependency } from "./dependency-planner.js";
 
+/** Source of a supporting tree. The root is the original sealed report,
+ * not the failing child or the most recent amended plan. */
+export type DependencySupportSource = import("./event-work.js").EventBlueprintPrerequisite |
+  { rootReportDigest: string; expectedHead: string };
+function supportRoots(plan: NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>, source: DependencySupportSource) {
+  return plan.entries.filter(e => "rootReportDigest" in source
+    ? e.reportDigest === source.rootReportDigest && !e.parent && e.report.sourceSha === source.expectedHead
+    : e.blueprintSource?.readinessDigest === source.reportDigest &&
+      e.blueprintSource.milestoneId === source.milestoneId);
+}
+
 /** Authenticate an exact committed, not-yet-published prerequisite effect.
  * This is inspection only; the existing child remains responsible for publication. */
 export async function inspectInterruptedBlueprintSupport(job: import("./job.js").JobStartResult,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string,
+  readiness: DependencySupportSource, graphThreadId: string,
   allowPublished = false): Promise<string | null> {
   const plan = await inspectDependencyPlan(job);
   if (!plan) return null;
-  const roots = plan.entries.filter(e => e.blueprintSource?.readinessDigest === readiness.reportDigest);
+  const roots = supportRoots(plan, readiness);
   const head = dependencyGit(job, "rev-parse", "HEAD");
   const parent = dependencyGit(job, "rev-parse", "HEAD^");
   const published = JSON.parse(await readFile(join(job.stateDir, "revisions", "verified-head.json"), "utf8"));
@@ -61,17 +72,17 @@ export async function inspectInterruptedBlueprintSupport(job: import("./job.js")
 /** A paused prerequisite strategy can resume only across the exact ledger
  * effects of that original readiness report, never across unrelated commits. */
 export async function inspectBlueprintSupportProgress(job: import("./job.js").JobStartResult,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string): Promise<boolean> {
+  readiness: DependencySupportSource, graphThreadId: string): Promise<boolean> {
   const head = await trustedHead(job);
   if (head === readiness.expectedHead) return true;
   const plan = await inspectDependencyPlan(job);
   if (!plan) return false;
-  const roots = plan.entries.filter(e => e.blueprintSource?.readinessDigest === readiness.reportDigest);
+  const roots = supportRoots(plan, readiness);
   const relevant = plan.entries.filter(e =>
     roots.some(root => dependencyAncestors(plan.entries, e).has(root.reportDigest)));
   const verified = new Set<string>();
   for (const entry of relevant) {
-    if (entry.phase === "verified" && entry.commitSha) {
+    if ((entry.phase === "verified" || entry.phase === "reviewing" && entry.review?.verdict === "pass") && entry.commitSha) {
       verified.add(entry.commitSha);
       if (entry.supportRootSha && entry.supportRootSha !== entry.commitSha) {
         verified.add(entry.supportRootSha);
@@ -110,13 +121,12 @@ export class SupportingAssignmentStop extends Error {
  * The admitted Blueprint root and every intervening support effect must
  * belong to the original parent. No checkpoint field confers authority. */
 export async function inspectSupportingReviewSelection(job: import("./job.js").JobStartResult,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string,
+  readiness: DependencySupportSource, graphThreadId: string,
   reportDigest: string, selected?: SupportingReviewAssessment): Promise<SupportingReviewAssessment | null> {
   const plan = await inspectDependencyPlan(job);
   const entry = plan?.entries.find(e => e.reportDigest === reportDigest);
   if (!plan || !entry?.supportRootSha || !entry.amendment || entry.phase !== "reviewing" ||
-      !plan.entries.some(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
-        e.blueprintSource.milestoneId === readiness.milestoneId &&
+      !supportRoots(plan, readiness).some(e =>
         dependencyAncestors(plan.entries, entry).has(e.reportDigest)) ||
       !await inspectBlueprintSupportProgress(job, readiness, graphThreadId)) return null;
   const assessment = await inspectFoundationReviewBoundary(job, entry.supportRootSha, selected?.assessment);
@@ -128,15 +138,14 @@ export async function inspectSupportingReviewSelection(job: import("./job.js").J
 /** The existing native Review terminal is attributable to the original
  * parent Case, not a fresh failed Event or a new budget. */
 export async function inspectSupportingNativeFailure(job: import("./job.js").JobStartResult,
-  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string, caseId: string,
+  readiness: DependencySupportSource, graphThreadId: string, caseId: string | undefined,
   diagnostic?: import("./rejected-review-repair.js").NativeDiagnosticReference) {
   const plan = await inspectDependencyPlan(job);
   if (!plan) return null;
   const { inspectNativeReviewFailure } = await import("./rejected-review-repair.js");
   for (const entry of plan.entries) {
     if ((!["authorized", "reviewing"].includes(entry.phase) && !(diagnostic && entry.phase === "verified")) || !entry.amendment ||
-        !plan.entries.some(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
-          e.blueprintSource.milestoneId === readiness.milestoneId &&
+        !supportRoots(plan, readiness).some(e =>
           dependencyAncestors(plan.entries, entry).has(e.reportDigest))) continue;
     const amendment = entry.amendment;
     const key = logicalAssignmentKey({ schema: "noveltea-assignment-identity/v1",
@@ -159,7 +168,7 @@ export async function inspectSupportingNativeFailure(job: import("./job.js").Job
       }
     }
     if (!entry.supportRootSha) continue;
-    const failure = await inspectNativeReviewFailure(job, entry.supportRootSha, caseId, key, diagnostic);
+    const failure = await inspectNativeReviewFailure(job, entry.supportRootSha, caseId ?? key, key, diagnostic);
     if (!failure) continue;
     if (!await inspectBlueprintSupportProgress(job, readiness, graphThreadId))
       throw new ProtocolIntegrityBlockedError("Native supporting failure lost its original parent lineage.");
@@ -468,7 +477,8 @@ async function admitDependency(job: import("./job.js").JobStartResult,
 /** Serialized sub-work at the originating assignment's no-write boundary.
  * The parent stays on that assignment, so no second origin writer is scheduled.
  * All external effects are fenced by private receipts, independently of graph checkpoints. */
-export async function advanceFocusedDependency(input: FocusedWorkOptions, config?: RunnableConfig) {
+export async function advanceFocusedDependency(input: FocusedWorkOptions, config?: RunnableConfig,
+  nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   if (input.fixture) throw Error("Obsolete dependency fixture execution is retired.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const origin = JSON.parse(await readFile(join(job.stateDir, "focused-items", input.target + ".json"), "utf8")) as {
@@ -506,7 +516,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
     await admitDependency(job, plan, entry, input);
     return entry.amendment!.assignment;
   });
-  return runSupportingDependency(job, input, reportDigest, config);
+  return runSupportingDependency(job, input, reportDigest, config, undefined, nativeDiagnostic);
 }
 
 /** The same parent prerequisite lane for an authenticated precommit writer.
@@ -515,7 +525,8 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
 export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "target"> & {
   source: import("./writer-dependency.js").WriterDependencySource;
   inventory: import("./generation-plan.js").GenerationInventory;
-}, config?: RunnableConfig, caseId?: string) {
+}, config?: RunnableConfig, caseId?: string,
+  nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   if (input.fixture) throw Error("Writer prerequisite requires original Pi evidence.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const { inspectWriterDependency } = await import("./writer-dependency.js");
@@ -545,7 +556,7 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
   });
   let entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   if (entry?.phase !== "verified")
-    await runSupportingDependency(job, { ...input, target: source.targetId }, reportDigest, config, caseId);
+    await runSupportingDependency(job, { ...input, target: source.targetId }, reportDigest, config, caseId, nativeDiagnostic);
   entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   if (!entry || entry.phase !== "verified" || !entry.commitSha || entry.review?.verdict !== "pass")
     throw Error("Writer prerequisite has no independently verified support.");
@@ -826,7 +837,8 @@ export async function advanceReviewDependency(input: {
   story: string; job: string; task: string; contract: FocusedWorkOptions["contract"];
   skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
   turnPlanDigest: string; request: ReviewDependencyRequest;
-}, graphConfig?: RunnableConfig, caseId?: string) {
+}, graphConfig?: RunnableConfig, caseId?: string,
+  nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const request = input.request;
   const eventSource = request.classification === "new-full-story-record" &&
@@ -871,7 +883,7 @@ export async function advanceReviewDependency(input: {
   // on its original receipt path; never substitute a new independent reviewer.
   if (entry.supportRootSha || (!entry.reviewerSession && !entry.reviewSnapshot)) {
     await runSupportingDependency(job, { ...input, target: assignment.targets[0]!, fixture: false },
-      entry.reportDigest, graphConfig, caseId);
+      entry.reportDigest, graphConfig, caseId, nativeDiagnostic);
     return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
   }
   const verify = async (result: { headSha?: string }) => withStoryJobLock(job, "review-dependency-independent-review", async () => {

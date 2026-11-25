@@ -84,25 +84,32 @@ export async function verifyReviewCycleSuccessor(job: JobStartResult, rootSha: s
 
 /** Inspect published support/Review diagnostic grants rather than trusting
  * a checkpoint to remember which original read-only diagnosis authorized them. */
-async function verifyPublishedRepairDiagnostics(job: JobStartResult, c: RecoveryCase, root: string, head: string) {
+async function verifyPublishedRepairDiagnostics(job: JobStartResult, c: RecoveryCase, root: string, head: string,
+    nativeCaseId = c.id, assignmentKey?: string,
+    expected?: import("./assignment-metadata-recovery.js").AssignmentFailureProof) {
   const { inspectPublishedReviewDiagnostics, inspectNativeReviewFailure } = await import("./rejected-review-repair.js");
   const { authenticatePublishedNativeDiagnostic, assignmentDiagnosticDefects } = await import("./generation-operation-strategy.js");
+  let matched = !expected;
   for (const grant of await inspectPublishedReviewDiagnostics(job, root, head)) {
     const authorization = await authenticatePublishedNativeDiagnostic(job, c, grant, grant.workItem);
-    const failure = await inspectNativeReviewFailure(job, root, c.id, undefined, authorization, head);
+    const failure = await inspectNativeReviewFailure(job, root, nativeCaseId, assignmentKey, authorization, head);
     if (!failure?.successorProof || !assignmentDiagnosticDefects(failure, grant.workItem)) return false;
+    if (isDeepStrictEqual(failure.proof, expected)) matched = true;
   }
-  return true;
+  return matched;
 }
 
-async function verifyPublishedSupportDiagnostics(job: JobStartResult, c: RecoveryCase,
-    entries: readonly import("./dependency-state.js").DependencyEntry[]) {
+export async function verifyPublishedSupportDiagnostics(job: JobStartResult, c: RecoveryCase,
+    entries: readonly import("./dependency-state.js").DependencyEntry[], nativeCaseId: string | undefined = c.id,
+    expected?: NonNullable<GenerationOperationRecovery["evidence"]["supportFailure"]>) {
   const { inspectPublishedFocusedDiagnostic, inspectFocusedFailure } = await import("./focused-work.js");
   const { authenticatePublishedNativeDiagnostic, assignmentDiagnosticDefects } = await import("./generation-operation-strategy.js");
   for (const entry of entries) {
     if (!entry.amendment || !entry.commitSha) return false;
     if (entry.fixture) continue;
     const assignment = entry.amendment.assignment;
+    const expectedProof = expected?.reportDigest === entry.reportDigest ? expected.proof : undefined;
+    let writerMatched = !expectedProof;
     const writerHead = entry.supportRootSha ?? entry.commitSha;
     const grant = await inspectPublishedFocusedDiagnostic(job, assignment.targets[0]!, assignment.id, writerHead);
     if (grant) {
@@ -110,9 +117,20 @@ async function verifyPublishedSupportDiagnostics(job: JobStartResult, c: Recover
       const failure = await inspectFocusedFailure(job, assignment.targets[0]!, grant.sourceHead,
         authorization.authorization, writerHead, assignment.id);
       if (!failure?.successorProof || !assignmentDiagnosticDefects(failure, assignment.id)) return false;
+      if (isDeepStrictEqual(failure.proof, expectedProof)) writerMatched = true;
     }
-    if (entry.supportRootSha && !await verifyPublishedRepairDiagnostics(job, c, entry.supportRootSha, entry.commitSha))
+    const { logicalAssignmentKey } = await import("./generation-assignment-lifecycle.js");
+    const { dependencyDigest } = await import("./dependency-state.js");
+    const key = logicalAssignmentKey({ schema: "noveltea-assignment-identity/v1",
+      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId: c.origin.graphThreadId,
+      turnDigest: entry.report.turnDigest, assignmentId: assignment.id,
+      planVersion: entry.amendment.afterVersion, sourceHeadSha: entry.report.sourceSha,
+      scopeDigest: dependencyDigest(assignment) });
+    if (entry.supportRootSha && !await verifyPublishedRepairDiagnostics(job, c, entry.supportRootSha,
+      entry.commitSha, c.origin.operation === "dependency-amendment" ? key : nativeCaseId, key,
+      writerMatched ? undefined : expectedProof))
       return false;
+    if (!entry.supportRootSha && !writerMatched) return false;
   }
   return true;
 }
@@ -171,6 +189,20 @@ export async function inspectActiveRecoveryResolution(
       return verifyBlueprintAssessmentResolution(job, ref, correction, correctedHeadSha);
     }
   }
+  const supportFailure = source.channel === "operationRecovery" &&
+    (source.input as unknown as GenerationOperationRecovery).evidence.supportFailure;
+  if (supportFailure && original.origin.operation === "dependency-amendment") {
+    if (correction.store !== "dependency-plan" || correction.ref !== supportFailure.rootReportDigest) return false;
+    const { inspectDependencyPlan, verifiedDependencyEntries, dependencyDigest } = await import("./dependency-state.js");
+    const plan = await inspectDependencyPlan(job);
+    if (!plan) return false;
+    const entries = verifiedDependencyEntries(plan, [supportFailure.rootReportDigest]);
+    const root = entries.find(e => e.reportDigest === supportFailure.rootReportDigest);
+    if (!root || root.parent || root.commitSha !== correctedHeadSha || root.report.turnDigest !== original.origin.turnDigest ||
+        !entries.some(e => e.reportDigest === supportFailure.reportDigest) ||
+        correction.digest !== dependencyDigest(entries.map(e => dependencyDigest(e)))) return false;
+    return verifyPublishedSupportDiagnostics(job, original, entries, undefined, supportFailure);
+  }
   const checkpoints = await inspectRecoveryCheckpoints(job);
   if (correction.store === "specialist-receipt" && source.channel === "operationRecovery" &&
       original.origin.operation === "specialist-result" &&
@@ -182,9 +214,11 @@ export async function inspectActiveRecoveryResolution(
         original.observation === "returned-failure")
       {
         if (!await verifyReviewCycleSuccessor(job, original.origin.sourceHeadSha, correctedHeadSha)) return false;
-        const plan = await (await import("./dependency-state.js")).inspectDependencyPlan(job);
-        const support = plan?.entries.filter(e => e.reviewSourceSha === original.origin.sourceHeadSha && e.phase === "verified") ?? [];
-        if (support.length) return verifyPublishedSupportDiagnostics(job, original, support);
+        const { inspectDependencyPlan, verifiedDependencyEntries } = await import("./dependency-state.js");
+        const plan = await inspectDependencyPlan(job);
+        const roots = plan?.entries.filter(e => e.reviewSourceSha === original.origin.sourceHeadSha && e.phase === "verified") ?? [];
+        if (plan && roots.length) return verifyPublishedSupportDiagnostics(job, original,
+          verifiedDependencyEntries(plan, roots.map(e => e.reportDigest)));
         const root = checkpoints.find(p => p.commitSha === original.origin.sourceHeadSha && p.eligible);
         return !root || !sharedFoundationReviewWorkItem(root.workItem)
           ? true : verifyPublishedRepairDiagnostics(job, original, original.origin.sourceHeadSha, correctedHeadSha);

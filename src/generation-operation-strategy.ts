@@ -46,6 +46,23 @@ const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
   schema: "noveltea-generation-recovery-decision/v1" as const, caseId: c.id,
   checkedSourceHeadSha: c.origin.sourceHeadSha, evidence: proof ? [...c.evidence, proof] : c.evidence,
 });
+export async function originalSuspendedDependency(job: JobStartResult, s: State, c: RecoveryCase) {
+  const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
+    GenerationOperationRecovery | undefined;
+  const captured = op?.evidence.supportFailure;
+  const review = c.origin.operation === "independent-review" && s.reviewPrerequisite &&
+    !s.reviewPrerequisite.supportRef && s.reviewPrerequisite.recoveryCaseId === c.id;
+  if (!captured && !review) return null;
+  if (!op || s.request.turnPlanDigest !== c.origin.turnDigest || s.planVersion !== c.origin.planVersion ||
+      s.active?.id !== c.origin.assignmentId || c.origin.jobId !== job.jobId ||
+      c.origin.jobThreadId !== job.threadId || (captured && (c.origin.operation !== "dependency-amendment" ||
+        c.observation !== "returned-failure" || op.evidence.reference !== "dependency-plan")))
+    throw Error("Supporting recovery lost its original parent identity.");
+  const root = await (await import("./generation.js")).inspectSuspendedDependencyRoot(job, s, c.origin.graphThreadId);
+  if (!root || captured && root.source.rootReportDigest !== captured.rootReportDigest)
+    throw Error("Supporting recovery lost its original suspension.");
+  return { ...root, captured };
+}
 async function originalAssignmentFailure(job: JobStartResult, s: State, c: RecoveryCase,
   diagnostic?: import("./rejected-review-repair.js").NativeDiagnosticReference) {
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
@@ -57,6 +74,15 @@ async function originalAssignmentFailure(job: JobStartResult, s: State, c: Recov
     if (!await originalNoWriteOwnerProof(job, s, c))
       throw Error("Supporting native failure lost its original parent owner proof.");
     return failure;
+  }
+  const suspended = await originalSuspendedDependency(job, s, c);
+  if (suspended) {
+    const failure = await (await import("./dependency-work.js")).inspectSupportingNativeFailure(job,
+      suspended.source, c.origin.graphThreadId, suspended.nativeCaseId, diagnostic);
+    if (suspended.captured?.proof && (!failure || failure.supportReportDigest !== suspended.captured.reportDigest ||
+        !isDeepStrictEqual(failure.proof, suspended.captured.proof)))
+      throw Error("Supporting native terminal changed from its original observation.");
+    if (failure) return failure;
   }
   if (!op?.evidence.assignmentFailure) {
     if (c.origin.operation !== "independent-review" || !usesSharedAssignmentReview(c.origin.assignmentId)) return null;
@@ -86,12 +112,16 @@ async function originalAssignmentFailure(job: JobStartResult, s: State, c: Recov
   return failure;
 }
 export async function authenticateSupportingNativeOrigin(job: JobStartResult, s: State, c: RecoveryCase) {
-  if (!(s.recoverySources.find(x => x.caseId === c.id &&
-    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite)
+  const op = s.recoverySources.find(x => x.caseId === c.id &&
+    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+  if (!op?.evidence.eventBlueprintPrerequisite && !op?.evidence.supportFailure &&
+      !(c.origin.operation === "independent-review" && s.reviewPrerequisite && !s.reviewPrerequisite.supportRef))
     return false;
   const selected = s.recoveryLifecycle.decision;
   if (selected && (selected.action === "known-correction" || selected.action === "plan-amendment") && selected.nativeDiagnostic)
     return !!await authenticateNativeReviewDiagnostic(job, s, c, selected);
+  if (selected?.action === "pause" && selected.evidence.length === c.evidence.length + 2)
+    return !!await pausedNativeReviewDiagnostic(job, s, s.recoveryLifecycle);
   const failure = await originalAssignmentFailure(job, s, c);
   return !!failure && "supportReportDigest" in failure;
 }
@@ -409,6 +439,9 @@ export async function originalFailedReviewProof(job: JobStartResult, s: State,
  * the C06 controller consumes this source-bound input for supersession. */
 export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
   c: RecoveryCase): Promise<{ owner: string; proof: RecoveryEvidence } | null> {
+  const suspended = await originalSuspendedDependency(job, s, c);
+  if (suspended) return { owner: suspended.owner, proof: { store: "dependency-plan",
+    ref: suspended.source.rootReportDigest, digest: suspended.source.rootReportDigest } };
   if (!s.request.turnPlanDigest ||
       c.origin.operation !== "specialist-result" || c.observation !== "returned-failure" ||
       s.active || s.result || s.causalAmendment || s.crossDomainCloseout ||
@@ -534,7 +567,9 @@ async function selectDiagnosticDecision(job: JobStartResult, c: RecoveryCase, pr
 function originalOwnerAdapter(s: State, c: RecoveryCase): "dependency-work" | "adaptive-work" | null {
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined;
-  if (op?.evidence.eventBlueprintPrerequisite) return "dependency-work";
+  if (op?.evidence.eventBlueprintPrerequisite || op?.evidence.supportFailure ||
+      c.origin.operation === "independent-review" && s.reviewPrerequisite && !s.reviewPrerequisite.supportRef)
+    return "dependency-work";
   const interactive = op?.evidence.interactiveNoWrite;
   if (interactive?.domain === "choice" &&
       c.origin.assignmentId === "interactive:" + interactive.milestoneId &&
@@ -579,12 +614,20 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   }
   const owner = await originalNoWriteOwnerProof(job, s, c);
   if (owner) {
-    await assertSource(job, s, c);
+    const suspended = await originalSuspendedDependency(job, s, c);
+    if (suspended) {
+      const { inspectBlueprintSupportProgress } = await import("./dependency-work.js");
+      if (!await inspectBlueprintSupportProgress(job, suspended.source, c.origin.graphThreadId))
+        throw Error("Supporting dependency source has moved.");
+    } else await assertSource(job, s, c);
     const adapter = originalOwnerAdapter(s, c);
     if (!adapter) return { ...base(c, owner.proof), action: "strategy-unresolved",
       reason: "unsupported-implementation", scopeRef: owner.proof, receipt: owner.proof };
+    const selected = suspended?.captured?.reviewAssessment;
+    if (selected && !await (await import("./dependency-work.js")).inspectSupportingReviewSelection(job, suspended!.source, c.origin.graphThreadId, selected.reportDigest, selected))
+      throw Error("Supporting Review assessment changed from its original observation.");
     return { ...base(c, owner.proof), action: "plan-amendment",
-      adapter, owner: owner.owner, scopeRef: owner.proof };
+      adapter, owner: owner.owner, scopeRef: owner.proof, ...(selected ? { supportReview: selected } : {}) };
   }
   const reviewProof = await originalFailedReviewProof(job, s, c);
   if (reviewProof) {
@@ -624,8 +667,9 @@ export async function authenticateOperationOwnerProof(job: JobStartResult, s: St
   if (!d.supportReview) return true;
   const readiness = (s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
-  return !!readiness && d.adapter === "dependency-work" &&
-    !!await (await import("./dependency-work.js")).inspectSupportingReviewSelection(job, readiness,
+  const supportSource = readiness ?? (await originalSuspendedDependency(job, s, c))?.source;
+  return !!supportSource && d.adapter === "dependency-work" &&
+    !!await (await import("./dependency-work.js")).inspectSupportingReviewSelection(job, supportSource,
       c.origin.graphThreadId, d.supportReview.reportDigest, d.supportReview);
 }
 export async function authenticateOperationReviewProof(job: JobStartResult, s: State,
@@ -639,12 +683,28 @@ export async function authenticateOperationReviewProof(job: JobStartResult, s: S
   if (!original || !isDeepStrictEqual(original, d.receipt) ||
       !isDeepStrictEqual(d.evidence, [...c.evidence, original, ...(d.nativeDiagnostic ? [d.nativeDiagnostic] : [])])) return false;
   if (d.nativeDiagnostic && !await authenticateNativeReviewDiagnostic(job, s, c, d)) return false;
+  if (s.reviewPrerequisite?.supportRef && s.reviewPrerequisite.recoveryCaseId === c.id) {
+    const { inspectDependencyPlan, dependencyAncestors } = await import("./dependency-state.js");
+    const plan = await inspectDependencyPlan(job);
+    const root = plan?.entries.find(e => e.reviewSourceSha === c.origin.sourceHeadSha);
+    if (!plan || !root || !await (await import("./generation-recovery-resolution.js")).verifyPublishedSupportDiagnostics(
+        job, c, plan.entries.filter(e => dependencyAncestors(plan.entries, e).has(root.reportDigest)))) return false;
+  }
   if (!d.reviewAssessment) return true;
   return usesSharedAssignmentReview(c.origin.assignmentId) &&
     isDeepStrictEqual(d.reviewAssessment,
       await inspectFoundationReviewBoundary(job, c.origin.sourceHeadSha, d.reviewAssessment));
   } catch { return false; }
 }
+export async function selectSupportingReviewAssessment(job: JobStartResult, s: State, c: RecoveryCase,
+    selected: SupportingReviewAssessment): Promise<RecoveryDecision | null> {
+  const owner = await originalNoWriteOwnerProof(job, s, c);
+  if (!owner) return null;
+  const decision: RecoveryDecision = { ...base(c, owner.proof), action: "plan-amendment",
+    adapter: "dependency-work", owner: owner.owner, scopeRef: owner.proof, supportReview: selected };
+  return await authenticateOperationOwnerProof(job, s, c, decision) ? decision : null;
+}
+
 async function supportingReviewExhaustion(job: JobStartResult, s: State, c: RecoveryCase,
   selected: SupportingReviewAssessment): Promise<RecoveryDecision | null> {
   const owner = await originalNoWriteOwnerProof(job, s, c);
@@ -973,7 +1033,8 @@ async function unresolvedDependencyStrategy(job: JobStartResult, s: State, c: Re
   if (!original || !isDeepStrictEqual(original.proof, scopeRef)) return null;
   const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
-  if (!readiness) return null;
+  const suspended = await originalSuspendedDependency(job, s, c);
+  if (!readiness && !suspended) return null;
   const { inspectDependencyPlan, dependencyBoundary, dependencyDigest } = await import("./dependency-state.js");
   const plan = await inspectDependencyPlan(job);
   const entry = plan?.entries.find(e => e.reportDigest === reportDigest);
@@ -988,8 +1049,9 @@ async function unresolvedDependencyStrategy(job: JobStartResult, s: State, c: Re
     if (!parent) return null;
     root = parent;
   }
-  if (root.blueprintSource?.readinessDigest !== readiness.reportDigest ||
-      root.blueprintSource.milestoneId !== readiness.milestoneId) return null;
+  if (readiness ? root.blueprintSource?.readinessDigest !== readiness.reportDigest ||
+      root.blueprintSource.milestoneId !== readiness.milestoneId :
+      root.reportDigest !== suspended!.source.rootReportDigest) return null;
   const reason = entry.rejection?.kind ??
     (entry.commitSha && entry.review?.verdict === "block" && !entry.reviewSourceSha
       ? "support-review-negative" : null);
@@ -1031,7 +1093,9 @@ export async function pausedBlueprintDependencyDecision(job: JobStartResult, s: 
       !["author-pause", "budget", "provider-unavailable", "author-choice"].includes(pause.reason)) return null;
   const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
-  if (!readiness || pause.resumeRef.ref !== readiness.reportDigest || pause.resumeRef.digest !== readiness.reportDigest ||
+  const suspended = await originalSuspendedDependency(job, s, c);
+  const rootDigest = readiness?.reportDigest ?? suspended?.source.rootReportDigest;
+  if (!rootDigest || pause.resumeRef.ref !== rootDigest || pause.resumeRef.digest !== rootDigest ||
       c.origin.graphThreadId !== graphThreadId) return null;
   const failure = await originalAssignmentFailure(job, s, c);
   if (failure && "supportReportDigest" in failure) {
@@ -1046,7 +1110,7 @@ export async function pausedBlueprintDependencyDecision(job: JobStartResult, s: 
     adapter: "dependency-work" as const, owner: owner.owner, scopeRef: owner.proof };
   const { inspectBlueprintSupportProgress } = await import("./dependency-work.js");
   return await authenticateOperationOwnerProof(job, s, c, decision) &&
-    await inspectBlueprintSupportProgress(job, readiness, graphThreadId) ? decision : null;
+    await inspectBlueprintSupportProgress(job, readiness ?? suspended!.source, graphThreadId) ? decision : null;
 }
 
 async function executeRetainedChoice(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle,
@@ -1265,12 +1329,14 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   });
   const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+  const suspended = await originalSuspendedDependency(job, s, c);
   const pauseDecision = (reason: Extract<RecoveryDecision, { action: "pause" }>["reason"]): RecoveryDecision =>
     d.action === "plan-amendment" && d.nativeDiagnostic
       ? { ...base(c), action: "pause", reason, evidence: d.evidence, resumeRef: d.nativeDiagnostic }
-      : readiness && (d.action === "plan-amendment" && d.adapter === "dependency-work" || d.action === "diagnostic")
+      : (readiness || suspended) && (d.action === "plan-amendment" && d.adapter === "dependency-work" || d.action === "diagnostic")
       ? { ...base(c, d.action === "plan-amendment" ? d.scopeRef : d.evidence.at(-1)), action: "pause", reason, resumeRef: { store: "dependency-plan",
-          ref: readiness.reportDigest, digest: readiness.reportDigest } }
+          ref: readiness?.reportDigest ?? suspended!.source.rootReportDigest,
+          digest: readiness?.reportDigest ?? suspended!.source.rootReportDigest } }
       : { ...base(c), action: "pause", reason };
   try {
     if (d.action === "plan-amendment" && d.adapter === "adaptive-work") {
@@ -1283,7 +1349,8 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
     }
     const control = await readJobControl(job);
     if (control !== "running") return stop(pauseDecision(control === "paused" ? "author-pause" : "cancelled"), "Author control precedes corrective work.", control);
-    if (d.action === "plan-amendment" && d.adapter === "dependency-work" && readiness) {
+    if (d.action === "plan-amendment" && d.adapter === "dependency-work" && (readiness || suspended)) {
+      const supportSource = readiness ?? suspended!.source;
       if (!await authenticateOperationOwnerProof(job, s, c, d) ||
           s.request.turnPlanDigest !== c.origin.turnDigest || s.request.job !== c.origin.jobId ||
           job.threadId !== c.origin.jobThreadId || s.planVersion !== c.origin.planVersion)
@@ -1308,11 +1375,16 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         return { recoveryLifecycle: { ...decideRecovery(settled, ordinary), assessorPending: true },
           reason: null, status: "running" };
       }
-      let result: Awaited<ReturnType<typeof advanceBlueprintDependency>>;
+      let result: Awaited<ReturnType<typeof advanceBlueprintDependency>> | undefined;
+      let patch: Partial<State> | undefined;
       try {
         const nativeDiagnostic = d.nativeDiagnostic ? await authenticateNativeReviewDiagnostic(job, s, c, d) : null;
         if (d.nativeDiagnostic && !nativeDiagnostic) throw Error("Supporting native diagnosis lost its original grant.");
-        result = await advanceBlueprintDependency(s.request, readiness, config, c.id, nativeDiagnostic ?? undefined);
+        if (readiness) result = await advanceBlueprintDependency(s.request, readiness, config, c.id, nativeDiagnostic ?? undefined);
+        else {
+          if (!config || !suspended) throw Error("Supporting continuation requires its original parent.");
+          patch = await (await import("./generation.js")).advanceOriginalDependency(s, config, nativeDiagnostic ?? undefined);
+        }
       } catch (error) {
         // Derive the stop from the existing authenticated ledger even if the
         // child graph wrapped the error. Uncertain effects still fail closed.
@@ -1321,7 +1393,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         if (error instanceof SupportingAssignmentStop) {
           const outcome = error.outcome;
           if (outcome.status === "unresolved" && outcome.dispositionRef === "assess-review") {
-            const selected = await inspectSupportingReviewSelection(job, readiness, c.origin.graphThreadId, error.reportDigest);
+            const selected = await inspectSupportingReviewSelection(job, supportSource, c.origin.graphThreadId, error.reportDigest);
             if (!selected || selected.assessment.digest !== outcome.evidenceRef)
               throw Error("Supporting Review assessment lost its exact source.");
             return { recoveryLifecycle: { ...decideRecovery(settled, { ...d, supportReview: selected }), assessorPending: true },
@@ -1359,6 +1431,44 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         }
         throw error;
       }
+      if (suspended && !readiness && patch) {
+        const { inspectDependencyPlan, dependencyAncestors, dependencyDigest, verifiedDependencyEntries } = await import("./dependency-state.js");
+        const plan = await inspectDependencyPlan(job);
+        if (!plan) throw Error("Supporting dependency lost its verified plan.");
+        const root = plan.entries.find(e => e.reportDigest === suspended.source.rootReportDigest);
+        if (!root?.commitSha || root.review?.verdict !== "pass")
+          throw Error("Supporting dependency has no independently reviewed successor.");
+        const entries = plan.entries.filter(e => dependencyAncestors(plan.entries, e).has(root.reportDigest));
+        if (entries.some(e => !e.commitSha || e.review?.verdict !== "pass" ||
+            e.phase !== "verified" && !(e === root && s.reviewPrerequisite && e.phase === "reviewing")))
+          throw Error("Supporting dependency subtree did not settle.");
+        const { verifyPublishedSupportDiagnostics, inspectActiveRecoveryResolution } = await import("./generation-recovery-resolution.js");
+        if (!await verifyPublishedSupportDiagnostics(job, c, entries, suspended.nativeCaseId))
+          throw Error("Supporting dependency lost its original diagnostic publication.");
+        if (s.reviewPrerequisite) {
+          const proof = await originalFailedReviewProof(job, s, c);
+          if (!proof || !patch.reviewPrerequisite?.supportRef)
+            throw Error("Original Review still lacks its prerequisite handoff.");
+          // The support invocation is settled and independently attested above.
+          // The original negative Review must still be repaired/reviewed.
+          return { ...patch, recoveryLifecycle: { ...decideRecovery({ ...settled, attempt: null },
+            { ...base(c, proof), action: "known-correction", adapter: "review-cycle", receipt: proof }),
+            assessorPending: false }, status: "running", reason: null };
+        }
+        const verified = verifiedDependencyEntries(plan, [root.reportDigest]);
+        const head = await trustedHead(job);
+        const assurance = { store: "dependency-plan" as const, ref: root.reportDigest,
+          digest: dependencyDigest(verified.map(e => dependencyDigest(e))) };
+        const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")!;
+        if (!patch.focusedPrerequisite?.supportRef || !await inspectActiveRecoveryResolution(job, c, source,
+            { case: c, correction: assurance, correctedHeadSha: head, disposition: "active-verified" },
+            { request: s.request, inventory: s.inventory }))
+          throw Error("Supporting dependency did not authenticate its original parent handoff.");
+        return { ...patch, recoveryLifecycle: finishVerifiedRecovery(settled,
+          { status: "verified", caseId: c.id, sourceHeadSha: head, assurance }, true),
+          status: "running", reason: null };
+      }
+      if (!readiness || !result) throw Error("Dependency continuation did not return its original handoff.");
       const assurance = { store: "dependency-plan" as const, ref: readiness.reportDigest, digest: result.digest };
       const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")!;
       const { inspectActiveRecoveryResolution } = await import("./generation-recovery-resolution.js");

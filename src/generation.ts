@@ -281,6 +281,7 @@ type CoreState = GenerationGraphState;
 // Local node observations only; never LangGraph channels or resume authority.
 type State = CoreState & DomainRecoveryStatus & { nonsemanticStop?: "author-boundary";
   reviewAssessmentRequested?: true;
+  supportAssessmentRequested?: true | import("./generation-recovery-contract.js").SupportingReviewAssessment;
   reviewDependencyRequest?: ReviewDependencyRequest;
   /** Callback-local control reason; the child persists the typed controlRef. */
   reviewControlRef?: "budget" | "provider-unavailable" | "author-pause" | "author-choice";
@@ -3049,7 +3050,7 @@ function writerSourceMatches(active: CoreState["active"], source: import("./writ
     (active.stage === source.stage || active.stage === "interactive" && ["choice", "puzzle"].includes(source.stage))) &&
     active.milestone === source.milestoneId;
 }
-export async function advanceSuspendedWriter(s: CoreState, config: RunnableConfig) {
+async function authenticateSuspendedWriter(s: CoreState, config: RunnableConfig) {
   const job = await openJob(s);
   const pin = s.focusedPrerequisite;
   if (!pin?.writerSource || !s.active) throw Error("Writer prerequisite lacks its suspended assignment.");
@@ -3072,11 +3073,115 @@ export async function advanceSuspendedWriter(s: CoreState, config: RunnableConfi
       pin.suspension.owner !== original.report.likelySpecialist)
     throw Error("Writer dependency amendment lost its checkpointed original suspension.");
   await (await import("./writer-dependency.js")).assertWriterAssignmentRoot(job, original, pin.identity.sourceHeadSha);
+  return { job, pin, source, original, inventory: s.inventory };
+}
+
+export async function advanceSuspendedWriter(s: CoreState, config: RunnableConfig,
+    nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation) {
+  const { job, pin, source, inventory } = await authenticateSuspendedWriter(s, config);
   const { advanceWriterDependency } = await import("./dependency-work.js");
-  const resolved = await advanceWriterDependency({ ...s.request, source, inventory: s.inventory }, config, s.recoveryLifecycle.active?.id);
+  const caseId = s.recoveryLifecycle.active?.origin.operation === "dependency-amendment" ? undefined : s.recoveryLifecycle.active?.id;
+  const resolved = await advanceWriterDependency({ ...s.request, source, inventory }, config, caseId, nativeDiagnostic);
   return { result: null, focusedPrerequisite: { ...pin, supportRef: resolved.supportRef },
-    inventory: { ...s.inventory, headSha: resolved.head },
+    inventory: { ...inventory, headSha: resolved.head },
     dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], resolved.reportDigest) };
+}
+
+async function authenticateSuspendedFocused(s: CoreState, config: RunnableConfig) {
+  const job = await openJob(s);
+  if (s.active?.stage !== "focus" || !s.active.milestone)
+    throw Error("Dependency amendment is not bound to a focused assignment.");
+  const pin = s.focusedPrerequisite;
+  if (!pin || pin.supportRef || pin.identity.assignmentId !== s.active.id || pin.identity.planVersion !== s.planVersion ||
+      pin.identity.turnDigest !== s.request.turnPlanDigest || pin.identity.jobId !== job.jobId ||
+      pin.identity.jobThreadId !== job.threadId ||
+      pin.identity.graphThreadId !== config.configurable?.thread_id)
+    throw Error("Dependency amendment has no checkpointed original assignment suspension.");
+  const original = await inspectFocusedPrerequisite(job, s.active.milestone,
+    s.request.turnPlanDigest!, s.request.fixture, s.planVersion!);
+  const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active;
+  if (!original || original.phase !== "waiting-dependency" ||
+      original.report.sourceSha !== pin.identity.sourceHeadSha ||
+      pin.identity.scopeDigest !== dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }) ||
+      dependencyDigest(original.seal) !== pin.suspension.suspensionRef ||
+      original.seal.reportDigest !== pin.suspension.evidenceRef ||
+      pin.suspension.scopeRef !== original.seal.reportDigest ||
+      pin.suspension.owner !== original.report.likelySpecialist || pin.suspension.pendingPhase !== "writer" ||
+      pin.suspension.assignmentKey !== logicalAssignmentKey(pin.identity))
+    throw Error("Dependency amendment lost the original sealed no-write report.");
+  return { job, pin, original, target: s.active.milestone };
+}
+
+/** A support diagnostic never replaces the original Review decision. Rebuild
+ * its immutable source for checking the suspension, not for dispatching work. */
+async function originalReviewDependencyState(s: State) {
+  const c = s.recoveryLifecycle.active;
+  if (!c || s.reviewPrerequisite?.recoveryCaseId !== c.id)
+    throw Error("Supporting Review lost its original parent Case.");
+  const job = await openJob(s);
+  const proof = await (await import("./generation-operation-strategy.js")).originalFailedReviewProof(job, s, c);
+  if (!proof) throw Error("Supporting Review lost its original negative verdict.");
+  return { ...s, recoveryLifecycle: { ...s.recoveryLifecycle, phase: "correcting" as const,
+    assessorPending: false, decision: { schema: "noveltea-generation-recovery-decision/v1" as const,
+      caseId: c.id, checkedSourceHeadSha: c.origin.sourceHeadSha, evidence: [...c.evidence, proof],
+      action: "known-correction" as const, adapter: "review-cycle" as const, receipt: proof } } };
+}
+
+/** Authenticate the exact original suspended parent before any support
+ * terminal can be attributed to it. The existing dependency plan owns the
+ * root and its nested support grants. */
+export async function inspectSuspendedDependencyRoot(job: JobStartResult, s: CoreState, graphThreadId: string) {
+  const config = { configurable: { thread_id: graphThreadId } };
+  const plan = await inspectDependencyPlan(job);
+  if (!plan || s.request.fixture || !s.active) return null;
+  if (s.reviewPrerequisite && !s.reviewPrerequisite.supportRef) {
+    const state = await originalReviewDependencyState(s as State);
+    const { request, pin } = await authenticatedReviewPrerequisite(state, config);
+    const root = plan.entries.find(e => e.reviewSourceSha === request.sourceSha && !e.parent);
+    if (!root || root.report.turnDigest !== request.turnDigest || root.report.assignmentId !== request.originalAssignmentId)
+      return null;
+    return { source: { rootReportDigest: root.reportDigest, expectedHead: root.report.sourceSha },
+      owner: pin.suspension.owner, nativeCaseId: pin.recoveryCaseId };
+  }
+  const pin = s.focusedPrerequisite;
+  if (!pin || pin.supportRef) return null;
+  const original = pin.writerSource
+    ? (await authenticateSuspendedWriter(s, config)).original
+    : (await authenticateSuspendedFocused(s, config)).original;
+  const digest = "reportDigest" in original ? original.reportDigest : original.seal.reportDigest;
+  const root = plan.entries.find(e => e.reportDigest === digest && !e.parent);
+  if (!root || !isDeepStrictEqual(root.report, original.report)) return null;
+  return { source: { rootReportDigest: digest, expectedHead: root.report.sourceSha },
+    owner: pin.suspension.owner,
+    nativeCaseId: s.recoveryLifecycle.active?.origin.operation === "dependency-amendment" ? undefined : s.recoveryLifecycle.active?.id };
+}
+
+/** The original parent operation is shared by ordinary dispatch and the
+ * assessor-selected support continuation. Never run author intake against
+ * an unfinished native draft; admission rechecks the exact original grant. */
+export async function advanceOriginalDependency(state: CoreState, config: RunnableConfig,
+    nativeDiagnostic?: import("./rejected-review-repair.js").NativeDiagnosticContinuation): Promise<Partial<CoreState>> {
+  const s = { ...state, ...projectRecovery(state) } as State;
+  const job = await openJob(s);
+  if (s.reviewPrerequisite) {
+    const originalState = s.recoveryLifecycle.decision?.action === "plan-amendment" ? await originalReviewDependencyState(s) : s;
+    const { request, pin } = await authenticatedReviewPrerequisite(originalState, config);
+    const { advanceReviewDependency, inspectReviewSupport } = await import("./dependency-work.js");
+    await advanceReviewDependency({ ...s.request, turnPlanDigest: request.turnDigest, request }, config,
+      s.recoveryLifecycle.active?.id, nativeDiagnostic);
+    const supported = await inspectReviewSupport(job, request);
+    if (supported.entry.amendment?.assignment.specialist !== pin.suspension.owner)
+      throw Error("Supporting Review assignment has the wrong owner.");
+    return { reviewPrerequisite: { ...pin, supportRef: supported.ref } };
+  }
+  if (s.focusedPrerequisite?.writerSource)
+    return advanceSuspendedWriter(s, config, nativeDiagnostic);
+  const { pin, target } = await authenticateSuspendedFocused(s, config);
+  const resolved = await advanceFocusedDependency({ ...s.request, target }, config, nativeDiagnostic);
+  const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === resolved.reportDigest);
+  if (!entry || entry.phase !== "verified") throw Error("Dependency amendment lost its completion evidence.");
+  return { result: null, focusedPrerequisite: { ...pin, supportRef: dependencyDigest(entry) },
+    dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], entry.reportDigest) };
 }
 
 export async function runRetainedInteractiveChoice(state: CoreState, config: RunnableConfig,
@@ -3690,6 +3795,18 @@ export function recoveryNode(
       return execute({ ...state, ...prior, ...projectRecovery(prior) } as State, config) as Promise<Partial<CoreState>>;
     const local = { ...state, ...prior, ...projectRecovery(prior) } as State;
     const outcome = await observeNodeOutcome(node, local, config, execute);
+    if (node === "dependency_amendment" && outcome.supportAssessmentRequested) {
+      const active = prior.recoveryLifecycle.active;
+      if (!active) throw Error("Supporting assessment requires its original parent Case.");
+      const job = await openJob(local);
+      const selected = outcome.supportAssessmentRequested === true ? await selectOperationStrategy(job, local, active) :
+        await (await import("./generation-operation-strategy.js")).selectSupportingReviewAssessment(job, local, active, outcome.supportAssessmentRequested);
+      if (selected?.action !== "diagnostic" && selected?.action !== "exhausted" && selected?.action !== "plan-amendment")
+        throw Error("Supporting terminal has no independently authenticated assessment.");
+      return { status: selected.action === "exhausted" ? "blocked" : "running",
+        recoveryLifecycle: { ...decideRecovery(prior.recoveryLifecycle, selected),
+          assessorPending: selected.action !== "exhausted" } };
+    }
     if (node === "independent_assignment_review" &&
         (outcome.reviewAssessmentRequested || outcome.reviewPauseReason)) {
       const active = prior.recoveryLifecycle.active;
@@ -4824,50 +4941,44 @@ export function createGenerationGraph(
         const job = await openJob(s);
         const stopped = await withStoryJobLock(job, "dependency-author-boundary", () => authorBoundary(job, s));
         if (stopped) return { ...stopped, result: s.result };
-        if (s.reviewPrerequisite) {
-          const { request, pin } = await authenticatedReviewPrerequisite(s, config);
-          const { advanceReviewDependency, inspectReviewSupport } = await import("./dependency-work.js");
-          await advanceReviewDependency({ ...s.request, turnPlanDigest: request.turnDigest, request }, config, s.recoveryLifecycle.active?.id);
-          const supported = await inspectReviewSupport(job, request);
-          if (supported.entry.amendment?.assignment.specialist !== pin.suspension.owner)
-            throw Error("Supporting Review assignment has the wrong owner.");
-          return { reviewPrerequisite: { ...pin, supportRef: supported.ref } };
-        }
-        if (s.focusedPrerequisite?.writerSource) {
-          return await advanceSuspendedWriter(s, config);
-        }
-        if (s.active?.stage !== "focus" || !s.active.milestone)
-          throw Error("Dependency amendment is not bound to a focused assignment.");
-        const pin = s.focusedPrerequisite;
-        if (!pin || pin.identity.assignmentId !== s.active.id || pin.identity.planVersion !== s.planVersion ||
-            pin.identity.turnDigest !== s.request.turnPlanDigest || pin.identity.jobId !== job.jobId ||
-            pin.identity.jobThreadId !== job.threadId ||
-            pin.identity.graphThreadId !== config.configurable?.thread_id)
-          throw Error("Dependency amendment has no checkpointed original assignment suspension.");
-        const original = await inspectFocusedPrerequisite(job, s.active.milestone,
-          s.request.turnPlanDigest!, s.request.fixture, s.planVersion!);
-        const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active;
-        if (!original || original.phase !== "waiting-dependency" ||
-            original.report.sourceSha !== pin.identity.sourceHeadSha ||
-            pin.identity.scopeDigest !== dependencyDigest({ scope, task: s.request.task, contract: s.request.contract }) ||
-            dependencyDigest(original.seal) !== pin.suspension.suspensionRef ||
-            original.seal.reportDigest !== pin.suspension.evidenceRef ||
-            pin.suspension.scopeRef !== original.seal.reportDigest ||
-            pin.suspension.owner !== original.report.likelySpecialist || pin.suspension.pendingPhase !== "writer" ||
-            pin.suspension.assignmentKey !== logicalAssignmentKey(pin.identity))
-          throw Error("Dependency amendment lost the original sealed no-write report.");
-        const resolved = await advanceFocusedDependency({ ...s.request, target: s.active.milestone }, config);
-        const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === resolved.reportDigest);
-        if (!entry || entry.phase !== "verified") throw Error("Dependency amendment lost its completion evidence.");
-        return { result: null, focusedPrerequisite: { ...pin, supportRef: dependencyDigest(entry) },
-          dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], entry.reportDigest) };
+        return await advanceOriginalDependency(s, config);
       } catch (error) {
         if (isGraphBubbleUp(error)) throw error;
         const stop = blocked(error);
         if (stop.status !== "blocked") return { ...stop, result: s.result };
-        // The original negative Review already owns the active RecoveryCase.
-        // A failed support effect cannot replace it or start an assessor loop.
-        // The shared observation boundary fences the exact failed support task.
+        const { SupportingAssignmentStop, inspectSupportingNativeFailure, inspectSupportingReviewSelection } = await import("./dependency-work.js");
+        if (error instanceof SupportingAssignmentStop && error.outcome.status === "unresolved" &&
+            error.outcome.dispositionRef === "assess-review") {
+          const job = await openJob(s);
+          const thread = config.configurable!.thread_id as string;
+          const root = await inspectSuspendedDependencyRoot(job, s, thread);
+          const selected = root && await inspectSupportingReviewSelection(job, root.source, thread, error.reportDigest);
+          if (!selected || selected.assessment.digest !== error.outcome.evidenceRef)
+            throw new ProtocolIntegrityBlockedError("Supporting Review assessment lost its exact parent proof.");
+          if (s.recoveryLifecycle.active)
+            return { status: "running", supportAssessmentRequested: selected };
+          return operationFailure(s, job, "dependency-amendment", error,
+            { reference: "dependency-plan", assignmentId: s.active?.id,
+              supportFailure: { rootReportDigest: root!.source.rootReportDigest,
+                reportDigest: selected.reportDigest, reviewAssessment: selected } }, "returned-failure");
+        }
+        if (error instanceof SupportingAssignmentStop && error.outcome.status === "unresolved" &&
+            error.outcome.dispositionRef.startsWith("repair-native:")) {
+          const job = await openJob(s);
+          const root = await inspectSuspendedDependencyRoot(job, s, config.configurable!.thread_id as string);
+          const terminal = root && await inspectSupportingNativeFailure(job, root.source,
+            config.configurable!.thread_id as string, root.nativeCaseId);
+          if (!terminal || terminal.supportReportDigest !== error.reportDigest ||
+              terminal.proof.receiptDigest !== error.outcome.evidenceRef ||
+              error.outcome.dispositionRef !== "repair-native:" + terminal.proof.kind)
+            throw new ProtocolIntegrityBlockedError("Supporting native terminal lost its exact parent proof.");
+          if (s.recoveryLifecycle.active)
+            return { status: "running", supportAssessmentRequested: true };
+          return operationFailure(s, job, "dependency-amendment", error,
+            { reference: "dependency-plan", assignmentId: s.active?.id,
+              supportFailure: { rootReportDigest: root!.source.rootReportDigest,
+                reportDigest: terminal.supportReportDigest, proof: terminal.proof } }, "returned-failure");
+        }
         if (s.reviewPrerequisite) throw error;
         return operationFailure(s, await openJob(s), "dependency-amendment", error,
           { reference: "dependency-plan", assignmentId: s.active?.id });

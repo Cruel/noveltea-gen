@@ -985,12 +985,9 @@ transcript after discharge; inspection must fence and spend no new calls.
 R01/R02 source proof fingerprints and the direct/transitive effect consumer
 gates were updated for the affected child and repair continuations, the
 three new pause exits, published grant inspection, and their proof helpers.
-These changes reuse the existing Case and dependency ledgers. A remaining
-audit distinction: the new assessor re-entry for a nonconverging supporting
-child is wired through Blueprint-origin prerequisite Cases; the separate
-writer/Focused/Review-origin dependency-amendment parent path has not yet
-been qualified or fully generalized for that same terminal outcome.
-Do not infer this broader coverage from the Blueprint cases.
+These changes reuse the existing Case and dependency ledgers. The subsequent
+ordinary-suspension correction below generalizes this assessor re-entry to
+writer-, Focused- and Review-origin dependency-amendment paths.
 
 Full-suite qualification is deliberately deferred by the author; the prior
 suite runs remain historical evidence only. No paid provider calls.
@@ -1003,3 +1000,62 @@ passed 5/5 with no skips or cancellations. This includes historical transcript
 tamper detection. Logs: `/tmp/nt275-history-targeted.log`,
 `/tmp/nt275-history-audit-final.log`, `/tmp/nt275-history-type3.log`.
 The two added behavioral mutation controls await the later qualification run.
+
+### #275 follow-up: ordinary suspended prerequisite recovery
+
+The shared dependency inspector now binds a supporting tree to either its
+original Blueprint report or its exact original suspended writer/Focused/Review
+report. It validates ancestry, original child identity and terminal evidence.
+The original dependency-amendment node yields an authenticated native or
+Review-assessment handoff to the existing assessor; the Review-origin path
+retains its original Case. The assessor uses the same dependency-work
+continuation and supporting Review boundary, then verifies the original
+support subtree before re-entering the original consumer. A native diagnostic
+does not grant an additional record or replacement session. The published
+support verification binds the captured terminal to the actual historical
+diagnostic grant. Review-origin re-entry reattests published support, not
+merely its recorded pass. The same inspector handles interrupted publication
+for ordinary suspensions. Existing-record derived references are limited to
+the exact invalid owned ID and unchanged original Git bytes of the consumer.
+
+New graph exits: dependency_amendment returns #4/#6 request an authenticated
+assessment of an existing Case; #5/#7 admit a typed new dependency-amendment
+observation; recoveryNode return #29 selects the existing Case's diagnostic,
+exhaustion or supporting Review assessment, not a writer grant. The extracted
+ordinary dependency authentication and continuation helpers and shared
+support-owner/Review selectors are now fingerprinted as part of R02.
+The direct/transitive consumer and C01/C08 inventories were refreshed for
+the changed source boundaries, not relaxed.
+
+Targeted deterministic evidence (local native CLI, local skills checkout,
+tracing disabled; no paid provider):
+- C04 typed Character prerequisite and its new native-diagnosis variant:
+  original Character -> reviewed World Fact support -> same Character
+  assignment, SQLite reopen, affected-only revalidation and scheduling.
+- R04 writer-native-diagnosis and review-native-diagnosis: existing Character
+  support reaches native nonconvergence, returns to the same supporting
+  writer with a sealed diagnosis and independently verified result; the
+  suspended original Focused writer or negative Review then resumes.
+  The ordinary nested-support crash/re-entry and no-write controls also pass.
+- Root typecheck and the three recovery coverage/consumer/matrix files
+  pass (25/25 audit tests). Logs: `/tmp/nt275-final-type.log`,
+  `/tmp/nt275-final-focused.log`, `/tmp/nt275-final-generation.log`,
+  `/tmp/nt275-final-audit2.log`.
+
+The author explicitly deferred the full qualification run. The targeted
+ordinary-origin cases exercise native writer nonconvergence; the shared
+supporting Review-assessment routing is not independently certified by these
+new cases. The broader cross-product, mutation controls, full root and Studio
+runs and both DB backend runs on this final source remain qualification work.
+Do not close #275 or enable paid #260 until the deferred acceptance is passed.
+
+Final targeted commands on this follow-up source:
+```sh
+pnpm typecheck
+pnpm exec tsx --test --test-name-pattern='R04.*(native-diagnosis|nested|support-no-write)' test/focused-generation.test.ts
+pnpm exec tsx --test --test-name-pattern='C04.*(native diagnosis|prerequisite)|prospective-(writer|review)-native-diagnosis$' test/generation.test.ts
+pnpm exec tsx --test test/generation-recovery-coverage.test.ts test/generation-model-consumer-coverage.test.ts test/generation-recovery-c08-matrix.test.ts
+```
+The Focused and Generation selections each passed 4/4, with zero failures,
+skips or cancellations; the Generation selection includes both earlier
+Blueprint native-diagnosis continuations. The source audit passed 25/25.
