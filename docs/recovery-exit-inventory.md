@@ -404,3 +404,78 @@ native master Build containing that correction before certifying the
 generator against the downloaded artifact. Do not relax the generator's
 protected-record refusal or substitute fixture evidence for the native
 contract.
+
+### R14L incremental qualification (#272)
+
+This section records partial deterministic qualification under #246/#260
+and the R14A–K migrations (#247–#259, #261–#271). It is not a certification
+of the integrated contract. ADRs 0005–0007 and the existing recovery
+contract remain normative; no new recovery authority is introduced.
+
+| Changed boundary | Former exit / next authority | Current gate and independent regression |
+| --- | --- | --- |
+| [Shared assignment outcome](../src/generation-assignment-lifecycle.ts), `assertAssignmentOutcome` | An unknown discriminant could fall through to the unresolved-reference check, and a verified result could contain contradictory control fields. | Exact runtime union, logical key, typed nonblank evidence and disposition reference, and verified source/HEAD are checked before the result can route. The shape gate does not authenticate the referenced receipt; the adapter still must. [Lifecycle regression](../test/generation-assignment-lifecycle.test.ts) proves invalid outputs cannot dispatch or verify the original assignment. |
+| [Subunit Review correction](../src/generation.ts), `subunitReviewTransitions`, `subunitReviewStop` | The admitted Review prerequisite returned unresolved with a string tag; a later parent projection constructed the real suspension. | A sealed controller-amendment request returns `needs-prerequisite` with original Review digest, suspension digest, bounded owner, scope and pending Review phase. The stop consumer authenticates the native checkpoint and exact ledger tuple before handing the request to the parent. Protected approval remains a separate control. |
+| [Review prerequisite identity and continuation](../src/generation.ts), `reviewPrerequisiteOwner`, `reviewPrerequisiteIdentity`, `runReviewPrerequisiteChild` | Supporting owner resolution was performed only by the later parent projection. A returned suspension could be projected without comparing its complete tuple. | Resolve owner from the same pinned Turn for both boundaries; parent authenticates the original Case/plan/native negative Review and rejects inconsistent returned suspension or a stale suspension after support. Only the parent may admit the supporting assignment; the existing continuation requires its verified receipt. [R14D support](../test/generation.test.ts) checks actual persisted correction-child outcomes equal the parent suspension, original assignment key, native Git diff, original reviewer/writer session, child-before-parent crash/restart and next scheduled work. |
+| [Studio fork regression](../web/test/current-checkpoint-fork.test.ts) | Unset native CLI override was restored as the literal string `undefined`; valid fork then failed the tooling gate. | Restore absence rather than assigning undefined. The native tooling guard is unchanged. Test retains negative controls and verified same-Thread continuation. |
+
+#### Downstream reply-consumer gate (partial)
+
+The [existing model-consumer AST test](../test/generation-model-consumer-coverage.test.ts)
+now separately enumerates 37 consumer owners of 16 named reply/Review/planning
+producer functions. The direct-call baseline is not regenerated. The second
+inventory catches imported aliases, new downstream owners and changed
+same-count consumer bodies. A fingerprint is a change alarm, not a semantic
+proof. The following is the crosswalk for this named boundary set; existing
+regressions are referenced as verification targets, not a claim that all
+were executed in this qualification.
+
+| Actual downstream producer → consumer | Validation, disposition and next authority | Regression |
+| --- | --- | --- |
+| `proposeAdaptiveWork` → [reconcileAdaptiveWork](../src/adaptive-work.ts) | Proposal admission and source/plan checks precede reconciliation; invalid/stale proposal cannot authorize dispatch; parent retains plan admission. | [adaptive operation recovery](../test/adaptive-operation-recovery.test.ts) |
+| `proposeDependency`, `reviewNarrative` → [advanceFocusedDependency, advanceReviewDependency, continueReviewDependency](../src/dependency-work.ts) | Exact dependency source/authority and independently verified support before original continuation; no reviewer output grants a writer; unmet/negative support cannot advance original assignment. | [R14D/R04](../test/generation.test.ts), [dependency amendments](../test/dependency-amendments.test.ts) |
+| `runPiAssignmentReview` → [independentAssignmentBoundary](../src/generation.ts); `runPinnedObjectivePlanner`, `assessTurnFulfillment`, `reviewTurnCompleteness` → [createGenerationGraph](../src/generation.ts) | Authenticate native checkpoint/Turn; negative Review enters parent recovery; planner output does not bypass plan admission; final objective verdict must independently pass. | [production archive and Event recovery](../test/generation.test.ts), [Turn fulfillment](../test/turn-fulfillment.test.ts) |
+| `diagnoseUnknownCompletion` → [executeOperationStrategy](../src/generation-operation-strategy.ts); `independentReviewResults` → authenticateSettledReviewVerdict | Diagnostic proposal is not a corrective grant; compare sealed original verdict and source before parent strategy admission. Untrusted evidence fences. | [operation Event diagnostic](../test/generation-operation-event-diagnostic.test.ts) |
+| `parseSpecialistJson` → [authorMilestoneCloseout](../src/cross-domain-closeout-specialist.ts), [recoveredCloseoutReview, verifyLegacyCloseoutReviewTranscript](../src/cross-domain-closeout-work.ts); `reviewNarrative` → advanceCrossDomainCloseout | Parse/validate exact closeout scope and source; legacy evidence re-read is not executable permission; require independent review/native proof before original closure. | [closeout successor](../test/cross-domain-closeout-successor.test.ts) |
+| `reviewNarrative` → [advanceDependentCorrection](../src/dependent-correction-work.ts), [revalidateAfterReviewedCorrection](../src/selective-revalidation-work.ts), [candidateReview](../src/pending-work.ts) | Review exact affected/candidate scope, retain pending obligations on negative/untrusted results; parent decides next authorization. | [dependent correction](../test/dependent-correction-work.test.ts), [selective revalidation](../test/selective-revalidation.test.ts), [pending amendments](../test/pending-work-amendments.test.ts) |
+| `validateSemanticVerdict`, `independentReviewResults` → [captureSealedReview](../src/execution-replay-capture.ts); plus `parseSpecialistJson` → [executeReplay](../src/execution-replay.ts) | Capture/replay validates evidence against the original packet; replay analysis is not a new canonical writer grant. | [execution replay](../test/execution-replay.test.ts) |
+| `reviewNarrative` → [decideEventOnlyOmission](../src/interactive-event-only.ts), [previewStoryMerge](../src/merge-preview.ts), [runNarrativeReview](../src/narrative-review.ts) | Independently review omission/preview/parent scope; no fabricated native checkpoint or positive verdict from an invalid response. | [omission merge](../test/recovery-omission-merge.test.ts), [merge preview](../test/merge-preview.test.ts), [narrative Review](../test/narrative-review.test.ts) |
+| `parseSpecialistJson`, `validateSemanticVerdict` → [reviewNarrative, assignmentVerdictResponseContract, reviewSpecialistAssignments](../src/narrative-review-specialist.ts); `reviewPostcommitDiagnosis` → diagnoseAcceptedPostcommitRound; `validateTurnFulfillment` → reviewTurnCompleteness | Bounded parser/protocol correction, sealed read-only verdict and source-linked findings; only the owning controller can act on a negative verdict or diagnosis. | [semantic assignment Review](../test/semantic-assignment-review.test.ts), [postcommit diagnostic](../test/issue-211-postcommit-diagnostic.test.ts), [fulfillment](../test/turn-fulfillment.test.ts) |
+| `parseSpecialistJson` → [readSealedPostcommitVerdict](../src/postcommit-repair-diagnostic.ts); `runPiAssignmentReview` → [adjudicateRejectedRepair, rejectedRepairOperations](../src/rejected-review-repair.ts); `validateSemanticVerdict`, `independentReviewResults` → foundationDiagnosticSource; `reviewPostcommitDiagnosis` → executeFoundationReviewAssessment | Reopen original transcript and review cycle; diagnosis/adjudication never self-approves a repair; original native and reviewer successor evidence remains mandatory. | [postcommit Review cycle](../test/issue-210-postcommit-review-cycle.test.ts), [R14D](../test/generation.test.ts) |
+| `validateSemanticVerdict`, `independentReviewResults` → [reviewBoundedAssignments](../src/semantic-assignment-review.ts); `reviewSpecialistAssignments` → runPiAssignmentReview | Strict packet, diff, source and assignment review; failed result stays negative, invalid evidence rejected. | [semantic assignment Review](../test/semantic-assignment-review.test.ts) |
+| `validateTurnFulfillment` → [readTurnFulfillment, assessTurnFulfillment](../src/turn-fulfillment.ts) | Revalidate persisted/returned final objective verdict and source; incomplete or forged evidence cannot complete the Turn. | [Turn fulfillment](../test/turn-fulfillment.test.ts) |
+| `readDiscoveryResponse` → [meterDiscoveryAttempts](../web/src/lib/discovery-evidence.server.ts), [onboardingPiRequest](../web/src/lib/onboarding-pi.server.ts); `onboardingPiRequest` → [storyChatDiscoveryRequest](../web/src/lib/story-chat-discovery.server.ts) | Authenticate original attempt/transcript, exact reviewed proposal, owner and approval; meter once, no repeated handoff effects; unresolved/ambiguous response or missing authority cannot grant a new execution. | [real backend Discovery](../web/test/story-chat-discovery.test.ts), [approved continuation](../web/test/story-approved-continuation.test.ts) |
+
+The new named-consumer set does **not** discover arbitrary higher-order
+aliases, every native/domain-manifest consumer or all transitive provider,
+queue and handoff effect consumers. The remaining adapter exits include
+auxiliary Review patches that can disagree with a typed outcome, initial
+negative Review assessment, and cancellation projected through unresolved
+correction outcomes. These require actual production-adapter behavior
+tests and source-linked exit classification before #272 can close.
+
+The Studio Discovery tests currently demonstrate real SQLite and PostgreSQL
+approval and one cumulative-budget handoff through the queue. The production
+Generation tests separately demonstrate resumed Review/support and final
+fulfillment. These are not a single integrated authenticated Discovery-to-
+Generation run and do not satisfy that mandatory acceptance item.
+Paid/live provider acceptance remains with #260 after the deterministic
+gate; no paid model runs were initiated.
+
+#### Incremental verification, 2026-11-24
+
+Base `73f66f8`, Node 24.18.0, pnpm 11.15.0, installed native
+NovelTea 1.0.0 (local Cruel/nt checkout `f842e3c6a`). Studio PostgreSQL
+was a disposable PostgreSQL 17 Alpine container bound to a random
+loopback port with a temporary credential; `NT_TEST_PG_URL` supplied
+the actual connection. No backend substitution or paid provider call.
+
+- `pnpm exec tsx --test test/generation-recovery-c08-matrix.test.ts test/generation-recovery-coverage.test.ts test/generation-model-consumer-coverage.test.ts test/generation-assignment-lifecycle.test.ts test/generation-recovery-graph.test.ts test/generation-operation-event-diagnostic.test.ts test/recovery-cutover.test.ts` — 65 passed, zero failures/skips before downstream audit extension. Final rerun of recovery coverage, model-consumer coverage and shared lifecycle: 32 passed, zero failures/skips, including both new downstream mutation checks.
+- `pnpm exec tsx --test --test-name-pattern='R14D Event native correction.*support' test/generation.test.ts` — passed after typed suspension and final equality check, with real native validation, Git, scripted Pi, and persisted SQLite.
+- `pnpm exec tsx --test --test-name-pattern='R14K canonical archive reaches|R14K current archive reaches|R14I production World question|R14D Event native correction.*(review|diagnosis)' test/generation.test.ts` — six passed, zero failures/skips, including final independent Turn fulfillment and all three nested author question variants.
+- `pnpm --filter @noveltea/studio exec tsx --test test/story-chat-discovery.test.ts test/story-approved-continuation.test.ts test/current-checkpoint-fork.test.ts` — real SQLite and PostgreSQL Discovery and approved continuation passed; fork originally failed because of the unset environment restoration defect. Separate rerun of `test/current-checkpoint-fork.test.ts` after correction passed. No skipped backend.
+- `pnpm exec tsx --test test/semantic-assignment-review.test.ts test/turn-fulfillment.test.ts test/generation-recovery-lifecycle.test.ts test/review-other-owner-controller.test.ts test/review-dependency-request.test.ts` — 59 passed, three private historical-replay-state tests skipped (require `NT_TEST_SEMANTIC_REPLAY_STATE` / `NT_TEST_S14_STATE`), zero failures.
+- `pnpm typecheck`, `pnpm lint`, `pnpm build`, `pnpm --filter @noveltea/studio typecheck`, `pnpm --filter @noveltea/studio build` — all passed, including final production guard change; native validation/Git exercised through the above generator and Studio regressions. No unrelated full test suite.
+
+The focused tests certify the named seams only. Full #272 acceptance and
+separate live #260 certification are not established.

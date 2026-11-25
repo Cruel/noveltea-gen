@@ -132,7 +132,7 @@ test('authenticated recovery forks retain verified work through Composition and 
     const strangerCookie = 'better-auth.session_token=' + strangerSession.token + '.' + createHmac('sha256', config.secret).update(strangerSession.token).digest('base64')
     assert.equal((await forkRequest(input, strangerCookie)).status, 404)
     assert.equal(await countForks(), 0)
-    const native = process.env.NT_NATIVE_CLI!
+    const native = process.env.NT_NATIVE_CLI
     process.env.NT_STUDIO_SKILLS_SOURCE = join(root, 'missing-skills')
     try {
       const missing = await forkRequest(input)
@@ -141,7 +141,10 @@ test('authenticated recovery forks retain verified work through Composition and 
     } finally { process.env.NT_STUDIO_SKILLS_SOURCE = skills }
     process.env.NT_NATIVE_CLI = join(root, 'missing-validator')
     try { assert.equal((await forkRequest(input)).status, 409) }
-    finally { process.env.NT_NATIVE_CLI = native }
+    finally {
+      if (native === undefined) delete process.env.NT_NATIVE_CLI
+      else process.env.NT_NATIVE_CLI = native
+    }
     assert.equal(await countForks(), 0)
     const fork = await checkpointForkRequest(auth, store, new Request(config.baseURL + '/fork', {
       method: 'POST', headers: { origin: config.baseURL, cookie, 'content-type': 'application/json' }, body: JSON.stringify(input),

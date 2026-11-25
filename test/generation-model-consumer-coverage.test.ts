@@ -17,9 +17,9 @@ const modelCalls = new Set([
 ]);
 const printer = ts.createPrinter({ removeComments: true });
 
-function consumerSignatures(file: string, source: string): Record<string, string> {
+function consumerSignatures(file: string, source: string, producers = modelCalls): Record<string, string> {
   const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
-  const names = new Set(modelCalls);
+  const names = new Set(producers);
   for (const stmt of sf.statements) {
     if (!ts.isImportDeclaration(stmt)) continue;
     const bindings = stmt.importClause?.namedBindings;
@@ -125,4 +125,87 @@ test("R14 new aliased invocation and changed outcome with the same call count ch
   assert.notDeepEqual(consumerSignatures("example.ts",
     'import { createAgentSession as open } from "sdk";\n' + original + '\nasync function newWriter() { await open(); }',
   ), baseline);
+});
+
+// R14L: audited downstream reply consumers. Unlike the direct transport
+// inventory, this follows named semantic-review, planning and Discovery
+// output boundaries, including transcript readers that never call Pi.
+// See recovery-exit-inventory.md for the behavioral crosswalk and remaining
+// native, domain-manifest, queue and provider-effect coverage obligations.
+const downstreamProducers = new Set([
+  "parseSpecialistJson", "validateSemanticVerdict", "independentReviewResults",
+  "readDiscoveryResponse", "reviewNarrative", "runPiAssignmentReview",
+  "reviewTurnCompleteness", "validateTurnFulfillment", "assessTurnFulfillment",
+  "runPinnedObjectivePlanner", "proposeAdaptiveWork", "proposeDependency",
+  "diagnoseUnknownCompletion", "onboardingPiRequest", "reviewSpecialistAssignments",
+  "reviewPostcommitDiagnosis",
+]);
+
+// Each owner below is independently identified by its actual downstream
+// consumer, not added to the existing direct Pi-call baseline. A fingerprint
+// change requires review of that owner's verifier and next authority.
+const downstreamReviewed: Record<string, string> = {
+  // Parent admission and source-linked proposal / Review gates.
+  "src/adaptive-work.ts:reconcileAdaptiveWork": "1:4b7540ae585f448c5ea0ac64",
+  "src/dependency-work.ts:advanceFocusedDependency": "2:f40c2fe0d59059a3efd4a964",
+  "src/dependency-work.ts:advanceReviewDependency": "2:fd8f307545297c9e888fc4be",
+  "src/dependency-work.ts:continueReviewDependency": "1:763cf4d2e8040ab5985f92bd",
+  "src/generation.ts:independentAssignmentBoundary": "1:cd5885456ac1086a2ab87516",
+  "src/generation.ts:createGenerationGraph": "3:36546aa62956ff41bf1ea5f2",
+  "src/generation-operation-strategy.ts:executeOperationStrategy": "1:ce61e961ebde642e41f90ed6",
+  // Validated, read-only verdict consumers and sealed evidence re-readers.
+  "src/cross-domain-closeout-specialist.ts:authorMilestoneCloseout": "1:6039a9cb83869c2519f4bc80",
+  "src/cross-domain-closeout-work.ts:recoveredCloseoutReview": "1:d07d3a0f91e221a2cb34c6d1",
+  "src/cross-domain-closeout-work.ts:verifyLegacyCloseoutReviewTranscript": "1:5acb0a5e8eacbf5aabd14ecf",
+  "src/cross-domain-closeout-work.ts:advanceCrossDomainCloseout": "1:dd63274008530f26908842dc",
+  "src/dependent-correction-work.ts:advanceDependentCorrection": "1:f6d5cb09a011d425dbad5a3f",
+  "src/execution-replay-capture.ts:captureSealedReview": "2:6b7747a538feb49ecc6465ae",
+  "src/execution-replay.ts:executeReplay": "3:5300f4a97d25a99b2f72c042",
+  "src/generation-operation-strategy.ts:authenticateSettledReviewVerdict": "1:e3400de56b5517c7964df318",
+  "src/interactive-event-only.ts:decideEventOnlyOmission": "1:c8a51efb97ad675bd98e1a57",
+  "src/merge-preview.ts:previewStoryMerge": "1:840d13f8fe94da7b84e805fe",
+  "src/narrative-review-specialist.ts:reviewNarrative": "2:7520c967cbb41f7d7155bbd2",
+  "src/narrative-review-specialist.ts:assignmentVerdictResponseContract": "3:3648c888decefabfb1e9862d",
+  "src/narrative-review-specialist.ts:diagnoseAcceptedPostcommitRound": "1:18d1cc524efcf878cd06d02f",
+  "src/narrative-review-specialist.ts:reviewSpecialistAssignments": "2:df00496b12dc07926f00d296",
+  "src/narrative-review-specialist.ts:reviewTurnCompleteness": "2:f2859a2242a6b53785bd2f40",
+  "src/narrative-review.ts:runNarrativeReview": "1:5d2a876ce288384748fd396a",
+  "src/pending-work.ts:candidateReview": "1:4964af351a5a8e1287181c37",
+  "src/postcommit-repair-diagnostic.ts:readSealedPostcommitVerdict": "1:d20d8d0f71300bd38b131024",
+  "src/rejected-review-repair.ts:adjudicateRejectedRepair": "1:a652f3d6ec971557d3ded6f9",
+  "src/rejected-review-repair.ts:foundationDiagnosticSource": "2:dcbf910433f0f92378993626",
+  "src/rejected-review-repair.ts:executeFoundationReviewAssessment": "1:b9a79bd66c71024b594fb64f",
+  "src/rejected-review-repair.ts:rejectedRepairOperations": "1:68568bfd3112e0735646e8d0",
+  "src/selective-revalidation-work.ts:revalidateAfterReviewedCorrection": "1:0404670200e88b575ffc58fe",
+  "src/semantic-assignment-review.ts:reviewBoundedAssignments": "2:d8afc63cbd24fab347ef2f5c",
+  "src/semantic-assignment-review.ts:runPiAssignmentReview": "1:b9165fbdbe8c220c4796c9a6",
+  // Final objective evidence and authenticated Studio response/handoff.
+  "src/turn-fulfillment.ts:readTurnFulfillment": "1:6444ae47e2033a25e5c7dfd4",
+  "src/turn-fulfillment.ts:assessTurnFulfillment": "1:ef5b7f354e0afb3dc0ca024a",
+  "web/src/lib/discovery-evidence.server.ts:meterDiscoveryAttempts": "1:e815c68da3ec4e1c0762231d",
+  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
+  "web/src/lib/story-chat-discovery.server.ts:storyChatDiscoveryRequest": "1:14222f0213a6d39fc9d6254d",
+};
+
+test("R14L downstream reply consumers cannot multiply or change their disposition silently", () => {
+  const actual: Record<string, string> = {};
+  for (const base of ["src", "web/src"]) {
+    for (const path of readdirSync(resolve(root, base), { recursive: true, encoding: "utf8" })) {
+      if (!/\.tsx?$/.test(path)) continue;
+      const file = base + "/" + path.replaceAll("\\", "/");
+      Object.assign(actual, consumerSignatures(file, readFileSync(resolve(root, file), "utf8"), downstreamProducers));
+    }
+  }
+  assert.deepEqual(actual, downstreamReviewed);
+});
+
+test("R14L downstream reply audit catches a new consumer and a same-count disposition change", () => {
+  const original = 'import { validateSemanticVerdict as validate } from "./review";\n' +
+    'function review(packet: unknown) { const verdict = validate(packet); return verdict.status === "pass" ? "verified" : "unresolved"; }';
+  const baseline = consumerSignatures("example.ts", original, downstreamProducers);
+  assert.equal(Object.keys(baseline).length, 1);
+  assert.notDeepEqual(consumerSignatures("example.ts", original.replace('"unresolved"', '"verified"'), downstreamProducers), baseline);
+  assert.notDeepEqual(consumerSignatures("example.ts", original +
+    '\nfunction bypass(packet: unknown) { validate(packet); return "verified"; }', downstreamProducers), baseline);
+  assert.deepEqual(consumerSignatures("example.ts", original), {}, "Direct Pi inventory alone misses these consumers");
 });

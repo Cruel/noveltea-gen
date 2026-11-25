@@ -1487,6 +1487,20 @@ async function runArchitectureAssignmentChild(
       resultStatus: finished.submission?.status ?? finished.outcome.status }, "returned-failure");
 }
 
+/** Resolve the supporting owner from the original sealed Turn, never from
+ * model-proposed routing or a child-local grant. */
+async function reviewPrerequisiteOwner(s: State, job: JobStartResult, request: ReviewDependencyRequest) {
+  const turn = await readTurnEvidence(job, s.request.contract, s.request.task, request.turnDigest);
+  if (!turn) throw new ProtocolIntegrityBlockedError("Review prerequisite lost its original Turn.");
+  const owners = request.otherOwnerPath ? turn.assignments.filter(a => a.id !== request.originalAssignmentId &&
+    (a.authority.existingPaths.includes(request.otherOwnerPath!) ||
+      a.authority.newPaths?.includes(request.otherOwnerPath!))) : [];
+  const owner = request.classification === "new-full-story-record" ? "nt-character-development" :
+    request.classification === "other-owner" && owners.length === 1 ? owners[0]!.specialist : null;
+  if (!owner) throw new ProtocolIntegrityBlockedError("Review prerequisite does not have a unique authorized owner.");
+  return owner;
+}
+
 function subunitReviewTransitions(s: State, job: JobStartResult, identity: AssignmentIdentity,
   ref: string, correction: State["recoveryLifecycle"]["active"],
   preflight: () => Promise<AssignmentOutcome | null>,
@@ -1509,9 +1523,17 @@ function subunitReviewTransitions(s: State, job: JobStartResult, identity: Assig
             !!s.request.turnPlanDigest && (await checkPlan(job, s.request, s.planVersion))?.plan?.version === s.planVersion });
       } catch (error) {
         if (error instanceof ReviewDependencyRequiredError) {
-          return error.request.action === "author-approval-required"
-            ? outcome("paused", error.request.digest, { controlRef: "protected-approval:" + error.request.digest })
-            : outcome("unresolved", error.request.digest, { dispositionRef: "review-prerequisite" });
+          const request = error.request;
+          if (request.action === "author-approval-required")
+            return outcome("paused", request.digest, { controlRef: "protected-approval:" + request.digest });
+          if (request.turnDigest !== identity.turnDigest || request.basePlanVersion !== identity.planVersion ||
+              request.originalWorkItem !== workItem || request.sourceSha !== correction.origin.sourceHeadSha ||
+              !(await inspectDependencyPlan(job))?.reviewRequests?.some(r => isDeepStrictEqual(r, request)))
+            throw new ProtocolIntegrityBlockedError("Subunit Review prerequisite lost its sealed original authority.");
+          return { status: "needs-prerequisite", assignmentKey: logicalAssignmentKey(identity),
+            evidenceRef: request.reviewDigest, suspensionRef: request.digest,
+            owner: await reviewPrerequisiteOwner(s, job, request), scopeRef: request.scopeDigest,
+            pendingPhase: "review" } satisfies AssignmentPrerequisiteSuspension;
         }
         const reason = error instanceof Error && (error.name === "PiBudgetPause" ? "budget" :
           error.name === "PiModelUnavailableError" ? "provider-unavailable" :
@@ -1558,14 +1580,18 @@ async function subunitReviewStop(s: State, job: JobStartResult, identity: Assign
     }
     if (outcome.dispositionRef === "cancelled")
       return { status: "cancelled", reviewPauseReason: "cancelled", result: s.result };
-    if (outcome.dispositionRef === "review-prerequisite") {
-      const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
-        r.digest === outcome.evidenceRef && r.turnDigest === identity.turnDigest &&
-        r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === workItem &&
-        r.action === "controller-amendment-required");
-      if (!request) throw new ProtocolIntegrityBlockedError("Subunit Review prerequisite lost its original authority.");
-      return { reviewDependencyRequest: request, result: s.result };
-    }
+  }
+  if (outcome.status === "needs-prerequisite") {
+    const request = (await inspectDependencyPlan(job))?.reviewRequests?.find(r =>
+      r.digest === outcome.suspensionRef && r.reviewDigest === outcome.evidenceRef &&
+      r.turnDigest === identity.turnDigest && r.basePlanVersion === identity.planVersion &&
+      r.sourceSha === correction.origin.sourceHeadSha && r.scopeDigest === outcome.scopeRef &&
+      r.originalAssignmentId === originalAssignmentId && r.originalWorkItem === workItem &&
+      r.action === "controller-amendment-required");
+    if (!request || outcome.assignmentKey !== logicalAssignmentKey(identity) || outcome.pendingPhase !== "review" ||
+        outcome.owner !== await reviewPrerequisiteOwner(s, job, request))
+      throw new ProtocolIntegrityBlockedError("Subunit Review prerequisite lost its original authority.");
+    return { reviewDependencyRequest: request, result: s.result };
   }
   if (outcome.status === "paused") {
     if (outcome.controlRef === "author-updates")
@@ -2273,14 +2299,8 @@ async function reviewPrerequisiteIdentity(s: State, config: RunnableConfig,
   const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
     p.commitSha === request.sourceSha && p.semanticReview === "failed" &&
     p.assurance?.assignmentDigest === request.originalAssignmentDigest);
-  const turn = await readTurnEvidence(job, s.request.contract, s.request.task, request.turnDigest);
-  if (!point?.assurance || !turn) throw Error("Review prerequisite lost its native checkpoint and Turn.");
-  const owners = request.otherOwnerPath ? turn.assignments.filter(a => a.id !== request.originalAssignmentId &&
-    (a.authority.existingPaths.includes(request.otherOwnerPath!) ||
-      a.authority.newPaths?.includes(request.otherOwnerPath!))) : [];
-  const owner = request.classification === "new-full-story-record" ? "nt-character-development" :
-    request.classification === "other-owner" && owners.length === 1 ? owners[0]!.specialist : null;
-  if (!owner) throw Error("Review prerequisite does not have a unique authorized owner.");
+  if (!point?.assurance) throw Error("Review prerequisite lost its native checkpoint.");
+  const owner = await reviewPrerequisiteOwner(s, job, request);
   const migrated = /^(?:event-|composition-|focus:)/.test(request.originalWorkItem);
   const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = s.active;
   const focusSource = migrated && s.active.stage === "focus" && s.active.milestone
@@ -2387,8 +2407,11 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
     submissionKey: key, outcome: null, continuationRef: initial.supportRef,
     suspension: initial.supportRef ? initial.suspension : null },
     { ...assignmentChildConfig(config, initial.identity, "correction"), durability: "sync" });
-  if (finished.outcome?.status === "needs-prerequisite")
+  if (finished.outcome?.status === "needs-prerequisite") {
+    if (initial.supportRef || !isDeepStrictEqual(finished.outcome, initial.suspension))
+      throw new ProtocolIntegrityBlockedError("Returned Review suspension differs from the authenticated original prerequisite.");
     return { reviewPrerequisite: initial };
+  }
   if (finished.outcome && finished.outcome.status !== "verified")
     return subunitReviewStop(s, job, initial.identity, correction, finished.outcome);
   if (finished.outcome?.status !== "verified" || !initial.supportRef ||

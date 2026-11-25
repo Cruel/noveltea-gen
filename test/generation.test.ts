@@ -1015,6 +1015,18 @@ for (const mode of ["review", "support", "diagnosis"] as const) test("R14D Event
       assert.equal(suspended.reviewPrerequisite.suspension.owner, "nt-character-development");
       assert.equal(suspended.reviewPrerequisite.suspension.assignmentKey, event.assignmentKey);
       assert.equal(observed.length, 11);
+      // The original correction child, not only its parent's later projection,
+      // must checkpoint the bounded prerequisite rather than an unresolved failure.
+      const outcomes: unknown[] = [];
+      for await (const tuple of saver.list({ configurable: { thread_id: cfg.configurable.thread_id } })) {
+        const ns = tuple.config.configurable?.checkpoint_ns ?? "";
+        if (!ns.includes("assignment-") || !ns.includes("-correction")) continue;
+        const outcome = tuple.checkpoint.channel_values.outcome as
+          import("../src/generation-assignment-lifecycle.js").AssignmentOutcome | undefined;
+        if (outcome?.assignmentKey === event.assignmentKey) outcomes.push(outcome);
+      }
+      assert.ok(outcomes.length > 0, "Original correction outcome must be persisted");
+      for (const outcome of outcomes) assert.deepEqual(outcome, suspended.reviewPrerequisite.suspension);
       await crashAtSubmission("focused-committed", 16, { interruptAfter: ["dependency_amendment"] });
       const supportHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
       assert.equal(git(f.job.worktreeRoot, "diff", "--name-only", event.commitSha, supportHead), "story/" + supportPath);

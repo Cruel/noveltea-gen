@@ -424,3 +424,23 @@ test("R14I dynamic assignment resumes the writer phase after an interrupted sett
     assert.deepEqual((await make(saver).getState(config)).next, []);
   } finally { saver.db.close(); }
 });
+
+// R14L: a checkpoint or adapter is a runtime trust boundary, not a TypeScript cast.
+for (const [label, forged] of [
+  ["unknown outcome", { status: "completed", assignmentKey: key, evidenceRef: "source", dispositionRef: "done" }],
+  ["contradictory outcome fields", { ...verified(), controlRef: "paused" }],
+  ["untyped evidence reference", { ...verified(), evidenceRef: 42 }],
+  ["blank evidence reference", { ...verified(), evidenceRef: "   " }],
+] as const) test(`R14L rejects ${label} before accepting or dispatching an assignment`, async () => {
+  let effects = 0;
+  const { parent } = graph({
+    preflight: async () => forged as unknown as AssignmentOutcome,
+    invoke: async () => { effects++; throw Error("unexpected writer"); },
+    verify: async () => { effects++; throw Error("unexpected review"); },
+  }, `r14l-${label.replaceAll(" ", "-")}`);
+  const config = { configurable: { thread_id: "r14l-forged" } };
+  await assert.rejects(parent.invoke({ identity, submission: null, outcome: null, continuationRef: null }, config),
+    /Assignment outcome/);
+  assert.equal(effects, 0);
+  assert.notEqual((await parent.getState(config)).values.outcome?.status, "verified");
+});

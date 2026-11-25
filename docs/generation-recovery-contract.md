@@ -750,3 +750,15 @@ writer and Review path with an injected scripted Pi transport; tests assert
 source receipts, native Git effects, and no additional model calls on fenced
 resumption. This does not confer current authority on historical fixture-only
 checkpoints.
+
+**R14L qualification progress (#272).** The shared lifecycle now rejects
+unknown or contradictory runtime outcome shapes before dispatch/routing.
+For checkpointed subunit Review corrections, a sealed owner-scoped
+controller prerequisite returns the actual `needs-prerequisite` outcome,
+not an unresolved tag. The parent reauthenticates the sealed Review,
+Turn, plan, source, scope and owner before admitting support; the original
+Review remains pending until independently verified continuation. See
+[the incremental source-linked inventory](recovery-exit-inventory.md#r14l-incremental-qualification-272).
+The full per-adapter exit audit, integrated Studio-to-Generation seam,
+and complete deterministic certification remain open. No normative ADR
+or recovery authority has changed.

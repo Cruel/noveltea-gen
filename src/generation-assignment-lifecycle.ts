@@ -164,23 +164,57 @@ export type AssignmentAdapter<I extends LifecycleIdentity = AssignmentIdentity> 
 }>;
 
 function assertAssignmentOutcome(identity: LifecycleIdentity, outcome: AssignmentOutcome<LifecycleIdentity>): void {
-  if (outcome.assignmentKey !== logicalAssignmentKey(identity) || !outcome.evidenceRef)
+  const nonempty = (value: unknown): value is string => typeof value === "string" && !!value.trim();
+  if (!outcome || typeof outcome !== "object" ||
+      outcome.assignmentKey !== logicalAssignmentKey(identity) || !nonempty(outcome.evidenceRef))
     throw Error("Assignment outcome lacks an authenticated original source reference.");
+  // Check the runtime union at the receipt/checkpoint boundary. A cast or a
+  // persisted object with an unknown discriminant must not fall through to
+  // the unresolved case, and another outcome's fields cannot confer a
+  // contradictory permission or continuation.
+  const common = ["assignmentKey", "evidenceRef", "status"];
+  let fields: string[];
+  switch (outcome.status) {
+    case "verified":
+      fields = ["reviewRef", identity.schema === "noveltea-discovery-assignment/v1" ? "sourceDigest" : "headSha"];
+      break;
+    case "needs-prerequisite":
+      fields = ["suspensionRef", "owner", "scopeRef", "pendingPhase"];
+      break;
+    case "awaiting-author":
+      fields = ["questionRef", "resumePhase"];
+      break;
+    case "paused":
+      fields = ["controlRef"];
+      break;
+    case "fenced":
+      fields = ["inspectionRef"];
+      break;
+    case "unresolved":
+      fields = ["dispositionRef"];
+      break;
+    default:
+      throw Error("Assignment outcome has an unknown disposition.");
+  }
+  const expected = new Set([...common, ...fields]);
+  if (Object.keys(outcome).length !== expected.size ||
+      Object.keys(outcome).some(field => !expected.has(field)))
+    throw Error("Assignment outcome has contradictory or missing typed fields.");
   const ref = outcome.status === "verified" ? outcome.reviewRef :
     outcome.status === "needs-prerequisite" ? outcome.suspensionRef :
     outcome.status === "awaiting-author" ? outcome.questionRef :
     outcome.status === "paused" ? outcome.controlRef :
     outcome.status === "fenced" ? outcome.inspectionRef : outcome.dispositionRef;
   if (outcome.status === "needs-prerequisite" &&
-      (!outcome.owner?.trim() || !outcome.scopeRef?.trim() ||
+      (!nonempty(outcome.owner) || !nonempty(outcome.scopeRef) ||
        !["writer", "review"].includes(outcome.pendingPhase)))
     throw Error("Prerequisite suspension lacks its bounded owner, scope or pending phase.");
   if (outcome.status === "awaiting-author" && !["writer", "review", "correction"].includes(outcome.resumePhase))
     throw Error("Author question lacks its original continuation phase.");
-  if (typeof ref !== "string" || !ref.trim() ||
+  if (!nonempty(ref) ||
       outcome.status === "verified" && (identity.schema === "noveltea-discovery-assignment/v1"
         ? !("sourceDigest" in outcome) || outcome.sourceDigest !== identity.scopeDigest
-        : !("headSha" in outcome) || !/^[a-f0-9]{40}$/.test(outcome.headSha)))
+        : !("headSha" in outcome) || typeof outcome.headSha !== "string" || !/^[a-f0-9]{40}$/.test(outcome.headSha)))
     throw Error("Assignment outcome has no valid typed evidence/commit reference.");
 }
 
