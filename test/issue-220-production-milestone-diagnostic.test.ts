@@ -32,7 +32,9 @@ import { removeTestTree } from "./helpers.js";
 import { BlueprintAssessmentRequired, readBlueprintAssessment, verifyBlueprintAssessmentResolution,
   type BlueprintAssessmentGrant } from "../src/blueprint-reassessment.js";
 import { selectOperationStrategy, authenticateOperationReviewProof } from "../src/generation-operation-strategy.js";
-import { recoveryCaseId } from "../src/generation-recovery-lifecycle.js";
+import { admitRecovery, decideRecovery, emptyRecoveryLifecycle, finishVerifiedRecovery, recoveryCaseId } from "../src/generation-recovery-lifecycle.js";
+import { ProtocolExhaustedError } from "../src/response-contract-recovery.js";
+import type { RecoveryLifecycle } from "../src/generation-recovery-contract.js";
 import type { RecoveryCase, RecoveryOrigin } from "../src/generation-recovery-contract.js";
 import type { GenerationGraphState } from "../src/generation.js";
 
@@ -96,7 +98,7 @@ function scripted(
   downstreamCorrection = false,
   productive = false,
   omitReads = false,
-  sourceRecovery = false,
+  sourceRecovery: boolean | "malformed" | "false-pass" = false,
 ): Provider {
   let reviewerRound = 0;
   let writerRound = 0;
@@ -150,9 +152,13 @@ function scripted(
     event.knowledge = "A witness reports who entered the gate; the subject does not provide testimony.";
     event.participants = round === 0 ? [] : ["character.witness"];
     event.evidence[0]!.source = "The gate witness describes character.subject";
-    event.evidence[0]!.characterSources = [round === 0
+    event.evidence[0]!.observation = "The witness saw the subject enter today.";
+    event.evidence[0]!.access = "The guard can interview the witness at the gate.";
+    event.evidence[0]!.establishes = "The witness reports the subject entered today.";
+    event.evidence[0]!.limits = "The account does not establish a previous visit.";
+    event.evidence[0]!.characterSources = [round === 0 && sourceRecovery !== "false-pass"
       ? { id: "character.subject", availability: "prospective", role: "Person discussed by the witness." }
-      : { id: "character.witness", availability: round < 4 ? "existing" : "prospective", role: "Provides eyewitness testimony." }];
+      : { id: "character.witness", availability: round < 4 && sourceRecovery !== "false-pass" ? "existing" : "prospective", role: "Provides eyewitness testimony." }];
     return { ...draft, events: [event] };
   };
   const sourceQuote = (round: number) => JSON.stringify(sourceDraft(round).events[0]!.evidence);
@@ -187,14 +193,18 @@ function scripted(
     const isReplacement = prompt.includes("FRESH INDEPENDENT REPLACEMENT REVIEWER");
     const isCorrection = prompt.includes("READ-ONLY MILESTONE SOURCE-READ CORRECTION");
     const isProtocol = prompt.includes("READ-ONLY MILESTONE REVIEWER FORMAT CORRECTION");
+    const isPlannerProtocol = prompt.includes("READ-ONLY MILESTONE PLANNER FORMAT CORRECTION");
     const isReview = prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") || isCorrection && pendingReadRole === "reviewer";
     const isWriter = prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") || isCorrection && pendingReadRole === "writer";
 
-    if (!isDiagnostic && !isReview && !isWriter && !isProtocol)
+    if (!isDiagnostic && !isReview && !isWriter && !isProtocol && !isPlannerProtocol)
       throw Error("Unexpected Milestone Pi prompt: " + prompt.slice(0, 200));
     let content: AssistantMessage["content"];
     let reason: "stop" | "toolUse" = "stop";
-    if (isProtocol) {
+    if (isPlannerProtocol && sourceRecovery === "malformed") {
+      assert.equal(tools.size, 0, "planner format correction must revoke all tools");
+      content = [{ type: "text", text: "{" }];
+    } else if (isProtocol) {
       assert.ok(pendingProtocol);
       assert.match(prompt, /ZERO-BASED/);
       assert.match(prompt, /prior\[0\]/);
@@ -243,11 +253,15 @@ function scripted(
       ];
     } else if (isReview) {
       if (sourceRecovery) {
-        if (reviewerRound < 4) {
+        if (reviewerRound < (sourceRecovery === "false-pass" ? 1 : 4)) {
           assert.match(prompt, /CONTROLLER SOURCE FINDINGS/);
-          assert.match(prompt, reviewerRound === 0 ? /character.subject/ : /character.witness/);
+          assert.match(prompt, reviewerRound === 0 && sourceRecovery !== "false-pass" ? /character.subject/ : /character.witness/);
         }
-        content = [{ type: "text", text: JSON.stringify(sourceReview(reviewerRound++)) }];
+        const round = reviewerRound++;
+        const response = sourceRecovery === "false-pass"
+          ? { ...sourceReview(0), status: "pass", findings: [], prior: [] }
+          : sourceReview(round);
+        content = [{ type: "text", text: JSON.stringify(response) }];
       } else if (productive) {
         const reply = productiveReview(reviewerRound++);
         if (omitReads && reply.prior.length && !protocolCorrected) {
@@ -321,7 +335,9 @@ function scripted(
       if (sourceRecovery) {
         if (writerRound > 0) assert.match(prompt, /CONTROLLER SOURCE FINDINGS/);
         if (writerRound === 4) assert.match(prompt, /INDEPENDENT DIAGNOSTIC ADVICE/);
-        content = [{ type: "text", text: JSON.stringify(sourceDraft(writerRound++)) }];
+        const round = writerRound++;
+        content = [{ type: "text", text: sourceRecovery === "malformed" ? "{" :
+          JSON.stringify(sourceDraft(sourceRecovery === "false-pass" && round > 0 ? 4 : round)) }];
       } else if (productive) {
         content = [{ type: "text", text: JSON.stringify(productiveDraft(writerRound++)) }];
       } else if (downstreamCorrection) {
@@ -435,6 +451,7 @@ test("#220: three stalled Milestone reviews actually dispatch a fresh independen
   let secondCaseJobId: string | undefined;
   let downstreamJobId: string | undefined;
   let sourceJobId: string | undefined;
+  const controlJobIds: string[] = [];
   try {
     const app = join(tmp, "app"), state = join(tmp, "state"), cache = join(tmp, "cache"),
       socketDir = join(tmp, "controller");
@@ -456,6 +473,7 @@ fulfillment: {any_of: []}
 ---
 
 The guard finds a dated register, but no evidence of a prior visit.
+A witness at the gate personally saw a named visitor enter today and can be interviewed by the guard. The visitor is the subject of that account, not its provider.
 `;
     writeFileSync(join(story, milestonePath), source);
     const git = (...args: string[]) =>
@@ -1029,6 +1047,7 @@ The guard finds a dated register, but no evidence of a prior visit.
       result: Annotation<Awaited<ReturnType<typeof ensureMilestoneBlueprint>> | null>(),
     });
     const sourceReceipt = join(sourceJob.stateDir, "milestone-blueprints", "sample.json");
+    let lifecycle: RecoveryLifecycle | undefined;
     let originalSeal: { writer: { id: string }; reviewer: { id: string }; assignmentKey: string } | undefined;
     const execute = (grant?: BlueprintAssessmentGrant) => ensureMilestoneBlueprint(sourceJob, plan,
       assignment, snapshot, model.provider, model.id, task, head, false, undefined, parentKey, turnDigest, grant);
@@ -1065,6 +1084,9 @@ The guard finds a dated register, but no evidence of a prior visit.
           assert.equal(decision?.adapter, "review-cycle");
           assert.equal(await authenticateOperationReviewProof(sourceJob, s, c, decision!), true);
           assert.deepEqual(await selectOperationStrategy(sourceJob, s, c), decision);
+          lifecycle = decideRecovery(admitRecovery(emptyRecoveryLifecycle(), { outcome: "admitted", case: c }), decision!);
+          assert.equal(lifecycle.active?.id, c.id);
+          assert.deepEqual(admitRecovery(lifecycle, { outcome: "admitted", case: c }), lifecycle);
           return { grant: { caseId: c.id, ref } };
         }
       })
@@ -1086,9 +1108,14 @@ The guard finds a dated register, but no evidence of a prior visit.
       assert.equal(sourceCalls.filter(c => c.prompt.includes("FORMAT CORRECTION")).length, 0);
       assert.ok(sourceCalls.every(c => !c.tools.some(t => ["write", "edit", "bash"].includes(t))));
       assert.equal(milestoneCharacterPrerequisites(result.blueprint, assignment)[0]?.characterId, "character.witness");
-      assert.equal(await verifyBlueprintAssessmentResolution(sourceJob, settled.grant!.ref, {
-        store: "specialist-receipt", ref: "milestone-blueprints/sample.json", digest: sha(JSON.stringify(result.pin)),
-      }, head), true);
+      const assurance = { store: "specialist-receipt" as const, ref: "milestone-blueprints/sample.json", digest: sha(JSON.stringify(result.pin)) };
+      const verified = await verifyBlueprintAssessmentResolution(sourceJob, settled.grant!.ref, assurance, head);
+      assert.equal(verified, true);
+      const discharged = finishVerifiedRecovery(lifecycle!, { status: "verified", caseId: settled.grant!.caseId,
+        sourceHeadSha: head, assurance }, verified);
+      assert.equal(discharged.active, null);
+      assert.equal(discharged.discharged.length, 1);
+      assert.equal(discharged.discharged[0]!.case.id, settled.grant!.caseId);
       assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceJob.worktreeRoot, encoding: "utf8" }).trim(), "");
       const approved = readFileSync(sourceReceipt, "utf8");
       final.rounds[0].draft.events[0].participants.push("character.subject");
@@ -1096,11 +1123,68 @@ The guard finds a dated register, but no evidence of a prior visit.
       await assert.rejects(readReviewedMilestoneBlueprint(sourceJob, result.pin, assignment), /evidence changed|sealed|provenance/);
       writeFileSync(sourceReceipt, approved);
     } finally { sourceSaver.db.close(); }
+
+    // Malformed JSON exhausts the original zero-tool allowance; a false PASS
+    // from the independent reviewer cannot grant a pin.
+    for (const mode of ["malformed", "false-pass"] as const) {
+      const controlJobId = randomUUID();
+      controlJobIds.push(controlJobId);
+      const controlDb = new DatabaseSync(join(app, "studio.sqlite"));
+      try { controlDb.prepare("INSERT INTO studio_sessions VALUES (?,?,?,?,?)")
+        .run(controlJobId, owner, "story", head, null); } finally { controlDb.close(); }
+      const controlJob = await startStoryJob({ story, job: controlJobId, worktreeCacheRoot: scoped });
+      const controlCalls: Call[] = [];
+      const controlRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+      controlRuntime.registerNativeProvider(scripted(controlCalls, "continue", false, false, false, false, mode));
+      await controlRuntime.refresh({ allowNetwork: false });
+      await configurePiPolicy(controlJob, { version: 1, profile: { provider: model.provider, model: model.id },
+        limits: { modelCalls: 20 } });
+      const controlSaver = SqliteSaver.fromConnString(join(controlJob.stateDir, "control-assignment.sqlite"));
+      const controlParent = new StateGraph(Annotation.Root({ result: Annotation<unknown>() }))
+        .addNode("original", async () => ({ result: await ensureMilestoneBlueprint(controlJob, plan,
+          assignment, snapshot, model.provider, model.id, task, head, false) }))
+        .addEdge(START, "original").addEdge("original", END)
+        .compile({ checkpointer: controlSaver });
+      try {
+        const run = () => withJobModelRuntime(controlRuntime, () =>
+          withStoryJobLock(controlJob, "event-sample", () => controlParent.invoke({ result: null },
+            { configurable: { thread_id: controlJob.threadId + ":control" }, durability: "sync", recursionLimit: 10000 })));
+        const controlFile = join(controlJob.stateDir, "milestone-blueprints", "sample.json");
+        if (mode === "malformed") {
+          await assert.rejects(run(), error => error instanceof ProtocolExhaustedError && error.attempts === 3);
+          const receipt = JSON.parse(readFileSync(controlFile, "utf8"));
+          assert.notEqual(receipt.phase, "approved");
+          assert.equal(receipt.approvedDigest, undefined);
+          assert.equal(receipt.rounds.length, 0);
+        } else {
+          const outcome = (await run()).result as Awaited<ReturnType<typeof ensureMilestoneBlueprint>>;
+          const raw = readFileSync(controlFile, "utf8");
+          const receipt = JSON.parse(raw);
+          assert.equal(receipt.phase, "approved");
+          assert.deepEqual(receipt.rounds.map((r: any) => r.review.status), ["revise", "pass"]);
+          assert.equal(receipt.rounds[0].reviewerVerdict.status, "pass");
+          assert.equal(receipt.rounds[1].reviewerVerdict, undefined);
+          assert.notEqual(receipt.rounds[0].draftDigest, receipt.approvedDigest);
+          assert.deepEqual(receipt.rounds[0].draft.events[0].evidence, receipt.rounds[1].draft.events[0].evidence,
+            "A valid correction to participants alone must not be forced to rewrite its evidence.");
+          assert.ok(controlCalls.some(c => c.prompt.includes("CONTROLLER VETO OF INDEPENDENT PASS")));
+          await readReviewedMilestoneBlueprint(controlJob, outcome.pin, assignment);
+          delete receipt.rounds[0].reviewerVerdict;
+          writeFileSync(controlFile, JSON.stringify(receipt));
+          await assert.rejects(readReviewedMilestoneBlueprint(controlJob, outcome.pin, assignment), /sealed Pi answers/);
+          writeFileSync(controlFile, raw);
+        }
+        assert.equal(controlCalls.filter(c => c.prompt.includes("FORMAT CORRECTION")).length, mode === "malformed" ? 2 : 0);
+        assert.equal(controlCalls.some(c => c.prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW")), mode === "false-pass");
+        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: controlJob.worktreeRoot, encoding: "utf8" }).trim(), "");
+      } finally { controlSaver.db.close(); }
+    }
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
+    if (controller) for (const id of controlJobIds) await controller.dispose(id);
     if (controller && sourceJobId) await controller.dispose(sourceJobId);
     if (controller && downstreamJobId) await controller.dispose(downstreamJobId);
     if (controller && secondCaseJobId) await controller.dispose(secondCaseJobId);

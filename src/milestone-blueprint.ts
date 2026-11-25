@@ -266,7 +266,7 @@ export function milestonePassCorrections(draft: MilestoneBlueprint,
   if (!["noveltea-milestone-blueprint-review/v3",
         "noveltea-milestone-blueprint-review/v4",
         "noveltea-milestone-blueprint-review/v5"].includes(review.schema)) return true; // sealed legacy
-  return previous.every((round, index) => round.review.findings.every((finding, findingIndex) => {
+  return previous.every((round, index) => independentFindings(round).every((finding, findingIndex) => {
     const proof = review.prior?.find(p => p.round === index && p.findingIndex === findingIndex);
     return proof?.status === "resolved" &&
       milestoneCorrectionEvidence(proof, finding, round.draft, draft,
@@ -286,20 +286,37 @@ interface SessionSeal {
   id: string; file: string; bytes: number; digest: string;
 }
 interface Round { draft: MilestoneBlueprint; review: MilestoneBlueprintReview;
-  draftDigest: string; reviewDigest: string }
+  draftDigest: string; reviewDigest: string;
+  /** Only present when the controller vetoes an actual independent PASS.
+   * The effective rejection is not attributed to the independent reviewer. */
+  reviewerVerdict?: MilestoneBlueprintReview }
+
+/** Controller vetoes are checked by the controller on every draft, not
+ * masqueraded as independent review findings requiring a particular repair.
+ * Either side of a source relationship may be changed to resolve it. */
+function independentFindings(round: Round | undefined): readonly MilestoneFinding[] {
+  return round?.reviewerVerdict?.findings ?? round?.review.findings ?? [];
+}
 
 /** Reconstruct nonprogress entirely from sealed rounds, including after a restart.
  * Cosmetic rewrites, oscillation, and newly discovered issues alone cannot
  * reset the two-correction reassessment threshold. */
-export function milestoneReviewStagnation(rounds: readonly Round[]): number {
+export function milestoneReviewStagnation(rounds: readonly Round[], assignment?: SourceScope): number {
   let stalled = 0;
   for (let i = 1; i < rounds.length; i++) {
     const prior = rounds[i - 1]!;
     const current = rounds[i]!;
-    const material = (current.review.prior ?? []).some(p => {
+    const nextControllerFindings = prior.reviewerVerdict && assignment
+      ? milestoneBlueprintSourceFindings(current.draft, assignment) : null;
+    const resolvedControllerFinding = nextControllerFindings && assignment &&
+      milestoneBlueprintSourceFindings(prior.draft, assignment).some(old =>
+        !nextControllerFindings.some(next =>
+          old.category === next.category && old.eventId === next.eventId &&
+          old.offendingId === next.offendingId && old.expected === next.expected));
+    const material = !!resolvedControllerFinding || (current.review.prior ?? []).some(p => {
       if (p.status !== "resolved" && p.status !== "improved") return false;
       const source = rounds[p.round];
-      const finding = source?.review.findings[p.findingIndex];
+      const finding = independentFindings(source)[p.findingIndex];
       if (!finding) return false;
       if (finding.evidence && "target" in finding.evidence) {
         return current.review.schema === "noveltea-milestone-blueprint-review/v5" &&
@@ -463,7 +480,7 @@ class MilestoneContractError extends Error {
 function invalid(path: string, expected: string): never { throw new MilestoneContractError(path, expected); }
 /** All historical identifiers are controller-generated, never inferred by a model. */
 export function milestoneReviewFindingIndex(previous: readonly Round[]) {
-  return previous.flatMap((round, i) => round.review.findings.map((finding, j) => ({
+  return previous.flatMap((round, i) => independentFindings(round).map((finding, j) => ({
     round: i, findingIndex: j, ...(finding.eventId ? { eventId: finding.eventId } : {}),
     evidence: finding.evidence,
   })));
@@ -471,6 +488,7 @@ export function milestoneReviewFindingIndex(previous: readonly Round[]) {
 function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">,
   previous: readonly Round[]) {
   return "Round and findingIndex are ZERO-BASED. The first review is round 0. " +
+    "Controller veto findings are independently rechecked by the controller, not included as prior reviewer identities. " +
     "Use each of these EXACT prior identities once, with its original Event ID or downstream target and field: " +
     JSON.stringify(milestoneReviewFindingIndex(previous)) +
     ". Current provisional Event IDs: " + JSON.stringify(draft.events.map(e => e.id)) +
@@ -615,6 +633,40 @@ function assertMilestoneSources(draft: MilestoneBlueprint, assignment: SourceSco
   if (findings.length)
     throw new MilestoneSourceError(findings);
 }
+/** Reuse the existing correction cycle for a controller-vetoed PASS, while
+ * retaining the actual independent response as separate transcript evidence.
+ * Group exact field targets; the full typed findings remain reconstructible
+ * from the same sealed draft and assignment (and are sent to the planner). */
+function controllerReviewDisposition(draft: MilestoneBlueprint, assignment: SourceScope,
+  verdict: MilestoneBlueprintReview): MilestoneBlueprintReview {
+  if (verdict.status !== "pass") return verdict;
+  const sources = milestoneBlueprintSourceFindings(draft, assignment);
+  if (!sources.length) return verdict;
+  const findings: MilestoneFinding[] = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    const event = source.eventId && milestoneEvent(draft, source.eventId);
+    const field = source.path.match(/^events\[\d+\]\.(dependsOn|participants|evidence)/)?.[1] as MilestoneField | undefined;
+    const key = source.eventId + ":" + field;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const base = { anchorPath: assignment.milestonePath,
+      requirement: "Controller source validation: " + source.path,
+      reason: "Independent PASS conflicts with the deterministic source finding for " + source.offendingId,
+      correction: source.expected };
+    if (event && field) {
+      const exactId = JSON.stringify(source.offendingId);
+      const serialized = milestoneFieldText(event, field);
+      const anchor = '"anchorPath":' + exactId;
+      const quote = exactId.length >= 8 && serialized.includes(exactId) ? exactId :
+        field === "evidence" && serialized.includes(anchor) ? anchor : serialized;
+      findings.push({ ...base, eventId: event.id, evidence: { field, quote, repair: "replace" } });
+    } else if (source.path === "downstream") findings.push({ ...base,
+      evidence: { target: "missing-downstream", owner: "composition",
+        quote: JSON.stringify(draft.downstream), repair: "extend" } });
+  }
+  return { ...verdict, status: "revise", findings: findings.slice(0, 12) };
+}
 function sourceFindingFeedback(draft: MilestoneBlueprint, assignment: SourceScope): string {
   const findings = milestoneBlueprintSourceFindings(draft, assignment);
   return findings.length ? "\nCONTROLLER SOURCE FINDINGS (data, not new authority): " + JSON.stringify(findings) +
@@ -652,7 +704,7 @@ function bindCompactReviewEvidence(raw: unknown, draft: MilestoneBlueprint,
     if (!object(item) || !object(item.evidence) ||
         !Number.isSafeInteger(item.round) || !Number.isSafeInteger(item.findingIndex)) continue;
     const original = previous[item.round as number];
-    const finding = original?.review.findings[item.findingIndex as number];
+    const finding = independentFindings(original)[item.findingIndex as number];
     const claim = finding?.evidence, e = item.evidence;
     if (!claim || !original || typeof e.kind !== "string") continue;
     if ("target" in claim && claim.target === "missing-downstream") {
@@ -783,7 +835,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
     throw Error("New Milestone review requires v5 source-bound findings.");
   if (hasPrior) {
     const review = raw as unknown as MilestoneBlueprintReview;
-    const count = previous.reduce((total, round) => total + round.review.findings.length, 0);
+    const count = previous.reduce((total, round) => total + independentFindings(round).length, 0);
     if (!Array.isArray(review.prior) || review.prior.length !== count)
       invalid("prior", "Milestone review must account for every prior material finding exactly once: " + JSON.stringify(milestoneReviewFindingIndex(previous)));
     const seen = new Set<string>();
@@ -792,7 +844,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       if (!object(p)) invalid(path, "expected an object with round, findingIndex, status, reason, evidence");
       const key = p.round + ":" + p.findingIndex;
       const source = previous[p.round];
-      const original = source?.review.findings[p.findingIndex];
+      const original = independentFindings(source)[p.findingIndex];
       if (!Number.isSafeInteger(p.round) || !Number.isSafeInteger(p.findingIndex) ||
           seen.has(key) || !source || !original ||
           !["resolved", "improved", "persisting", "regressed"].includes(p.status) ||
@@ -955,8 +1007,16 @@ function assertRounds(value: Receipt, assignment: Pick<EventAssignment,
     const boundaries = value.reviewStarts ?? (value.reviewStart === undefined
       ? [] : [value.reviewStart]);
     const start = boundaries.filter(boundary => boundary <= index).at(-1) ?? 0;
+    const previous = value.rounds.slice(start, index);
     const review = parseMilestoneBlueprintReview(JSON.stringify(round.review), draft,
-      assignment, value.rounds.slice(start, index), "sealed-replay");
+      assignment, previous, "sealed-replay");
+    if (round.reviewerVerdict) {
+      const actual = parseMilestoneBlueprintReview(JSON.stringify(round.reviewerVerdict), draft,
+        assignment, previous, "sealed-replay");
+      if (actual.status !== "pass" || review.status !== "revise" ||
+          sha(controllerReviewDisposition(draft, assignment, actual)) !== sha(review))
+        throw Error("Milestone controller veto differs from the sealed reviewer and source findings.");
+    }
     if (round.draftDigest !== sha(draft) || round.reviewDigest !== sha(review))
       throw Error("Milestone review evidence changed after its sealed verdict.");
   }
@@ -1042,8 +1102,9 @@ async function runMilestoneDiagnosis(job: JobStartResult, snapshot: SkillSnapsho
       "\nTASK: " + JSON.stringify(task) +
       "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
       "\nHISTORICAL SEALED REVIEWS: " + JSON.stringify(receipt.rounds.map((r, i) =>
-        ({ round: i, draftDigest: r.draftDigest, review: r.review }))) +
-      "\nCURRENT EXACT DRAFT: " + JSON.stringify(last.draft) +
+        ({ round: i, draftDigest: r.draftDigest, review: r.review,
+          ...(r.reviewerVerdict ? { reviewerVerdict: r.reviewerVerdict, controllerVeto: true } : {}) }))) +
+      "\nCURRENT EXACT DRAFT: " + JSON.stringify(last.draft) + sourceFindingFeedback(last.draft, assignment) +
       "\\nReturn ONLY strict JSON {schema:'noveltea-milestone-diagnosis/v1'," +
       "action:'continue|replace|split|escalate',explanation:string," +
       "assessments:[{kind:'material|deferred|cosmetic|scope',reason:string," +
@@ -1169,7 +1230,7 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "\nAUTHOR OBJECTIVE: " + task +
     (earlier ? "\nSAME REVIEW CYCLE: Revise the previous provisional plan to resolve material findings, " +
       "without inventing protected authority. Preserve provisional Event IDs for revisions; replace/remove only if substantively necessary so the independent reviewer can cite original identity. PRIOR PLAN: " + JSON.stringify(earlier.draft) +
-      "\nINDEPENDENT REVIEW: " + JSON.stringify(earlier.review) + sourceFindingFeedback(earlier.draft, assignment) : "") +
+      (earlier.reviewerVerdict ? "\nCONTROLLER VETO OF INDEPENDENT PASS: " : "\nINDEPENDENT REVIEW: ") + JSON.stringify(earlier.review) + sourceFindingFeedback(earlier.draft, assignment) : "") +
     (diagnosis ? "\nINDEPENDENT DIAGNOSTIC ADVICE (not approval or authority): " + JSON.stringify(diagnosis) : "");
 }
 function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, prior: Round[],
@@ -1233,7 +1294,7 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "\nAUTHOR OBJECTIVE: " + JSON.stringify(task) +
     "\nAPPROVED CONTRACT: " + JSON.stringify(contract) +
     "\nPREVIOUS SEALED REVIEWS: " + JSON.stringify(prior.map((r, round) => ({ round, draftDigest: r.draftDigest,
-      review: r.review }))) + "\nEXACT REVIEW CONTRACT: " + milestoneReviewContract(draft, assignment, prior) + "\nCURRENT PLAN: " + JSON.stringify(draft) + sourceFindingFeedback(draft, assignment);
+      review: r.review, ...(r.reviewerVerdict ? { reviewerVerdict: r.reviewerVerdict, controllerVeto: true } : {}) }))) + "\nEXACT REVIEW CONTRACT: " + milestoneReviewContract(draft, assignment, prior) + "\nCURRENT PLAN: " + JSON.stringify(draft) + sourceFindingFeedback(draft, assignment);
 }
 async function sessionFor(job: JobStartResult, snapshot: SkillSnapshot, assignment: EventAssignment,
   provider: string, model: string,
@@ -1454,14 +1515,14 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
       { id: record.reviewer.id, file: record.reviewer.file });
     await verifySeal(job, record.writer, "writer");
     await verifySeal(job, record.reviewer, record.reviewerRole ?? "reviewer");
-    if (expected || record.supersedes) {
+    if (expected || record.supersedes || record.rounds.some(r => r.reviewerVerdict || milestoneBlueprintSourceFindings(r.draft, assignment).length)) {
       const starts = record.reviewStarts ?? (record.reviewStart ? [record.reviewStart] : []);
       await assertBlueprintReplies(record.writer, record.rounds.filter((_, i) => !starts.includes(i)).map(r => r.draftDigest));
       const reviewers = [...(record.reviewerHistory ?? []).map(h => h.session), record.reviewer];
       if (reviewers.length !== starts.length + 1) throw Error("Incomplete Blueprint reviewer lineage.");
       for (const [index, session] of reviewers.entries()) {
         const rounds = record.rounds.slice(index ? starts[index - 1] : 0, starts[index]);
-        await assertBlueprintReplies(session, rounds.map(r => r.reviewDigest),
+        await assertBlueprintReplies(session, rounds.map(r => r.reviewerVerdict ? sha(r.reviewerVerdict) : r.reviewDigest),
           (text, round) => parseMilestoneBlueprintReview(text, rounds[round]!.draft,
             assignment, record!.rounds.slice(0, (index ? starts[index - 1]! : 0) + round), "sealed-replay"));
       }
@@ -1643,7 +1704,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         if (identities.has(session.id)) throw Error("Milestone Blueprint reused a reviewer identity.");
         identities.add(session.id);
         const rounds = current.rounds.slice(index ? starts[index - 1] : 0, starts[index]);
-        await assertBlueprintReplies(session, rounds.map(r => r.reviewDigest),
+        await assertBlueprintReplies(session, rounds.map(r => r.reviewerVerdict ? sha(r.reviewerVerdict) : r.reviewDigest),
           (text, round) => parseMilestoneBlueprintReview(text, rounds[round]!.draft,
             assignment, current.rounds.slice(0, (index ? starts[index - 1]! : 0) + round), "sealed-replay"));
       }
@@ -1722,10 +1783,12 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
 
     return draftSubmission(receipt.rounds.length, receipt.draft!);
   };
-  const settleReview = async (review: MilestoneBlueprintReview, draft: MilestoneBlueprint) => {
+  const settleReview = async (verdict: MilestoneBlueprintReview, draft: MilestoneBlueprint) => {
+    const review = controllerReviewDisposition(draft, assignment, verdict);
     if (review.status === "pass") assertMilestoneSources(draft, assignment);
     receipt.rounds.push({ draft, review,
-      draftDigest: sha(draft), reviewDigest: sha(review) });
+      draftDigest: sha(draft), reviewDigest: sha(review),
+      ...(review !== verdict ? { reviewerVerdict: verdict } : {}) });
 
     if (review.status === "pass") {
       receipt.approvedDigest = sha(draft);
@@ -1806,7 +1869,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
     const active = receipt.rounds.slice(reviewStart);
     const diagnosedAt = (receipt.diagnostics ?? []).filter(d => d.round >= reviewStart)
       .map(d => d.round + 1 - reviewStart);
-    const trigger = milestoneDiagnosticTrigger(active, diagnosedAt, milestoneReviewStagnation(active));
+    const trigger = milestoneDiagnosticTrigger(active, diagnosedAt, milestoneReviewStagnation(active, assignment));
     const continuationDue = receipt.diagnostics?.at(-1)?.diagnosis.action === "continue" &&
       receipt.diagnostics.at(-1)!.round === round;
     if (!trigger || continuationDue) return;
