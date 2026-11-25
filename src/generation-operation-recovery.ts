@@ -48,6 +48,7 @@ export interface GenerationOperationRecovery {
     interactiveDomain?: "choice" | "puzzle";
     closeout?: { milestoneId: string; proposalDigest: string; repairId: string };
     /** Original settled Event no-write report, never a replacement Event writer lease. */
+    eventBlueprintPrerequisite?: import("./event-work.js").EventBlueprintPrerequisite;
     eventNoWrite?: { milestoneId: string; expectedHead: string; reportDigest: string };
     /** Original final report and eligible checkpoint captured by the controller. */
     completion?: { checkpoint: string; reportStatus: string; scopeStatus: string; planStatus: string };

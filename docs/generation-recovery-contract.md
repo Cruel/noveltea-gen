@@ -176,7 +176,7 @@ The C03 exit audit classifies two explicitly protected Review refusals as nonsem
 
 ### C05 current-format diagnostic strategy and legacy retirement
 
-Current **operationRecovery** cases selected by C03 use the existing `diagnoseUnknownCompletion` Pi/protocol/session/budget implementation, with `generation.recovery-diagnostic.v2` and `noveltea-recovery-diagnostic-proposal/v1` instead of the historical completion-only v1 advisory. The source-proven proof reference and immutable case signature bind the strict proposal to the failed check; the bounded packet includes original Job/Thread/Turn, approved author objective/scope, current and prior verified Git heads, assignment/inventory, available adapters and existing findings/attempt references, not private author-only message history. Source-only selection happens before Pi invocation, and the model has **no tools**. Repeated unchanged diagnosis reads the sealed original transcript and completed protocol receipt, rather than prompting a new agent or resetting the job's budget ledger. Invalid proposals use the same response-contract correction as other read-only Pi responses. A model result is a proposed strategy, not a `RecoveryDecision` or a started attempt.
+Current **operationRecovery** cases selected by C03 use the existing `diagnoseUnknownCompletion` Pi/protocol/session/budget implementation, with `generation.recovery-diagnostic.v3` and `noveltea-recovery-diagnostic-proposal/v1` instead of the historical completion-only v1 advisory. The controller binds the source-proven proof reference and immutable case signature to the failed check; the model need not transcribe either opaque identity. Explicit conflicting or incomplete identity claims are rejected. Field-specific format feedback and sealed original terminal transcripts distinguish protocol exhaustion from receipt tampering. Historical v2 transcripts are inspectable but cannot authorize another invocation. The diagnostic policy retains one original read-only invocation and up to two format corrections, without a fresh diagnosis fallback; the bounded packet includes original Job/Thread/Turn, approved author objective/scope, current and prior verified Git heads, assignment/inventory, available adapters and existing findings/attempt references, not private author-only message history. Source-only selection happens before Pi invocation, and the model has **no tools**. Repeated unchanged diagnosis reads the sealed original transcript and completed protocol receipt, rather than prompting a new agent or resetting the job's budget ledger. Invalid proposals use the same response-contract correction as other read-only Pi responses. A model result is a proposed strategy, not a `RecoveryDecision` or a started attempt.
 
 `generation-diagnostic-controller.ts` is a **pure adapter-admission projection** of the existing C03 assessor, not a new authority. Source-authenticated no-writer scheduling exceptions and transport errors after an already independently accepted assignment Review may select `reconcile-original` → existing `reconcile-effects`/`checkpoint-reconciliation`, but only with the original immutable HEAD/Turn/plan/assignment, sealed positive Review when applicable, no protected escalation and no new owner/scope grant. Before recording any verified resolution, the original assessor **reexecutes the scheduling check or reauthenticates the same independently passed original reviewer**, under the job lock. It then reauthenticates the sealed Pi proposal and attempt, original source, and Review/Turn assurance, and only the ordinary C02 `recordRecoveryOutcome` + `finishRecovery` transition may clear the case and resume scheduling. An original failure without its objective-planning seal, changed HEAD, missing original Review, or altered diagnostic transcript stays fenced; an accepted model answer is never enough. Other proposed strategies (`local-repair`, `dependency-plan`, `blueprint-or-work-plan-amend`, `review-adjudication`, `no-write-omission-review`) require their own C04/C06 original specialist/plan/Review authority and do not become permission simply because the model recommended them. `resource-or-author-pause`/`unsafe` also never grant work. Where the existing adapter cannot be independently authenticated, retain the unresolved case and sealed source-bound proposal in `diagnostic-stop`; the controller may later authorize a qualified original adapter but the saved opinion is not itself authorization. A saved stop must authenticate both original Pi result and source; a saved model-derived reconciliation independently rederives the same selected adapter and proposal. No second diagnostic retry loop is introduced.
 
@@ -772,3 +772,26 @@ adapter, manifest, native, downstream reply, and durable handoff/queue
 consumers and mutation tests. See the inventory for precise verification
 and limitations. No normative ADR or recovery authority has changed;
 paid/live provider certification remains #260.
+
+
+### #260 prospective Character readiness (partial qualification)
+
+A local Milestone Blueprint can declare material evidence Character sources with
+an existing or prospective availability. The declared ID must belong to its
+provisional Event's participants, and an unknown ID must be explicitly
+prospective. Evidence still anchors to existing canonical records. Independent
+Review checks that the declarations faithfully cover the narrative obligations;
+no prose keyword test invents an owner or a grant. Historical plans lacking
+these declarations retain their original interpretation.
+
+At the Event boundary the controller checks the authenticated approved design
+against the current native catalog and authorized Arc participant set. An
+unrealized Character or an existing Character outside the Event authority
+produces a source-bound pre-dispatch readiness report, not a fabricated Event
+writer invocation or failed commit. The existing C03/C06 dependency-work
+assessment retains the reviewed design and requests owner/plan resolution.
+This is a safe stop, not yet automatic predecessor realization: the existing
+dependency plan must still admit a pre-Event source, independently review the
+supporting Character and any necessary authorized link, and rebind the original
+Event to the verified successor without erasing the original Blueprint.
+Protected changes require the existing author approval boundary.

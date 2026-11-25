@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export type ControllerReviewPhase = "correcting" | "diagnosing" | "planning" | "reviewing" | "reviewed";
 export interface ControllerReviewActivity {
   milestone?: string;
-  activity: "blueprint-planning" | "blueprint-review" | "blueprint-diagnosis" | "protocol-correction" | "source-read-correction" | "substantive-correction";
+  activity: "blueprint-planning" | "blueprint-review" | "blueprint-diagnosis" | "operation-diagnosis" | "protocol-correction" | "source-read-correction" | "substantive-correction";
   role?: "planner" | "reviewer" | "diagnostic";
   round?: number;
   verdict?: "pass" | "revise";

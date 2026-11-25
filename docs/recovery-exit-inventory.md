@@ -619,3 +619,25 @@ round-origin correction and the exhausted-reviewer parent disposition.
 - The Milestone planner, reviewer and diagnostician use the shared format-only response recovery after required read evidence is complete. Corrections retain the original read-only session, revoke tools and preserve source-bound verdict requirements. The controller supplies zero-based historical finding identities, the current provisional IDs and exact allowed fields; a removed Event must be cited against the original identity. The #220 production regression injects a one-based prior index and proves correction of that reply without extra tools or a fresh reviewer. `issue-227-milestone-review.test.ts` also rejects foreign IDs and nonexistent Blueprint fields.
 - Checkpoint preparation preserves historical receipt snapshots and Event-only omission source identities, checking the original Event completion seal before allocating a child. New work uses the configured current skills; a partially inherited multi-unit specialist retains its already pinned shared assignment snapshot. The authenticated Studio fork regression changes skills between Event and Interactive, verifies original Event identity and current Interactive snapshot, and continues through Composition.
 - The certification monitor consumes ordered controller activity by cursor, reports planning, round-specific independent Blueprint verdicts, source-read/format/substantive corrections and diagnosis, and logs verified Git and checkpoint identities. Shared writer correction admissions report their typed defects. Progress never substitutes for native or independent Review proof.
+
+
+### #260 prospective source readiness and diagnostic correction (partial)
+
+- `specialist_dispatch/return#10` (R): the approved Milestone design and
+  current native catalog identify material Character predecessor work before
+  any Event writer is invoked. The new throws at #5/#6 reject foreign or changed
+  readiness proof; previous exits move by one return and two throws.
+  `inspectEventBlueprintPrerequisite` revalidates the exact clean original
+  source. This enters existing C06 owner/plan assessment; it does not yet
+  dispatch a new supporting assignment.
+- C05 general diagnostic v3 retains the same four model consumer call sites
+  and tool-free original session. Controller binding, field-specific format
+  feedback, and sealed exhaustion inspection change their proof gates, not
+  the allowance. A verified exhaustion is terminal protocol disposition,
+  whereas a changed seal still fences. Historical v2 is inspection-only.
+- Regressions: `test/issue-227-milestone-review.test.ts` (prospective witness,
+  absent/foreign/duplicate declarations), `test/unknown-recovery-diagnostic.test.ts`
+  (scripted Pi exact feedback, controller identities, restart, terminal
+  exhaustion and tamper), `test/recovery-diagnostic-proposal.test.ts` (schema).
+  Remaining qualification: autonomous pre-Event dependency admission,
+  independent supporting writer/Review and Event restart; live full Story.

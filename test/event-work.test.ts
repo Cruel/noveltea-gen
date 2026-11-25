@@ -442,7 +442,7 @@ test("#207 Milestone plan validates local causality and rejects invented source/
   assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(local), assignment), local);
   assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...local,
     events: [{ ...local.events[0], participants: ["character.not-authorized"] }] }), assignment),
-  /events\[0\]\.participants.*exact Character IDs/);
+  /events\[0\]\.participants.*prospective material source declaration/);
   assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...local,
     events: [{ ...local.events[0], evidence: [{ ...local.events[0].evidence[0],
       anchorPath: "events/imaginary.md" }] }] }), assignment), /canonical anchor/);

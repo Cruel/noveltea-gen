@@ -17,7 +17,8 @@ import { admitRecovery, decideRecovery, emptyRecoveryLifecycle,
 import type { JobStartResult } from '../src/job.js';
 import {
   unknownCompletionCase, parseUnknownDiagnosis, unknownDiagnosisDisposition,
-  diagnoseUnknownCompletion, inspectUnknownRecoveryStatus,
+  diagnoseUnknownCompletion, inspectUnknownRecoveryStatus, operationDiagnosisCase,
+  inspectDiagnosticExhaustion, inspectOriginalUnknownDiagnosis,
 } from '../src/unknown-recovery-diagnostic.js';
 
 const evidence = {
@@ -81,6 +82,8 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
   let calls = 0;
   let activeSignature = caseFile.signature;
   let malformedOnce = false;
+  let generalResponses: string[] | null = null;
+  const generalPrompts: string[] = [];
   const stream: NonNullable<Provider['streamSimple']> = (_model, ctx) => {
     const tools = new Set<string>();
     for (const entry of ctx.messages) {
@@ -91,7 +94,8 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
     assert.deepEqual([...tools], [], 'diagnostician must have zero active tools');
     calls++;
     const result = createAssistantMessageEventStream();
-    const content = [{ type: 'text' as const, text: malformedOnce ? 'Not structured JSON' :
+    if (generalResponses) generalPrompts.push(JSON.stringify(ctx.messages.filter(m => m.role === 'user').at(-1)));
+    const content = [{ type: 'text' as const, text: generalResponses ? generalResponses.shift()! : malformedOnce ? 'Not structured JSON' :
       JSON.stringify({
         schema: 'noveltea-unknown-recovery-diagnosis/v1',
         signature: activeSignature, category: 'unclassified',
@@ -238,5 +242,49 @@ test('real read-only Pi diagnosis is single-use across restart and rejects alter
       'both original and corrected calls remain in the same job ledger');
     assert.deepEqual(await runSecond(), resumed);
     assert.equal(calls, 3, 'accepted original transcript never receives another model call');
+    const makeOperation = async (suffix: string) => {
+      const nextJob = { ...job, jobId: 'job-222-' + suffix, stateDir: join(root, suffix) };
+      mkdirSync(nextJob.stateDir);
+      await configurePiPolicy(nextJob, { version: 1,
+        profile: { provider: model.provider, model: model.id }, limits: { modelCalls: 3 } });
+      const operation = operationDiagnosisCase({ id: 'f'.repeat(64), origin: {
+        jobId: nextJob.jobId, jobThreadId: nextJob.threadId, sourceHeadSha: evidence.sourceSha,
+        turnDigest: evidence.turnDigest, operation: 'specialist-result', check: 'specialist-result.v1',
+        assignmentId: 'event:milestone.discovery',
+      } } as import('../src/generation-recovery-contract.js').RecoveryCase,
+      'specialist-receipt:event-items/discovery.json:' + 'e'.repeat(64));
+      const invoke = () => withJobModelRuntime(rt, () =>
+        withStoryJobLock(nextJob, 'unknown-diagnostic-test', () =>
+          diagnoseUnknownCompletion(nextJob, operation, model.provider, model.id)));
+      return { nextJob, operation, invoke };
+    };
+    const proposal = { schema: 'noveltea-recovery-diagnostic-proposal/v1',
+      category: 'invalid-assignment', diagnosis: 'A necessary Character is not realized.',
+      strategy: 'blueprint-or-work-plan-amend', owner: null, scopeRef: null,
+      prerequisites: ['Review exact prerequisite'], uncertainty: 'No writer grant has been issued.' };
+    const corrected = await makeOperation('corrected');
+    generalResponses = [
+      JSON.stringify({ ...proposal, signature: 'a'.repeat(64), sourceRef: corrected.operation.proofRef }),
+      JSON.stringify(proposal),
+    ];
+    const accepted = await corrected.invoke();
+    assert.equal(accepted.signature, corrected.operation.signature);
+    assert.ok(generalPrompts.at(-1)?.includes('$.signature'));
+    assert.deepEqual(await inspectOriginalUnknownDiagnosis(corrected.nextJob, corrected.operation), accepted);
+    assert.deepEqual(await corrected.invoke(), accepted);
+    assert.equal(calls, 5, 'correction uses the original bounded invocation');
+    const exhausted = await makeOperation('exhausted');
+    generalResponses = Array(3).fill(JSON.stringify({ ...proposal, diagnosis: '' }));
+    await assert.rejects(exhausted.invoke(), /exhaust/i);
+    const terminal = await inspectDiagnosticExhaustion(exhausted.nextJob, exhausted.operation);
+    assert.equal(terminal?.proof.store, 'response-contract');
+    assert.equal(terminal?.proof.ref, exhausted.operation.signature);
+    await assert.rejects(exhausted.invoke(), /exhaust/i);
+    assert.equal(calls, 8, 'sealed exhaustion never repeats or starts a fresh diagnosis');
+    const markerPath = join(exhausted.nextJob.stateDir, 'unknown-diagnostics', exhausted.operation.signature + '.initial.json');
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    writeFileSync(marker.sessionFile, '\n', { flag: 'a' });
+    await assert.rejects(inspectDiagnosticExhaustion(exhausted.nextJob, exhausted.operation), /changed|seal|transcript/i);
+
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

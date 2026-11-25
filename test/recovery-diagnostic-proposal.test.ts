@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseRecoveryDiagnosticProposal } from "../src/recovery-diagnostic-proposal.js";
+import { parseRecoveryDiagnosticProposal, validateRecoveryDiagnosticProposal, parseDiagnosticModelResponse } from "../src/recovery-diagnostic-proposal.js";
 import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "../src/generation-diagnostic-controller.js";
 import type { OperationDiagnosisCase } from "../src/unknown-recovery-diagnostic.js";
 import { recoveryCaseId, decideRecovery, emptyRecoveryLifecycle,
@@ -39,6 +39,26 @@ test("C05 typed read-only diagnostic accepts only exact source-bound strategy JS
   ]) assert.throws(() => parseRecoveryDiagnosticProposal(JSON.stringify(invalid), admitted));
   assert.throws(() => parseRecoveryDiagnosticProposal("not JSON", admitted));
   assert.throws(() => parseRecoveryDiagnosticProposal("x".repeat(5100), admitted));
+});
+
+test("C05 diagnostic correction identifies each invalid field and the exact original identity", () => {
+  const failures = validateRecoveryDiagnosticProposal(JSON.stringify({
+    ...example, signature: "c".repeat(64), sourceRef: "wrong-source",
+    prerequisites: ["valid prerequisite", "x".repeat(161)], owner: "",
+  }), admitted);
+  assert.deepEqual(failures.map(f => f.path),
+    ["$.signature", "$.sourceRef", "$.owner", "$.prerequisites[1]"]);
+  assert.ok(failures[0]!.expected.includes(signature));
+  assert.ok(failures[1]!.expected.includes(proofRef));
+  assert.deepEqual(validateRecoveryDiagnosticProposal(JSON.stringify(example), admitted), []);
+});
+
+test("model may omit both opaque identities, but cannot replace or partially supply them", () => {
+  const { signature: _signature, sourceRef: _source, ...payload } = example;
+  assert.deepEqual(parseDiagnosticModelResponse(JSON.stringify(payload), admitted), example);
+  assert.throws(() => parseDiagnosticModelResponse(JSON.stringify({ ...payload, signature }), admitted), /sourceRef/);
+  assert.throws(() => parseDiagnosticModelResponse(JSON.stringify({ ...payload, sourceRef: proofRef }), admitted), /signature/);
+  assert.throws(() => parseDiagnosticModelResponse(JSON.stringify({ ...payload, signature: "c".repeat(64), sourceRef: proofRef }), admitted), /signature/);
 });
 
 const origin: RecoveryOrigin = {

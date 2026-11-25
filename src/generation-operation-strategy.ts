@@ -14,6 +14,7 @@ import { trustedHead } from "./revision.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
 import { readJobControl } from "./job-control.js";
 import { withStoryJobLock } from "./job-lock.js";
+import { ProtocolExhaustedError } from "./response-contract-recovery.js";
 import { inspectPiPolicy, PiModelUnavailableError } from "./job-pi-policy.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
@@ -32,7 +33,7 @@ import { authorizedInventoryComplete } from "./generation-plan.js";
 import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
 import { preflightCompositionBoundary } from "./cross-domain-prerequisite-controller.js";
 import { advanceCrossDomainCloseout } from "./cross-domain-closeout-work.js";
-import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis,
+import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, inspectDiagnosticExhaustion,
   operationDiagnosisCase, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { assessBoundedAssignmentFailure, decideRecovery, finishVerifiedRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
 import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "./generation-diagnostic-controller.js";
@@ -142,7 +143,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         op.evidence?.reference === "generation-checkpoint" &&
         !op.evidence.assignmentId && !op.evidence.priorHead &&
         !op.evidence.verifier && !op.evidence.closeout &&
-        !op.evidence.eventNoWrite && !op.evidence.interactiveNoWrite &&
+        !op.evidence.eventNoWrite && !op.evidence.eventBlueprintPrerequisite && !op.evidence.interactiveNoWrite &&
         !op.evidence.foundationsNoWrite &&
         op.source.jobId === job.jobId && op.source.threadId === c.origin.graphThreadId &&
         op.source.turnDigest === turnDigest && op.source.planVersion === planVersion &&
@@ -222,7 +223,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         op.source.headSha === head && op.source.turnDigest === turnDigest &&
         op.source.planVersion === planVersion &&
         op.evidence.reference === "generation-checkpoint" && !op.evidence.assignmentId &&
-        !op.evidence.closeout && !op.evidence.eventNoWrite &&
+        !op.evidence.closeout && !op.evidence.eventNoWrite && !op.evidence.eventBlueprintPrerequisite &&
         !op.evidence.interactiveNoWrite && !op.evidence.verifier) {
       const accepted = await inspectSettledAdaptiveReconciliation(job, s.request, c.origin);
       if (accepted) return accepted.receipt;
@@ -400,6 +401,18 @@ export async function originalNoWriteOwnerProof(job: JobStartResult, s: State,
       op.evidence.reference !== "specialist-receipt" ||
       op.evidence.assignmentId !== c.origin.assignmentId)
     return null;
+  const readiness = op.evidence.eventBlueprintPrerequisite;
+  if (op.evidence.resultStatus === "event-blueprint-prerequisite" && readiness &&
+      c.origin.assignmentId === "event:" + readiness.milestoneId &&
+      readiness.expectedHead === c.origin.sourceHeadSha && s.inventory.headSha === readiness.expectedHead &&
+      readiness.planVersion === c.origin.planVersion) {
+    const { inspectEventBlueprintPrerequisite } = await import("./event-work.js");
+    const original = await inspectEventBlueprintPrerequisite(job, readiness.milestoneId,
+      s.request.validatorSource ?? s.request.skillsSource);
+    if (!isDeepStrictEqual(original, readiness)) return null;
+    return { owner: "architecture", proof: { store: "specialist-receipt",
+      ref: "event-items/" + readiness.milestoneId.slice(10) + ".json", digest: original.reportDigest } };
+  }
   const interactive = op.evidence.interactiveNoWrite;
   if (op.evidence.resultStatus === "interactive-conflict-reported" && interactive &&
       interactive.expectedHead === c.origin.sourceHeadSha &&
@@ -472,6 +485,15 @@ async function originalBlueprintAssessment(job: JobStartResult, s: State, c: Rec
     ref: "blueprint-assessments/" + ref.key + "-" + ref.round + ".json", digest: ref.digest } };
 }
 
+async function selectDiagnosticDecision(job: JobStartResult, c: RecoveryCase, proof: RecoveryEvidence): Promise<RecoveryDecision> {
+  const diagnosis: RecoveryDecision = { ...base(c, proof), action: "diagnostic",
+    adapter: "unknown-diagnostic", mode: "read-only", attemptRef: null };
+  const exhaustion = await inspectDiagnosticExhaustion(job, diagnosticCaseForDecision(c, diagnosis));
+  if (exhaustion) return { ...base(c, proof), action: "exhausted",
+    reason: "protocol-exhausted", attemptRefs: [exhaustion.proof] };
+  return diagnosis;
+}
+
 export async function selectOperationStrategy(job: JobStartResult, s: State, c: RecoveryCase): Promise<RecoveryDecision | null> {
   if (!s.request.turnPlanDigest || s.request.turnPlanDigest !== c.origin.turnDigest) return null;
   const originalOperation = s.recoverySources.find(x => x.caseId === c.id &&
@@ -498,7 +520,7 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
     const proof = { store: "specialist-receipt" as const, ref: assignmentFailure.ref,
       digest: assignmentFailure.proof.receiptDigest };
     await assertSource(job, s, c);
-    return { ...base(c, proof), action: "diagnostic", adapter: "unknown-diagnostic", mode: "read-only", attemptRef: null };
+    return selectDiagnosticDecision(job, c, proof);
   }
   const owner = await originalNoWriteOwnerProof(job, s, c);
   if (owner) {
@@ -527,7 +549,7 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
   const proof = await diagnosticEvidence(job, s, c);
   if (!proof) return null;
   await assertSource(job, s, c);
-  return { ...base(c, proof), action: "diagnostic", adapter: "unknown-diagnostic", mode: "read-only", attemptRef: null };
+  return selectDiagnosticDecision(job, c, proof);
 }
 /** The saved decision may identify a real accepted Pi response yet have lost
  * the ORIGINAL selected source proof (e.g. an altered review/repair receipt).
@@ -1023,6 +1045,16 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         error.message + "; pinned model and original source remain unchanged.", "paused");
     if (error instanceof Error && error.name === "PiBudgetPause") return stop({ ...base(c), action: "pause", reason: "budget" }, error.message, "paused");
     if (error instanceof Error && error.name === "StoryCancelledError") return stop({ ...base(c), action: "pause", reason: "cancelled" }, error.message, "cancelled");
+    if (error instanceof ProtocolExhaustedError && d.action === "diagnostic") {
+      // A failed response contract is not a forged or ambiguous writer receipt.
+      // The same selector must authenticate the original diagnostic exhaustion
+      // on restart before the terminal decision is retained.
+      try {
+        const terminal = await selectOperationStrategy(job, s, c);
+        if (terminal?.action === "exhausted" && terminal.reason === "protocol-exhausted")
+          return stop(terminal, error.message);
+      } catch { /* Invalid original evidence still fences below. */ }
+    }
     return stop({ ...base(c), action: "integrity-fence", reason: "untrusted-receipt", requiredInspection: "Reconcile original adapter effects before any retry." },
       "Original adapter source, invocation or completion could not be verified; preserve receipts and do not replay.");
   }

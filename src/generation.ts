@@ -3207,7 +3207,7 @@ export function recoveryNode(
     if (prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
         prior.recoveryLifecycle.decision?.action === "exhausted" &&
         !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment ||
-          prior.recoveryLifecycle.active.origin.operation === "independent-review" && prior.recoveryLifecycle.decision.reason === "protocol-exhausted" ||
+          prior.recoveryLifecycle.decision.reason === "protocol-exhausted" ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.protocolFailure)) {
       const active = prior.recoveryLifecycle.active;
@@ -4381,6 +4381,30 @@ export function createGenerationGraph(
                 "Interactive assignment and sealed negative Pi report. Propose a separate, " +
                 "source-authenticated owner/plan amendment if warranted; no replacement " +
                 "Interactive writer, protected decision or new specialist scope is authorized." } };
+        }
+        if (result.status === "event-blueprint-prerequisite") {
+          const job = await openJob(s);
+          if (s.active?.stage !== "event" || !s.active.milestone)
+            throw Error("Blueprint readiness returned outside its Event assignment.");
+          const { inspectEventBlueprintPrerequisite } = await import("./event-work.js");
+          const original = await inspectEventBlueprintPrerequisite(job, s.active.milestone,
+            s.request.validatorSource ?? s.request.skillsSource);
+          const returned = (result as typeof result & { blueprintPrerequisite?: typeof original }).blueprintPrerequisite;
+          if (JSON.stringify(original) !== JSON.stringify(returned) ||
+              original.expectedHead !== s.inventory?.headSha || original.planVersion !== s.planVersion)
+            throw Error("Blueprint readiness differs from the admitted Event source.");
+          const failure = "Reviewed prospective Blueprint requires Character predecessor work: " +
+            [...new Set(original.blockers.map(b => b.characterId + " (" + b.readiness + ")"))].join(", ") +
+            ". Event was not dispatched.";
+          const assessment = await operationFailure(s, job, "specialist-result", failure,
+            { reference: "specialist-receipt", assignmentId: s.active.id,
+              resultStatus: result.status, eventBlueprintPrerequisite: original }, "returned-failure");
+          return { ...assessment, failures: { ...s.failures, [s.active.id]: failure },
+            inventory: blockedAssignmentInventory(s, failure), active: null, result: null,
+            escalation: { kind: "dependency-replan", requiresTrustedApproval: false,
+              sources: original.blockers.map(b => ({ source: b.anchorPath,
+                message: b.characterId + ": " + b.role, repair: "character-foundations" })),
+              action: "Preserve the reviewed prospective Blueprint and authorize the necessary Character predecessor through the shared work plan before Event dispatch." } };
         }
         if (result.status === "event-prerequisite-reported") {
           let evidence = result as typeof result & {

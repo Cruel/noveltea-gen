@@ -69,7 +69,7 @@ export async function appendGenerationEvent(store: StudioDatabase, owner: string
     throw new Error('Model status cannot claim controller evidence')
   if (input.reviewActivity && (!input.reviewPhase || input.kind !== 'working' || input.stage !== 'review' ||
       input.reviewActivity.milestone && !canonicalMilestone(input.reviewActivity.milestone) ||
-      !['blueprint-planning', 'blueprint-review', 'blueprint-diagnosis', 'protocol-correction', 'source-read-correction', 'substantive-correction'].includes(input.reviewActivity.activity) ||
+      !['blueprint-planning', 'blueprint-review', 'blueprint-diagnosis', 'operation-diagnosis', 'protocol-correction', 'source-read-correction', 'substantive-correction'].includes(input.reviewActivity.activity) ||
       input.reviewActivity.round !== undefined && (!Number.isSafeInteger(input.reviewActivity.round) || input.reviewActivity.round < 0) ||
       input.reviewActivity.findings !== undefined && (!Number.isSafeInteger(input.reviewActivity.findings) || input.reviewActivity.findings < 0) ||
       input.reviewActivity.verdict && !['pass', 'revise'].includes(input.reviewActivity.verdict) ||

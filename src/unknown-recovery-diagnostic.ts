@@ -11,16 +11,18 @@ import type { JobStartResult } from "./job.js";
 import { createJobModelRuntime } from "./model-runtime.js";
 import { guardPiBudget, recordPiSession, registerPendingPiSession, resolvePiModel } from "./job-pi-policy.js";
 import { openStoryProject } from "./project.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { parseRecoveryDiagnosticProposal, type RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
-import { beginProtocolInvocation, inspectCompletedProtocolResponse,
+import { parseRecoveryDiagnosticProposal, parseDiagnosticModelResponse, validateDiagnosticModelResponse, type RecoveryDiagnosticProposal } from "./recovery-diagnostic-proposal.js";
+import { beginProtocolInvocation, inspectCompletedProtocolResponse, authenticateSealedProtocolFailure, ProtocolExhaustedError,
   recoverResponseContract, type ResponseContractFailure } from "./response-contract-recovery.js";
 
 const sha = (input: unknown) => createHash("sha256").update(JSON.stringify(input)).digest("hex");
 const hex40 = /^[a-f0-9]{40}$/;
 const hex64 = /^[a-f0-9]{64}$/;
 const legacyContract = "generation.unknown-diagnosis.v1";
-const generalContract = "generation.recovery-diagnostic.v2";
+const historicalGeneralContract = "generation.recovery-diagnostic.v2";
+const generalContract = "generation.recovery-diagnostic.v3";
 const safeCode = (value: string) => /^[a-z][a-z0-9.:-]{0,80}$/.test(value);
 export interface UnknownCompletionEvidence {
   jobId: string; threadId: string; turnDigest: string | null;
@@ -134,10 +136,14 @@ const sessionsRoot = (job: JobStartResult) => join(job.stateDir, "unknown-diagno
 const contractFor = (evidence: DiagnosticCase) => evidence.schema === "noveltea-operation-diagnosis-case/v1"
   ? generalContract : legacyContract;
 const decode = (response: string, evidence: DiagnosticCase, chosen: string): RecoveryDiagnosis =>
-  chosen === generalContract && evidence.schema === "noveltea-operation-diagnosis-case/v1"
-    ? parseRecoveryDiagnosticProposal(response, evidence)
-    : parseUnknownDiagnosis(response, evidence);
+  evidence.schema === "noveltea-operation-diagnosis-case/v1" && chosen === generalContract
+    ? parseDiagnosticModelResponse(response, evidence)
+    : evidence.schema === "noveltea-operation-diagnosis-case/v1" && chosen === historicalGeneralContract
+      ? parseRecoveryDiagnosticProposal(response, evidence)
+      : parseUnknownDiagnosis(response, evidence);
 const validation = (caseFile: DiagnosticCase, chosen: string) => (response: string): ResponseContractFailure[] => {
+  if (chosen === generalContract && caseFile.schema === "noveltea-operation-diagnosis-case/v1")
+    return validateDiagnosticModelResponse(response, caseFile);
   try { decode(response, caseFile, chosen); return []; }
   catch { return [{ path: "$.diagnosis", expected: "strict source-bound diagnostic proposal JSON" }]; }
 };
@@ -150,7 +156,8 @@ async function recordedContract(job: JobStartResult, evidence: DiagnosticCase): 
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000)
     throw Error("Unsafe original diagnostic invocation marker");
   const marker = JSON.parse(await readFile(started, "utf8")) as { contract?: string };
-  if (marker.contract !== contractFor(evidence) && marker.contract !== legacyContract)
+  if (marker.contract !== contractFor(evidence) && marker.contract !== legacyContract &&
+      !(evidence.schema === "noveltea-operation-diagnosis-case/v1" && marker.contract === historicalGeneralContract))
     throw Error("Unknown or altered original diagnostic protocol contract");
   return marker.contract;
 }
@@ -191,7 +198,30 @@ export async function inspectOriginalUnknownDiagnosis(
     receiptFile: root, sourceDigest: evidence.signature, contract: chosen,
     sessionRoots: [sessionsRoot(job)], validate: validation(evidence, chosen),
     parse: text => decode(text, evidence, chosen),
+    requireSealedTranscript: chosen === generalContract,
   });
+}
+
+/** Terminal response exhaustion is not evidence corruption. Re-read the exact
+ * source-bound admission and the sealed exhausted transcript before publishing
+ * a terminal protocol decision. No model request or new allowance occurs here. */
+export async function inspectDiagnosticExhaustion(job: JobStartResult, evidence: DiagnosticCase) {
+  if (await recordedContract(job, evidence) !== generalContract) return null;
+  const receipt = protocolRoot(job, evidence.signature) + ".initial.json";
+  if (!existsSync(receipt)) return null;
+  const stat = await lstat(receipt);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4000)
+    throw Error("Unsafe original diagnostic protocol receipt.");
+  const marker = JSON.parse(await readFile(receipt, "utf8")) as { status?: string };
+  if (marker.status !== "protocol-exhausted") return null;
+  try { await inspectOriginalUnknownDiagnosis(job, evidence); }
+  catch (error) {
+    if (!(error instanceof ProtocolExhaustedError) || !error.proof) throw error;
+    await authenticateSealedProtocolFailure(error.proof, [sessionsRoot(job)]);
+    return { proof: { store: "response-contract" as const,
+      ref: evidence.signature, digest: error.proof.transcriptDigest }, error };
+  }
+  throw Error("Exhausted diagnostic unexpectedly returned an accepted proposal.");
 }
 
 /** Index the authenticated original invocation, not the checkpoint's selection
@@ -248,16 +278,22 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
   const correction = (session: Parameters<typeof recoverResponseContract>[0]["session"],
     file: string, resumeOriginal = false) => recoverResponseContract({
       session, contract: chosen, validate, parse, sourceDigest: evidence.signature,
-      receiptFile: receipt + ".initial.json",
+      receiptFile: receipt + ".initial.json", sealTranscript: chosen === generalContract,
       ...(resumeOriginal ? { resumeOriginal: { base: receipt,
         sessionRoots: [sessionsRoot(job)] } } : {}),
-      beforeCorrection: () => guardPiBudget(job, "unknown-diagnosis:" + evidence.signature, file),
+      beforeCorrection: async () => {
+        await guardPiBudget(job, "unknown-diagnosis:" + evidence.signature, file);
+        await reportControllerReviewPhase("correcting", { activity: "protocol-correction", role: "diagnostic" });
+      },
       prompt: prompt => promptMetered(session as Parameters<typeof promptStorySpecialist>[0], file, prompt),
-      feedback: () => "FORMAT CORRECTION ONLY: preserve the original diagnosis and source identity. " +
+      feedback: failures => "FORMAT CORRECTION ONLY: preserve the original diagnosis and source identity. " +
         (chosen === generalContract
-          ? "Return EXACT keys schema,signature,sourceRef,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. "
-          : "Return EXACT keys schema,signature,category,action,summary. ") +
-        "No tools, new diagnosis, or authorization.",
+          ? "Return EXACT keys schema,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. Omit BOTH signature and sourceRef; the controller binds them. "
+          : chosen === historicalGeneralContract
+            ? "Return EXACT keys schema,signature,sourceRef,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. "
+            : "Return EXACT keys schema,signature,category,action,summary. ") +
+        "No tools, new diagnosis, or authorization. Exact violations: " +
+        failures.map(f => f.path + " expected " + f.expected).join("; "),
     });
   if (existsSync(admission)) {
     const stat = await lstat(admission);
@@ -275,6 +311,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
       const prior = JSON.parse(await readFile(first, "utf8")) as {
         status?: string; sessionFile?: string; sessionId?: string };
       if (prior.status === "invalid-response") {
+        if (chosen === historicalGeneralContract) throw Error("Historical diagnostic is inspection-only; preserve its original receipt.");
         const sessionFile = prior.sessionFile;
         if (!sessionFile || !sessionFile.startsWith(sessionsRoot(job) + sep) ||
             !prior.sessionId)
@@ -301,6 +338,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
     return inspectCompletedProtocolResponse({
       receiptFile: receipt, sourceDigest: evidence.signature, contract: chosen,
       sessionRoots: [sessionsRoot(job)], validate, parse,
+      requireSealedTranscript: chosen === generalContract,
     });
   }
 
@@ -329,17 +367,20 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
     await writeFile(admission, JSON.stringify(bound) + "\n", { flag: "wx", mode: 0o600 });
     await beginProtocolInvocation({ receiptFile: receipt,
       sourceDigest: evidence.signature, contract: chosen, session });
+    await reportControllerReviewPhase("diagnosing", { activity: "operation-diagnosis", role: "diagnostic" });
     await promptMetered(session, file, chosen === generalContract &&
       evidence.schema === "noveltea-operation-diagnosis-case/v1" ?
       "INDEPENDENT READ-ONLY GENERATION RECOVERY DIAGNOSIS. No tools, Story writes, scope " +
       "grants, verdict overrides, new author approvals, or writer dispatch. " +
       "Use ONLY the authenticated controller packet, do not infer missing evidence. " +
-      "Return strict JSON with EXACT keys schema,signature,sourceRef,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. " +
-      "schema=noveltea-recovery-diagnostic-proposal/v1; signature=" + evidence.signature +
+      "Return strict JSON with EXACT keys schema,category,diagnosis,strategy,owner,scopeRef,prerequisites,uncertainty. " +
+      "Do NOT transcribe signature or sourceRef: the controller binds both to this authenticated invocation. " +
+      "schema=noveltea-recovery-diagnostic-proposal/v1; " +
+      "Controller binding (not output fields): signature=" + evidence.signature +
       "; sourceRef=" + evidence.proofRef + "; category=defect|invalid-assignment|protocol|infrastructure|integrity; " +
       "strategy=local-repair|dependency-plan|blueprint-or-work-plan-amend|review-adjudication|reconcile-original|no-write-omission-review|resource-or-author-pause|unsafe. " +
       "Provide a specific diagnosis (4-500 chars) and uncertainty (4-300 chars), " +
-      "owner and scopeRef as strings or null, prerequisites as up to five strings. " +
+      "owner and scopeRef as null or 4–120 and 4–1024 character strings respectively, prerequisites as up to five 4–160 character strings. No control characters in strings. " +
       "A proposal never grants authority; the controller independently decides whether an exact existing adapter is safe. " +
       "VERIFIED PACKET: " + JSON.stringify(packet ?? { failedOperation: evidence.operation,
         failedCheck: evidence.check, sourceProof: evidence.proofRef }) :

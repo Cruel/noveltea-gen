@@ -41,7 +41,9 @@ export interface MilestoneBlueprint {
   events: Array<{
     id: string; purpose: string; dependsOn: string[];
     evidence: Array<{ anchorPath: string; source: string; observation: string;
-      access: string; establishes: string; limits: string }>;
+      access: string; establishes: string; limits: string;
+      /** Material Character sources, not a claim that a planned record exists. */
+      characterSources?: Array<{ id: string; availability: "existing" | "prospective"; role: string }> }>;
     participants: string[]; knowledge: string;
     routes: Array<{ condition: string; consequence: string }>;
   }>;
@@ -483,20 +485,42 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
     if (!string(event.knowledge)) invalid(path + ".knowledge", "expected one nonempty bounded STRING, not an array/object");
     if (!strings(event.dependsOn, 4) || event.dependsOn.some((id: string) => !seen.has(id)))
       invalid(path + ".dependsOn", "expected at most four earlier provisional Event IDs: " + JSON.stringify([...seen]));
-    if (!strings(event.participants, 12) || event.participants.some((id: string) => !assignment.characterIds.includes(id)))
-      invalid(path + ".participants", "expected at most twelve exact Character IDs from " + JSON.stringify(assignment.characterIds));
+    if (!strings(event.participants, 12) || new Set(event.participants).size !== event.participants.length ||
+        event.participants.some(id => !/^character\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)))
+      invalid(path + ".participants", "expected at most twelve unique typed Character IDs");
     if (!Array.isArray(event.evidence) || !event.evidence.length || event.evidence.length > 8)
       invalid(path + ".evidence", "expected 1–8 concrete evidence entries");
     if (!Array.isArray(event.routes) || event.routes.length > 5)
       invalid(path + ".routes", "expected 0–5 route objects");
     seen.add(String(event.id));
+    const declared = new Map<string, string>();
     for (const [j, e] of event.evidence.entries()) {
-      if (!exact(e, ["anchorPath", "source", "observation", "access", "establishes", "limits"]) ||
+      if (!exact(e, ["anchorPath", "source", "observation", "access", "establishes", "limits",
+          ...(object(e) && "characterSources" in e ? ["characterSources"] : [])]) ||
           !assignment.sourcePaths.includes(String(e.anchorPath)) ||
           ![e.source, e.observation, e.access, e.establishes, e.limits]
             .every(value => string(value)))
         invalid(path + ".evidence[" + j + "]", "expected exact anchorPath, source, observation, access, establishes, limits; bounded nonempty strings and a canonical anchor from " + JSON.stringify(assignment.sourcePaths));
+      if ("characterSources" in e) {
+        const sourcePath = path + ".evidence[" + j + "].characterSources";
+        if (!Array.isArray(e.characterSources) || e.characterSources.length > 12)
+          invalid(sourcePath, "expected at most twelve material Character sources");
+        const local = new Set<string>();
+        for (const source of e.characterSources) {
+          if (!exact(source, ["id", "availability", "role"]) ||
+              typeof source.id !== "string" || !event.participants.includes(source.id) ||
+              local.has(source.id) || !string(source.role, 400) ||
+              (source.availability !== "existing" && source.availability !== "prospective") ||
+              (source.availability === "existing") !== assignment.characterIds.includes(source.id) ||
+              (declared.has(source.id) && declared.get(source.id) !== source.availability))
+            invalid(sourcePath, "expected unique participant IDs, existing only for authorized Characters, otherwise prospective, with a material evidence role");
+          local.add(source.id);
+          declared.set(source.id, source.availability as string);
+        }
+      }
     }
+    if (event.participants.some(id => !assignment.characterIds.includes(id) && declared.get(id) !== "prospective"))
+      invalid(path + ".participants", "unknown Character requires a prospective material source declaration; existing authorized IDs: " + JSON.stringify(assignment.characterIds));
     for (const [j, route] of event.routes.entries())
       if (!exact(route, ["condition", "consequence"]) ||
           !string(route.condition) || !string(route.consequence))
@@ -512,6 +536,18 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
     throw Error("Milestone plan must identify the downstream Composition owner.");
   return raw as unknown as MilestoneBlueprint;
 }
+/** Readiness is separate from narrative validity. Only dependencies consumed
+ * by this Event are checked; later Interactive/Composition work stays prospective. */
+export function milestoneCharacterPrerequisites(design: MilestoneBlueprint,
+  assignment: Pick<EventAssignment, "characterIds">) {
+  return design.events.flatMap(event => event.evidence.flatMap((evidence, index) =>
+    (evidence.characterSources ?? []).filter(source =>
+      !assignment.characterIds.includes(source.id)).map(source => ({
+        eventId: event.id, evidenceIndex: index, anchorPath: evidence.anchorPath,
+        characterId: source.id, role: source.role, owner: "nt-character-development" as const,
+      }))));
+}
+
 export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlueprint,
   assignment: Pick<EventAssignment, "milestonePath" | "sourcePaths">,
   previous: readonly Round[] = [],
@@ -928,7 +964,13 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "conditions and lasting consequences. The Event knowledge field MUST be ONE " +
     "nonempty STRING summarizing who learns what and why, NEVER an array, object, " +
     "list of structured state transitions or nested fact mappings. Participants " +
-    "MUST use ONLY the exact CHARACTER IDS below (or [] if empty). dependsOn " +
+    "MUST include all material Character participants, including testimony, witness or informant sources. " +
+    "Use the exact CHARACTER IDS below for existing authorized Characters. If the intended evidence needs an additional " +
+    "Character not in that inventory, declare a typed character.slug as prospective and include it in participants. " +
+    "For every evidence entry include characterSources: [{id,availability:'existing|prospective',role}] " +
+    "for all material Character sources, or [] for non-Character sources. A prospective Character is a required " +
+    "predecessor, NOT authority for Event to author it or proof of existing canon. Do not remove valid narrative evidence " +
+    "merely because its required Character is not yet realized. dependsOn " +
     "MUST use only earlier provisional Event slugs. " +
     "Evidence anchorPath MUST be an existing sourcePaths " +
     "canonical record, not a proposed Event path. Name downstream owners for required " +
@@ -942,7 +984,7 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "Unknown future Events remain provisional, not verified canon. " +
     "No unrelated Milestone or protected-canon changes. Return ONLY one JSON object " +
     "{schema:'noveltea-milestone-blueprint/v1',milestoneId,events:[{id,purpose,dependsOn," +
-    "evidence:[{anchorPath,source,observation,access,establishes,limits}],participants,knowledge," +
+    "evidence:[{anchorPath,source,observation,access,establishes,limits,characterSources:[{id,availability,role}]}],participants,knowledge," +
     "routes:[{condition,consequence}]}],downstream:[{owner:'event|interactive|composition',obligation}]}. " +
     "An Event id is a provisional slug, not a canonical event.* ID. " +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
@@ -964,6 +1006,10 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "A positive interactive owner means REQUIRED work for THIS Milestone, never a declaration " +
     "that none is needed, an optional idea, or work deferred to another Milestone. " +
     "Legitimate Event-only Milestones need no interactive owner; do not fabricate a Choice. " +
+    "Verify EVERY material witness, informant, testimony provider or other Character evidence source " +
+    "is explicitly declared in characterSources and participants. Reject a missing declaration by citing the evidence field; " +
+    "do not reject a sound design just because a declared prospective Character is unrealized. " +
+    "A prospective Character must be necessary for the selected Milestone, and must be authored by its own authorized owner before Event. " +
     "Do not insist on canon or playable prose not yet authored, and do not call a future stage's " +
     "obligation a current-stage blocker. Flag actual unsupported, contradictory or missing " +
     "obligations with a CURRENT canonical anchorPath. Preserve prior findings and assess the " +

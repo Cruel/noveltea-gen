@@ -33,7 +33,7 @@ import { processAuthorUpdatesAtBoundary, processAuthorUpdatesAfterWork } from ".
 import { loadSkillConfig } from "./skills.js";
 import { guardPiBudget, preflightPiAssignment } from "./job-pi-policy.js";
 import { archiveReviewedMilestoneBlueprint, ensureMilestoneBlueprint,
-  inspectMilestoneBlueprint, readReviewedMilestoneBlueprint,
+  inspectMilestoneBlueprint, readReviewedMilestoneBlueprint, milestoneCharacterPrerequisites,
   type MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import { createSkillSnapshot, openSkillSnapshot, type SkillSnapshot } from "./snapshot.js";
 import { validateStoryJob, type ValidationResult } from "./validator.js";
@@ -53,6 +53,7 @@ interface EventReceipt {
   /** Older Event items predate the local Blueprint gate; new items require it. */
   blueprintRequired?: boolean; blueprintTask?: string; blueprintPin?: MilestoneBlueprintPin;
   assignment?: EventAssignment;
+  blueprintPrerequisite?: EventBlueprintPrerequisite;
   skillReads?: string[]; claimedPaths?: string[];
   paths?: string[]; contentDigest?: string; commitSha?: string;
   conflicts?: string[]; obligations?: string[];
@@ -542,9 +543,64 @@ function verifyCommit(job: JobStartResult, receipt: EventReceipt, commit: string
     throw new Error("Event commit contains unreviewed or missing files.");
   }
 }
+export interface EventBlueprintPrerequisite {
+  milestoneId: string;
+  expectedHead: string;
+  planVersion: number;
+  blueprintDigest: string;
+  reportDigest: string;
+  blockers: Array<ReturnType<typeof milestoneCharacterPrerequisites>[number] & {
+    readiness: "unrealized-character" | "outside-event-authority";
+  }>;
+}
+
+/** A pre-dispatch readiness report is not a specialist result or a write
+ * lease. Reconstruct it from the independently reviewed plan and native
+ * catalog while the source is still the original clean HEAD. */
+async function blueprintPrerequisite(job: JobStartResult, receipt: EventReceipt, plan: Plan,
+  source: Report): Promise<EventBlueprintPrerequisite | null> {
+  if (!receipt.blueprintPin || receipt.phase !== "ready" || receipt.sessionFile ||
+      receipt.invocationSource || receipt.claimedPaths?.length ||
+      receipt.planVersion !== plan.version || receipt.planDigest !== hash(JSON.stringify(plan)) ||
+      receipt.expectedHead !== await trustedHead(job) || dirty(job).length)
+    throw Error("Blueprint readiness requires the original clean, unstarted Event assignment.");
+  const assignment = selectedAssignment(job, plan, source, receipt.milestoneId, receipt.workItemId);
+  const design = await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, assignment);
+  const blockers = milestoneCharacterPrerequisites(design, assignment).map(blocker => ({
+    ...blocker,
+    readiness: source.records.some(record => record.metadata.id === blocker.characterId &&
+      record.metadata.type === "character" && record.metadata.status !== "superseded")
+      ? "outside-event-authority" as const : "unrealized-character" as const,
+  }));
+  if (!blockers.length) return null;
+  const body = { milestoneId: receipt.milestoneId, expectedHead: receipt.expectedHead,
+    planVersion: receipt.planVersion, blueprintDigest: receipt.blueprintPin.digest, blockers };
+  return { ...body, reportDigest: hash(JSON.stringify({ jobId: job.jobId, assignment, ...body })) };
+}
+
+export async function inspectEventBlueprintPrerequisite(job: JobStartResult, milestone: string,
+  validatorSource?: string): Promise<EventBlueprintPrerequisite> {
+  if (!idPattern.test(milestone)) throw Error("Invalid Blueprint readiness target.");
+  const receipt = JSON.parse(await readFile(join(job.stateDir, "event-items",
+    milestone.slice(10) + ".json"), "utf8")) as EventReceipt;
+  const architecture = JSON.parse(await readFile(join(job.stateDir, "architecture.json"), "utf8")) as ArchitectureReceipt;
+  if (receipt.jobId !== job.jobId || receipt.baseSha !== job.baseSha || receipt.milestoneId !== milestone ||
+      receipt.workItemId !== "event-" + milestone.slice(10) || receipt.worker !== "pi" ||
+      architecture.jobId !== job.jobId || architecture.phase !== "committed" || !architecture.plan ||
+      !receipt.blueprintPrerequisite)
+    throw Error("Blueprint readiness lost its original Event or Architecture receipt.");
+  const source = reportOf(await validateStoryJob(job, validatorSource,
+    { ...job, baseSha: receipt.expectedHead }), receipt.expectedHead);
+  const original = await blueprintPrerequisite(job, receipt, architecture.plan, source);
+  if (!original || JSON.stringify(original) !== JSON.stringify(receipt.blueprintPrerequisite))
+    throw Error("Blueprint readiness differs from its original reviewed source and catalog.");
+  return original;
+}
+
 function output(job: JobStartResult, state: EventReceipt) {
   return { status: state.phase === "committed" ? "event-cluster-committed" :
-    state.phase === "prerequisite-reported" ? "event-prerequisite-reported" : state.phase,
+    state.phase === "prerequisite-reported" ? "event-prerequisite-reported" :
+    state.blueprintPrerequisite ? "event-blueprint-prerequisite" : state.phase,
     jobId: job.jobId, milestoneId: state.milestoneId, workItemId: state.workItemId,
     worktreeStoryRoot: job.worktreeStoryRoot, headSha: state.commitSha ?? state.expectedHead,
     expectedHead: state.expectedHead, planVersion: state.planVersion, phase: state.phase,
@@ -552,6 +608,7 @@ function output(job: JobStartResult, state: EventReceipt) {
     obligations: state.obligations, conflicts: state.conflicts,
     outstanding: state.validation?.remaining ?? [],
     failure: state.failure, prerequisite: state.prerequisite, causalDiscovery: state.causalDiscovery,
+    blueprintPrerequisite: state.blueprintPrerequisite,
     reroutedFrom: state.reroutedFrom,
     sessionFile: state.sessionFile, skillReads: state.skillReads,
     consequenceProof: state.consequenceProof,
@@ -680,6 +737,8 @@ export async function runEventWorkItem(input: EventOptions) {
         throw Error("Event inspection found a missing required Milestone Blueprint approval.");
       if (receipt.blueprintPin && receipt.assignment)
         await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
+      if (receipt.blueprintPrerequisite)
+        await inspectEventBlueprintPrerequisite(job, receipt.milestoneId, input.validatorSource ?? input.skillsSource);
       return { ...output(job, receipt),
         localPlanning: await inspectMilestoneBlueprint(job, receipt.milestoneId) };
     }
@@ -812,6 +871,11 @@ export async function runEventWorkItem(input: EventOptions) {
         undefined, input.round?.assignmentKey ?? receipt.assignmentKey, input.turnPlanDigest, input.blueprintAssessment);
       receipt.blueprintPin = local.pin;
       receipt.blueprintTask = task;
+      const readiness = await blueprintPrerequisite(job, receipt, arch.plan!, source);
+      if (receipt.blueprintPrerequisite &&
+          JSON.stringify(receipt.blueprintPrerequisite) !== JSON.stringify(readiness))
+        throw Error("Original Blueprint readiness changed without an authorized successor.");
+      if (readiness) receipt.blueprintPrerequisite = readiness;
       await persist(receiptFile, receipt);
     }
     if (input.blueprintAssessment) {
@@ -819,6 +883,9 @@ export async function runEventWorkItem(input: EventOptions) {
         throw Error("Original Milestone Blueprint assessment did not reach its independently approved pin.");
       return { ...output(job, receipt), status: "blueprint-approved", blueprintPin: receipt.blueprintPin };
     }
+    // A sound prospective Blueprint can be approved while a predecessor is
+    // unrealized. Do not enter the Event writer graph or consume its budget.
+    if (receipt.blueprintPrerequisite) return output(job, receipt);
     const Channels = Annotation.Root({ receipt: Annotation<EventReceipt>(),
       round: Annotation<AssignmentRoundResult | null>({ reducer: (_, next) => next, default: () => null }) });
     const graph = new StateGraph(Channels)

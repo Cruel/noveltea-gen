@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  parseMilestoneBlueprint,
+  parseMilestoneBlueprint, milestoneCharacterPrerequisites,
   parseMilestoneBlueprintReview,
   milestoneReviewStagnation,
   type MilestoneBlueprint,
@@ -399,4 +399,37 @@ test("R14 live Milestone review failures identify exact zero-based identities an
   proposed.prior[0].evidence.eventId = "renamed-event";
   assert.throws(() => parseMilestoneBlueprintReview(JSON.stringify(proposed), draft, assignment, prior),
     /prior\[0\].*original target\/Event ID/);
+});
+
+test("prospective witness is a legitimate design, but remains a Character predecessor", () => {
+  const event = draft.events[0]!;
+  const witness = { id: "character.gate-clerk", availability: "prospective" as const,
+    role: "The clerk personally observed who entered." };
+  const planned = { ...draft, events: [{ ...event, participants: [witness.id],
+    evidence: [{ ...event.evidence[0]!, characterSources: [witness] }] }] };
+  const parsed = parseMilestoneBlueprint(JSON.stringify(planned), assignment);
+  assert.deepEqual(parsed, planned);
+  assert.equal(parseMilestoneBlueprintReview(review("pass"), parsed, assignment).status, "pass");
+  assert.deepEqual(milestoneCharacterPrerequisites(parsed, assignment), [{
+    eventId: event.id, evidenceIndex: 0, anchorPath: path, characterId: witness.id,
+    role: witness.role, owner: "nt-character-development",
+  }]);
+  assert.deepEqual(milestoneCharacterPrerequisites(parsed, { characterIds: [witness.id] }), []);
+  // An invented canonical source or undeclared prospective participant is
+  // never accepted in place of the typed prerequisite.
+  for (const invalid of [
+    { ...planned.events[0], evidence: event.evidence },
+    { ...planned.events[0], participants: [] },
+    { ...planned.events[0], participants: [witness.id, witness.id] },
+    { ...planned.events[0], evidence: [{ ...event.evidence[0], characterSources: [
+      { ...witness, availability: "existing" },
+    ] }] },
+    { ...planned.events[0], evidence: [{ ...event.evidence[0], characterSources: [witness, witness] }] },
+  ]) assert.throws(() => parseMilestoneBlueprint(JSON.stringify({ ...planned, events: [invalid] }), assignment));
+  const ready = { ...planned, events: [{ ...planned.events[0], evidence: [
+    { ...event.evidence[0], characterSources: [{ ...witness, availability: "existing" }] },
+  ] }] };
+  const currentAssignment = { ...assignment, characterIds: [witness.id] };
+  assert.deepEqual(milestoneCharacterPrerequisites(
+    parseMilestoneBlueprint(JSON.stringify(ready), currentAssignment), currentAssignment), []);
 });

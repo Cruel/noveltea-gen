@@ -385,7 +385,7 @@ export async function inspectModernGenerationRecovery(
             source.channel === "operationRecovery" &&
             !!((source.input as unknown as GenerationOperationRecovery).evidence.assignmentFailure ||
               (source.input as unknown as GenerationOperationRecovery).evidence.protocolFailure ||
-              active.origin.operation === "independent-review" && d.reason === "protocol-exhausted") &&
+              d.reason === "protocol-exhausted") &&
             isDeepStrictEqual(d, await selectOperationStrategy(job, values as GenerationGraphState, active).catch(() => null));
         default:
           return false; // Unsupported active writer scope from a saved claim.
