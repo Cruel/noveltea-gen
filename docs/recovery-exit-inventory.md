@@ -693,7 +693,14 @@ round-origin correction and the exhausted-reviewer parent disposition.
 | `prepareRepairWriter`, `beginRejectedRepair`, `readRejectedRepairOrigin`, `verifyFinal`, `usesSharedAssignmentReview`, `usesCheckpointedReviewRounds`, `reviewSupportRoot` | Reuse the existing repair skill, sealed transcript, checkpoint and writer lease with the support identity. No new model consumer policy or allowance; Review is mandatory and the original failed checkpoint is not relabeled. |
 | `executeOperationStrategy`, `inspectBlueprintSupportProgress`, `supportingBoundary`, `advanceFocusedDependency` | Carry the original Case into support correction and authenticate verified roots and repair chains on reentry. Original parent authority and dependency closure are unchanged. |
 
-Further cross-owner support Review/diagnostic integration, unresolved planning,
-partial-progress resource qualification, and complete affected-consumer/multi-Case
-qualification remain outstanding. Unsupported specialist adapters remain in
-#274. This audit update is not certification of those unresolved routes.
+| `SupportingAssignmentStop`, `inspectSupportingReviewSelection`, `executeOperationStrategy` | Returned END is an authenticated outcome, not a generic exception. Persist the existing parent Case's selected support Review assessment before running the existing assessor. Reauthenticate the exact support root, grant and lineage; continue only on an authorized assessment, or seal the existing exhausted/protected disposition. |
+| `runSupportingChild` physical namespace | Same logical assignment key; retain the parent task identity in the checkpoint namespace so a fresh task cannot inherit a prior END result. Replay of the same task does not repeat effects. |
+| `inspectSupportingNativeFailure`, `authenticateSupportingNativeOrigin`, `inspectModernGenerationRecovery`, `recoveryNode/return#1` | Exact Case/assignment-bound native failure determines protocol exhaustion or existing diagnostic selection. Reinspect the original source across verified descendants; keep G for the outer recovery-node dispatch. A supporting failure never grants the Event writer a new repair scope. |
+| `repairNativeMetadataDefects`, `nativeMetadataDefects` | Only exact Git-proved unchanged consumers of directly invalid owned records may contribute derived broken-reference diagnostics; no new path authority or bypass of final native validation. R14D native-protocol and exact-reference unit tests exercise the gate. |
+| C08 deferred-two / existing selective revalidation and fulfillment gates | Two separate deferred Cases survive ordinary next dispatch; neither is silently discharged. Existing affected-only revalidation, receipt authentication, and steering/fulfillment tests remain authoritative. |
+
+The shared parent interface is exercised by the R04/R14D production graph
+regressions; remaining specialist adapter admission and lane integration
+(including the legacy review-source root) belong to #274. Full cross-lane
+and persistence qualification belongs to #275. Neither is implied by this
+parent-boundary audit.

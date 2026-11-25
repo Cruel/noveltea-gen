@@ -38,7 +38,7 @@ import { diagnoseUnknownCompletion, inspectDiagnosticAttempt, inspectOriginalUnk
   operationDiagnosisCase, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { assessBoundedAssignmentFailure, decideRecovery, finishVerifiedRecovery, recordRecoveryOutcome } from "./generation-recovery-lifecycle.js";
 import { authorizeDiagnosticStrategy, diagnosticPacket, terminalDiagnosticDecision } from "./generation-diagnostic-controller.js";
-import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle, RecoveryAttempt } from "./generation-recovery-contract.js";
+import type { RecoveryCase, RecoveryDecision, RecoveryEvidence, RecoveryLifecycle, RecoveryAttempt, SupportingReviewAssessment } from "./generation-recovery-contract.js";
 
 type State = GenerationGraphState;
 const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
@@ -48,6 +48,14 @@ const base = (c: RecoveryCase, proof?: RecoveryEvidence) => ({
 async function originalAssignmentFailure(job: JobStartResult, s: State, c: RecoveryCase) {
   const op = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
     GenerationOperationRecovery | undefined;
+  if (op?.evidence.eventBlueprintPrerequisite) {
+    const failure = await (await import("./dependency-work.js")).inspectSupportingNativeFailure(job,
+      op.evidence.eventBlueprintPrerequisite, c.origin.graphThreadId, c.id);
+    if (!failure) return null;
+    if (!await originalNoWriteOwnerProof(job, s, c))
+      throw Error("Supporting native failure lost its original parent owner proof.");
+    return failure;
+  }
   if (!op?.evidence.assignmentFailure) {
     if (c.origin.operation !== "independent-review" || !usesSharedAssignmentReview(c.origin.assignmentId)) return null;
     const failure = await inspectNativeReviewFailure(job, c.origin.sourceHeadSha, c.id);
@@ -74,6 +82,13 @@ async function originalAssignmentFailure(job: JobStartResult, s: State, c: Recov
   const failure = await authenticateAssignmentFailure(job, op.evidence, c.origin.sourceHeadSha);
   if (!failure) throw Error("Original settled assignment failure proof changed.");
   return failure;
+}
+export async function authenticateSupportingNativeOrigin(job: JobStartResult, s: State, c: RecoveryCase) {
+  if (!(s.recoverySources.find(x => x.caseId === c.id &&
+    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite)
+    return false;
+  const failure = await originalAssignmentFailure(job, s, c);
+  return !!failure && "supportReportDigest" in failure;
 }
 async function assertSource(job: JobStartResult, s: State, c: RecoveryCase) {
   if (s.request.turnPlanDigest !== c.origin.turnDigest || s.planVersion !== c.origin.planVersion ||
@@ -537,7 +552,8 @@ export async function selectOperationStrategy(job: JobStartResult, s: State, c: 
       digest: assignmentFailure.proof.receiptDigest };
     return { ...base(c, proof), action: "exhausted", reason: "protocol-exhausted", attemptRefs: [proof] };
   }
-  if (assignmentFailure?.proof.kind === "nonconverging" && c.origin.operation === "independent-review") {
+  if (assignmentFailure?.proof.kind === "nonconverging" && (c.origin.operation === "independent-review" ||
+      "supportReportDigest" in assignmentFailure)) {
     const proof = { store: "specialist-receipt" as const, ref: assignmentFailure.ref,
       digest: assignmentFailure.proof.receiptDigest };
     await assertSource(job, s, c);
@@ -583,9 +599,15 @@ export async function authenticateOperationOwnerProof(job: JobStartResult, s: St
   if (d.action !== "plan-amendment" || d.adapter !== originalOwnerAdapter(s, c))
     return false;
   const original = await originalNoWriteOwnerProof(job, s, c);
-  return !!original && original.owner === d.owner &&
-    isDeepStrictEqual(original.proof, d.scopeRef) &&
-    isDeepStrictEqual(d.evidence, [...c.evidence, original.proof]);
+  if (!original || original.owner !== d.owner ||
+      !isDeepStrictEqual(original.proof, d.scopeRef) ||
+      !isDeepStrictEqual(d.evidence, [...c.evidence, original.proof])) return false;
+  if (!d.supportReview) return true;
+  const readiness = (s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as
+    GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+  return !!readiness && d.adapter === "dependency-work" &&
+    !!await (await import("./dependency-work.js")).inspectSupportingReviewSelection(job, readiness,
+      c.origin.graphThreadId, d.supportReview.reportDigest, d.supportReview);
 }
 export async function authenticateOperationReviewProof(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
@@ -603,6 +625,26 @@ export async function authenticateOperationReviewProof(job: JobStartResult, s: S
       await inspectFoundationReviewBoundary(job, c.origin.sourceHeadSha, d.reviewAssessment));
   } catch { return false; }
 }
+async function supportingReviewExhaustion(job: JobStartResult, s: State, c: RecoveryCase,
+  selected: SupportingReviewAssessment): Promise<RecoveryDecision | null> {
+  const owner = await originalNoWriteOwnerProof(job, s, c);
+  if (!owner) return null;
+  const original: RecoveryDecision = { ...base(c, owner.proof), action: "plan-amendment",
+    adapter: "dependency-work", owner: owner.owner, scopeRef: owner.proof, supportReview: selected };
+  if (!await authenticateOperationOwnerProof(job, s, c, original)) return null;
+  const stop = await inspectFoundationReviewStop(job, selected.rootSha, selected.assessment);
+  if (!stop) return null;
+  return { ...base(c, owner.proof), evidence: [...c.evidence, owner.proof, stop],
+    action: "exhausted", reason: "nonconverging", attemptRefs: [stop], supportReview: selected };
+}
+
+export async function authenticateSupportingReviewExhaustion(job: JobStartResult, s: State,
+  c: RecoveryCase, d: Extract<RecoveryDecision, {action: "exhausted"}>): Promise<boolean> {
+  try {
+    return !!d.supportReview && isDeepStrictEqual(d, await supportingReviewExhaustion(job, s, c, d.supportReview));
+  } catch { return false; }
+}
+
 export async function authenticateFoundationReviewExhaustion(job: JobStartResult, s: State,
   c: RecoveryCase, d: RecoveryDecision): Promise<boolean> {
   if (d.action !== "exhausted" || d.reason !== "nonconverging" || !d.reviewAssessment ||
@@ -758,7 +800,7 @@ export async function authorizeOperationDiagnosticStrategy(job: JobStartResult, 
   const local = assignmentDiagnosticDecision(c, diagnostic, proposal);
   if (local) {
     const original = await originalAssignmentFailure(job, s, c);
-    if (!original || original.proof.kind !== "nonconverging" ||
+    if (!original || "supportReportDigest" in original || original.proof.kind !== "nonconverging" ||
         !assignmentDiagnosticDefects(original, c.origin.assignmentId) || original.ref !== local.evidence.at(-1)?.ref ||
         original.proof.receiptDigest !== local.evidence.at(-1)?.digest) return null;
     return local;
@@ -866,6 +908,13 @@ export async function pausedBlueprintDependencyDecision(job: JobStartResult, s: 
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
   if (!readiness || pause.resumeRef.ref !== readiness.reportDigest || pause.resumeRef.digest !== readiness.reportDigest ||
       c.origin.graphThreadId !== graphThreadId) return null;
+  const failure = await originalAssignmentFailure(job, s, c);
+  if (failure && "supportReportDigest" in failure) {
+    const selected = await selectOperationStrategy(job, s, c);
+    if (selected?.action === "diagnostic" && isDeepStrictEqual(pause.evidence, selected.evidence))
+      return selected;
+    return null;
+  }
   const owner = await originalNoWriteOwnerProof(job, s, c);
   if (!owner || !isDeepStrictEqual(pause.evidence, [...c.evidence, owner.proof])) return null;
   const decision = { ...base(c, owner.proof), action: "plan-amendment" as const,
@@ -1000,8 +1049,8 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
     x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
   const pauseDecision = (reason: Extract<RecoveryDecision, { action: "pause" }>["reason"]): RecoveryDecision =>
-    readiness && d.action === "plan-amendment" && d.adapter === "dependency-work"
-      ? { ...base(c, d.scopeRef), action: "pause", reason, resumeRef: { store: "dependency-plan",
+    readiness && (d.action === "plan-amendment" && d.adapter === "dependency-work" || d.action === "diagnostic")
+      ? { ...base(c, d.action === "plan-amendment" ? d.scopeRef : d.evidence.at(-1)), action: "pause", reason, resumeRef: { store: "dependency-plan",
           ref: readiness.reportDigest, digest: readiness.reportDigest } }
       : { ...base(c), action: "pause", reason };
   try {
@@ -1012,7 +1061,26 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           s.request.turnPlanDigest !== c.origin.turnDigest || s.request.job !== c.origin.jobId ||
           job.threadId !== c.origin.jobThreadId || s.planVersion !== c.origin.planVersion)
         throw Error("Blueprint dependency lost its original recovery decision.");
-      const { advanceBlueprintDependency } = await import("./dependency-work.js");
+      const { advanceBlueprintDependency, SupportingAssignmentStop, inspectSupportingReviewSelection } =
+        await import("./dependency-work.js");
+      if (d.supportReview) {
+        const selected = d.supportReview;
+        // The checkpointed original parent owns this read-only assessment.
+        // The common policy and original cycle own the diagnostic and budget.
+        const result = await withStoryJobLock(job, "assess-supporting-review", () =>
+          executeFoundationReviewAssessment(job, selected.rootSha, selected.assessment));
+        if (result.stop) {
+          const decision = await supportingReviewExhaustion(job, s, c, selected);
+          if (!decision || assessBoundedAssignmentFailure("nonconverging", "stop") !== "exhausted")
+            throw Error("Supporting Review assessment did not seal its terminal disposition.");
+          return stop(decision, result.reason ?? "Supporting Review did not converge.");
+        }
+        if (result.protectedApproval)
+          return stop(pauseDecision("protected-approval"), result.reason!, "blocked");
+        const { supportReview: _selected, ...ordinary } = d;
+        return { recoveryLifecycle: { ...decideRecovery(settled, ordinary), assessorPending: true },
+          reason: null, status: "running" };
+      }
       let result: Awaited<ReturnType<typeof advanceBlueprintDependency>>;
       try {
         result = await advanceBlueprintDependency(s.request, readiness, config, c.id);
@@ -1021,6 +1089,33 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         // child graph wrapped the error. Uncertain effects still fail closed.
         if (config?.signal?.aborted || (error != null && isGraphBubbleUp(error)) ||
             error instanceof PiModelUnavailableError || error instanceof Error && error.name === "PiBudgetPause") throw error;
+        if (error instanceof SupportingAssignmentStop) {
+          const outcome = error.outcome;
+          if (outcome.status === "unresolved" && outcome.dispositionRef === "assess-review") {
+            const selected = await inspectSupportingReviewSelection(job, readiness, c.origin.graphThreadId, error.reportDigest);
+            if (!selected || selected.assessment.digest !== outcome.evidenceRef)
+              throw Error("Supporting Review assessment lost its exact source.");
+            return { recoveryLifecycle: { ...decideRecovery(settled, { ...d, supportReview: selected }), assessorPending: true },
+              reason: null, status: "running" };
+          }
+          if (outcome.status === "unresolved" && outcome.dispositionRef.startsWith("repair-native:")) {
+            const original = await originalAssignmentFailure(job, s, c);
+            if (!original || !("supportReportDigest" in original) || original.supportReportDigest !== error.reportDigest ||
+                outcome.evidenceRef !== original.proof.receiptDigest ||
+                outcome.dispositionRef !== "repair-native:" + original.proof.kind)
+              throw Error("Supporting native terminal lost its exact source.");
+            const selected = await selectOperationStrategy(job, s, c);
+            if (selected?.action === "exhausted") return stop(selected, "Original supporting native response protocol exhausted.");
+            if (selected?.action !== "diagnostic") throw Error("Supporting native terminal has no shared assessment.");
+            return { recoveryLifecycle: { ...decideRecovery(settled, selected), assessorPending: true },
+              reason: null, status: "running" };
+          }
+          if (outcome.status === "paused") {
+            const reason = outcome.controlRef.split(":")[0];
+            if (reason === "author-choice" || reason === "author-pause" || reason === "budget" || reason === "provider-unavailable")
+              return stop(pauseDecision(reason), "Supporting assignment paused at its original boundary.", "paused");
+          }
+        }
         const { inspectDependencyPlan } = await import("./dependency-state.js");
         const plan = await inspectDependencyPlan(job);
         for (const entry of plan?.entries ?? []) {
@@ -1171,7 +1266,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           original: packet.existingFindings, assignmentDefects: originalDraft.defects,
           observation: "Repeated source-bound assignment correction did not converge; draft remains uncommitted.",
         };
-        if (diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
+        if (!("supportReportDigest" in originalDraft) && diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
             assignmentDiagnosticDefects(originalDraft, c.origin.assignmentId))
           packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef=exact sourceRef; only the exact original controller-verified defects within the existing write grant, no other owner or new prerequisites"];
       }

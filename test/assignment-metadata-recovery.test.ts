@@ -48,6 +48,17 @@ test("native metadata recovery carries exact owned locations but excludes untrus
 
 });
 
+test("derived broken references require exact unchanged-consumer evidence and an owned metadata defect", () => {
+  const ref = { code: "broken-reference", path: "arcs/truth.md", target: "character.mara" };
+  const owned = { code: "schema", path, pointer: "/title", line: 5 };
+  const exact = { ...source, derivedReferences: [{ path: ref.path, target: ref.target }] };
+  assert.deepEqual(nativeMetadataDefects(rejected([owned, ref]), exact), [defect]);
+  assert.throws(() => nativeMetadataDefects(rejected([owned, ref]), source), /scope/);
+  assert.throws(() => nativeMetadataDefects(rejected([owned, { ...ref, target: "character.other" }]), exact), /scope/);
+  assert.throws(() => nativeMetadataDefects(rejected([owned, { ...ref, path: "arcs/other.md" }]), exact), /scope/);
+  assert.throws(() => nativeMetadataDefects(rejected([ref]), exact), /directly scoped/);
+});
+
 type Reply = { text: string; effect?: string; fail?: boolean };
 async function harness(t: import("node:test").TestContext, replies: Reply[], responseKind?: AssignmentResponseKind) {
   const dir = await mkdtemp(join(tmpdir(), "nt-assignment-metadata-"));

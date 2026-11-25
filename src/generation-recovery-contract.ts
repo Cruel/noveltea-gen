@@ -103,6 +103,14 @@ export type RecoveryCase = Readonly<{
   causedByCaseId?: string;
 }>;
 
+/** A supporting Review remains part of the original parent's Case. This
+ * selects an existing assessment; neither a new Case nor a new write grant. */
+export type SupportingReviewAssessment = Readonly<{
+  reportDigest: string;
+  rootSha: string;
+  assessment: Readonly<{ kind: "diagnostic" | "dispute" | "author-revision" | "scope"; sourceSha: string; digest: string }>;
+}>;
+
 type RecoveryDecisionBase = Readonly<{
   schema: "noveltea-generation-recovery-decision/v1";
   caseId: string;
@@ -126,6 +134,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
         action: "plan-amendment";
         owner: string;
         scopeRef: RecoveryEvidence;
+        supportReview?: SupportingReviewAssessment;
         adapter:
           | "dependency-work"
           | "causal-amendment"
@@ -174,6 +183,7 @@ export type RecoveryDecision = RecoveryDecisionBase &
         reason: "protocol-exhausted" | "nonconverging" | "resource-ceiling";
         attemptRefs: readonly RecoveryEvidence[];
         reviewAssessment?: NonNullable<Extract<RecoveryDecision, { action: "known-correction" }>["reviewAssessment"]>;
+        supportReview?: SupportingReviewAssessment;
       }
     | {
         action: "integrity-fence";

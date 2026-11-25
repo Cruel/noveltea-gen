@@ -866,11 +866,42 @@ Event or Focused assignment. R14D exercises a negative support Review with a
 real Character correction, checkpoint loss after both the original support
 commit and corrective commit, and no repeated model calls.
 
-Remaining #273 acceptance is not established by these changes alone:
-unresolved planning and cross-owner support Review findings, recovery of
-support-specific diagnostic/author/nonprogress exits, multi-Case pending
-scheduling, affected-only consumer reconciliation, and resource controls
-beyond the tested author-pause path need further production qualification.
-#274 owns the remaining specialist adapter integration, not a replacement
-parent or a new retry budget. #275 owns the compositional qualification
-across those integrations.
+A supporting assignment's returned-END assessment is selected in the existing
+parent Case as `plan-amendment.supportReview` (dependency report digest,
+immutable support root SHA, and exact existing Review assessment). The parent
+reauthenticates the grant, complete intervening support lineage and assessment
+before invoking the ordinary read-only assessor. An authorized continuation
+returns to the same logical support assignment in a new physical parent-task
+namespace; replay of the same task retains its namespace. A diagnostic stop
+seals the existing `exhausted/nonconverging` disposition, while an authentic
+native response-protocol exhaustion seals `exhausted/protocol-exhausted`.
+Neither can be replayed as a writer on restart. A signed author choice and
+resource pauses retain the original dependency strategy; a new scope requires
+explicit approval. The native-failure receipt is bound to the original parent
+Case and exact supporting assignment, never treated as permission for the
+parent Event writer. The R14D tests exercise both the original Review cycle
+and the parent handoff with durable SQLite checkpoints and real Git effects.
+
+For owned metadata repairs, an unchanged consumer's broken reference is a
+secondary diagnostic only when its exact path and target are proved from the
+original Git source and the target has a directly owned schema error. No
+consumer write authority is inferred, and the full native validation remains
+mandatory before a commit. The parent retains distinct pending Cases while
+ordinary scheduling continues (C08 deferred-two). The existing other-owner
+revalidation gate (`revalidateOtherOwnerPrerequisite`,
+`settlePendingOtherOwnerRevalidations`) requires affected-consumer receipts
+before reconciliation; selective revalidation, fulfillment and steering
+regressions retain that behavior.
+
+Adapter integration boundary for #274: use these shared parent decisions,
+receipt verification, writer/reviewer transitions and logical reentry; extend
+the existing prerequisite source/admission adapters for Event/Focused
+non-Character and existing-outside-authority requests, Interactive and
+Composition upstream findings, and Story/Milestone Blueprint contradictions.
+The legacy review-source-root path and other lane-specific integration are
+not certified by the Blueprint support regressions. An ambiguous proposal
+must resolve to an authenticated bounded grant before work starts; refusal
+or protected scope remains unresolved rather than fabricating authority.
+#275 owns the complete compositional cross-lane qualification, including the
+Studio persistence matrix. No separate scheduler, retry allowance, Case
+ledger, or writer grant is introduced by this work.

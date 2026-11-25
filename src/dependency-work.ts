@@ -18,7 +18,9 @@ import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, dependencyAncestors, supportingReviewAssignment, DependencyAuthorizationRefusedError, type DependencyEntry } from "./dependency-state.js";
 import { createReviewRoundTransitions } from "./generation-review-round.js";
 import { reviewSupportRoot, inspectSharedSupportReview } from "./support-review.js";
-import { executeReviewRound } from "./rejected-review-repair.js";
+import { executeReviewRound, inspectFoundationReviewBoundary } from "./rejected-review-repair.js";
+import type { SupportingReviewAssessment } from "./generation-recovery-contract.js";
+import { isDeepStrictEqual } from "node:util";
 import { proposeDependency } from "./dependency-planner.js";
 
 /** Authenticate an exact committed, not-yet-published prerequisite effect.
@@ -94,6 +96,59 @@ export async function inspectBlueprintSupportProgress(job: import("./job.js").Jo
     parent = commit;
   }
   return parent === head;
+}
+
+/** Returned-END outcome from an admitted supporting child. The parent must
+ * reauthenticate its source before selecting any assessment or disposition. */
+export class SupportingAssignmentStop extends Error {
+  constructor(readonly reportDigest: string, readonly outcome: Exclude<AssignmentOutcome, {status: "verified"}>) {
+    super("Supporting assignment returned " + outcome.status);
+  }
+}
+
+/** Select the same bounded Review assessment used by ordinary assignments.
+ * The admitted Blueprint root and every intervening support effect must
+ * belong to the original parent. No checkpoint field confers authority. */
+export async function inspectSupportingReviewSelection(job: import("./job.js").JobStartResult,
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string,
+  reportDigest: string, selected?: SupportingReviewAssessment): Promise<SupportingReviewAssessment | null> {
+  const plan = await inspectDependencyPlan(job);
+  const entry = plan?.entries.find(e => e.reportDigest === reportDigest);
+  if (!plan || !entry?.supportRootSha || !entry.amendment || entry.phase !== "reviewing" ||
+      !plan.entries.some(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
+        e.blueprintSource.milestoneId === readiness.milestoneId &&
+        dependencyAncestors(plan.entries, entry).has(e.reportDigest)) ||
+      !await inspectBlueprintSupportProgress(job, readiness, graphThreadId)) return null;
+  const assessment = await inspectFoundationReviewBoundary(job, entry.supportRootSha, selected?.assessment);
+  if (!assessment) return null;
+  const checked = { reportDigest, rootSha: entry.supportRootSha, assessment };
+  return !selected || isDeepStrictEqual(selected, checked) ? checked : null;
+}
+
+/** The existing native Review terminal is attributable to the original
+ * parent Case, not a fresh failed Event or a new budget. */
+export async function inspectSupportingNativeFailure(job: import("./job.js").JobStartResult,
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string, caseId: string) {
+  const plan = await inspectDependencyPlan(job);
+  if (!plan) return null;
+  const { inspectNativeReviewFailure } = await import("./rejected-review-repair.js");
+  for (const entry of plan.entries) {
+    if (entry.phase !== "reviewing" || !entry.supportRootSha || !entry.amendment ||
+        !plan.entries.some(e => e.blueprintSource?.readinessDigest === readiness.reportDigest &&
+          e.blueprintSource.milestoneId === readiness.milestoneId &&
+          dependencyAncestors(plan.entries, entry).has(e.reportDigest))) continue;
+    const amendment = entry.amendment;
+    const key = logicalAssignmentKey({ schema: "noveltea-assignment-identity/v1",
+      jobId: job.jobId, jobThreadId: job.threadId, graphThreadId, turnDigest: entry.report.turnDigest,
+      assignmentId: amendment.assignment.id, planVersion: amendment.afterVersion,
+      sourceHeadSha: entry.report.sourceSha, scopeDigest: dependencyDigest(amendment.assignment) });
+    const failure = await inspectNativeReviewFailure(job, entry.supportRootSha, caseId, key);
+    if (!failure) continue;
+    if (!await inspectBlueprintSupportProgress(job, readiness, graphThreadId))
+      throw new ProtocolIntegrityBlockedError("Native supporting failure lost its original parent lineage.");
+    return { ...failure, supportReportDigest: entry.reportDigest };
+  }
+  return null;
 }
 
 /** A settled refusal is not a failed or uncertain writer. The parent must
@@ -223,6 +278,14 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
   const key = logicalAssignmentKey(identity);
   const currentEntry = async () => (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   const rounds = supportingWriterRounds(job, identity, input, currentEntry);
+  // The logical assignment is unchanged, but a new parent task after an
+  // assessed END must not inherit the completed child's terminal projection.
+  // Retain the physical parent task ID in the unstripped namespace. A replay
+  // of that same task still uses exactly the same child checkpoint.
+  const childConfig = assignmentChildConfig(config, identity);
+  const parentTask = config.configurable!.checkpoint_ns as string;
+  childConfig.configurable!.checkpoint_ns += "-task-" + dependencyDigest(parentTask);
+
   // Preserve dynamic child invocation order on parent replay. LangGraph's
   // physical namespace includes the invocation ordinal; receipt-only replay
   // cannot skip earlier children while a later author gate is pending.
@@ -233,7 +296,7 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
     });
     const state = await child.invoke({ identity, submission: null, submissionKey: null,
       outcome: null, continuationRef: null, suspension: null },
-      { ...assignmentChildConfig(config, identity), durability: "sync" });
+      { ...childConfig, durability: "sync" });
     if (dependencyDigest(state.outcome) !== dependencyDigest(outcome))
       throw new ProtocolIntegrityBlockedError("Settled supporting child changed its outcome.");
   };
@@ -306,10 +369,10 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
         ? rounds.verify(state.submission!) : verify(state.submission!),
     }, async head => !!continuationRef && await authenticate() && head === await trustedHead(job));
     const finished = await child.invoke({ identity, submission: null, submissionKey: null,
-      outcome: null, continuationRef, suspension }, { ...assignmentChildConfig(config, identity), durability: "sync" });
+      outcome: null, continuationRef, suspension }, { ...childConfig, durability: "sync" });
     if (!finished.outcome || finished.outcome.assignmentKey !== key)
       throw new ProtocolIntegrityBlockedError("Supporting child returned a foreign outcome.");
-    if (finished.outcome.status === "paused") throw new AssignmentAuthorPauseError();
+    if (finished.outcome.status === "paused" && finished.outcome.controlRef === "job-control") throw new AssignmentAuthorPauseError();
     if (finished.outcome.status === "needs-prerequisite") {
       const original = await supportingSuspension(job, (await currentEntry())!, identity);
       if (!original || dependencyDigest(original) !== dependencyDigest(finished.outcome) || suspension)
@@ -318,7 +381,7 @@ async function runSupportingChild(job: import("./job.js").JobStartResult,
       continue;
     }
     if (finished.outcome.status !== "verified")
-      throw Error("Supporting child did not independently verify its approved prerequisite.");
+      throw new SupportingAssignmentStop(reportDigest, finished.outcome);
     return finished.outcome;
   }
 }

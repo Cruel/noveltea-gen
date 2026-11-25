@@ -141,6 +141,8 @@ export function nativeMetadataDefects(
     paths: readonly string[];
     /** Explicit assignment-specific derived catalog consequences, never write grants. */
     derivedDiagnostics?: readonly string[];
+    /** Exact, controller-attested unchanged consumers of an invalid owned record. */
+    derivedReferences?: readonly { path: string; target: string }[];
   },
 ): AssignmentDefect[] {
   if (result.status !== "rejected" || result.exitCode !== 1 ||
@@ -150,7 +152,7 @@ export function nativeMetadataDefects(
       result.validator.version !== source.validatorVersion)
     throw new ProtocolIntegrityBlockedError("Native metadata rejection lacks its original validator/source");
   const report = result.report as {
-    diagnostics?: { code?: unknown; path?: unknown; line?: unknown; column?: unknown; pointer?: unknown }[];
+    diagnostics?: { code?: unknown; path?: unknown; line?: unknown; column?: unknown; pointer?: unknown; target?: unknown }[];
     protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[]; findings?: unknown[] };
   } | undefined;
   const protection = report?.protection;
@@ -165,7 +167,9 @@ export function nativeMetadataDefects(
   const position = (value: unknown): value is number =>
     typeof value === "number" && Number.isSafeInteger(value) && value > 0;
   const direct = report.diagnostics.filter(d => !(d.path === "." && typeof d.code === "string" &&
-    source.derivedDiagnostics?.includes(d.code)));
+    source.derivedDiagnostics?.includes(d.code)) &&
+    !(d.code === "broken-reference" && source.derivedReferences?.some(ref =>
+      ref.path === d.path && ref.target === d.target)));
   if (!direct.length) throw new ProtocolIntegrityBlockedError("No directly scoped native metadata diagnostic");
   return direct.map(d => {
     if (typeof d.code !== "string" || !metadataCodes.has(d.code) ||

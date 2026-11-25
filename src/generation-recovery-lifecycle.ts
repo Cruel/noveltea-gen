@@ -132,6 +132,12 @@ function validCase(c: RecoveryCase): boolean {
 
 /** Persisted checkpoint JSON is untyped. Reject malformed discriminants even
  * if a caller passes an apparently trusted TypeScript object. */
+function validSupportingReview(value: import("./generation-recovery-contract.js").SupportingReviewAssessment) {
+  return !!value && hex64.test(value.reportDigest) && hex40.test(value.rootSha) &&
+    !!value.assessment && ["diagnostic", "dispute", "author-revision", "scope"].includes(value.assessment.kind) &&
+    hex40.test(value.assessment.sourceSha) && hex64.test(value.assessment.digest);
+}
+
 function validDecision(value: unknown): value is RecoveryDecision {
   if (!value || typeof value !== "object") return false;
   const d = value as RecoveryDecision;
@@ -158,6 +164,7 @@ function validDecision(value: unknown): value is RecoveryDecision {
       return (
         populated(d.owner) &&
         validEvidence(d.scopeRef) &&
+        (d.supportReview === undefined || d.adapter === "dependency-work" && validSupportingReview(d.supportReview)) &&
         [
           "dependency-work",
           "causal-amendment",
@@ -217,6 +224,8 @@ function validDecision(value: unknown): value is RecoveryDecision {
         ["protocol-exhausted", "nonconverging", "resource-ceiling"].includes(d.reason) &&
         Array.isArray(d.attemptRefs) &&
         d.attemptRefs.every(validEvidence) &&
+        (d.supportReview === undefined || !d.reviewAssessment && d.reason === "nonconverging" &&
+          validSupportingReview(d.supportReview) && ["diagnostic", "dispute"].includes(d.supportReview.assessment.kind)) &&
         (d.reviewAssessment === undefined || d.reason === "nonconverging" &&
           ["diagnostic", "dispute"].includes(d.reviewAssessment.kind) &&
           hex40.test(d.reviewAssessment.sourceSha) && hex64.test(d.reviewAssessment.digest))

@@ -848,6 +848,42 @@ export async function finishRejectedRepairDraft(job: JobStartResult, sha: string
 }
 /** Native validation is mandatory; the writer's story_validate output does not
  * stand in for this controller run. Do not discard a failing draft. */
+/** An invalid owned record can temporarily disappear from the native catalog,
+ * causing a broken-reference diagnostic at an unchanged consumer. This is
+ * not authority to edit that consumer. Classify the owned metadata defect
+ * only if the original independently native-verified record ID and unchanged
+ * consumer bytes can be reconstructed from Git. Full validation must still
+ * pass before committing the repair. */
+function repairNativeMetadataDefects(job: JobStartResult, state: RepairReceipt,
+  result: Awaited<ReturnType<typeof validateStoryJob>>) {
+  const diagnostics = (result.report as { diagnostics?: {
+    code?: string; path?: string; target?: string;
+  }[] } | undefined)?.diagnostics ?? [];
+  const targets = new Set<string>();
+  for (const path of state.allowedPaths) {
+    if (!diagnostics.some(d => d.path === path && ["schema", "yaml", "frontmatter"].includes(d.code ?? ""))) continue;
+    const original = gitRaw(job, "show", state.baselineHead + ":" + repoPath(job, path));
+    const frontmatter = original.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+    const id = frontmatter?.match(/^id:\s*([a-z][a-z-]*\.[a-z][a-z0-9-]*)\s*$/m)?.[1];
+    if (id && state.assignment.targets.includes(id)) targets.add(id);
+  }
+  const derivedReferences: { path: string; target: string }[] = [];
+  for (const d of diagnostics) {
+    if (d.code !== "broken-reference" || !d.path || !d.target || !targets.has(d.target) ||
+        !originalSafePath(d.path) || state.allowedPaths.includes(d.path)) continue;
+    const path = join(job.worktreeStoryRoot, d.path);
+    if (realpathSync(path) !== path || !lstatSync(path).isFile()) continue;
+    if (gitRaw(job, "show", state.baselineHead + ":" + repoPath(job, d.path)) !== readFileSync(path, "utf8")) continue;
+    derivedReferences.push({ path: d.path, target: d.target });
+  }
+  return nativeMetadataDefects(result, {
+    jobId: job.jobId, baseSha: state.baselineHead, worktreeStoryRoot: job.worktreeStoryRoot,
+    validatorVersion: job.validatorVersion, paths: state.allowedPaths,
+    derivedDiagnostics: state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined,
+    derivedReferences,
+  });
+}
+
 export async function validateRejectedRepairDraft(job: JobStartResult, sha: string,
   nativeAdmission?: { caseId: string; assignmentKey: string }) {
   const state = await inspectRejectedRepair(job, sha);
@@ -867,11 +903,7 @@ export async function validateRejectedRepairDraft(job: JobStartResult, sha: stri
       report.protection.changes?.length || report.protection.warnings?.length)
     {
       if (!nativeAdmission) throw Error("Native validation/protected-canon gate rejected the repaired draft; preserve its bytes.");
-      const defects = nativeMetadataDefects(result, {
-        jobId: job.jobId, baseSha: state.baselineHead, worktreeStoryRoot: job.worktreeStoryRoot,
-        validatorVersion: job.validatorVersion, paths: state.allowedPaths,
-        derivedDiagnostics: state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined,
-      });
+      const defects = repairNativeMetadataDefects(job, state, result);
       const effect = await assignmentDraftEffect(job, state.baselineHead);
       const transcriptSha256 = state.submittedSessionSha256;
       if (!effect || !transcriptSha256 || hash(await readFile(state.origin.sessionFile)) !== transcriptSha256)
@@ -2035,11 +2067,7 @@ async function runNativeRepairRound(job: JobStartResult, state: RepairReceipt,
   };
   const verifyNative = async () => {
     const result = await validateStoryJob(job, undefined, { ...job, baseSha: state.baselineHead });
-    if (result.status === "rejected") return nativeMetadataDefects(result, {
-      jobId: job.jobId, baseSha: state.baselineHead, worktreeStoryRoot: job.worktreeStoryRoot,
-      validatorVersion: job.validatorVersion, paths: state.allowedPaths,
-      derivedDiagnostics: state.origin.workItem === "foundation" ? ["creative-direction-count"] : undefined,
-    });
+    if (result.status === "rejected") return repairNativeMetadataDefects(job, state, result);
     if (result.status !== "passed") throw new ProtocolIntegrityBlockedError("Native repair validation is unavailable");
     return [];
   };
@@ -2100,7 +2128,7 @@ async function runNativeRepairRound(job: JobStartResult, state: RepairReceipt,
 
 /** Reauthenticate a terminal native subround of the original Review case.
  * No new failure owner, retry allowance or writer is admitted here. */
-export async function inspectNativeReviewFailure(job: JobStartResult, root: string, caseId: string) {
+export async function inspectNativeReviewFailure(job: JobStartResult, root: string, caseId: string, assignmentKey?: string) {
   let sha = root;
   const seen = new Set<string>();
   while (existsSync(pathFor(job, sha))) {
@@ -2116,6 +2144,7 @@ export async function inspectNativeReviewFailure(job: JobStartResult, root: stri
     const admission = state.nativeCorrection;
     if (!admission || admission.accepted || !existsSync(join(nativeRepairDirectory(job, state), "terminal.json"))) return null;
     if (state.phase !== "validating" || admission.caseId !== caseId || !HASH.test(admission.assignmentKey) ||
+        assignmentKey !== undefined && admission.assignmentKey !== assignmentKey ||
         admission.sourceDigest !== nativeRepairSource(state, admission, admission) ||
         !await authenticateFoundationReviewHead(job, root) || await trustedHead(job) !== state.baselineHead ||
         !changedRepairPaths(job, state).length)

@@ -3112,10 +3112,14 @@ function assignmentFailureEvidence(state: RecoveryState, origin: RecoveryOrigin)
   return op?.operation === origin.operation && (op.evidence.assignmentId ?? null) === origin.assignmentId
     ? op.evidence : undefined;
 }
-async function recoverySourceHead(job: JobStartResult, state: RecoveryState, origin: RecoveryOrigin) {
+async function recoverySourceHead(job: JobStartResult, state: State, origin: RecoveryOrigin) {
   const evidence = assignmentFailureEvidence(state, origin);
   if (evidence?.assignmentFailure)
     return await authenticateAssignmentFailure(job, evidence, origin.sourceHeadSha) ? origin.sourceHeadSha : null;
+  const current = state.recoveryLifecycle.active;
+  if (current && isDeepStrictEqual(current.origin, origin) &&
+      await (await import("./generation-operation-strategy.js")).authenticateSupportingNativeOrigin(job, state, current))
+    return origin.sourceHeadSha;
   if (origin.operation === "independent-review" && usesSharedAssignmentReview(origin.assignmentId) &&
       await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, origin.sourceHeadSha))
     return origin.sourceHeadSha;
@@ -3206,7 +3210,7 @@ export function recoveryNode(
     if (prior.recoveryLifecycle.decision?.action === "strategy-unresolved" ||
         prior.recoveryLifecycle.decision?.action === "diagnostic-stop" ||
         prior.recoveryLifecycle.decision?.action === "exhausted" &&
-        !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment ||
+        !!prior.recoveryLifecycle.active && (prior.recoveryLifecycle.decision.reviewAssessment || prior.recoveryLifecycle.decision.supportReview ||
           prior.recoveryLifecycle.decision.reason === "protocol-exhausted" ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.assignmentFailure ||
           assignmentFailureEvidence(prior, prior.recoveryLifecycle.active.origin)?.protocolFailure)) {
@@ -3216,14 +3220,17 @@ export function recoveryNode(
         const thread = config.configurable?.thread_id;
         if (!active || typeof thread !== "string" ||
             prior.recoveryLifecycle.decision?.action !== "strategy-unresolved" &&
-              await recoverySourceHead(job, prior, active.origin) !== active.origin.sourceHeadSha ||
+              !(prior.recoveryLifecycle.decision?.action === "exhausted" && prior.recoveryLifecycle.decision.supportReview) &&
+              await recoverySourceHead(job, { ...state, ...prior } as State, active.origin) !== active.origin.sourceHeadSha ||
             !await authenticateRecoveryOrigin(job, state.request, thread,
               active.origin, active.evidence, false, assignmentFailureEvidence(prior, active.origin)) ||
             !(prior.recoveryLifecycle.decision?.action === "strategy-unresolved"
               ? await (await import("./generation-operation-strategy.js"))
                   .authenticateUnresolvedStrategy(job, state as State, active, prior.recoveryLifecycle.decision)
               : prior.recoveryLifecycle.decision?.action === "exhausted"
-              ? prior.recoveryLifecycle.decision.reviewAssessment
+              ? prior.recoveryLifecycle.decision.supportReview
+                ? await (await import("./generation-operation-strategy.js")).authenticateSupportingReviewExhaustion(job, state as State, active, prior.recoveryLifecycle.decision)
+                : prior.recoveryLifecycle.decision.reviewAssessment
                 ? await (await import("./generation-operation-strategy.js")).authenticateFoundationReviewExhaustion(job, state as State, active, prior.recoveryLifecycle.decision)
                 : isDeepStrictEqual(prior.recoveryLifecycle.decision, await selectOperationStrategy(job, state as State, active))
               : await authenticateSealedDiagnosticStop(job, state as State, prior.recoveryLifecycle)))
@@ -3309,7 +3316,7 @@ export function recoveryNode(
         const graphThreadId = config.configurable?.thread_id as string | undefined;
         const active = prior.recoveryLifecycle.active;
         if (graphThreadId && await readJobControl(job) === "running" &&
-            await recoverySourceHead(job, prior, active.origin) === active.origin.sourceHeadSha &&
+            await recoverySourceHead(job, { ...state, ...prior } as State, active.origin) === active.origin.sourceHeadSha &&
             await authenticateRecoveryOrigin(job, state.request, graphThreadId,
               active.origin, active.evidence, false, assignmentFailureEvidence(prior, active.origin))) {
           return { status: "running", reason: null,
@@ -3370,7 +3377,7 @@ export function recoveryNode(
         const active = prior.recoveryLifecycle.active;
         const job = await openJob(state);
         const graphThread = config.configurable?.thread_id;
-        if (typeof graphThread !== "string" || await recoverySourceHead(job, prior, active.origin) !== active.origin.sourceHeadSha ||
+        if (typeof graphThread !== "string" || await recoverySourceHead(job, { ...state, ...prior } as State, active.origin) !== active.origin.sourceHeadSha ||
             !await authenticateRecoveryOrigin(job, state.request, graphThread, active.origin, active.evidence,
               false, assignmentFailureEvidence(prior, active.origin)))
           throw Error("Original failure source no longer matches the selected Turn and current HEAD.");
