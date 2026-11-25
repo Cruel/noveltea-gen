@@ -4,7 +4,7 @@
  * Other-owner corrections use a separate authorized dependency amendment. */
 import { createHash } from "node:crypto";
 import { authorizedArchitectureRecordPath } from "./architecture-record-path.js";
-import type { CheckpointAssurance, IndependentReviewResult } from "./checkpoint-assurance.js";
+import { checkpointRecordType, type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
 import type { TurnAssignmentEvidence, TurnEvidence } from "./turn-plan-evidence.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -62,6 +62,23 @@ export interface ReviewRepairPlanAmendment {
  * creative work, not automatically a protected author decision. An amended
  * plan must still verify exact proposed targets and independent reviewer
  * evidence before dispatch; until then the failed checkpoint remains failed. */
+/** A whole-Story stage has type authority, not an enumerated future path list.
+ * The last verified writer checkpoint establishes ownership of a realized path. */
+export interface OtherOwnerCheckpoint {
+  assignmentId: string;
+  workItem: string;
+  commitSha: string;
+  assuranceDigest: string;
+}
+export function reviewOtherOwners(turn: TurnEvidence, originalId: string, path: string,
+  checkpoint?: OtherOwnerCheckpoint): TurnAssignmentEvidence[] {
+  const type = checkpointRecordType(path);
+  return turn.assignments.filter(a => a.id !== originalId &&
+    (a.authority.existingPaths.includes(path) || a.authority.newPaths?.includes(path) ||
+      turn.kind === "full-story" && turn.objective?.breadth === "whole-story" &&
+      checkpoint?.assignmentId === a.id && !!type && a.authority.recordTypes.includes(type)));
+}
+
 export interface ReviewDependencyRequest {
   version: 1;
   kind: "review-dependency";
@@ -81,6 +98,7 @@ export interface ReviewDependencyRequest {
   recordTypeHint: string | null;
   /** A sealed no-write report from the original repair session, never a path grant. */
   otherOwnerPath?: string;
+  otherOwnerCheckpoint?: OtherOwnerCheckpoint;
   /** Digest of the unchanged, exact original objective and assignment ownership.
    * No newPaths, role, or target is authorized by this request. */
   digest: string;
@@ -116,6 +134,7 @@ export function deriveReviewDependencyRequest(input: {
   eventMilestone?: EventMilestoneRepairGrant;
   /** Only an authenticated needs-plan repair receipt may supply this path. */
   otherOwnerPath?: string;
+  otherOwnerCheckpoint?: OtherOwnerCheckpoint;
 }): ReviewDependencyRequest {
   const { assurance, review, original, turn } = input;
   const source = { jobId: assurance.jobId, commitSha: assurance.commitSha,
@@ -152,8 +171,13 @@ export function deriveReviewDependencyRequest(input: {
   });
   const ownerPath = input.otherOwnerPath;
   const citedOtherOwner = ownerPath && findings.some(f => f.affectedPaths.includes(ownerPath));
-  const owners = ownerPath ? turn.assignments.filter(a => a.id !== original.id &&
-    (a.authority.existingPaths.includes(ownerPath) || a.authority.newPaths?.includes(ownerPath))) : [];
+  const owners = ownerPath ? reviewOtherOwners(turn, original.id, ownerPath, input.otherOwnerCheckpoint) : [];
+  if (input.otherOwnerCheckpoint && (!ownerPath || turn.kind !== "full-story" ||
+      !/^[a-f0-9]{40}$/.test(input.otherOwnerCheckpoint.commitSha) ||
+      input.otherOwnerCheckpoint.commitSha === assurance.commitSha ||
+      !/^[a-f0-9]{64}$/.test(input.otherOwnerCheckpoint.assuranceDigest) ||
+      !owners.some(owner => owner.id === input.otherOwnerCheckpoint!.assignmentId)))
+    throw Error("Cross-specialist prerequisite checkpoint is not bound to its original owner.");
   if (ownerPath && (!canonicalPath.test(ownerPath) || !citedOtherOwner ||
       assurance.changedPaths.includes(ownerPath) || owners.length !== 1 ||
       owners[0]!.authority.recordTypes.length === 0))
@@ -185,7 +209,7 @@ export function deriveReviewDependencyRequest(input: {
     f.affectedPaths.some(path => turn.assignments.some(a => a.id !== original.id &&
       (a.authority.existingPaths.includes(path) || a.authority.newPaths?.includes(path)))));
   const classification: ReviewDependencyRequest["classification"] =
-    protectedSource || missingCharacter && !newFullStoryRecord
+    protectedSource || !ownerPath && missingCharacter && !newFullStoryRecord
       ? "scope-or-protected" : ownerPath ? "other-owner" : newFullStoryRecord ? "new-full-story-record"
         : otherOwner ? "other-owner" : "scope-or-protected";
   const body = {
@@ -197,8 +221,9 @@ export function deriveReviewDependencyRequest(input: {
     ownersDigest: hash(turn.assignments), basePlanVersion: input.planVersion,
     originalAssignmentId: original.id, originalAssignmentDigest: hash(original),
     originalWorkItem: input.originWorkItem, findings,
-    recordTypeHint: missingCharacter ? "character" : null,
+    recordTypeHint: !ownerPath && missingCharacter ? "character" : null,
     ...(ownerPath ? { otherOwnerPath: ownerPath } : {}),
+    ...(input.otherOwnerCheckpoint ? { otherOwnerCheckpoint: input.otherOwnerCheckpoint } : {}),
   };
   return { ...body, digest: hash(body) };
 }

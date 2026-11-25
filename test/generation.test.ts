@@ -809,7 +809,7 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: ["prospective-review-stalled-continue", "prospective"].includes(mode) ? 240_000 : 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
@@ -825,7 +825,10 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
   const partialPause = mode === "prospective-paused";
   const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport || outsideSupport || stalledSupport || authorSupport || nativeSupport;
   const prospective = mode === "prospective" || sourceRecovery || multi;
-  const needsCharacter = mode === "support";
+  const negativeReviewSupport = mode === "support-negative";
+  const worldOwner = mode === "other-owner-world";
+  const otherOwner = mode === "other-owner" || worldOwner;
+  const needsCharacter = mode === "support" || negativeReviewSupport;
   const bindingDiagnosis = mode === "binding-diagnosis";
   const diagnosis = mode === "diagnosis" || bindingDiagnosis;
   const f = setup("r14d-event-rounds-" + mode);
@@ -882,8 +885,10 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
     const path = "events/disclose-ledger.md";
     const quote = needsCharacter ? "Mara steps forward and identifies Neri's signature from the night shift." :
       "Ada studies Neri's signature on the ledger before the player must decide.";
-    const requiredCorrection = needsCharacter ? "Create a missing Character record for Mara and add her to Event participants; deliver her required on-screen witness dialogue." : quote;
-    const supportPath = "characters/mara.md";
+    const requiredCorrection = worldOwner ? "Clarify the provenance of the concealed ledger as a verifiable Fact." : otherOwner ? "Establish Neri’s firsthand understanding of the ledger signature in his existing Character profile." : needsCharacter ? "Create a missing Character record for Mara and add her to Event participants; deliver her required on-screen witness dialogue." : quote;
+    const supportPath = worldOwner ? "facts/evidence-concealed.md" : otherOwner ? "characters/neri.md" : "characters/mara.md";
+    const supportTarget = worldOwner ? "fact.evidence-concealed" : "character.neri";
+    const supportSpecialist = worldOwner ? "nt-worldbuilding" : "nt-character-development";
     const character = "---\nschema: '0.1'\ntype: character\nid: character.mara\ntitle: Mara\nstatus: draft\ndecisions: []\nmotivation: Protect the witness and testify truthfully\ninitial_knowledge: []\n---\n\nMara is the archive night witness. She is willing to testify to preserve the ledger and protect the witness.\n";
     const corrected = needsCharacter ? authored.replace("participants: [character.ada, character.neri]", "participants: [character.ada, character.neri, character.mara]") : authored;
     const manifest = { modifiedRecords: [path], architecturalConflicts: [], laterObligations: [
@@ -1194,6 +1199,61 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
         return write(authored);
       }
       if (index === 9) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+      if (otherOwner && index >= 11) {
+        const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
+        const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
+        if (index === 11) {
+          assert.match(prompt, /OUT_OF_AUTHORITY:/);
+          return { content: scriptedText("OUT_OF_AUTHORITY: " + supportPath), reason: "stop" };
+        }
+        if (index === 12) return { content: scriptedReadCalls([
+          "nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+          "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md",
+        ].map(p => "skill://" + p).concat(supportPath), index), reason: "toolUse" };
+        if (index === 13) return { content: scriptedText({ target: supportTarget, specialist: supportSpecialist,
+          outcome: requiredCorrection, reason: "The original Event uses this existing typed prerequisite." }), reason: "stop" };
+        if (index === 14) return { content: scriptedReadCalls([supportSpecialist + "/SKILL.md", "nt-catalog/SKILL.md",
+          "nt-catalog/references/records.md"].map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 15) {
+          const before = readFileSync(join(f.job.worktreeStoryRoot, supportPath), "utf8");
+          return { content: [{ type: "toolCall", id: "existing-neri", name: "edit",
+            arguments: { path: supportPath, edits: [{ oldText: before, newText: before +
+              (worldOwner ? "\nThe signed transfer record verifies the concealment independently of testimony.\n" :
+              "\nNeri personally verified the concealed ledger signature during his night shift.\n") }] } }], reason: "toolUse" };
+        }
+        if (index === 16) return { content: scriptedText({ modifiedRecords: [supportPath], architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
+        if (index === 17) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 18) {
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1,
+              explanation: "The original typed prerequisite is now established." }] }), reason: "stop" };
+        }
+        if (prompt.includes("You are the independent nt-narrative-review editor")) {
+          const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
+          if (index === 19) return { content: scriptedReadCalls(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!
+            .split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths), index), reason: "toolUse" };
+          return { content: scriptedText({ verdict: "pass", findings: [], evidence: assignment.paths.map((p: string) =>
+            p + ":1: The original Event is now grounded in the verified supporting record.") }), reason: "stop" };
+        }
+        throw Error("Unexpected whole-Story other-owner prompt " + index + ": " + prompt.slice(0, 800));
+      }
+      if (negativeReviewSupport && index >= 18 && index <= 20) {
+        if (index === 18) {
+          assert.match(JSON.stringify(context.messages), /SOURCE-LINKED REVIEW FEEDBACK/);
+          return { content: [{ type: "toolCall", id: "r14d-review-support-correction", name: "write",
+            arguments: { path: supportPath, content: character + "\nMara witnessed the ledger signature firsthand and can identify it.\n" } }], reason: "toolUse" };
+        }
+        if (index === 19) return { content: scriptedText("Established the witness's firsthand evidence."), reason: "stop" };
+        const messages = context.messages as Array<{ content: Array<{ text?: string }> }>;
+        const prompt = messages.flatMap(m => m.content ?? []).map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"))!;
+        const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        const item = packet.items[0];
+        return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+          evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1,
+            explanation: "The Character can now establish the signature from firsthand evidence." }] }), reason: "stop" };
+      }
       if (needsCharacter && index >= 11 && index <= 17) {
         if (index === 11) return { content: scriptedReadCalls([
           "nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
@@ -1207,11 +1267,17 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
         if (index === 15) return { content: scriptedText({ modifiedRecords: [supportPath], architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
         const messages = context.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
         const prompt = messages.filter(m => m.role === "user").flatMap(m => m.content ?? []).map(c => c.text ?? "").at(-1)!;
-        const assignment = JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
-        if (index === 16) return { content: scriptedReadCalls(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p => p.startsWith("skill://")).concat(assignment.paths), index), reason: "toolUse" };
-        return { content: scriptedText({ verdict: "pass", findings: [], evidence: [supportPath + ":1: Mara has a source-grounded role as required."] }), reason: "stop" };
+        const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        const item = packet.items[0];
+        assert.match(item.assignment.id, /^dependency:/);
+        if (index === 16) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+        const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: supportPath, line: 1 };
+        return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: negativeReviewSupport ? "fail" : "pass",
+          findings: negativeReviewSupport ? [{ ...ref, kind: "continuity", message: "The witness's firsthand evidence is unclear.",
+            requiredCorrection: "Establish her firsthand knowledge of the ledger signature in the existing Character.", affectedPaths: [supportPath] }] : [],
+          evidence: negativeReviewSupport ? [] : [{ ...ref, explanation: "Mara has a source-grounded role as required." }] }), reason: "stop" };
       }
-      const correctionIndex = needsCharacter ? 18 : 11;
+      const correctionIndex = needsCharacter ? negativeReviewSupport ? 21 : 18 : 11;
       if (index === correctionIndex) return write(corrected + "\n" + quote + "\n");
       if (index === correctionIndex + 1) return { content: scriptedText("Clarified the source-linked observation."), reason: "stop" };
       if (index === 10 || index === correctionIndex + 2) {
@@ -1224,7 +1290,7 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
         const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1 };
         return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: index === 10 ? "fail" : "pass",
           findings: index === 10 ? [{ ...ref, kind: "missing-requirement", message: "The visible evidence is insufficiently explicit.",
-            requiredCorrection, affectedPaths: [path] }] : [],
+            requiredCorrection, affectedPaths: otherOwner ? [path, supportPath] : [path] }] : [],
           evidence: index !== 10 ? [{ ...ref, explanation: quote }] : [],
           ...(index !== 10 ? { progressDiagnosis: { status: "material", reason: "Added visible observation.",
             evidence: { path, quote, change: "added" } } } : {}),
@@ -1283,8 +1349,17 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
       const receipt = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
       assert.equal(receipt.phase, "prerequisite-reported");
       assert.equal(receipt.invocationProof.ordinal, 0);
-      const { inspectEventNoWrite } = await import("../src/event-work.js");
+      const { inspectEventNoWrite, authenticateSettledEventNoWrite } = await import("../src/event-work.js");
       const original = await inspectEventNoWrite(f.job, receipt.milestoneId, head, receipt.planVersion);
+      // Causal approval/replay and historical inspection use this very same
+      // immutable invocation gate, rather than trusting the sealed digest.
+      assert.deepEqual(await authenticateSettledEventNoWrite(f.job, receipt), original.prerequisite);
+      await assert.rejects(authenticateSettledEventNoWrite(f.job, { ...receipt, invocationProof: undefined }),
+        /settled invocation proof/);
+      await assert.rejects(authenticateSettledEventNoWrite(f.job, { ...receipt,
+        causalDiscovery: { sourcePath: "milestones/disclosure.md", sourceQuote: "fake quote",
+          violatedObligation: "fake obligation", proposedCorrection: "fake amendment" } }),
+        /differs from the original settled response/);
       assert.deepEqual(original.conflicts, [plan.downstream[0]!.obligation]);
       const recoveryCase = failed.recoveryLifecycle.active!;
       const decision = await selectOperationStrategy(f.job, failed, recoveryCase);
@@ -1656,6 +1731,34 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
     const selected = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
     assert.equal(selected.recoveryLifecycle.decision?.action, "known-correction", JSON.stringify(selected.recoveryLifecycle));
     await assertSubunitReviewAuthority(f.job, selected, "event-disclosure", "interactive-choice-disclosure", event.assignmentKey);
+    if (otherOwner) {
+      const suspended = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
+      assert.ok(suspended.reviewPrerequisite, JSON.stringify({ reason: suspended.reason, lifecycle: suspended.recoveryLifecycle, calls: observed.length }));
+      const { inspectDependencyPlan } = await import("../src/dependency-state.js");
+      const request = (await inspectDependencyPlan(f.job))!.reviewRequests![0]!;
+      assert.equal(request.otherOwnerPath, supportPath);
+      assert.equal(request.otherOwnerCheckpoint?.assignmentId, "foundations");
+      assert.equal(request.otherOwnerCheckpoint?.workItem, worldOwner ? "world-foundations" : "character-foundations");
+      assert.equal(suspended.reviewPrerequisite.suspension.owner, supportSpecialist);
+      const original = (await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === request.otherOwnerCheckpoint?.commitSha);
+      assert.ok(original?.eligible && original.assurance?.changedPaths.includes(supportPath));
+      await crashAtSubmission("focused-committed", 17, { interruptAfter: ["dependency_amendment"] });
+      const supportHead = git(f.job.worktreeRoot, "rev-parse", "HEAD");
+      const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+      assert.ok(supported.reviewPrerequisite?.supportRef, JSON.stringify({ reason: supported.reason, calls: observed.length }));
+      assert.deepEqual(supported.reviewPrerequisite.identity, suspended.reviewPrerequisite.identity);
+      assert.equal(git(f.job.worktreeRoot, "diff", "--name-only", event.commitSha, supportHead), "story/" + supportPath);
+      const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+      assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified", JSON.stringify({ reason: next.reason, lifecycle: next.recoveryLifecycle, calls: observed.length }));
+      assert.equal(next.active?.id, "event:milestone.reckoning");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), supportHead);
+      assert.equal((await inspectDependencyPlan(f.job))!.entries[0]!.phase, "verified");
+      assert.equal((await inspectRecoveryCheckpoints(f.job)).find(p => p.commitSha === event.commitSha)?.semanticReview, "failed");
+      assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+      assert.equal(next.request.turnPlanDigest, turnDigest);
+      assert.equal(next.recoveryLifecycle.discharged.filter(d => d.case.id === failed.recoveryLifecycle.active?.id).length, 1);
+      return;
+    }
     if (needsCharacter) {
       const suspended = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
       assert.ok(suspended.reviewPrerequisite, JSON.stringify({ reason: suspended.reason, lifecycle: suspended.recoveryLifecycle, calls: observed.length }));
@@ -1681,15 +1784,28 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
       const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
       assert.ok(supported.reviewPrerequisite?.supportRef, JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
       assert.deepEqual(supported.reviewPrerequisite.identity, suspended.reviewPrerequisite.identity);
-      assert.equal(observed.length, 18);
-      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), supportHead);
+      assert.equal(observed.length, negativeReviewSupport ? 21 : 18);
+      const supportEntry = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries[0]!;
+      assert.equal(supportEntry.supportRootSha, supportHead);
+      assert.equal(supportEntry.phase, "reviewing", "The dependent's original Review remains unresolved");
+      assert.equal(supportEntry.review?.verdict, "pass");
+      const points = await inspectRecoveryCheckpoints(f.job);
+      assert.equal(points.find(p => p.commitSha === supportHead)?.semanticReview, negativeReviewSupport ? "failed" : "passed");
+      assert.equal(points.find(p => p.commitSha === supportEntry.commitSha)?.semanticReview, "passed");
+      assert.equal(points.find(p => p.commitSha === event.commitSha)?.semanticReview, "failed");
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), supportEntry.commitSha);
+      if (negativeReviewSupport) {
+        assert.notEqual(supportEntry.commitSha, supportHead);
+        assert.equal(git(f.job.worktreeRoot, "rev-parse", supportEntry.commitSha + "^"), supportHead);
+        assert.equal(git(f.job.worktreeRoot, "diff", "--name-only", supportHead, supportEntry.commitSha!), "story/" + supportPath);
+      }
     }
-    await crashAtSubmission("repair-round", needsCharacter ? 20 : 13, { interruptAfter: ["independent_assignment_review"] });
+    await crashAtSubmission("repair-round", needsCharacter ? negativeReviewSupport ? 23 : 20 : 13, { interruptAfter: ["independent_assignment_review"] });
     const successor = git(f.job.worktreeRoot, "rev-parse", "HEAD");
     assert.notEqual(successor, event.commitSha);
     const passed = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["independent_assignment_review"] }));
     assert.equal(passed.result?.headSha, successor, JSON.stringify({ reason: passed.reason, recovery: passed.recoveryLifecycle, calls: observed.length }));
-    assert.equal(observed.length, needsCharacter ? 21 : 14);
+    assert.equal(observed.length, needsCharacter ? negativeReviewSupport ? 24 : 21 : 14);
     await assertSubunitReviewSessions(f.job, { commitSha: event.commitSha, piSessionFile: event.sessionFile }, successor);
     if (needsCharacter) {
       const { inspectDependencyPlan } = await import("../src/dependency-state.js");
@@ -1705,7 +1821,7 @@ for (const mode of ["review", "support", "future-choice", "scene-evidence", "set
     assert.equal(next.active?.id, "event:milestone.reckoning");
       assert.equal(next.inventory?.items.find(i => i.id === "interactive:milestone.disclosure")?.status, "pending");
       assert.equal(next.inventory?.items.find(i => i.id === "event:milestone.disclosure")?.status, "verified");
-    assert.equal(observed.length, needsCharacter ? 21 : 14);
+    assert.equal(observed.length, needsCharacter ? negativeReviewSupport ? 24 : 21 : 14);
   } finally {
     saver.db.close();
     restoreSandbox();
@@ -2423,6 +2539,18 @@ test("R06 real Interactive Pi manifest correction preserves the original session
     assert.ok(unit.piSessionId);
     const proof = await inspectInteractiveConflict(f.job, "milestone.disclosure");
     assert.equal(proof.reportDigest, unit.digest);
+    const receiptFile = join(f.job.stateDir, "interactive-items/disclosure.json");
+    const withoutProof = structuredClone(original);
+    delete withoutProof.units[0].invocation;
+    delete withoutProof.units[0].invocationProof;
+    writeFileSync(receiptFile, JSON.stringify(withoutProof));
+    await assert.rejects(inspectInteractiveConflict(f.job, "milestone.disclosure"), /settled invocation proof/);
+    const foreignGrant = structuredClone(original);
+    foreignGrant.units[0].invocation.assignment.sourcePaths = ["events/unrelated.md"];
+    writeFileSync(receiptFile, JSON.stringify(foreignGrant));
+    await assert.rejects(inspectInteractiveConflict(f.job, "milestone.disclosure"), /settled invocation proof/);
+    writeFileSync(receiptFile, JSON.stringify(original));
+    assert.deepEqual(await inspectInteractiveConflict(f.job, "milestone.disclosure"), proof);
     const again = await withJobModelRuntime(runtime, () => runInteractiveWorkItem({ ...opts, round: { assignmentKey, command: { phase: "verify", proof: initial.round!.proof } } }));
     assert.equal(again.status, result.status);
     assert.equal(observed.length, 3);

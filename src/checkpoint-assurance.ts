@@ -24,6 +24,10 @@ const directories: Record<string, string> = {
   "narrative-positions": "narrative-position",
 };
 
+export function checkpointRecordType(path: string): string | undefined {
+  return canonicalPath(path) ? directories[path.split("/")[0]!] : undefined;
+}
+
 export type SemanticReviewStatus = "not-required" | "required-pending" | "passed" | "failed";
 export interface ReviewSelection {
   status: "not-required" | "required-pending";
@@ -219,13 +223,14 @@ export async function resolvedCheckpointReviews(job: JobStartResult,
         validation?: { status: string; baseSha: string; validatorVersion: string };
       };
       const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+      const supportRoot = entry.supportRootSha ?? entry.commitSha;
       if (proof.phase !== "committed" || proof.expectedHead !== source.commitSha ||
-          proof.commitSha !== entry.commitSha || proof.workItemId !== assignment!.id ||
+          proof.commitSha !== supportRoot || proof.workItemId !== assignment!.id ||
           proof.jobId !== job.jobId || proof.assignmentDigest !== request.turnDigest ||
           proof.validation?.status !== "passed" ||
           proof.validation?.baseSha !== source.commitSha ||
           proof.validation?.validatorVersion !== job.validatorVersion ||
-          dependencyGit(job, "rev-parse", entry.commitSha + "^") !== source.commitSha ||
+          dependencyGit(job, "rev-parse", supportRoot + "^") !== source.commitSha ||
           dependencyGit(job, "diff", "--name-only", source.commitSha, entry.commitSha) !== prefix + path)
         throw Error("Other-owner support lacks an exact validated single-path specialist commit.");
       // A supporting commit and two passing reviews are necessary, but not

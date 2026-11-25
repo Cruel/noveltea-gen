@@ -4,14 +4,13 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { readFile } from "node:fs/promises";
-import { authenticateEventNoWrite } from "./event-prerequisite-auth.js";
 import { join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import type { GenerationInventory } from "./generation-plan.js";
 import { buildCausalAmendment, type CausalAmendment, type CausalDiscovery } from "./causal-amendment.js";
 import type { MilestoneBlueprintPin } from "./milestone-blueprint.js";
-import { readEventSourceBlueprint } from "./event-work.js";
+import { authenticateSettledEventNoWrite, readEventSourceBlueprint } from "./event-work.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { executionId, resolvedCheckpointReviews } from "./checkpoint-assurance.js";
 import { validateStoryJob } from "./validator.js";
@@ -70,7 +69,7 @@ export async function inspectCausalAmendment(job: JobStartResult, input: {
         item.status === "verified" && item.targetIds.includes(event.milestoneId))) {
     throw Error("No current source-bound, clean Event causal discovery is eligible for upstream amendment.");
   }
-  await authenticateEventNoWrite(job, event);
+  await authenticateSettledEventNoWrite(job, event);
   // This verifies the complete original writer/reviewer cycle, exact private
   // source hashes, original model identity, and job/Thread/assignment pins.
   const blueprint = await readEventSourceBlueprint(job, event.blueprintPin, event.assignment, event.expectedHead);

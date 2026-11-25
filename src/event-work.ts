@@ -765,34 +765,47 @@ export async function inspectEventBlueprintPrerequisite(job: JobStartResult, mil
 
 /** Reopen the effect authority after the child releases the writer lease. Only
  * the sealed report, not free text returned in graph state, enters planning. */
+/** Reauthenticate immutable no-write evidence at its original source. This
+ * is equally required at live admission, signed amendment replay and
+ * historical inspection. Callers separately establish current HEAD/plan
+ * authority; an archived receipt alone cannot authorize any writer. */
+export async function authenticateSettledEventNoWrite(job: JobStartResult, saved: unknown) {
+  const original = saved as EventReceipt;
+  if (!original || original.version !== 1 || original.jobId !== job.jobId ||
+      original.baseSha !== job.baseSha || !idPattern.test(original.milestoneId) ||
+      original.workItemId !== "event-" + original.milestoneId.slice(10) ||
+      original.phase !== "prerequisite-reported" || original.worker !== "pi" ||
+      original.assignment?.milestoneId !== original.milestoneId ||
+      original.assignment.workItemId !== original.workItemId ||
+      original.claimedPaths?.length || original.reroutedFrom || original.reroutedTask ||
+      !original.invocationProof || original.invocationProof.sourceDigest !== original.invocationSource ||
+      original.prerequisite?.sessionId !== original.sessionId)
+    throw new ProtocolIntegrityBlockedError("Event no-write lacks its original settled invocation proof.");
+  const response = await verifySettledAssignment({ ...eventInvocationOptions(job, original),
+    proof: original.invocationProof, effect: null });
+  const manifest = parseEventManifest(JSON.stringify(response));
+  if (manifest.modifiedRecords.length || JSON.stringify(manifest.architecturalConflicts) !== JSON.stringify(original.conflicts) ||
+      JSON.stringify(manifest.laterObligations) !== JSON.stringify(original.obligations) ||
+      JSON.stringify(manifest.causalDiscovery) !== JSON.stringify(original.causalDiscovery) ||
+      JSON.stringify(manifest.blueprintFinding) !== JSON.stringify(original.blueprintFinding))
+    throw new ProtocolIntegrityBlockedError("Event no-write report differs from the original settled response.");
+  return authenticateEventNoWrite(job, original);
+}
+
 export async function inspectEventNoWrite(job: JobStartResult, milestone: string,
   head: string, planVersion: number | null) {
   if (!idPattern.test(milestone)) throw new ProtocolIntegrityBlockedError("Invalid Event no-write target.");
-  const workItemId = "event-" + milestone.slice(10);
   return withStoryJobLockOrReuse(job, "event-no-write-admission", [
     "assess-source-bound-operation", "assess-original-operation-diagnostic",
     "generation-c05-resolution-proof", "generation-inspect",
   ], async () => {
     const original = JSON.parse(await readFile(join(job.stateDir, "event-items",
       milestone.slice(10) + ".json"), "utf8")) as EventReceipt;
-    if (original.jobId !== job.jobId || original.baseSha !== job.baseSha ||
-        original.workItemId !== workItemId || original.milestoneId !== milestone ||
-        original.phase !== "prerequisite-reported" || original.worker !== "pi" ||
-        original.assignment?.milestoneId !== milestone || original.assignment.workItemId !== workItemId ||
-        original.expectedHead !== head || original.planVersion !== planVersion ||
-        original.claimedPaths?.length || original.reroutedFrom || original.reroutedTask ||
-        await trustedHead(job) !== head || dirty(job).length)
+    if (original.milestoneId !== milestone || original.expectedHead !== head ||
+        original.planVersion !== planVersion || await trustedHead(job) !== head ||
+        dirty(job).length || await assignmentDraftEffect(job, head) !== null)
       throw new ProtocolIntegrityBlockedError("Event no-write lacks its clean original assignment source.");
-    if (!original.invocationProof) throw new ProtocolIntegrityBlockedError("Event no-write lacks its settled invocation proof.");
-    const response = await verifySettledAssignment({ ...eventInvocationOptions(job, original), proof: original.invocationProof,
-      effect: await assignmentDraftEffect(job, head) });
-    const manifest = parseEventManifest(JSON.stringify(response));
-    if (manifest.modifiedRecords.length || JSON.stringify(manifest.architecturalConflicts) !== JSON.stringify(original.conflicts) ||
-        JSON.stringify(manifest.laterObligations) !== JSON.stringify(original.obligations) ||
-        JSON.stringify(manifest.causalDiscovery) !== JSON.stringify(original.causalDiscovery) ||
-        JSON.stringify(manifest.blueprintFinding) !== JSON.stringify(original.blueprintFinding))
-      throw new ProtocolIntegrityBlockedError("Event no-write report differs from the original settled response.");
-    const prerequisite = await authenticateEventNoWrite(job, original);
+    const prerequisite = await authenticateSettledEventNoWrite(job, original);
     return { prerequisite, conflicts: original.conflicts!, obligations: original.obligations!,
       causalDiscovery: original.causalDiscovery };
   });
@@ -898,7 +911,7 @@ export async function runEventWorkItem(input: EventOptions) {
             hash(JSON.stringify(arch.history.at(-1)!.plan)) !== old.planDigest ||
             prereq.reportDigest !== amendment.source.reportDigest)
           throw Error("Causal Event replay does not match the approved original no-write discovery.");
-        await authenticateEventNoWrite(job, old);
+        await authenticateSettledEventNoWrite(job, old);
         if (dirty(job).length || await trustedHead(job) !== arch.expectedHead)
           throw Error("Causal Event restart requires the exact clean corrected Architecture HEAD.");
         try { rawGit(job, "merge-base", "--is-ancestor", old.expectedHead, arch.expectedHead); }
@@ -976,7 +989,7 @@ export async function runEventWorkItem(input: EventOptions) {
           (receipt.worker === "pi" && !receipt.sessionFile) ||
           receipt.claimedPaths?.length || !receipt.conflicts || !receipt.obligations || dirty(job).length)
         throw Error("A reported Event prerequisite is missing its clean original source.");
-      await authenticateEventNoWrite(job, receipt);
+      await authenticateSettledEventNoWrite(job, receipt);
       try { rawGit(job, "merge-base", "--is-ancestor", receipt.expectedHead, await trustedHead(job)); }
       catch { throw Error("Event prerequisite report no longer descends from its pinned Story source."); }
       return output(job, receipt);

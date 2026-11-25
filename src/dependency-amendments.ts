@@ -2,7 +2,7 @@ import { declaredCanonicalReferences, type CanonicalScopeRecord } from "./focuse
 import { focusedSpecialist } from "./focused-specialist.js";
 import type { TurnAssignmentEvidence, TurnEvidence } from "./turn-plan-evidence.js";
 import { createHash } from "node:crypto";
-import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
+import { reviewOtherOwners, type ReviewDependencyRequest } from "./review-repair-amendment.js";
 
 export interface DependencySource { path: string; sha256: string; quote: string }
 export interface DependencyReport {
@@ -172,8 +172,8 @@ export function authorizeReviewOtherOwnerDependency(input: {
   const otherPath = request.otherOwnerPath;
   const source = records.find(r => r.path === request.findings[0]?.path);
   const target = records.find(r => r.path === otherPath);
-  const otherOwners = plan.assignments.filter(a => a.id !== owner?.id && !!otherPath &&
-    (a.authority.existingPaths.includes(otherPath) || a.authority.newPaths?.includes(otherPath)));
+  const otherOwners = otherPath ? reviewOtherOwners(plan, request.originalAssignmentId,
+    otherPath, request.otherOwnerCheckpoint) : [];
   const other = otherOwners[0];
   const connected = !!source && !!target && (
     declaredCanonicalReferences(source).has(target.metadata.id) ||
@@ -186,7 +186,8 @@ export function authorizeReviewOtherOwnerDependency(input: {
       !request.findings[0]!.affectedPaths.includes(otherPath) ||
       source.metadata.status === "superseded" || target.metadata.status === "superseded" ||
       !other.authority.recordTypes.includes(target.metadata.type) ||
-      !other.authority.existingPaths.includes(otherPath) ||
+      (!other.authority.existingPaths.includes(otherPath) &&
+        request.otherOwnerCheckpoint?.assignmentId !== other.id) ||
       target.metadata.id !== proposal.target ||
       target.metadata.type !== proposal.target.split(".")[0] ||
       !text(proposal.reason) || !text(proposal.outcome) ||

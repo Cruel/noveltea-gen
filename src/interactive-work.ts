@@ -826,16 +826,17 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       throw Error("Original Interactive Pi report lacks a settled final assistant response");
     const reported = parseInteractiveManifest((last.content ?? [])
       .filter(c => c.type === "text").map(c => c.text ?? "").join("\n"), negative.domain);
-    if (negative.invocation) {
-      if (!negative.invocationProof || !negative.piSessionId || !negative.piSessionFile ||
-          negative.invocationProof.sourceDigest !== negative.invocation.sourceDigest)
-        throw Error("Original Interactive contradiction lacks its settled invocation proof");
-      await verifySettledAssignment({ proof: negative.invocationProof,
-        directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId),
-        sessionId: negative.piSessionId, sessionFile: negative.piSessionFile,
-        sessionRoots: [directory], effect: null });
-    }
-    if (reported.paths.length ||
+    if (!negative.invocation || !negative.invocationProof || !negative.piSessionId ||
+        !negative.piSessionFile || negative.invocationProof.sourceDigest !== negative.invocation.sourceDigest ||
+        negative.invocation.sourceDigest !== await interactiveSourceDigest(job, receipt, negative,
+          negative.invocation.baseline, negative.invocation.assignment))
+      throw Error("Original Interactive contradiction lacks its settled invocation proof");
+    const response = await verifySettledAssignment({ proof: negative.invocationProof,
+      directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId),
+      sessionId: negative.piSessionId, sessionFile: negative.piSessionFile,
+      sessionRoots: [directory], effect: null });
+    if (JSON.stringify(parseInteractiveManifest(JSON.stringify(response), negative.domain)) !== JSON.stringify(reported) ||
+        reported.paths.length ||
         JSON.stringify(reported.conflicts) !== JSON.stringify(negative.conflicts) ||
         JSON.stringify(reported.obligations) !== JSON.stringify(negative.obligations))
       throw Error("Original Interactive report differs from the settled Pi transcript");

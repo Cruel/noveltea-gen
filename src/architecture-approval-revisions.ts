@@ -12,7 +12,7 @@ import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import type { CausalAmendment } from "./causal-amendment.js";
-import { authenticateEventNoWrite, type EventNoWriteSource } from "./event-prerequisite-auth.js";
+import { authenticateSettledEventNoWrite } from "./event-work.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { readIndependentReview } from "./checkpoint-assurance.js";
 import { readReviewedMilestoneBlueprint } from "./milestone-blueprint.js";
@@ -76,7 +76,7 @@ async function originalEvent(job: JobStartResult, proposal: CausalAmendment, ori
       event.assignment?.milestonePath !== proposal.source.path ||
       !event.assignment?.sourcePaths?.includes(proposal.source.path))
     throw Error("Architecture post-approval incident has altered or stale Event causal evidence.");
-  await authenticateEventNoWrite(job, event as EventNoWriteSource);
+  await authenticateSettledEventNoWrite(job, event);
   await readReviewedMilestoneBlueprint(job, event.blueprintPin, event.assignment);
   const source = git(job, "show", proposal.source.sha + ":" +
     (job.storyRelativePath ? job.storyRelativePath + "/" : "") + proposal.source.path);

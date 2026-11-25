@@ -499,7 +499,9 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
     entry.review = verdict;
     entry.reviewerSession = verdict.sessionFile!;
     entry.reviewerSessionDigest = createHash("sha256").update(await readFile(verdict.sessionFile!)).digest("hex");
-    entry.phase = verdict.verdict === "pass" ? "verified" : "rejected";
+    // A review-discovered prerequisite still owes the original consumer's
+    // independent rereview. Passing support alone never completes that entry.
+    entry.phase = verdict.verdict === "pass" ? (entry.reviewSourceSha ? "reviewing" : "verified") : "rejected";
     await saveDependencyPlan(job, plan);
     return entry;
   });
@@ -687,7 +689,7 @@ export async function advanceReviewDependency(input: {
   story: string; job: string; task: string; contract: FocusedWorkOptions["contract"];
   skillsSource?: string; validatorSource?: string; provider?: string; model?: string;
   turnPlanDigest: string; request: ReviewDependencyRequest;
-}, graphConfig?: RunnableConfig) {
+}, graphConfig?: RunnableConfig, caseId?: string) {
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const request = input.request;
   const eventSource = request.classification === "new-full-story-record" &&
@@ -702,12 +704,12 @@ export async function advanceReviewDependency(input: {
     const prior = existing?.entries.find(e => e.reviewSourceSha === request.sourceSha);
     const head = prior?.phase === "authorized" && existing?.entries.some(e => e.parent?.reportDigest === prior.reportDigest)
       ? prior.report.sourceSha : await supportingBoundary(job, prior);
-    const { plan, entry } = existing && prior?.amendment && prior.phase === "authorized" &&
+    const { plan, entry } = existing && prior?.amendment && (prior.phase === "authorized" || prior.phase === "reviewing" && prior.supportRootSha) &&
       existing.reviewRequests?.some(r => dependencyDigest(r) === dependencyDigest(request))
       ? { plan: existing, entry: prior }
       : await registerReviewDependency(job, request, input.validatorSource ?? input.skillsSource);
     if (entry.phase === "verified") return entry.amendment!.assignment;
-    if (entry.phase === "reviewing" && entry.commitSha === head)
+    if (entry.phase === "reviewing" && (entry.commitSha === head || entry.supportRootSha))
       return entry.amendment!.assignment;
     if (entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected review-dependency work requires exact manual reconciliation; never replay model sessions.");
@@ -726,6 +728,15 @@ export async function advanceReviewDependency(input: {
     return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
   if (entry.phase !== "authorized" && entry.phase !== "reviewing")
     throw Error("Review-dependency authoring is not in an approved phase.");
+  // New review-origin roots share the same mandatory checkpointed support
+  // Review, native correction, and original-session repair as writer-origin
+  // and Blueprint-origin support. A pre-cutover review session must remain
+  // on its original receipt path; never substitute a new independent reviewer.
+  if (entry.supportRootSha || (!entry.reviewerSession && !entry.reviewSnapshot)) {
+    await runSupportingDependency(job, { ...input, target: assignment.targets[0]!, fixture: false },
+      entry.reportDigest, graphConfig, caseId);
+    return { status: "dependency-support-verified" as const, sourceSha: request.sourceSha };
+  }
   const verify = async (result: { headSha?: string }) => withStoryJobLock(job, "review-dependency-independent-review", async () => {
     const head = await dependencyBoundary(job);
     const persisted = await inspectDependencyPlan(job);

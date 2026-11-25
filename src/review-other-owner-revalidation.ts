@@ -4,7 +4,8 @@
 import type { JobStartResult } from "./job.js";
 import type { CompletionContract } from "./architecture.js";
 import type { GenerationInventory } from "./generation-plan.js";
-import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
+import { reviewOtherOwners, type ReviewDependencyRequest } from "./review-repair-amendment.js";
+import { executionId } from "./checkpoint-assurance.js";
 import { dependencyDigest, dependencyGit, inspectDependencyPlan, dependencyTurn } from "./dependency-state.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { assertCompletedOtherOwnerRevalidation, revalidateAfterReviewedCorrection } from "./selective-revalidation-work.js";
@@ -92,15 +93,18 @@ export async function revalidateOtherOwnerPrerequisite(input: {
     throw Error("Other-owner revalidation has no authenticated original execution inventory.");
   dependencyGit(job, "merge-base", "--is-ancestor", inventory.headSha, request.sourceSha);
   const turn = await dependencyTurn(job);
-  const owners = turn.assignments.filter(a => a.id !== request.originalAssignmentId &&
-    a.authority.existingPaths.includes(path));
+  const owners = reviewOtherOwners(turn, request.originalAssignmentId, path, request.otherOwnerCheckpoint);
   if (owners.length !== 1 || turn.digest !== request.turnDigest)
     throw Error("Other-owner revalidation cannot reconstruct exactly one original writer.");
   const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(point =>
     point.eligible && point.assurance?.turnDigest === request.turnDigest &&
     point.assurance.assignmentId === owners[0]!.id);
+  const producer = request.otherOwnerCheckpoint;
   const upstream = inventory.items.filter(item => item.status === "verified" &&
-    checkpoints.some(point => point.commitSha === item.verifiedSha));
+    checkpoints.some(point => point.commitSha === item.verifiedSha) &&
+    (!producer || item.id === executionId(producer.workItem)));
+  if (producer && upstream.length === 1 && upstream[0]?.verifiedSha)
+    dependencyGit(job, "merge-base", "--is-ancestor", producer.commitSha, upstream[0].verifiedSha);
   if (upstream.length !== 1 || !upstream[0]?.verifiedSha)
     throw Error("Prerequisite's previous reviewed owner has no unique completed inventory node.");
   dependencyGit(job, "merge-base", "--is-ancestor", upstream[0].verifiedSha, request.sourceSha);

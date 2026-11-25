@@ -34,7 +34,7 @@ function fixture() {
   git(repo, "add", "."); git(repo, "commit", "-qm", "Verified Story source");
   const head = git(repo, "rev-parse", "HEAD"), turnDigest = "a".repeat(64);
   const job = { jobId: "c03-event-no-write", threadId: "c03-event-original",
-    baseSha: head, stateDir, worktreeRoot: repo, worktreeStoryRoot: story,
+    baseSha: head, branch: git(repo, "symbolic-ref", "--short", "HEAD"), stateDir, worktreeRoot: repo, worktreeStoryRoot: story,
     storyRoot: story, storyRelativePath: "story" } as JobStartResult;
   const workItemId = "event-disclosure";
   const sessionDir = join(stateDir, "event-sessions", workItemId);

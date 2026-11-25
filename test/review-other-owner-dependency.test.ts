@@ -138,3 +138,29 @@ test("#221: source, ownership, scope and protected decisions reject speculative 
     ...character, authority: { ...character.authority, existingPaths: ["characters/witness.md"] },
   }] }), /in-scope/);
 });
+
+test("#274: a realized whole-Story record needs checkpoint-backed owner authority", () => {
+  const unenumerated = { ...turn, assignments: [event, { ...character,
+    authority: { ...character.authority, existingPaths: [], mayCreate: true } }] };
+  const otherOwnerCheckpoint = { assignmentId: character.id, workItem: "character-foundations",
+    commitSha: "2".repeat(40), assuranceDigest: "3".repeat(64) };
+  assert.throws(() => deriveReviewDependencyRequest({ ...args(), turn: unenumerated }),
+    /unambiguous authenticated other-owner/);
+  const request = deriveReviewDependencyRequest({ ...args(), turn: unenumerated, otherOwnerCheckpoint });
+  assert.equal(request.classification, "other-owner");
+  assert.deepEqual(request.otherOwnerCheckpoint, otherOwnerCheckpoint);
+  const grant = authorizeReviewOtherOwnerDependency({ plan: unenumerated, head: source,
+    request, proposal, reportDigest: proposal.reportDigest, records, version: 1 });
+  assert.deepEqual(grant.assignment.authority, { recordTypes: ["character"],
+    existingPaths: ["characters/witness.md"], mayCreate: false });
+  for (const foreign of [
+    { ...otherOwnerCheckpoint, assignmentId: event.id },
+    { ...otherOwnerCheckpoint, commitSha: source },
+    { ...otherOwnerCheckpoint, assuranceDigest: "invalid" },
+  ]) assert.throws(() => deriveReviewDependencyRequest({ ...args(), turn: unenumerated,
+    otherOwnerCheckpoint: foreign }), /checkpoint|other-owner/);
+  assert.throws(() => authorizeReviewOtherOwnerDependency({ plan: unenumerated, head: source,
+    request, proposal, reportDigest: proposal.reportDigest, version: 1,
+    records: [records[0]!, { ...records[1]!, metadata: { ...records[1]!.metadata,
+      decisions: ["protected"] } }] }), /in-scope/);
+});

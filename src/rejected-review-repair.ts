@@ -1737,7 +1737,7 @@ async function foundationReviewBoundary(job: JobStartResult, state: RepairReceip
     // prerequisite controller. Yield controller-replan to it; the parent
     // checks exact Turn authority and protected decisions before granting
     // any separately owned work. The shared scope stop must not mask it.
-    if (/^(?:event-|composition-|focus:)/.test(state.origin.workItem)) return null;
+    if (/^(?:event-|composition-|interactive-(?:choice|puzzle)-|focus:)/.test(state.origin.workItem)) return null;
     return make("scope", state.outOfAuthority);
   }
   return null;
@@ -2230,7 +2230,7 @@ export async function executeReviewRound(job: JobStartResult,
     const assessment = await foundationReviewBoundary(job, state);
     if (assessment) return { status: "assess", sourceSha, assessment };
     if (state.phase === "needs-plan" && state.outOfAuthority &&
-        /^(?:event-|composition-|focus:)/.test(state.origin.workItem)) {
+        /^(?:event-|composition-|interactive-(?:choice|puzzle)-|focus:)/.test(state.origin.workItem)) {
       // The negative verdict and exact out-of-authority report are evidence,
       // never authority to run the other owner. The parent admits support.
       await attestNegativeReviewRound(job, state, point);
@@ -2244,6 +2244,8 @@ export async function executeReviewRound(job: JobStartResult,
         assurance: point.assurance, review, original, turn,
         planVersion: point.planVersion ?? turn.version, originWorkItem: workItem,
         otherOwnerPath: state.outOfAuthority.path,
+        otherOwnerCheckpoint: await (await import("./dependency-state.js")).reviewOtherOwnerCheckpoint(
+          job, turn, original.id, sourceSha, state.outOfAuthority.path),
       });
       await withStoryJobLock(job, "other-owner-prerequisite-evidence", () => recordReviewDependency(job, request));
       throw new ReviewDependencyRequiredError(request);

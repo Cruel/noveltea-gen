@@ -1539,11 +1539,13 @@ async function runArchitectureAssignmentChild(
 async function reviewPrerequisiteOwner(s: State, job: JobStartResult, request: ReviewDependencyRequest) {
   const turn = await readTurnEvidence(job, s.request.contract, s.request.task, request.turnDigest);
   if (!turn) throw new ProtocolIntegrityBlockedError("Review prerequisite lost its original Turn.");
-  const owners = request.otherOwnerPath ? turn.assignments.filter(a => a.id !== request.originalAssignmentId &&
-    (a.authority.existingPaths.includes(request.otherOwnerPath!) ||
-      a.authority.newPaths?.includes(request.otherOwnerPath!))) : [];
+  const { reviewOtherOwners } = await import("./review-repair-amendment.js");
+  const owners = request.otherOwnerPath ? reviewOtherOwners(turn, request.originalAssignmentId,
+    request.otherOwnerPath, request.otherOwnerCheckpoint) : [];
+  const type = request.otherOwnerPath && (await import("./checkpoint-assurance.js")).checkpointRecordType(request.otherOwnerPath);
   const owner = request.classification === "new-full-story-record" ? "nt-character-development" :
-    request.classification === "other-owner" && owners.length === 1 ? owners[0]!.specialist : null;
+    request.classification === "other-owner" && owners.length === 1 && type
+      ? (await import("./focused-specialist.js")).focusedSpecialist(type + ".prerequisite") : null;
   if (!owner) throw new ProtocolIntegrityBlockedError("Review prerequisite does not have a unique authorized owner.");
   return owner;
 }
@@ -4543,7 +4545,7 @@ export function createGenerationGraph(
         if (s.reviewPrerequisite) {
           const { request, pin } = await authenticatedReviewPrerequisite(s, config);
           const { advanceReviewDependency, inspectReviewSupport } = await import("./dependency-work.js");
-          await advanceReviewDependency({ ...s.request, turnPlanDigest: request.turnDigest, request }, config);
+          await advanceReviewDependency({ ...s.request, turnPlanDigest: request.turnDigest, request }, config, s.recoveryLifecycle.active?.id);
           const supported = await inspectReviewSupport(job, request);
           if (supported.entry.amendment?.assignment.specialist !== pin.suspension.owner)
             throw Error("Supporting Review assignment has the wrong owner.");

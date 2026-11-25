@@ -745,3 +745,27 @@ Current traceability (not final acceptance):
 
 Other adapter audit and mandatory R07/R08 qualification remain open. No
 additional corrective controller or writer grant is introduced.
+
+### #274 follow-up: checkpointed Review-origin support
+
+| Transferred requirement | Production boundary and verification | Residual scope |
+| --- | --- | --- |
+| #252 Interactive | `inspectInteractiveConflict` requires the original settled invocation and rederived source; R06 real Interactive Pi manifest correction rejects removed proof and modified assignment. Postcommit wrong-owner correction now enters the shared parent route for Choice/Puzzle as well as Event/Composition/Focused. | Precommit no-write owner amendment, declined omission and original writer continuation remain incomplete. |
+| #253 cross-lane | `advanceReviewDependency`, `runSupportingDependency`, `inspectDependencyCheckpointAssignment` share the support writer/Review and original Case. R14D support and support-negative exercise an actual supporting creation, negative Review, original-session correction and original Event correction; R04 review/writer/nested/no-write exercise the actual Focused graph. R14D other-owner and other-owner-world authenticate previous Character and World producers and independently reviewed existing-record corrections with SQLite crash/reentry and ordinary next dispatch. | Multiple-owner and additional precommit missing-record cases remain; this is not blanket R07 certification. |
+| #254 Blueprint/upstream | `reviewOtherOwnerCheckpoint`, `reviewOtherOwners`, `authorizeReviewOtherOwnerDependency`, `revalidateOtherOwnerPrerequisite` authenticate prior actual Git writer and precise inventory node in a whole-Story Turn (not merely record-type permission). `authenticateSettledEventNoWrite` is shared by causal amendment admission, historical approval incident and Event replay. | Pre-dispatch canonical Blueprint contradiction correction and full R08 acceptance remain. |
+| #264 Event/Focused | R14D other-owner-world demonstrates a non-Character production support path; R14D settled-no-write and stale-choice-finding exercise authenticated no-write assessment; causal/archived gates now use the same proof. | Arbitrary precommit wrong-owner report execution and multiple-owner support remain. |
+| #265 Composition | Existing postcommit source-linked repair enters shared Review-origin support; no local replacement scheduler or new writer grant. | General pre-dispatch missing Event/Choice/Puzzle/Character/World/Blueprint correction still needs production acceptance. |
+| #266 Architecture | `inspectCausalAmendment`, `originalEvent` and `runEventWorkItem` require complete settled original no-write evidence, not an altered digest-only report. R14D negative invocation and substituted causal report controls exercise the shared gate. | Remaining residual boundary audit; no claim of full Architecture qualification. |
+| #267 Blueprint | Source-backed historical causal admission is strengthened without a new Blueprint scheduler. | Upstream canonical correction from pre-dispatch Blueprint finding, verified descendant lineage and affected-only revalidation remain. |
+
+AST audit changes are limited to the reviewed admission, dependency and
+historical proof gates above. The Event settled response consumer moved
+from the live wrapper to the shared immutable proof helper; no new model
+call was added. The original parent dependency node now forwards its Case
+ID into the existing supporting child. No graph return/throw sites changed.
+
+An extended R14D World-owner run reached the next ordinary Event commit but
+timed out before Interactive/Composition/final Review (240 seconds). The
+bounded regression verifies recovery and next dispatch, not full-Story
+completion. R07 downstream qualification and investigation of the prolonged
+verification remain open.

@@ -917,3 +917,41 @@ already-held Story lease; it cannot acquire a second writer lease. Selecting
 the diagnostic neither spends a model allowance nor authorizes corrective
 writes. This closes the Event diagnostic admission gap, not the remaining
 cross-owner execution gaps in #274.
+
+### #274: Review-origin support and previously realized owner authority
+
+New Review-discovered supporting work uses the same checkpointed dependency
+writer and independent Review lifecycle as prospective and writer-discovered
+support. A pre-cutover reviewer session remains bound to its existing receipt;
+it is not replaced by a new reviewer. The support root and each independently
+reviewed corrective successor remain distinct. A passed support Review leaves
+the entry in `reviewing` until the original dependent's required correction or
+rereview settles. The Generation parent carries the original Case identity.
+No new retry allowance, scheduler, or write lease is introduced.
+
+Whole-Story assignments may have record-type authority with no pre-enumerated
+existing paths. An authenticated no-write **repair** report naming another
+owner's existing record can derive that owner's grant from the latest actual
+Git writer of the cited path at the original failed Review source, provided
+its native checkpoint belongs to the same Turn and has passed (or did not
+require) independent Review. The path must be in the original negative
+Review's affected sources, be schema-linked to its cited canonical record,
+and be unprotected. The stored producer checkpoint is rederived on every
+full ledger inspection. The supporting assignment has exactly one existing
+path; its owner is the native record type's specialist, not the composite
+Foundations stage or a model-proposed owner. Revalidation identifies the
+producer's exact original inventory node, including a World/Character
+subunit of a composite Foundations item. A negative dependent remains
+negative until both supporting and original Reviews and required selective
+revalidation authenticate. This does not authorize arbitrary unowned,
+protected, already revised or same-stage earlier records.
+
+All Event no-write live and historical causal admission/replay gates share
+`authenticateSettledEventNoWrite`: exact original assignment, job, session,
+settled protocol response and null writer effect, then the report seal. The
+live wrapper also verifies current branch, clean source and plan version.
+Historical proof is inspection evidence, not a current write grant.
+Interactive negative admission likewise requires its original invocation,
+rederives the pinned assignment source and compares the settled protocol
+response to its sealed negative transcript; deleting both invocation fields
+cannot downgrade it to a digest-only legacy report.

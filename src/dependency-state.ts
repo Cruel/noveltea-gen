@@ -9,7 +9,7 @@ import { trustedHead } from "./revision.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { inspectCheckpointReview, readRepairCommitProof } from "./checkpoint-assurance.js";
 import { auditEventParticipantCorrection } from "./event-participant-correction.js";
-import { deriveReviewDependencyRequest, type EventCharacterRepairGrant,
+import { deriveReviewDependencyRequest, reviewOtherOwners, type OtherOwnerCheckpoint, type EventCharacterRepairGrant,
   type ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
@@ -214,6 +214,28 @@ export async function registerBlueprintDependency(job: JobStartResult,
   return recordDependency(job, report, false, source);
 }
 
+/** Authenticate the last actual writer at the failed Review source, not a
+ * path guessed from an assignment's record-type permission. Historical
+ * inspection uses the same immutable Git history even after support commits. */
+export async function reviewOtherOwnerCheckpoint(job: JobStartResult, turn: TurnEvidence,
+  originalId: string, sourceSha: string, path: string,
+  points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>): Promise<OtherOwnerCheckpoint | undefined> {
+  if (turn.kind !== "full-story" || turn.objective?.breadth !== "whole-story" ||
+      reviewOtherOwners(turn, originalId, path).length) return undefined;
+  const repoPath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path;
+  const last = dependencyGit(job, "log", "-1", "--format=%H", sourceSha, "--", repoPath);
+  const point = (points ?? await inspectRecoveryCheckpoints(job)).find(p =>
+    p.commitSha === last && p.commitSha !== sourceSha && p.eligible &&
+    p.assurance?.turnDigest === turn.digest && p.assurance.changedPaths.includes(path) &&
+    (p.semanticReview === "passed" || p.semanticReview === "not-required") &&
+    !p.workItem.startsWith("repair-") && !p.workItem.startsWith("dependency:"));
+  if (!point?.assurance) return undefined;
+  const checkpoint = { assignmentId: point.assurance.assignmentId, workItem: point.workItem,
+    commitSha: point.commitSha, assuranceDigest: dependencyDigest(point.assurance) };
+  if (reviewOtherOwners(turn, originalId, path, checkpoint).length !== 1) return undefined;
+  return checkpoint;
+}
+
 async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean): Promise<DependencyPlan | null> {
   if (!existsSync(file(job))) return null;
   const saved = JSON.parse(await readFile(file(job), "utf8")) as DependencyPlan;
@@ -249,12 +271,15 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
           repair.outOfAuthority?.sourceSha !== request.sourceSha ||
           repair.outOfAuthority?.reviewDigest !== request.reviewDigest))
         throw Error("Cross-specialist report lost its original sealed no-write repair.");
+      const otherOwnerCheckpoint = repair && request.otherOwnerPath
+        ? await reviewOtherOwnerCheckpoint(job, turn, original.id, request.sourceSha, request.otherOwnerPath, checkpoints)
+        : undefined;
       if (sealed?.status !== "failed" || !sealed.result ||
           JSON.stringify(deriveReviewDependencyRequest({ assurance: point.assurance,
             review: sealed.result, original, turn,
             planVersion: request.basePlanVersion,
             originWorkItem: point.workItem,
-            ...(repair ? { otherOwnerPath: repair.outOfAuthority!.path } : {}) })) !== JSON.stringify(request))
+            ...(repair ? { otherOwnerPath: repair.outOfAuthority!.path, otherOwnerCheckpoint } : {}) })) !== JSON.stringify(request))
         throw Error("Review dependency differs from immutable source, ownership or scope.");
     }
   }
@@ -393,7 +418,7 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
     }
     const supportPassed = entry.phase === "verified" ||
       entry.phase === "reviewing" && entry.review?.verdict === "pass";
-    const supportRejected = entry.phase === "rejected" && !entry.reviewSourceSha &&
+    const supportRejected = entry.phase === "rejected" && (!entry.reviewSourceSha || !!entry.supportRootSha) &&
       entry.review?.verdict === "block";
     if (supportRejected && (!entry.amendment || !entry.commitSha || !entry.reviewerSession || entry.fixture))
       throw Error("Negative supporting Review lacks its original committed assignment and reviewer.");
@@ -472,7 +497,7 @@ export function inspectDependencyPlan(job: JobStartResult) {
 export async function inspectDependencyCheckpointAssignment(job: JobStartResult, id: string) {
   const plan = await inspectDependencyLedger(job, true);
   const entry = plan?.entries.find(e => e.amendment?.assignment.id === id);
-  if (!entry?.amendment || !entry.approval || entry.fixture || entry.reviewSourceSha ||
+  if (!entry?.amendment || !entry.approval || entry.fixture ||
       !entry.supportRootSha || !["reviewing", "verified", "rejected"].includes(entry.phase))
     throw Error("Support checkpoint has no original admitted dependency assignment.");
   return entry.amendment.assignment;
@@ -563,6 +588,9 @@ export async function recordReviewDependency(job: JobStartResult, request: Revie
         await verifiedNarrativeChain(job, entry.commitSha, head);
         return request; // Independently reviewed later commits are not a replay of the prerequisite.
       }
+      if (entry?.phase === "reviewing" && entry.supportRootSha &&
+          await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, entry.supportRootSha))
+        return request;
       const proofPath = entry?.amendment && join(job.stateDir, "dependency-items",
         entry.amendment.assignment.id + ".json");
       if (!entry || !entry.amendment || !proofPath || !existsSync(proofPath) ||
@@ -619,6 +647,9 @@ export async function registerReviewDependency(
       await verifiedNarrativeChain(job, prior.commitSha, head);
       return { plan: saved, entry: prior };
     }
+    if (prior.phase === "reviewing" && prior.supportRootSha &&
+        await (await import("./rejected-review-repair.js")).authenticateFoundationReviewHead(job, prior.supportRootSha))
+      return { plan: saved, entry: prior };
     if (head !== request.sourceSha) {
       const path = prior.amendment && join(job.stateDir, "dependency-items",
         prior.amendment.assignment.id + ".json");
@@ -674,8 +705,8 @@ export async function registerReviewDependency(
     (existingOwner || r.metadata.type === (foundations ? "arc" : "event")) &&
     r.metadata.status !== "superseded");
   if (!sourceRecord ||
-      !(existingOwner ? !!original.assignments.find(a => a.id !== request.originalAssignmentId &&
-          a.authority.existingPaths.includes(sourceRecord.path)) :
+      !(existingOwner ? reviewOtherOwners(original, request.originalAssignmentId, sourceRecord.path,
+          request.otherOwnerCheckpoint).length === 1 :
         foundations ? /^arc\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) :
         /^event\.[a-z][a-z0-9-]*$/.test(sourceRecord.metadata.id) &&
         Array.isArray(sourceRecord.metadata.participants) &&
@@ -861,19 +892,20 @@ export async function inspectReviewEventSupport(
     assignment.id + ".json"), "utf8"));
   const newPath = assignment.authority.newPaths[0]!;
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const supportRoot = entry.supportRootSha ?? entry.commitSha;
   if (proof.phase !== "committed" || proof.jobId !== job.jobId ||
-      proof.commitSha !== entry.commitSha || proof.expectedHead !== failedSourceSha ||
+      proof.commitSha !== supportRoot || proof.expectedHead !== failedSourceSha ||
       proof.workItemId !== assignment.id || proof.worker !== "pi" ||
       proof.assignmentDigest !== request.turnDigest ||
       proof.validation?.status !== "passed" ||
       proof.validation.validatorVersion !== job.validatorVersion ||
       proof.validation.baseSha !== failedSourceSha ||
       JSON.stringify(proof.paths) !== JSON.stringify(assignment.authority.newPaths) ||
-      dependencyGit(job, "rev-parse", entry.commitSha + "^") !== failedSourceSha ||
+      dependencyGit(job, "rev-parse", supportRoot + "^") !== failedSourceSha ||
       dependencyGit(job, "diff", "--name-only", failedSourceSha, entry.commitSha) !==
         prefix + newPath ||
       proof.sha256 !== dependencyDigest([[newPath,
-        sourceDigest(dependencyGit(job, "show", entry.commitSha + ":" + prefix + newPath))]]))
+        sourceDigest(dependencyGit(job, "show", supportRoot + ":" + prefix + newPath))]]))
     throw Error("Event Character support has no exact native-validated specialist receipt.");
   // The lease is re-attested while an Event correction may have a dirty
   // draft. Validate the verified Git head here; the actual writer admission
