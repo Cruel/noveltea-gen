@@ -20,14 +20,14 @@ export const reviewedReturnExits = {
   assess_recovery:
     "f9a2c8495ff02fa8:G c55d721037529090:F 847377c251391777:F 4b1fc97521b4c16b:S bb65f63e263b2fe8:F 68b0e7e4cbc2f04d:G 0d98a4d66450cb87:G 128687fb2b296bcd:F 7c2c37136b02e54d:G 4b2fff23895d5bac:G 41b8bc3b2f1df749:F 68b0e7e4cbc2f04d:G e1ecdca5abae0cf6:F 0d98a4d66450cb87:G c6a6c70112e77cf8:F 27fe5712f50f7abb:F 0a1d512a1ea80f42:F 709ddcba4378d1e8:G 709ddcba4378d1e8:G 170918fa99798bda:F 5d2896d748d553b3:B 591823c6f3985766:G",
   author_update_intake:
-    "ba759ce7cf83b761:G a4cfbfbb689ff1b2:U 73bc16b555ae8f07:G cfba761fff836f54:S e4b08665b2511bc8:G 5d687f16a5596c4f:R e4b08665b2511bc8:G e4b08665b2511bc8:G fdbf39f3b7061801:R a260befd39f85294:S 747b91dd0e6c2dc8:G 73bc16b555ae8f07:G f49f72da98546066:R 4d083c13dcc1e236:G 42867d567e1d95c1:G fceab62ae26516ee:R 5567ab42da73df08:U 9e0f30ee86075453:R 63a353783d128fb6:R e4840f27212ca310:R 3ea9cb6dd42763ac:G fe3e9d5287d5503f:R",
+    "19d0b4a5efd4883a:G a4cfbfbb689ff1b2:U 73bc16b555ae8f07:G cfba761fff836f54:S e4b08665b2511bc8:G 5d687f16a5596c4f:R e4b08665b2511bc8:G 73bc16b555ae8f07:G e4b08665b2511bc8:G fdbf39f3b7061801:R a260befd39f85294:S 747b91dd0e6c2dc8:G 73bc16b555ae8f07:G f49f72da98546066:R 4d083c13dcc1e236:G 42867d567e1d95c1:G fceab62ae26516ee:R 5567ab42da73df08:U 9e0f30ee86075453:R 63a353783d128fb6:R e4840f27212ca310:R 3ea9cb6dd42763ac:G fe3e9d5287d5503f:R",
   idea_integration:
     "e4b08665b2511bc8:G 20f588fb0567918e:G 525b4f362005f993:G 525b4f362005f993:G 6d21786f048a0f8f:R",
   verify_idea_integration:
     "fc4216fab4e774f4:G a8f06f34fb2636b9:R 3455306dafdc433b:G c373186eff1403b1:G 85e672986fb4d591:R",
   specialist_dispatch:
     "24d3234e13786970:G 67b5750b1e2f2d35:R e4b08665b2511bc8:G 2e390504c300c98d:S 7a691ba8e5d9ee20:G aff8ea941706c451:G 96fd9f45db7bb4c2:S 96fd9f45db7bb4c2:S 773d436bc9ee46ab:R 13fca47490992833:R 9f8b26ae0a357a24:O ed19971c96f82f6c:R 16827c77cbe7351c:R 0d9e6ec6e5934712:G 179232cd4e6294bf:S 37dc2f379c0b56cc:G 9c449fd8d8e255f9:G a36a5142fcf487a7:R 591562bbc7305825:R 2347023c580cd850:G 5f21d1ea20af1f8d:R 0e3fde7b04b5c6fb:O 5f21d1ea20af1f8d:R",
-  dependency_amendment: "eb13fe2b1f18ff5d:S 6b32f8cbd165bff6:G 365b250dad205c8c:G 495fbeab957c05af:S 0769876482d9a3e7:R",
+  dependency_amendment: "eb13fe2b1f18ff5d:S 6b32f8cbd165bff6:G b13b496b3869771e:G 365b250dad205c8c:G 495fbeab957c05af:S 0769876482d9a3e7:R",
   independent_assignment_review:
     "cf87cfda057d4dea:G 418d3dec6f744971:R 418d3dec6f744971:S 418d3dec6f744971:S 4d0c3b0ac80f6dc6:B 4f56955e96ca670d:V 9fe665d7fe799027:R 418d3dec6f744971:S",
   verify_committed_work:
@@ -53,11 +53,11 @@ export const reviewedThrowExits = {
     "aea92a900ce47858 411a3eae0cf3264b a8edb9348f27a65a 6f51bea018a720ea da0b0f2a87ae9f16 a487edb9609979d3 ae5af9f3c772e569 5b2b502238c5209e 3bf20806b502b598 96e71052b4de2658",
   assess_recovery:
     "7560a93fe575f141 901af6af846912cc d239f0ce472da0a0 2940c9db8a4e420b 03683bf91d992821 ae20aa221d4ba89b 607db873966042c5 ad5250671b6f390f 4f5dc6113e63c8d6 a8898c435e412b51 9277af1fe7f253d3 c7940c2a3e5537f5 a11058b81b892f89 49e50ec066f8490d",
-  author_update_intake: "0abd139e9b6f45a4",
+  author_update_intake: "6b28dab4a00d4f6c 0abd139e9b6f45a4",
   idea_integration: "5c212deb6b599f1b 2e0ec52402b79d11 8e87eec152864718 c98f90ca62ed64ed c7c8d830407dd1e5",
   verify_idea_integration: "308c430973f6b74e 43e1138180314eb1 a4b0709f69a7c2f3 63cc21025b2defc5",
   specialist_dispatch: "b306d96cffbf864c 8c468a57ba68bc74 086baca322d6ec07 44903bac895ce58d 8cf89d55148c1a84 c0072050cbf2a40f 16cf2788d5413e94 d980fe569e35ead1 a1beda487210eb50 8c468a57ba68bc74",
-  dependency_amendment: "ba56ceef28aadcc7 31c32f029ac15a97 6d9bcb7f81920391 0546c40eba97d45f 4b99521c61fca4d0 8c468a57ba68bc74 8c468a57ba68bc74",
+  dependency_amendment: "ba56ceef28aadcc7 27da2ccf2e6fa2e5 31c32f029ac15a97 6d9bcb7f81920391 0546c40eba97d45f 4b99521c61fca4d0 8c468a57ba68bc74 8c468a57ba68bc74",
   independent_assignment_review: "e646f3af90c171bf",
   verify_committed_work: "a5bc7d1ba7fb26d5 c949fc12ca8f8afe 90d19dd8ecfbcd01",
   completion_decision: "a71c76f34850a2b8 07a14758d9e6bb2b",
@@ -81,7 +81,7 @@ export const reviewedStatusExits = {
     "f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G e0394fa2f3847b80:F f309314d6c8adbdd:G f309314d6c8adbdd:G",
   assess_recovery:
     "e0394fa2f3847b80:F 2b78ad3f49b1ead6:F 088baada343b4451:S f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G",
-  author_update_intake: "f15f39eb577eed93:U f309314d6c8adbdd:G f309314d6c8adbdd:G 64104e1034916182:U",
+  author_update_intake: "f15f39eb577eed93:U f309314d6c8adbdd:G f309314d6c8adbdd:G f309314d6c8adbdd:G 64104e1034916182:U",
   idea_integration: "b2a1ee45d94f53be:G",
   verify_idea_integration: "1ef03b815a1070ca:G",
   specialist_dispatch: "fb8dc871bfe4bc06:G",

@@ -49,6 +49,7 @@ export interface EventAssignment {
   contract: CompletionContract;
   workItemId: string;
   authorTask?: string;
+  dependencyObligations?: string[];
   /** Reviewed private local plan is a bounded obligation, never canonical authority. */
   milestoneBlueprint?: { digest: string; design: import("./milestone-blueprint.js").MilestoneBlueprint };
   /** Exact independently approved pre-predecessor source, not a new lease. */
@@ -66,6 +67,7 @@ export interface EventEvidence {
   /** No-write source-bound claim only; does not authorize an Architecture edit. */
   causalDiscovery?: CausalDiscovery;
   blueprintFinding?: import("./event-manifest.js").EventBlueprintFinding;
+  dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
   /** Source-backed challenge to the provisional approved plan; no write grant. */
   blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge;
   skillReads: string[];
@@ -480,6 +482,7 @@ export async function authorEventCluster(
   provider: string, modelId: string, onSession: (file: string, id: string) => Promise<void>,
   verifyDraft: (evidence: EventEvidence) => Promise<(string | AssignmentDefect)[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
+    continuation?: { sessionSha256: string; reportDigest: string };
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
   resume: SpecialistChoiceReceipt | undefined, round: AssignmentRoundCommand,
 ): Promise<EventEvidence | { round: AssignmentRoundResult }> {
@@ -532,8 +535,16 @@ export async function authorEventCluster(
     const settled = await executeAssignmentRound({
       session, directory: eventInvocationDirectory(job, assignment.workItemId, session.sessionId, original.sourceDigest),
       sourceDigest: original.sourceDigest, sessionRoots: [sessionDir], responseKind: "event-manifest-or-choice",
-      initialTranscriptSha256: resume?.sessionSha256,
-      initialPrompt: context.contextNote + direction + eventSpecialistPrompt(snapshot, assignment, Boolean(sandboxTools)),
+      initialTranscriptSha256: resume?.sessionSha256 ?? original.continuation?.sessionSha256,
+      initialPrompt: context.contextNote + direction + (original.continuation ?
+        "\nAUTHENTICATED VERIFIED PREREQUISITE " + original.continuation.reportDigest +
+        ": The controller independently reviewed the supporting correction. Re-read the current source and newly approved local Blueprint. Continue YOUR original Event assignment, within its original grant; do not replay the previous no-write turn.\n" : "") + (assignment.dependencyObligations ?
+        "\nIf a genuinely necessary existing canonical prerequisite outside your current writer grant blocks delivery, return a no-write manifest with dependencyFinding: " +
+        JSON.stringify({ obligationIndex: 0, targetId: "typed.record-id", missing: "exact required correction", affectedIds: [assignment.milestoneId, "typed.record-id"],
+          sources: [{ path: "canonical/path.md", quote: "exact source quote" }], likelySpecialist: "owner-skill", authorDecisionRequired: false }) +
+        ". Cite both the current source anchor and the earlier owned target, and select an original delivery obligation by index: " +
+        JSON.stringify(assignment.dependencyObligations) + ". Do not use this for your own work or future planned delivery.\n" : "") +
+        eventSpecialistPrompt(snapshot, assignment, Boolean(sandboxTools)),
       authorize: original.authorize, effect: original.effect,
       beforeTurn: async () => {
         const control = await readJobControl(job);
@@ -568,9 +579,9 @@ export async function authorEventCluster(
           ? m.content.filter(c => c.type === "toolCall") : []);
         const evidence: EventEvidence = { ...common, claimedPaths: summary.modifiedRecords,
           conflicts: summary.architecturalConflicts, obligations: summary.laterObligations,
-          causalDiscovery: summary.causalDiscovery, blueprintChallenge: summary.blueprintChallenge };
+          causalDiscovery: summary.causalDiscovery, blueprintChallenge: summary.blueprintChallenge, dependencyFinding: summary.dependencyFinding };
         if (!summary.modifiedRecords.length) {
-          if (resume || calls.some(c => ["write", "edit"].includes(c.name)) || await original.effect() !== null)
+          if (resume || original.continuation || calls.some(c => ["write", "edit"].includes(c.name)) || await original.effect() !== null)
             throw Error("Event no-write prerequisite report follows a writer tool or author-choice resume.");
           const claim = summary.blueprintFinding;
           if (claim) {

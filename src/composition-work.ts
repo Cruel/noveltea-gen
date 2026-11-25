@@ -69,7 +69,10 @@ interface Receipt {
   version: 1; jobId: string; baseSha: string; milestoneId: string; workItemId: string;
   planVersion: number; planDigest: string; interactiveHead: string;
   worker: "fixture" | "pi"; provider: string; model: string; thinking?: "low" | "high";
-  snapshot?: SkillSnapshot; phase: "pending" | "writing" | "authored" | "committed";
+  snapshot?: SkillSnapshot; phase: "pending" | "writing" | "authored" | "committed" | "prerequisite-reported";
+  dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
+  writerNegative?: { sealDigest: string; sessionSha256: string; transcriptBytes: number };
+  writerContinuation?: import("./writer-dependency.js").WriterContinuation;
   beforeHead?: string; paths?: string[]; claimedPaths?: string[]; digest?: string;
   commitSha?: string; sessionFile?: string; writerSessionId?: string; reviewSessionFile?: string;
   reviewedDigest?: string; reviewedEvidence?: SemanticReview; reviewPin?: CompositionReviewPin;
@@ -84,7 +87,7 @@ interface Receipt {
 export interface CompositionOptions {
   story: string; job: string; action: "run" | "inspect"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean;
-  provider?: string; model?: string; task?: string; thinking?: "low" | "high";
+  provider?: string; model?: string; task?: string; thinking?: "low" | "high"; turnPlanDigest?: string;
   round?: { assignmentKey: string; command: AssignmentRoundCommand; publish?: true };
 }
 const milestonePattern = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -94,7 +97,7 @@ function compositionInvocationSource(job: JobStartResult, receipt: Receipt) {
     workItem: receipt.workItemId, assignmentKey: receipt.assignmentKey, head: receipt.beforeHead, interactiveHead: receipt.interactiveHead,
     planVersion: receipt.planVersion, plan: receipt.planDigest, assignment: receipt.invocationAssignment,
     baseline: receipt.invocationBaseline,
-    snapshot: receipt.snapshot?.id, provider: receipt.provider, model: receipt.model, thinking: receipt.thinking }));
+    snapshot: receipt.snapshot?.id, provider: receipt.provider, model: receipt.model, thinking: receipt.thinking, writerContinuation: receipt.writerContinuation }));
 }
 function compositionInvocationOptions(job: JobStartResult, receipt: Receipt) {
   if (!receipt.assignmentKey || !receipt.invocationSource || receipt.invocationSource !== compositionInvocationSource(job, receipt) ||
@@ -104,6 +107,78 @@ function compositionInvocationOptions(job: JobStartResult, receipt: Receipt) {
     sourceDigest: receipt.invocationSource, sessionId: receipt.writerSessionId, sessionFile: receipt.sessionFile,
     sessionRoots: [join(job.stateDir, "composition-sessions", receipt.workItemId, "write")] };
 }
+function compositionNegativeDigest(s: Receipt, prefix: { sessionSha256: string; transcriptBytes: number }) {
+  return hash(JSON.stringify({ source: s.invocationSource, proof: s.invocationProof, assignmentKey: s.assignmentKey,
+    finding: s.dependencyFinding, conflicts: s.conflicts, obligations: s.obligations, prefix }));
+}
+function compositionNegativePath(job: JobStartResult, milestone: string, sealDigest: string) {
+  if (!milestonePattern.test(milestone) || !/^[a-f0-9]{64}$/.test(sealDigest)) throw Error("Invalid Composition prerequisite identity.");
+  return join(job.stateDir, "composition-writer-prerequisites", milestone.slice(10) + "-" + sealDigest + ".json");
+}
+export async function inspectCompositionWriterDependency(job: JobStartResult, milestone: string, sealDigest: string):
+    Promise<import("./writer-dependency.js").OriginalWriterDependency> {
+  const archive = compositionNegativePath(job, milestone, sealDigest);
+  const historical = existsSync(archive);
+  const file = historical ? archive : join(job.stateDir, "composition-items", milestone.slice(10) + ".json");
+  if (await realpath(file) !== file || !(await lstat(file)).isFile()) throw Error("Unsafe Composition prerequisite receipt.");
+  const s = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  const negative = s.writerNegative;
+  if (s.jobId !== job.jobId || s.baseSha !== job.baseSha || s.milestoneId !== milestone || s.worker !== "pi" ||
+      s.phase !== "prerequisite-reported" || !s.beforeHead || !s.assignmentKey || !s.invocationAssignment?.dependencyObligations ||
+      !s.dependencyFinding || !negative || !s.invocationProof || s.claimedPaths?.length || s.commitSha || s.reviewPin ||
+      negative.sealDigest !== sealDigest || compositionNegativeDigest(s, { sessionSha256: negative.sessionSha256,
+        transcriptBytes: negative.transcriptBytes }) !== sealDigest)
+    throw Error("Composition prerequisite lost its exact original settled report.");
+  const bytes = await readFile(s.sessionFile!);
+  if (!Number.isSafeInteger(negative.transcriptBytes) || negative.transcriptBytes <= 0 ||
+      negative.transcriptBytes > bytes.length || !historical && negative.transcriptBytes !== bytes.length ||
+      hash(bytes.subarray(0, negative.transcriptBytes)) !== negative.sessionSha256)
+    throw Error("Composition negative session prefix changed.");
+  const response = await verifySettledAssignment({ ...compositionInvocationOptions(job, s), proof: s.invocationProof,
+    effect: null, historical });
+  const { parseWriterDependencyFinding } = await import("./dependency-amendments.js");
+  if (!isDeepStrictEqual(parseWriterDependencyFinding(response.dependencyFinding), s.dependencyFinding) ||
+      !isDeepStrictEqual(response.modifiedRecords, []) || !isDeepStrictEqual(response.architecturalConflicts, s.conflicts) ||
+      !isDeepStrictEqual(response.laterObligations, s.obligations))
+    throw Error("Composition negative report differs from its sealed response.");
+  git(job, "merge-base", "--is-ancestor", s.beforeHead, "HEAD");
+  if (!historical && (await trustedHead(job) !== s.beforeHead || changes(job).length)) throw Error("Composition prerequisite source is not clean.");
+  return { stage: "composition", milestoneId: milestone, workItemId: s.workItemId, planVersion: s.planVersion, sealDigest,
+    assignmentKey: s.assignmentKey, head: s.beforeHead, sourcePaths: s.invocationAssignment.sourcePaths,
+    obligations: s.invocationAssignment.dependencyObligations, finding: s.dependencyFinding };
+}
+export async function archiveCompositionWriterDependency(job: JobStartResult, milestone: string, sealDigest: string) {
+  const original = await inspectCompositionWriterDependency(job, milestone, sealDigest);
+  const archive = compositionNegativePath(job, milestone, sealDigest);
+  if (!existsSync(archive)) await save(archive, JSON.parse(await readFile(join(job.stateDir, "composition-items", milestone.slice(10) + ".json"), "utf8")));
+  return original;
+}
+async function authenticateCompositionContinuation(job: JobStartResult, s: Receipt, assignmentKey?: string) {
+  const { authenticateWriterContinuation } = await import("./writer-dependency.js");
+  const source = await authenticateWriterContinuation(job, s.writerContinuation!, "composition", s.milestoneId, assignmentKey);
+  const original = JSON.parse(await readFile(compositionNegativePath(job, s.milestoneId, source.sealDigest), "utf8")) as Receipt;
+  if (original.sessionFile !== s.sessionFile || original.writerSessionId !== s.writerSessionId ||
+      original.assignmentKey !== s.assignmentKey || original.writerNegative?.sessionSha256 !== s.writerContinuation!.sessionSha256)
+    throw Error("Composition continuation lost its original writer.");
+}
+export async function rebindCompositionAfterWriterDependency(job: JobStartResult,
+    source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
+  const { verifiedWriterSupport } = await import("./writer-dependency.js");
+  const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
+  const original = JSON.parse(await readFile(compositionNegativePath(job, source.milestoneId, source.sealDigest), "utf8")) as Receipt;
+  const file = join(job.stateDir, "composition-items", source.milestoneId.slice(10) + ".json");
+  const current = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.writerNegative!.sessionSha256 };
+  if (current.writerContinuation) {
+    if (!isDeepStrictEqual(current.writerContinuation, binding)) throw Error("Composition continuation changed.");
+    return;
+  }
+  if (changes(job).length || !isDeepStrictEqual(original, current)) throw Error("Composition prerequisite receipt changed before reentry.");
+  const { writerNegative, dependencyFinding, invocationSource, invocationAssignment, invocationBaseline, invocationProof,
+    claimedPaths, conflicts, obligations, failure, ...rest } = current;
+  await save(file, { ...rest, phase: "pending", beforeHead: await trustedHead(job), writerContinuation: binding });
+}
+
 export async function inspectPendingCompositionInvocation(job: JobStartResult, milestone: string, sourceHead?: string) {
   if (!milestonePattern.test(milestone)) return null;
   const path = join(job.stateDir, "composition-items", milestone.slice(10) + ".json");
@@ -590,7 +665,8 @@ function verifyCommit(job: JobStartResult, state: Receipt, sha: string) {
     throw new Error("Composition commit includes unauthorized files.");
 }
 function output(job: JobStartResult, state: Receipt) {
-  return { status: state.phase === "committed" ? "composition-committed" : "in-progress",
+  return { status: state.phase === "committed" ? "composition-committed" : state.phase === "prerequisite-reported" ? "composition-prerequisite-reported" : "in-progress",
+    prerequisite: state.writerNegative, dependencyFinding: state.dependencyFinding,
     phase: state.phase, jobId: job.jobId, milestoneId: state.milestoneId,
     workItemId: state.workItemId, interactiveHead: state.interactiveHead,
     expectedHead: state.beforeHead ?? state.interactiveHead, planVersion: state.planVersion,
@@ -747,6 +823,11 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
       await save(file, state);
     }
     if (input.action === "inspect") return output(job, state);
+    if (state.writerContinuation) await authenticateCompositionContinuation(job, state, input.round?.assignmentKey);
+    if (state.phase === "prerequisite-reported") {
+      await inspectCompositionWriterDependency(job, state.milestoneId, state.writerNegative!.sealDigest);
+      return output(job, state);
+    }
     if (state.worker === "pi") {
       if (!input.round) throw Error("Composition requires its checkpointed assignment child.");
       if (!state.assignmentKey) {
@@ -823,6 +904,11 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         ...(s.authorTask ? { authorTask: s.authorTask } : {}) };
       if (s.phase === "pending" || continuing) {
         if (!continuing) {
+          if (input.turnPlanDigest) {
+            const turn = await (await import("./dependency-state.js")).dependencyTurn(job);
+            if (turn.digest !== input.turnPlanDigest) throw Error("Composition Turn changed.");
+            assign.dependencyObligations = turn.objective?.obligations;
+          }
           await preflightPiAssignment(job, "composition:" + s.workItemId + ":write", s.worker === "pi"
             ? { provider: s.provider, model: s.model, thinking: s.thinking } : undefined);
           s.phase = "writing"; s.beforeHead = base;
@@ -836,6 +922,12 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
         let cycle: Awaited<ReturnType<typeof createCompositionReviewCycle>> | undefined;
         try {
           const verifyDraft = async (evidence: CompositionEvidence) => {
+            if (evidence.dependencyFinding) {
+              assertHead(job, base);
+              if (evidence.modifiedRecords.length || changes(job).length || !evidence.conflicts.length || s.reviewPin)
+                throw Error("Composition prerequisite has unexpected effects or prior editorial acceptance.");
+              return { stage: "pre-review" as const, problems: [] };
+            }
             let paths: string[] | undefined;
             let manifestFeedback: string | undefined;
             try {
@@ -901,6 +993,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
                 s.sessionFile = session; s.writerSessionId = id; await save(file, s); },
               verifyDraft, { sourceDigest: s.invocationSource!,
                 session: s.sessionFile && s.writerSessionId ? { file: s.sessionFile, id: s.writerSessionId } : undefined,
+                continuation: s.writerContinuation,
                 authorize: async () => {
                   assertHead(job, base);
                   if (s.invocationSource !== compositionInvocationSource(job, s))
@@ -917,6 +1010,15 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
           }
           s.claimedPaths = evidence.modifiedRecords;
           if (evidence.piSessionId) s.writerSessionId = evidence.piSessionId;
+          if (evidence.dependencyFinding) {
+            s.dependencyFinding = evidence.dependencyFinding;
+            s.conflicts = evidence.conflicts; s.obligations = evidence.obligations;
+            const bytes = await readFile(s.sessionFile!);
+            const negative = { sessionSha256: hash(bytes), transcriptBytes: bytes.length };
+            s.writerNegative = { ...negative, sealDigest: compositionNegativeDigest(s, negative) };
+            s.phase = "prerequisite-reported"; await save(file, s);
+            return;
+          }
           s.paths = await auditCompositionPaths(job, assign, evidence.modifiedRecords);
           s.conflicts = evidence.conflicts; s.obligations = evidence.obligations;
           s.skillReads = evidence.skillReads;
@@ -993,6 +1095,7 @@ export async function runCompositionWorkItem(input: CompositionOptions) {
     const result = await graph.invoke({ receipt: state });
     if (result.round) return { ...output(job, result.receipt),
       status: result.round.status === "accepted" ? "composition-authored" : "writer-round", round: result.round };
+    if (result.receipt.phase === "prerequisite-reported") return output(job, result.receipt);
     const authorUpdates = await processAuthorUpdatesAfterWork(job);
     const { scheduleIdeasAtBoundary } = await import("./idea-placement.js");
     await scheduleIdeasAtBoundary(job, "composition-work");

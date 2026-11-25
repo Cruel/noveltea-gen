@@ -955,3 +955,42 @@ Interactive negative admission likewise requires its original invocation,
 rederives the pinned assignment source and compares the settled protocol
 response to its sealed negative transcript; deleting both invocation fields
 cannot downgrade it to a digest-only legacy report.
+
+### #274: precommit writer and Milestone Blueprint prerequisite
+
+A settled Event, Choice, Puzzle or Composition no-write manifest may name a
+typed, necessary existing upstream record and cite its original obligation
+and exact source quotes. The parent reopens the original Pi invocation and
+null effect; it resolves the actual native producer checkpoint at the
+original Git revision, including an earlier distinct Event in the same
+Turn owner. A prose conflict does not establish that authority. The
+existing dependency admission verifies canonical reference connectivity,
+source hashes, scope, protected decisions and the exact target path before
+the existing support child may write. No creation, unrelated path, or
+protected decision is authorized by this existing-record adapter.
+
+The parent keeps the original logical assignment suspended while the
+support child commits and passes independent Review. It authenticates the
+existing selective-revalidation receipt before rebinding the original
+writer to the verified descendant. The negative receipt and transcript
+prefix remain immutable; a new invocation namespace in the original Pi
+session is bound to the verified support receipt, not a replay of the
+settled invocation. Choice and Puzzle keep separate logical identities and
+native/Review checkpoints. Composition still requires its own independent
+editorial acceptance before commit and ordinary independent Review.
+
+A passing Milestone design can contain a typed upstream contradiction.
+This is an admission blocker, not prospective delivery or an Event
+writer's settled result. The original private approval and selected
+assignment are archived; after independently verified canonical support
+and selective revalidation, a fresh source-bound Milestone approval is
+required before the original logical Event writer starts. No old Event
+writer transcript or postcommit Review is invented. This route is distinct
+from an ordinary prospective Character prerequisite and the existing
+postcommit approved-Blueprint challenge.
+
+The parent intake retains the original suspended work after the support
+return. It does not select an ordinary successor until the original writer
+and its mandatory Review settle. The new intake and dependency-amendment
+returns are graph progress, not success verdicts; a mismatched original
+assignment or support receipt is a classified exception.

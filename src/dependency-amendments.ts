@@ -47,6 +47,27 @@ export function parseDependencyReport(value: unknown): DependencyReport {
     throw Error("Malformed dependency evidence report.");
   return structuredClone(r);
 }
+/** Shared wire evidence for a precommit writer that cannot fulfill its
+ * own authorized work. The controller binds original Turn/HEAD and Git
+ * hashes; no planner-proposed path is a write grant. */
+export type WriterDependencyFinding = Omit<DependencyReport,
+  "sourceSha" | "turnDigest" | "assignmentId" | "obligation" | "sources"> & {
+    obligationIndex: number; targetId: string; sources: Array<{ path: string; quote: string }>;
+  };
+export function parseWriterDependencyFinding(value: unknown): WriterDependencyFinding {
+  const f = value as WriterDependencyFinding;
+  if (!keys(f, "obligationIndex,targetId,missing,affectedIds,sources,likelySpecialist,authorDecisionRequired") ||
+      typeof f.targetId !== "string" || !id.test(f.targetId) || !Array.isArray(f.affectedIds) || !f.affectedIds.includes(f.targetId) ||
+      !Number.isSafeInteger(f.obligationIndex) || f.obligationIndex < 0 ||
+      !Array.isArray(f.sources) || f.sources.some(s => !keys(s, "path,quote")))
+    throw Error("Malformed precommit dependency finding.");
+  parseDependencyReport({ sourceSha: "0".repeat(40), turnDigest: "0".repeat(64),
+    assignmentId: "writer", obligation: "pinned", missing: f.missing,
+    affectedIds: f.affectedIds, sources: f.sources.map(s => ({ ...s, sha256: "0".repeat(64) })),
+    likelySpecialist: f.likelySpecialist, authorDecisionRequired: f.authorDecisionRequired });
+  return structuredClone(f);
+}
+
 // Only typed canonical link fields establish connection; free prose and titles
 // mentioning an ID cannot turn an unrelated enhancement into a prerequisite.
 function links(record: CanonicalScopeRecord, target: string): boolean {
@@ -220,6 +241,55 @@ export function authorizeReviewOtherOwnerDependency(input: {
       authority: { recordTypes: [target.metadata.type], existingPaths: [otherPath], mayCreate: false },
     },
   };
+}
+
+/** An existing canonical prerequisite reported before publication. Historical
+ * producer identity is authenticated by the caller, and all scope derives
+ * from the native catalog and original Turn, not the planner's suggestion. */
+export function authorizeWriterDependency(input: {
+  plan: TurnEvidence; head: string; report: DependencyReport; reportDigest: string;
+  proposal: DependencyProposal; records: CanonicalScopeRecord[]; sources: DependencySource[];
+  version: number; source: import("./writer-dependency.js").WriterDependencySource;
+  priorAmendments: TurnAssignmentEvidence[];
+}): DependencyAmendment {
+  const { plan, head, report, proposal, records, source } = input;
+  const origin = plan.assignments.find(a => a.id === report.assignmentId);
+  const owner = plan.assignments.find(a => a.id === source.producer.assignmentId);
+  const target = records.find(r => r.metadata.id === source.targetId && r.path === source.targetPath);
+  const cited = records.filter(r => report.sources.some(s => s.path === r.path));
+  const anchor = cited.find(r => r.metadata.id === source.milestoneId);
+  // Only cited canonical reference edges count. An Arc can connect the
+  // current Milestone to an earlier Event/Character without trusting prose.
+  const reached = new Set<string>(anchor ? [anchor.metadata.id] : []);
+  for (let i = 0; i < cited.length; i++) for (const r of cited)
+    if ([...reached].some(id => r.metadata.id === id || links(r, id) ||
+        cited.some(c => c.metadata.id === id && links(c, r.metadata.id))))
+      reached.add(r.metadata.id);
+  if (plan.kind !== "full-story" || plan.objective?.breadth !== "whole-story" ||
+      !origin || !owner || !target || !anchor || !reached.has(source.targetId) ||
+      target.metadata.type !== source.targetId.split(".")[0] ||
+      !owner.authority.recordTypes.includes(target.metadata.type) ||
+      target.metadata.status === "superseded" || cited.some(r => r.metadata.status === "superseded") ||
+      cited.length !== report.sources.length ||
+      cited.some(r => !report.affectedIds.includes(r.metadata.id)) ||
+      !report.affectedIds.every(id => cited.some(r => r.metadata.id === id)) ||
+      !keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason") ||
+      proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest ||
+      proposal.target !== source.targetId || proposal.specialist !== focusedSpecialist(source.targetId) ||
+      proposal.specialist !== report.likelySpecialist || proposal.outcome !== report.missing ||
+      !text(proposal.reason) || report.sourceSha !== head || report.turnDigest !== plan.digest ||
+      !plan.objective.obligations.includes(report.obligation) || report.authorDecisionRequired ||
+      JSON.stringify(report.sources) !== JSON.stringify(input.sources) ||
+      target.metadata.decisions !== undefined && (!Array.isArray(target.metadata.decisions) || target.metadata.decisions.length) ||
+      input.priorAmendments.some(a => a.authority.existingPaths.includes(source.targetPath) || a.authority.newPaths?.includes(source.targetPath)) ||
+      !Number.isSafeInteger(input.version) || input.version < 1 || input.version > 8)
+    throw new DependencyAuthorizationRefusedError("Writer prerequisite is not a source-linked, unprotected existing owner correction.");
+  return { beforeVersion: input.version, afterVersion: input.version + 1, sourceSha: head,
+    turnDigest: plan.digest, reportDigest: input.reportDigest, reason: proposal.reason,
+    objective: structuredClone(plan.objective), resumes: origin.id,
+    assignment: { id: "dependency:" + input.version + ":" + proposal.target, specialist: proposal.specialist,
+      outcome: proposal.outcome, targets: [proposal.target], dependsOn: [], discovery: "canonical-story-read-only",
+      authority: { recordTypes: [target.metadata.type], existingPaths: [target.path], mayCreate: false } } };
 }
 
 export function authorizeDependency(input: {

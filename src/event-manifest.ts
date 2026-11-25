@@ -1,5 +1,6 @@
 import { lastSpecialistManifest } from "./specialist-manifest.js";
 import type { CausalDiscovery } from "./causal-amendment.js";
+import { parseWriterDependencyFinding, type WriterDependencyFinding } from "./dependency-amendments.js";
 
 export type EventBlueprintFinding = { pinDigest: string } & (
   | { kind: "downstream"; downstreamIndex: number }
@@ -8,6 +9,7 @@ export type EventBlueprintFinding = { pinDigest: string } & (
 
 export function parseEventManifest(text: string): { modifiedRecords: string[]; architecturalConflicts: string[];
   laterObligations: string[]; causalDiscovery?: CausalDiscovery; blueprintFinding?: EventBlueprintFinding;
+  dependencyFinding?: WriterDependencyFinding;
   blueprintChallenge?: import("./blueprint-challenge.js").SpecialistBlueprintChallenge } {
   const obj = lastSpecialistManifest(text);
   const strings = (value: unknown): value is string[] =>
@@ -18,6 +20,10 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
         !obj.laterObligations.length)) {
     throw new Error("Event specialist must return a JSON manifest with modifiedRecords, architecturalConflicts and laterObligations.");
   }
+  const dependencyFinding = obj.dependencyFinding === undefined ? undefined : parseWriterDependencyFinding(obj.dependencyFinding);
+  if (dependencyFinding && (obj.modifiedRecords.length || !obj.architecturalConflicts.length ||
+      obj.causalDiscovery !== undefined || obj.blueprintFinding !== undefined || obj.blueprintChallenge !== undefined))
+    throw Error("A dependencyFinding requires a clean, exclusive no-write report.");
   const finding = obj.blueprintFinding as EventBlueprintFinding | undefined;
   if (finding !== undefined) {
     const keys = finding && Object.keys(finding).sort().join();
@@ -63,5 +69,5 @@ export function parseEventManifest(text: string): { modifiedRecords: string[]; a
   }
   return { modifiedRecords: obj.modifiedRecords, architecturalConflicts: obj.architecturalConflicts,
     laterObligations: obj.laterObligations, ...(causalDiscovery ? { causalDiscovery } : {}),
-    ...(finding ? { blueprintFinding: finding } : {}), ...(blueprintChallenge ? { blueprintChallenge } : {}) };
+    ...(finding ? { blueprintFinding: finding } : {}), ...(dependencyFinding ? { dependencyFinding } : {}), ...(blueprintChallenge ? { blueprintChallenge } : {}) };
 }

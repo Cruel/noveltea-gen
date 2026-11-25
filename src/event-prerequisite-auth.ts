@@ -16,9 +16,10 @@ export interface EventNoWriteSource {
   snapshot?: { id: string }; assignment?: unknown;
   conflicts?: string[]; obligations?: string[]; causalDiscovery?: CausalDiscovery;
   blueprintFinding?: EventBlueprintFinding;
+  dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
   prerequisite?: { expectedHead: string; sessionSha256: string; sessionId: string;
     assignmentDigest: string; snapshotId: string; sessionFile: string;
-    worker: "pi" | "fixture"; reportDigest: string };
+    worker: "pi" | "fixture"; reportDigest: string; transcriptBytes?: number };
 }
 
 export function eventPrerequisiteReportDigest(value: {
@@ -27,6 +28,7 @@ export function eventPrerequisiteReportDigest(value: {
   snapshotId: string; sessionFile: string; worker: "pi" | "fixture";
   conflicts: string[]; obligations: string[]; causalDiscovery?: CausalDiscovery;
   blueprintFinding?: EventBlueprintFinding;
+  dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
 }) {
   if (!/^[a-f0-9]{40}$/.test(value.expectedHead) ||
       !/^[a-f0-9]{64}$/.test(value.sessionSha256) ||
@@ -48,7 +50,7 @@ export function eventPrerequisiteReportDigest(value: {
 
 /** Does not grant scope, authorize HEAD movement, or replace the caller's
  * phase/plan/history checks; those remain separate at every boundary. */
-export async function authenticateEventNoWrite(job: JobStartResult, event: EventNoWriteSource) {
+export async function authenticateEventNoWrite(job: JobStartResult, event: EventNoWriteSource, historical = false) {
   const source = event.prerequisite;
   if (!source || !event.assignment || !event.snapshot ||
       !event.conflicts || !event.obligations ||
@@ -66,10 +68,14 @@ export async function authenticateEventNoWrite(job: JobStartResult, event: Event
         conflicts: event.conflicts, obligations: event.obligations,
         ...(event.causalDiscovery ? { causalDiscovery: event.causalDiscovery } : {}),
         ...(event.blueprintFinding ? { blueprintFinding: event.blueprintFinding } : {}),
+        ...(event.dependencyFinding ? { dependencyFinding: event.dependencyFinding } : {}),
       })) throw new ProtocolIntegrityBlockedError("Event no-write report changed or does not match its sealed source.");
   if (source.worker === "pi") {
     await verifyJobPiSession(job, "event", source.sessionFile, source.sessionId, event.workItemId);
-    if (hash(await readFile(source.sessionFile)) !== source.sessionSha256)
+    const transcript = await readFile(source.sessionFile);
+    if (historical && (!Number.isSafeInteger(source.transcriptBytes) || source.transcriptBytes! <= 0 ||
+        source.transcriptBytes! > transcript.length) ||
+        hash(historical ? transcript.subarray(0, source.transcriptBytes) : transcript) !== source.sessionSha256)
       throw new ProtocolIntegrityBlockedError("Event no-write Pi transcript changed after the settled turn.");
   } else if (source.sessionSha256 !== "f".repeat(64) || source.sessionId !== "fixture") {
     throw new ProtocolIntegrityBlockedError("Event no-write deterministic fixture provenance is invalid.");

@@ -21,12 +21,14 @@ import { boundedPinnedSources, pinnedSourcePaths, renderBoundedPrompt } from "./
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 import { CHOICE_PAYOFF_AUTHOR } from "./choice-payoff-guidance.js";
 import { PUZZLE_GOAL_AUTHOR } from "./puzzle-goal-fidelity.js";
+import { parseWriterDependencyFinding, type WriterDependencyFinding } from "./dependency-amendments.js";
 import type { ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 
 export type InteractiveDomain = "choice" | "puzzle";
 export interface InteractiveAssignment {
   workItemId: string;
   authorTask?: string;
+  dependencyObligations?: string[];
   milestoneId: string;
   arcIds: string[];
   characterIds: string[];
@@ -56,6 +58,7 @@ export interface InteractiveEvidence {
   skillReads: string[];
   piSessionFile?: string;
   invocationProof?: AssignmentInvocationProof;
+  dependencyFinding?: WriterDependencyFinding;
 }
 const SPECIALISTS = {
   choice: { name: "nt-interactive-narrative" },
@@ -81,7 +84,11 @@ export function parseInteractiveManifest(text: string, domain: InteractiveDomain
   if (domain === "choice" && obj.modifiedRecords.length === 0 &&
       obj.architecturalConflicts.length === 0)
     throw new Error("Interactive Choice cannot report no Story edits without a verified Event-only omission.");
+  const dependencyFinding = obj.dependencyFinding === undefined ? undefined : parseWriterDependencyFinding(obj.dependencyFinding);
+  if (dependencyFinding && (obj.modifiedRecords.length || !obj.architecturalConflicts.length))
+    throw Error("Typed prerequisite must be an explicit no-write report.");
   return {
+    ...(dependencyFinding ? { dependencyFinding } : {}),
     paths: obj.modifiedRecords,
     conflicts: obj.architecturalConflicts,
     obligations: obj.laterObligations,
@@ -177,7 +184,8 @@ export function interactiveSpecialistPrompt(
           '{"modifiedRecords":["events/example.md"],"architecturalConflicts":[],"laterObligations":[]}. ') +
       "ALL three arrays contain ONLY strings, never {id,path} objects. Include every " +
       "changed Story-relative path; report protected or unrelated blockers, never edit them. " +
-      "Controller validation, scope audit and independent review decide acceptance.",
+      "Controller validation, scope audit and independent review decide acceptance." +
+      (assignment.dependencyObligations ? " For a necessary existing upstream correction only, append dependencyFinding to the zero-edit report, in the shape " + JSON.stringify({ obligationIndex: 0, targetId: "typed.record-id", missing: "exact required correction", affectedIds: [assignment.milestoneId, "typed.record-id"], sources: [{path: "canonical/path.md", quote: "exact source quote"}], likelySpecialist: "owner-skill", authorDecisionRequired: false }) + ". Cite the original delivery obligation by index: " + JSON.stringify(assignment.dependencyObligations) : ""),
     assignmentLabel: "AUTHORIZED ASSIGNMENT",
     assignment,
     authorInstruction: specialistAuthorInstruction(assignment.authorTask),
@@ -195,6 +203,7 @@ export async function authorInteractive(
   onSession: (file: string, id: string) => Promise<void>,
   verifyDraft: (evidence: InteractiveEvidence) => Promise<(string | AssignmentDefect)[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
+    continuation?: import("./writer-dependency.js").WriterContinuation;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
   round: AssignmentRoundCommand,
 ): Promise<InteractiveEvidence | { round: AssignmentRoundResult }> {
@@ -270,9 +279,10 @@ export async function authorInteractive(
     const pinned = pinnedSourcePaths(snapshot, required);
     let accepted: InteractiveEvidence | undefined;
     const result = await executeAssignmentRound({
-      session, directory: interactiveInvocationDirectory(job, assignment.workItemId, domain, session.sessionId),
+      session, directory: interactiveInvocationDirectory(job, assignment.workItemId, domain, session.sessionId, original.continuation ? original.sourceDigest : undefined),
+      initialTranscriptSha256: original.continuation?.sessionSha256,
       sourceDigest: original.sourceDigest, sessionRoots: [dir],
-      initialPrompt: context.contextNote + interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools)),
+      initialPrompt: context.contextNote + (original.continuation ? "\nAUTHENTICATED VERIFIED PREREQUISITE " + original.continuation.reportDigest + ": Continue the original Interactive unit after rereading the verified current sources.\n" : "") + interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools)),
       authorize: original.authorize, effect: original.effect,
       beforeTurn: async () => {
         const control = await readJobControl(job);
@@ -304,7 +314,7 @@ export async function authorInteractive(
         if (data.paths.length && !edits.length)
           throw Error("Interactive specialist made no canonical Story edits");
         const evidence: InteractiveEvidence = { modifiedRecords: data.paths, conflicts: data.conflicts,
-          obligations: data.obligations, skillReads, piSessionFile: sessionFile };
+          obligations: data.obligations, skillReads, piSessionFile: sessionFile, dependencyFinding: data.dependencyFinding };
         const diagnostics = await verifyDraft(evidence);
         if (!diagnostics.length) accepted = evidence;
         return diagnostics.map(detail => typeof detail !== "string" ? detail : ({
@@ -324,8 +334,9 @@ export async function authorInteractive(
 }
 
 /** Invocation receipt namespace is unique to the original subunit/session. */
-export function interactiveInvocationDirectory(job: JobStartResult, workItem: string, domain: InteractiveDomain, sessionId: string) {
+export function interactiveInvocationDirectory(job: JobStartResult, workItem: string, domain: InteractiveDomain, sessionId: string, continuationSource?: string) {
   if (!/^interactive-[a-z][a-z0-9-]*$/.test(workItem) || !["choice", "puzzle"].includes(domain) || !/^[a-zA-Z0-9-]+$/.test(sessionId))
     throw Error("Invalid Interactive invocation identity");
-  return join(job.stateDir, "interactive-invocations", workItem, domain, sessionId);
+  if (continuationSource && !/^[a-f0-9]{64}$/.test(continuationSource)) throw Error("Invalid Interactive continuation source");
+  return join(job.stateDir, "interactive-invocations", workItem, domain, sessionId, ...(continuationSource ? [continuationSource] : []));
 }

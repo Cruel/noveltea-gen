@@ -224,6 +224,7 @@ export const GenerationInputSchema = z.object({
 type FocusedPrerequisitePin = {
   identity: AssignmentIdentity; suspension: AssignmentPrerequisiteSuspension;
   supportRef: string | null;
+  writerSource?: import("./writer-dependency.js").WriterDependencySource;
 };
 type ReviewPrerequisitePin = FocusedPrerequisitePin & {
   recoveryCaseId: string;
@@ -1936,13 +1937,14 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   if (correctionSelected && (!correction || !root || !s.result ||
       correction.origin.assignmentId !== active.id))
     throw Error("Narrative correction lacks its original native and Review receipts.");
+  const writerPin = s.focusedPrerequisite?.writerSource ? s.focusedPrerequisite : null;
   const focusSource = active.stage === "focus" && s.request.turnPlanDigest
     ? await inspectFocusedPrerequisite(job, active.milestone, s.request.turnPlanDigest, s.request.fixture, s.planVersion) : null;
   const pendingEvent = active.stage === "event" && !correction
     ? await inspectPendingEventInvocation(job, active.milestone) : null;
   const pendingComposition = active.stage === "composition" && !correction
     ? await inspectPendingCompositionInvocation(job, active.milestone) : null;
-  const sourceHead = focusSource?.report.sourceSha ?? (root ? root.parentSha :
+  const sourceHead = writerPin?.identity.sourceHeadSha ?? focusSource?.report.sourceSha ?? (root ? root.parentSha :
     pendingEvent?.expectedHead ?? pendingComposition?.beforeHead ?? s.inventory.headSha);
   const workItem = active.stage === "focus" ? active.id : active.stage + "-" + active.milestone.slice(10);
   const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
@@ -1953,7 +1955,22 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   };
   const key = logicalAssignmentKey(identity);
   const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
-  const continuation = correction?.id ?? diagnosis.ref;
+  const continuation = correction?.id ?? diagnosis.ref ?? writerPin?.supportRef ?? null;
+  if (writerPin && (active.stage !== writerPin.writerSource!.stage || logicalAssignmentKey(writerPin.identity) !== key))
+    throw Error("Writer prerequisite reentry has a different logical assignment.");
+  const suspensionOf = (original: Awaited<ReturnType<typeof import("./writer-dependency.js").reconstructWriterDependency>>): AssignmentPrerequisiteSuspension => ({
+    status: "needs-prerequisite", assignmentKey: key, evidenceRef: original.reportDigest,
+    suspensionRef: dependencyDigest(original.source), owner: original.report.likelySpecialist,
+    scopeRef: original.reportDigest, pendingPhase: "writer",
+  });
+  const authenticateSupport = async () => {
+    if (!writerPin?.writerSource || !writerPin.supportRef) return false;
+    const { inspectWriterDependency } = await import("./writer-dependency.js");
+    const original = await inspectWriterDependency(job, writerPin.writerSource);
+    const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === original.reportDigest);
+    return original.original.assignmentKey === key && isDeepStrictEqual(suspensionOf(original), writerPin.suspension) &&
+      entry?.phase === "verified" && dependencyDigest(entry) === writerPin.supportRef;
+  };
   const ref = active.stage === "focus" ? "focused-items/" + active.milestone + ".json" :
     active.stage + "-items/" + active.milestone.slice(10) + ".json";
   const milestone = active.milestone;
@@ -1984,11 +2001,31 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     if (correction && !await authenticateCorrection())
       throw Error("Narrative correction lost its authenticated original Review case.");
     if (s.request.turnPlanDigest) await assertSteeringReceipts(job, s.request.turnPlanDigest);
+    if (writerPin && !await authenticateSupport()) throw Error("Writer continuation has no verified supporting work.");
     return null;
   };
   const assertIdentity = (saved: AssignmentIdentity, continuationRef: string | null) => {
     if (logicalAssignmentKey(saved) !== key || continuationRef !== continuation)
       throw new ProtocolIntegrityBlockedError("Narrative checkpoint belongs to another admitted logical assignment.");
+  };
+  const inspectWriterFinding = async () => {
+    const { reconstructWriterDependency } = await import("./writer-dependency.js");
+    if (active.stage === "event") {
+      const saved = await runEventWorkItem({ ...s.request, milestone, action: "inspect" });
+      if (saved.blueprintOwnerFinding) return reconstructWriterDependency(job,
+        await (await import("./event-work.js")).inspectEventWriterDependency(job, milestone, saved.blueprintOwnerFinding.sealDigest));
+      const evidence = await inspectEventNoWrite(job, milestone, sourceHead, s.planVersion);
+      if (!evidence.dependencyFinding) return null;
+      return reconstructWriterDependency(job, await (await import("./event-work.js")).inspectEventWriterDependency(
+        job, milestone, evidence.prerequisite.reportDigest));
+    }
+    if (active.stage === "composition") {
+      const saved = await runCompositionWorkItem({ ...s.request, milestone, action: "inspect" });
+      if (!saved.prerequisite || !saved.dependencyFinding) return null;
+      return reconstructWriterDependency(job, await (await import("./composition-work.js")).inspectCompositionWriterDependency(
+        job, milestone, saved.prerequisite.sealDigest));
+    }
+    return null;
   };
   const runRound = async (command: AssignmentRoundCommand, publish?: true): Promise<AssignmentSubmission | AssignmentOutcome | AssignmentCorrection> => {
     const stopped = await preflight();
@@ -1996,6 +2033,14 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     try {
       const round = { assignmentKey: key, command: diagnosis.command(command), publish };
       result = await dispatch(s, undefined, round);
+      if (["event-prerequisite-reported", "event-blueprint-owner-prerequisite", "composition-prerequisite-reported"].includes(result.status)) {
+        const original = await inspectWriterFinding();
+        if (original) {
+          if (writerPin || original.original.assignmentKey !== key)
+            throw Error("Writer prerequisite cannot replace the original suspended assignment.");
+          return suspensionOf(original);
+        }
+      }
       const saved = subunitWriterResult(result as { status: string; headSha?: string; round?: AssignmentRoundResult }, ref);
       if (result.status === "composition-authored" && "status" in saved && saved.status === "writer-round")
         return { ...saved, status: "composition-authored" };
@@ -2020,10 +2065,13 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   const checkpointedReview = !!correction;
   const reviewRounds = subunitReviewTransitions(s, job, identity, ref, correction, preflight,
     (status, evidenceRef, extra) => ({ status, assignmentKey: key, evidenceRef, ...extra }) as AssignmentOutcome);
-  const child = (correction || diagnostic ? createAssignmentLifecycleGraph :
-    createGenerationQuestionGraph.bind(null, job, identity, workItem))({
+  const adapter: Parameters<typeof createGenerationQuestionGraph>[3] = {
     authenticateContinuation: async state => state.continuationRef === continuation &&
-      (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
+      (diagnostic ? await diagnosis.authenticate() : writerPin ? await authenticateSupport() : await authenticateCorrection()),
+    reenterWriter: async state => {
+      assertIdentity(state.identity, state.continuationRef);
+      return invokeRound({ phase: "invoke" });
+    },
     preflight: async state => {
       assertIdentity(state.identity, state.continuationRef);
       return preflight();
@@ -2072,7 +2120,10 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       }
       return { submission, outcome: await verifyCommitted(submission) };
     },
-  });
+  };
+  const child = correction || diagnostic ? createAssignmentLifecycleGraph(adapter) :
+    createGenerationQuestionGraph(job, identity, workItem, adapter,
+      async head => !!writerPin && await authenticateSupport() && head === await trustedHead(job));
   const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
       if (submission.receiptRef !== ref) throw Error("Narrative submission belongs to another work item.");
       if (!correction && !accepted[active.stage].includes(submission.status)) {
@@ -2080,9 +2131,13 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
         // prerequisite/assessment boundary, without certifying it as success.
         return disposition("unresolved", submission.status);
       }
+      const awaitableWriterBase = writerPin ? active.stage === "event"
+        ? (await inspectPendingEventInvocation(job, milestone))?.expectedHead
+        : (await runCompositionWorkItem({ ...s.request, milestone, action: "inspect" })).expectedHead : undefined;
       const native = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
         p.workItem === workItem && p.commitSha === (root ? root.commitSha : submission.headSha) &&
-        p.parentSha === (root ? root.parentSha : sourceHead) && p.validation.status === "passed" &&
+        p.parentSha === (root ? root.parentSha : writerPin
+          ? (awaitableWriterBase ?? sourceHead) : sourceHead) && p.validation.status === "passed" &&
         p.planVersion === s.planVersion &&
         p.assurance?.turnDigest === s.request.turnPlanDigest);
       if (!native) throw Error("Narrative child lacks its original native-validated checkpoint.");
@@ -2102,11 +2157,20 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   };
   const finished = await child.invoke({ identity,
     submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
-    submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation },
+    submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation,
+    suspension: writerPin?.suspension ?? null },
     { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
   if (!finished.outcome || finished.outcome.assignmentKey !== key)
     throw Error("Narrative child returned without an authenticated disposition.");
   assertReviewProjection(patch, finished.outcome, ref);
+  if (finished.outcome.status === "needs-prerequisite") {
+    const original = await inspectWriterFinding();
+    if (!original) throw Error("Writer prerequisite lost its exact source report.");
+    if (!isDeepStrictEqual(suspensionOf(original), finished.outcome))
+      throw Error("Writer prerequisite differs from its original settled report.");
+    return { result: { status: "dependency-required" }, focusedPrerequisite: {
+      identity, suspension: finished.outcome, supportRef: null, writerSource: original.source } };
+  }
   if (checkpointedReview && correction) {
     if (finished.outcome.status !== "verified")
       return subunitReviewStop(s, job, identity, correction, finished.outcome);
@@ -2119,7 +2183,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     ? { status: submission.status, headSha: submission.headSha } : null;
   if (patch && (patch.status || patch.operationRecovery || patch.reviewAssessmentRequested ||
       patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest))
-    return { ...patch, result: candidate ?? null };
+    return { ...patch, result: candidate ?? null, ...(writerPin && candidate?.headSha ? { focusedPrerequisite: null } : {}) };
   if (finished.outcome.status === "paused") return { status: "paused",
     reason: "Original narrative assignment suspended at a safe boundary.", result: candidate ?? null };
   if ((!submission || submission.status === "writer-round") && finished.outcome.status === "unresolved") {
@@ -2141,13 +2205,13 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     // original Review and reconstruct its parent-owned disposition.
     const projected = await reviewBoundary({ ...s, result: candidate }, correctionSelected);
     assertReviewProjection(projected, finished.outcome, ref);
-    return { ...projected, result: candidate };
+    return { ...projected, result: candidate, ...(writerPin ? { focusedPrerequisite: null } : {}) };
   }
   if (finished.outcome.status !== "verified") throw Error("Narrative child has no verified result.");
   const head = await trustedHead(job);
   if (head !== finished.outcome.headSha)
     throw Error("Narrative child result no longer matches verified HEAD.");
-  return { ...patch, result: { ...candidate, headSha: head } };
+  return { ...patch, result: { ...candidate, headSha: head }, ...(writerPin ? { focusedPrerequisite: null } : {}) };
 }
 
 /** A focused assignment returns a settled prerequisite to its parent at END.
@@ -2516,6 +2580,11 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
   if (typeof graphThreadId !== "string" || graphThreadId !== s.graphThreadId)
     throw Error("Interactive child lacks original graph Thread identity");
   await checkPlan(job, s.request, s.planVersion);
+  const writerPin = s.focusedPrerequisite?.writerSource ? s.focusedPrerequisite : null;
+  const writerDomain = writerPin?.writerSource?.stage;
+  if (writerPin && (writerDomain !== "choice" && writerDomain !== "puzzle" ||
+      writerPin.writerSource!.milestoneId !== milestone))
+    throw Error("Interactive continuation has a foreign source");
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
   let correctionDomain: InteractiveDomain | undefined;
   if (diagnostic && "workItem" in diagnostic.terminal)
@@ -2558,11 +2627,12 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       }
     }
   }
-  const domains: InteractiveDomain[] = correctionDomain ? [correctionDomain] :
+  const domains: InteractiveDomain[] = writerDomain === "choice" || writerDomain === "puzzle" ? [writerDomain] : correctionDomain ? [correctionDomain] :
     active.stage === "interactive" ? (pending || choiceReviewed ? ["puzzle"] : ["choice", "puzzle"]) : [active.stage as InteractiveDomain];
   for (const domain of domains) {
     const original = await inspectInteractiveUnit(job, milestone, domain);
-    const sourceHead = original?.unit.beforeHead ?? await trustedHead(job);
+    const effectiveHead = original?.unit.beforeHead ?? await trustedHead(job);
+    const sourceHead = writerPin?.identity.sourceHeadSha ?? effectiveHead;
     const workItem = "interactive-" + domain + "-" + milestone.slice(10);
     const { status: _status, verifiedSha: _verified, blockingReason: _blocked, ...scope } = active;
     const identity: AssignmentIdentity = {
@@ -2574,7 +2644,29 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     };
     const key = logicalAssignmentKey(identity);
     const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
-    const continuation = correction?.id ?? diagnosis.ref;
+    const continuation = correction?.id ?? diagnosis.ref ?? writerPin?.supportRef ?? null;
+    if (writerPin && logicalAssignmentKey(writerPin.identity) !== key)
+      throw Error("Interactive prerequisite reentry changed its logical assignment");
+    const suspensionOf = (finding: Awaited<ReturnType<typeof import("./writer-dependency.js").reconstructWriterDependency>>): AssignmentPrerequisiteSuspension => ({
+      status: "needs-prerequisite", assignmentKey: key, evidenceRef: finding.reportDigest,
+      suspensionRef: dependencyDigest(finding.source), owner: finding.report.likelySpecialist,
+      scopeRef: finding.reportDigest, pendingPhase: "writer",
+    });
+    const inspectFinding = async () => {
+      const unit = (await inspectInteractiveUnit(job, milestone, domain))?.unit;
+      if (unit?.phase !== "conflicted" || !unit.dependencyFinding || !unit.digest) return null;
+      const { inspectInteractiveWriterDependency } = await import("./interactive-work.js");
+      const { reconstructWriterDependency } = await import("./writer-dependency.js");
+      return reconstructWriterDependency(job, await inspectInteractiveWriterDependency(job, milestone, domain, unit.digest));
+    };
+    const authenticateSupport = async () => {
+      if (!writerPin?.writerSource || !writerPin.supportRef) return false;
+      const { inspectWriterDependency } = await import("./writer-dependency.js");
+      const finding = await inspectWriterDependency(job, writerPin.writerSource);
+      const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === finding.reportDigest);
+      return finding.original.assignmentKey === key && isDeepStrictEqual(suspensionOf(finding), writerPin.suspension) &&
+        entry?.phase === "verified" && dependencyDigest(entry) === writerPin.supportRef;
+    };
     const ref = "interactive-items/" + milestone.slice(10) + ".json#" + workItem;
     let patch: Partial<State> | undefined;
     let result: Awaited<ReturnType<typeof runInteractiveWorkItem>> | undefined;
@@ -2595,9 +2687,10 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         if (correction && (original?.unit.assignmentKey !== key || !await authenticateCorrection()))
           throw new ProtocolIntegrityBlockedError("Interactive child correction lacks its original assignment key or admitted Review case");
         const saved = await inspectInteractiveUnit(job, milestone, domain);
-        if (saved?.unit.beforeHead && saved.unit.beforeHead !== sourceHead)
+        if (writerPin && !await authenticateSupport()) throw Error("Interactive continuation has no verified supporting work");
+        if (saved?.unit.beforeHead && saved.unit.beforeHead !== effectiveHead)
           throw Error("Interactive child source changed");
-        if (!correction && !saved?.unit.beforeHead && await trustedHead(job) !== sourceHead)
+        if (!correction && !saved?.unit.beforeHead && await trustedHead(job) !== effectiveHead)
           throw Error("Interactive child lacks its original verified HEAD");
         return null;
     };
@@ -2607,6 +2700,14 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           if (stopped) return stopped;
           result = await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command) }) as typeof result;
           if (!result) throw Error("Interactive child returned no original receipt");
+          if (result.status === "interactive-conflict-reported") {
+            const finding = await inspectFinding();
+            if (finding) {
+              if (writerPin || finding.original.assignmentKey !== key)
+                throw Error("Interactive prerequisite cannot replace its original suspended assignment");
+              return suspensionOf(finding);
+            }
+          }
           return subunitWriterResult(result, ref);
         } catch (error) {
           // Budget/provider pauses have their own durable policy evidence and
@@ -2638,7 +2739,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
         const saved = await inspectInteractiveUnit(job, milestone, domain);
         if (!saved || submission.receiptRef !== ref ||
-            saved.unit.beforeHead !== sourceHead)
+            saved.unit.beforeHead !== effectiveHead)
           throw Error("Interactive child submission lost its exact original receipt");
         const { unit, receipt } = saved;
         if (unit.phase === "conflicted")
@@ -2661,7 +2762,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           throw Error("Interactive child has no committed native result");
         const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
         const point = points.find(p => p.workItem === workItem && p.commitSha === unit.commitSha &&
-          p.parentSha === sourceHead && p.validation.status === "passed" &&
+          p.parentSha === effectiveHead && p.validation.status === "passed" &&
           p.planVersion === s.planVersion &&
           p.assurance?.turnDigest === s.request.turnPlanDigest);
         if (!point) {
@@ -2700,7 +2801,8 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         return outcome("verified", { headSha: await trustedHead(job), reviewRef: "review-checkpoints:" + unit.commitSha });
     };
     const child = createAssignmentLifecycleGraph({
-      authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : await authenticateCorrection()),
+      authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : writerPin ? await authenticateSupport() : await authenticateCorrection()),
+      reenterWriter: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
       preflight: async state => { assertIdentity(state); return preflight(); },
       invoke: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
       correct: async state => {
@@ -2727,7 +2829,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     });
     const finished = await child.invoke({ identity,
       submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
-      submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation },
+      submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation, suspension: writerPin?.suspension ?? null },
       { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
     if (!finished.outcome || finished.outcome.assignmentKey !== key)
       throw Error("Interactive child returned no authenticated outcome");
@@ -2741,7 +2843,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         patch.reviewSteeringHandoff || patch.escalation || patch.reviewDependencyRequest)) {
       const candidate = finished.submission && { status: active.stage === "interactive" && domain === "choice"
         ? "review-handoff" : finished.submission.status, headSha: finished.submission.headSha };
-      return { ...patch, result: correction ? s.result : candidate ?? null };
+      return { ...patch, result: correction ? s.result : candidate ?? null, ...(writerPin && candidate?.headSha ? { focusedPrerequisite: null } : {}) };
     }
     if (settled.status === "paused") return { status: "paused", reason: "Original Interactive assignment suspended at a safe boundary." };
     if (settled.status === "unresolved") {
@@ -2760,11 +2862,17 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           ? "review-handoff" : finished.submission.status, headSha: finished.submission.headSha };
         const projected = await reviewBoundary({ ...s, result: correction ? s.result : candidate }, correctionSelected);
         assertReviewProjection(projected, settled, ref);
-        return { ...projected, result: correction ? s.result : candidate };
+        return { ...projected, result: correction ? s.result : candidate, ...(writerPin ? { focusedPrerequisite: null } : {}) };
       }
       throw Error("Interactive child returned an unauthenticated unresolved disposition");
     }
     if (settled.status === "needs-prerequisite") {
+      const finding = await inspectFinding();
+      if (finding) {
+        if (!isDeepStrictEqual(suspensionOf(finding), settled)) throw Error("Interactive prerequisite differs from settled original report");
+        return { result: { status: "dependency-required" }, focusedPrerequisite: {
+          identity, suspension: settled, supportRef: null, writerSource: finding.source } };
+      }
       const inspected = await runInteractiveWorkItem({ ...s.request, milestone, unit: domain, action: "inspect" });
       if (inspected.status === "interactive-conflict-reported") return { result: inspected };
       return { result: { status: "review-handoff", headSha: finished.submission?.headSha } };
@@ -2773,13 +2881,13 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
 
     // Inherited Choice has already crossed its original Review boundary.
     // There is no local checkpoint for the parent to wait on in this fork.
-    if (domain === "choice" && (domains.length === 2 || diagnostic && active.stage === "interactive") && !settled.reviewRef?.startsWith("recovery-fork:") &&
+    if (domain === "choice" && (domains.length === 2 || (diagnostic || writerPin) && active.stage === "interactive") && !settled.reviewRef?.startsWith("recovery-fork:") &&
         (await inspectInteractiveUnit(job, milestone, domain))?.unit.phase === "committed")
-      return { result: { status: "review-handoff", headSha: settled.headSha } };
+      return { result: { status: "review-handoff", headSha: settled.headSha }, ...(writerPin ? { focusedPrerequisite: null } : {}) };
     if (domain === domains.at(-1)) {
       const inspected = await runInteractiveWorkItem({ ...s.request, milestone,
         unit: active.stage === "interactive" ? undefined : domain, action: "inspect" });
-      return { result: { ...inspected, headSha: await trustedHead(job) } };
+      return { result: { ...inspected, headSha: await trustedHead(job) }, ...(writerPin ? { focusedPrerequisite: null } : {}) };
     }
   }
   throw Error("Interactive child returned without a completed assignment");
@@ -4058,6 +4166,19 @@ export function createGenerationGraph(
           // Preserve an in-flight result. For interrupted external effects, only the
           // original specialist may reconcile the dirty/unpublished work boundary.
           if (s.ideaTask) return {};
+          // Verified support does not finish the suspended assignment. Intake
+          // retains the exact logical writer before scheduling other work.
+          if (s.focusedPrerequisite?.writerSource && s.focusedPrerequisite.supportRef && !s.result) {
+            const pin = s.focusedPrerequisite;
+            const { inspectWriterDependency, verifiedWriterSupport } = await import("./writer-dependency.js");
+            const original = await inspectWriterDependency(job, pin.writerSource!);
+            if (!s.active || s.active.milestone !== pin.writerSource!.milestoneId ||
+                (receipt?.plan?.version ?? null) !== pin.identity.planVersion ||
+                logicalAssignmentKey(pin.identity) !== original.original.assignmentKey)
+              throw Error("Verified support lost its suspended original assignment.");
+            await verifiedWriterSupport(job, pin.writerSource!, original.reportDigest, pin.supportRef!);
+            return { status: "running" as const, reason: null };
+          }
           if (s.active && !s.result &&
               s.operationRecovery?.operation === "specialist-dispatch" &&
               s.operationRecovery.phase === "continued") {
@@ -4338,7 +4459,10 @@ export function createGenerationGraph(
     }, executionOwner))
     .addNode("specialist_dispatch", recoveryNode("specialist_dispatch", async (s, config) => {
       if (s.crossDomainCloseout || s.reviewPrerequisite || s.focusedPrerequisite &&
-          (s.active?.stage !== "focus" || s.active.id !== s.focusedPrerequisite.identity.assignmentId))
+          (s.focusedPrerequisite.writerSource ?
+            (s.active?.stage !== s.focusedPrerequisite.writerSource.stage && !(s.active?.stage === "interactive" && ["choice", "puzzle"].includes(s.focusedPrerequisite.writerSource.stage))) || s.active?.milestone !== s.focusedPrerequisite.writerSource.milestoneId ||
+              !s.focusedPrerequisite.supportRef :
+            s.active?.stage !== "focus" || s.active.id !== s.focusedPrerequisite.identity.assignmentId))
         throw Error("Unassessed prerequisite cannot authorize specialist dispatch.");
       // Every admitted Foundation assignment uses the shared child. A missing
       // production Turn proof is fenced by the common execution boundary.
@@ -4365,12 +4489,13 @@ export function createGenerationGraph(
         if (s.active && ["interactive", "choice", "puzzle"].includes(s.active.stage)) {
           const child = await runInteractiveAssignmentChildren(s, config, reviewBoundary);
           if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
-              child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest || child.result.status === "review-handoff") return child;
+              child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest || child.focusedPrerequisite !== undefined || child.result.status === "review-handoff") return child;
           result = child.result;
         } else if (s.active && ["event", "composition"].includes(s.active.stage)) {
           const child = await runNarrativeAssignmentChild(s, config, reviewBoundary);
           if (!child.result || child.status || child.operationRecovery || child.reviewAssessmentRequested ||
-              child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest) return child;
+              child.reviewSteeringHandoff || child.escalation || child.reviewDependencyRequest ||
+              child.focusedPrerequisite !== undefined) return child;
           result = child.result;
         } else result = await dispatch(s);
         if (result.status === "interactive-conflict-reported") {
@@ -4550,6 +4675,31 @@ export function createGenerationGraph(
           if (supported.entry.amendment?.assignment.specialist !== pin.suspension.owner)
             throw Error("Supporting Review assignment has the wrong owner.");
           return { reviewPrerequisite: { ...pin, supportRef: supported.ref } };
+        }
+        if (s.focusedPrerequisite?.writerSource) {
+          const pin = s.focusedPrerequisite;
+          const source = pin.writerSource!;
+          const { inspectWriterDependency } = await import("./writer-dependency.js");
+          const original = await inspectWriterDependency(job, source);
+          const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active!;
+          if ((s.active?.stage !== source.stage && !(s.active?.stage === "interactive" && ["choice", "puzzle"].includes(source.stage))) || s.active?.milestone !== source.milestoneId || !s.inventory ||
+              pin.supportRef || pin.identity.assignmentId !== source.workItemId ||
+              pin.identity.graphThreadId !== config.configurable?.thread_id ||
+              pin.identity.jobId !== job.jobId || pin.identity.jobThreadId !== job.threadId ||
+              pin.identity.planVersion !== s.planVersion || pin.identity.turnDigest !== s.request.turnPlanDigest ||
+              pin.identity.sourceHeadSha !== original.report.sourceSha ||
+              pin.identity.scopeDigest !== dependencyDigest({ scope, ...(["choice", "puzzle"].includes(source.stage) ? { domain: source.stage } : {}), task: s.request.task, contract: s.request.contract }) ||
+              logicalAssignmentKey(pin.identity) !== original.original.assignmentKey ||
+              pin.suspension.assignmentKey !== original.original.assignmentKey ||
+              pin.suspension.pendingPhase !== "writer" || pin.suspension.evidenceRef !== original.reportDigest ||
+              pin.suspension.scopeRef !== original.reportDigest || pin.suspension.suspensionRef !== dependencyDigest(source) ||
+              pin.suspension.owner !== original.report.likelySpecialist)
+            throw Error("Writer dependency amendment lost its checkpointed original suspension.");
+          const { advanceWriterDependency } = await import("./dependency-work.js");
+          const resolved = await advanceWriterDependency({ ...s.request, source, inventory: s.inventory }, config);
+          return { result: null, focusedPrerequisite: { ...pin, supportRef: resolved.supportRef },
+            inventory: { ...s.inventory, headSha: resolved.head },
+            dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], resolved.reportDigest) };
         }
         if (s.active?.stage !== "focus" || !s.active.milestone)
           throw Error("Dependency amendment is not bound to a focused assignment.");

@@ -1,0 +1,136 @@
+/** Precommit evidence, not a new dependency scheduler. The original
+ * writer receipt supplies the scope; existing DependencyPlan admission
+ * and supporting assignment lifecycle supply every actual write grant. */
+import type { JobStartResult } from "./job.js";
+import { dependencyDigest, dependencyGit, dependencyTurn, sourceDigest } from "./dependency-state.js";
+import { parseDependencyReport, parseWriterDependencyFinding, type DependencyReport,
+  type WriterDependencyFinding } from "./dependency-amendments.js";
+import { inspectRecoveryCheckpoints, inspectHistoricalRecoveryCheckpoint } from "./recovery-checkpoints.js";
+import type { OtherOwnerCheckpoint } from "./review-repair-amendment.js";
+import { checkpointRecordType } from "./checkpoint-assurance.js";
+import { focusedSpecialist } from "./focused-specialist.js";
+
+export interface WriterDependencySource {
+  stage: "event" | "choice" | "puzzle" | "composition";
+  milestoneId: string;
+  workItemId: string;
+  planVersion: number;
+  sealDigest: string;
+  origin?: "blueprint";
+  targetId: string;
+  targetPath: string;
+  producer: OtherOwnerCheckpoint;
+}
+
+export interface OriginalWriterDependency {
+  stage: WriterDependencySource["stage"];
+  milestoneId: string;
+  workItemId: string;
+  planVersion: number;
+  sealDigest: string;
+  assignmentKey: string;
+  origin?: "blueprint";
+  head: string;
+  sourcePaths: string[];
+  obligations: string[];
+  finding: WriterDependencyFinding;
+}
+
+/** Canonical record identity is read from the historical native-validated
+ * source, never inferred from the file slug. Admission independently checks
+ * the actual native catalog and typed links. */
+function historicalId(bytes: string, id: string) {
+  const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(bytes);
+  if (!header) return false;
+  return header[1]!.split(/\r?\n/).filter(line => /^id:\s*/.test(line)).length === 1 &&
+    header[1]!.split(/\r?\n/).some(line => /^id:\s*/.test(line) &&
+      [id, '"' + id + '"', "'" + id + "'"].includes(line.replace(/^id:\s*/, "").trim()));
+}
+
+export async function reconstructWriterDependency(job: JobStartResult, original: OriginalWriterDependency,
+  points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>) {
+  const turn = await dependencyTurn(job);
+  const f = parseWriterDependencyFinding(original.finding);
+  const origin = original.stage === "choice" || original.stage === "puzzle" ? "interactive" : original.stage;
+  const owner = turn.assignments.find(a => a.id === origin);
+  const obligation = turn.objective?.obligations[f.obligationIndex];
+  if (!owner || !obligation || dependencyDigest(original.obligations) !== dependencyDigest(turn.objective!.obligations) ||
+      !f.affectedIds.includes(original.milestoneId) ||
+      f.sources.some(s => !original.sourcePaths.includes(s.path)) ||
+      f.likelySpecialist !== focusedSpecialist(f.targetId))
+    throw Error("Writer prerequisite lacks exact original Turn, assignment, scope or owner.");
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const targets: string[] = [];
+  const sources = f.sources.map(s => {
+    const bytes = dependencyGit(job, "show", original.head + ":" + prefix + s.path);
+    if (!bytes.includes(s.quote)) throw Error("Writer prerequisite quote differs from original Git source.");
+    if (historicalId(bytes, f.targetId)) targets.push(s.path);
+    if (!f.affectedIds.some(id => historicalId(bytes, id))) throw Error("Writer prerequisite source is outside the cited typed records.");
+    return { ...s, sha256: sourceDigest(bytes) };
+  });
+  if (targets.length !== 1) throw Error("Writer prerequisite must cite exactly one existing canonical target.");
+  const targetPath = targets[0]!;
+  const last = dependencyGit(job, "log", "-1", "--format=%H", original.head, "--", prefix + targetPath);
+  const point = points ? points.find(p => p.commitSha === last && p.eligible) :
+    await inspectHistoricalRecoveryCheckpoint(job, last);
+  if (!point || !(point.assurance?.turnDigest === turn.digest &&
+    point.assurance.changedPaths.includes(targetPath) &&
+    ["passed", "not-required"].includes(point.semanticReview) &&
+    point.workItem !== original.workItemId && !point.workItem.startsWith("repair-") && !point.workItem.startsWith("dependency:")))
+    throw Error("Writer prerequisite is not an independently verified earlier owner.");
+  const priorOwner = point?.assurance && turn.assignments.find(a => a.id === point.assurance!.assignmentId);
+  if (!point?.assurance || !priorOwner || !priorOwner.authority.recordTypes.includes(checkpointRecordType(targetPath) ?? ""))
+    throw Error("Writer prerequisite has no independently verified earlier owner checkpoint.");
+  const producer: OtherOwnerCheckpoint = { assignmentId: priorOwner.id, workItem: point.workItem,
+    commitSha: last, assuranceDigest: dependencyDigest(point.assurance) };
+  const source: WriterDependencySource = { stage: original.stage, milestoneId: original.milestoneId,
+    workItemId: original.workItemId, planVersion: original.planVersion, sealDigest: original.sealDigest,
+    ...(original.origin ? { origin: original.origin } : {}),
+    targetId: f.targetId, targetPath, producer };
+  const report: DependencyReport = parseDependencyReport({ sourceSha: original.head, turnDigest: turn.digest,
+    assignmentId: origin, obligation, missing: f.missing, affectedIds: f.affectedIds,
+    sources, likelySpecialist: f.likelySpecialist, authorDecisionRequired: f.authorDecisionRequired });
+  return { source, report, original, reportDigest: dependencyDigest(report) };
+}
+
+export async function inspectWriterDependency(job: JobStartResult, source: WriterDependencySource,
+  points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>) {
+  const original = source.stage === "event"
+    ? await (await import("./event-work.js")).inspectEventWriterDependency(job, source.milestoneId, source.sealDigest)
+    : source.stage === "composition"
+      ? await (await import("./composition-work.js")).inspectCompositionWriterDependency(job, source.milestoneId, source.sealDigest)
+      : await (await import("./interactive-work.js")).inspectInteractiveWriterDependency(job, source.milestoneId, source.stage, source.sealDigest);
+  const rebuilt = await reconstructWriterDependency(job, original, points);
+  if (dependencyDigest(rebuilt.source) !== dependencyDigest(source))
+    throw Error("Writer prerequisite differs from its authenticated original owner/source.");
+  return rebuilt;
+}
+
+export interface WriterContinuation {
+  reportDigest: string; supportRef: string; originalHead: string; sessionSha256: string;
+}
+export async function verifiedWriterSupport(job: JobStartResult, source: WriterDependencySource,
+    reportDigest: string, supportRef: string) {
+  const { inspectDependencyPlan } = await import("./dependency-state.js");
+  const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
+  if (!entry?.writerSource || dependencyDigest(entry.writerSource) !== dependencyDigest(source) ||
+      entry.phase !== "verified" || !entry.commitSha || entry.review?.verdict !== "pass" ||
+      dependencyDigest(entry) !== supportRef)
+    throw Error("Writer continuation lacks independently verified original supporting work.");
+  const { assertCompletedOtherOwnerRevalidation } = await import("./selective-revalidation-work.js");
+  await assertCompletedOtherOwnerRevalidation(job, { baseSha: entry.report.sourceSha,
+    successorSha: entry.commitSha, turnDigest: entry.report.turnDigest, path: source.targetPath });
+  return entry;
+}
+export async function authenticateWriterContinuation(job: JobStartResult, pin: WriterContinuation,
+    stage: WriterDependencySource["stage"], milestone: string, assignmentKey?: string) {
+  const { inspectDependencyPlan } = await import("./dependency-state.js");
+  const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === pin.reportDigest);
+  if (!entry?.writerSource || entry.writerSource.stage !== stage || entry.writerSource.milestoneId !== milestone ||
+      entry.phase !== "verified" || dependencyDigest(entry) !== pin.supportRef ||
+      entry.report.sourceSha !== pin.originalHead)
+    throw Error("Writer continuation lost its admitted supporting work.");
+  const original = await inspectWriterDependency(job, entry.writerSource);
+  if (original.original.assignmentKey !== assignmentKey) throw Error("Writer continuation has a foreign logical assignment.");
+  return entry.writerSource;
+}

@@ -29,7 +29,10 @@ import {
 } from "./composition-review-policy.js";
 import { specialistAuthorInstruction } from "./specialist-author-instruction.js";
 
+import { parseWriterDependencyFinding, type WriterDependencyFinding } from "./dependency-amendments.js";
+
 export interface CompositionAssignment {
+  dependencyObligations?: string[];
   milestoneBlueprint?: import("./milestone-obligation-handoff.js").ReviewedMilestoneHandoff;
   milestoneId: string;
   workItemId: string;
@@ -67,6 +70,7 @@ export function compositionOptionalDialoguePolicy(eventOnly: boolean): string {
   );
 }
 export interface CompositionEvidence {
+  dependencyFinding?: WriterDependencyFinding;
   modifiedRecords: string[];
   conflicts: string[];
   obligations: string[];
@@ -279,7 +283,7 @@ export async function authorComposition(
   verifyDraft: (evidence: CompositionEvidence) => Promise<{ problems: string[]; stage: "pre-review" | "editorial";
     reviewProgress?: { receiptDigest: string; productive: boolean }; defects?: AssignmentDefect[] }>,
   original: { sourceDigest: string; authorize: () => Promise<void>; effect: () => Promise<string | null>;
-    session?: { file: string; id: string } },
+    session?: { file: string; id: string }; continuation?: { sessionSha256: string; reportDigest: string } },
   round: AssignmentRoundCommand,
 ): Promise<CompositionEvidence | { round: AssignmentRoundResult }> {
   const { session, project, pinned, context, sandboxed } = await createSession(
@@ -348,7 +352,9 @@ export async function authorComposition(
       session, directory: compositionInvocationDirectory(job, assignment.workItemId, session.sessionId, original.sourceDigest),
       sourceDigest: original.sourceDigest,
       sessionRoots: [join(job.stateDir, "composition-sessions", assignment.workItemId, "write")],
-      initialPrompt: context.contextNote + prompt,
+      initialTranscriptSha256: original.continuation?.sessionSha256,
+      initialPrompt: context.contextNote + (original.continuation ? "\nAUTHENTICATED VERIFIED PREREQUISITE " + original.continuation.reportDigest + ": Continue the original Composition after rereading the verified current sources.\n" : "") +
+        (assignment.dependencyObligations ? "\nReport a genuinely necessary existing upstream correction with zero edits and dependencyFinding: " + JSON.stringify({ obligationIndex: 0, targetId: "typed.record-id", missing: "exact required correction", affectedIds: [assignment.milestoneId, "typed.record-id"], sources: [{path: "canonical/path.md", quote: "exact source quote"}], likelySpecialist: "owner-skill", authorDecisionRequired: false }) + ". Cite the original delivery obligation by index: " + JSON.stringify(assignment.dependencyObligations) + "\n" : "") + prompt,
       authorize: original.authorize, effect: original.effect,
       beforeTurn: async () => {
         const control = await readJobControl(job);
@@ -369,12 +375,15 @@ export async function authorComposition(
         const calls = toolPaths(session, project.root, snapshot.path);
         if (assignment.mandatoryReads.some(p => !calls.some(c => c.tool === "read" && c.relative === p)))
           throw Error("Composition specialist omitted pinned skill or essential source reads.");
-        if (!calls.some(c => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/")))
+        const dependencyFinding = parsed.dependencyFinding === undefined ? undefined : parseWriterDependencyFinding(parsed.dependencyFinding);
+        if (!dependencyFinding && !calls.some(c => ["write", "edit"].includes(c.tool) && c.relative.startsWith("authored-content/")))
           throw Error("Composition specialist did not author canonical Authored Content.");
-        if (!strings(parsed.modifiedRecords) || !parsed.modifiedRecords.length ||
+        if (!strings(parsed.modifiedRecords) || !dependencyFinding && !parsed.modifiedRecords.length ||
             !strings(parsed.architecturalConflicts) || !strings(parsed.laterObligations))
           throw Error("Composition specialist must report complete modifiedRecords, architecturalConflicts and laterObligations.");
-        const evidence: CompositionEvidence = { modifiedRecords: parsed.modifiedRecords,
+        if (dependencyFinding && (parsed.modifiedRecords.length || !parsed.architecturalConflicts.length))
+          throw Error("Composition prerequisite must be an explicit no-write report.");
+        const evidence: CompositionEvidence = { dependencyFinding, modifiedRecords: parsed.modifiedRecords,
           conflicts: parsed.architecturalConflicts, obligations: parsed.laterObligations,
           skillReads: pinned, piSessionFile: sessionFile, piSessionId: session.sessionId };
         const feedback = await verifyDraft(evidence);

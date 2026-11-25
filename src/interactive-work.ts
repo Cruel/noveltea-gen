@@ -47,6 +47,9 @@ interface Unit {
   noWrite?: PuzzleNoWriteRef;
   /** Original settled negative report; never a new writer lease. */
   piSessionSha256?: string;
+  piSessionBytes?: number;
+  dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
+  writerContinuation?: import("./writer-dependency.js").WriterContinuation;
   eventOnly?: EventOnlyRef;
   validation?: { status: "passed"; validatorVersion: string; protectionBase: string;
     choices: ChoiceEvidence[]; puzzles: PuzzleEvidence[]; downstreamObligations: string[]; searchTruncated: boolean };
@@ -410,6 +413,7 @@ async function interactiveSourceDigest(job: JobStartResult, receipt: Receipt, un
   return digest(JSON.stringify({ job: job.jobId, thread: job.threadId, base: job.baseSha,
     branch: job.branch, plan: receipt.planDigest, planVersion: receipt.planVersion,
     head: unit.beforeHead, unit: unit.id, assignmentKey: unit.assignmentKey, eventSource: receipt.eventSource,
+    ...(unit.writerContinuation ? { writerContinuation: unit.writerContinuation } : {}),
     blueprint: receipt.correctedBlueprintPin, snapshot: receipt.snapshot.id,
     worker: receipt.worker, provider: receipt.provider, model: receipt.model,
     selected: resolved.selected, thinking: resolved.thinking, validator: job.validatorVersion,
@@ -749,15 +753,16 @@ function interactiveConflictReportDigest(receipt: Receipt, negative: Unit,
     unitId: negative.id, paths: negative.claimedPaths, conflicts: negative.conflicts,
     obligations: negative.obligations, skillReads: negative.skillReads,
     piSessionFile: sessionPath, piSessionSha256: sessionHash,
+    ...(negative.dependencyFinding ? { dependencyFinding: negative.dependencyFinding, piSessionBytes: negative.piSessionBytes } : {}),
   }));
 }
 /** Reauthenticate a settled Interactive contradiction at the original unchanged
  * HEAD. The negative report is evidence, never an authority to revise canon. */
 export async function inspectInteractiveConflict(job: JobStartResult, milestoneId: string,
-  allowHistoricalDescendant = false) {
+  allowHistoricalDescendant = false, writerArchive?: string) {
   if (!validMilestone.test(milestoneId)) throw Error("Invalid Interactive conflict Milestone");
   const relative = "interactive-items/" + milestoneId.slice(10) + ".json";
-  let receipt = JSON.parse(await readFile(join(job.stateDir, relative), "utf8")) as Receipt;
+  let receipt = JSON.parse(await readFile(writerArchive ?? join(job.stateDir, relative), "utf8")) as Receipt;
   if (receipt.supersededNegative) {
     const ref = receipt.supersededNegative;
     const historical = "interactive-negative-history/" + milestoneId.slice(10) + ".json";
@@ -799,7 +804,7 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
       !Array.isArray(negative.obligations) ||
       (receipt.worker === "pi" && (!negative.piSessionFile || !negative.piSessionSha256)) ||
       (receipt.worker === "fixture" && (negative.piSessionFile || negative.piSessionSha256)) ||
-      !negative.digest || dirty(job).length)
+      !negative.digest || !writerArchive && dirty(job).length)
     throw Error("Original Interactive no-write source or receipts cannot be authenticated");
   const directory = join(job.stateDir, "interactive-sessions", receipt.workItemId, negative.domain);
   const sessionPath = receipt.worker === "pi" ? await realpath(negative.piSessionFile!) : null;
@@ -809,7 +814,10 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
   const sessionStat = sessionPath ? await lstat(sessionPath) : null;
   if (sessionStat && (!sessionStat.isFile() || sessionStat.size > 64 * 1024 * 1024))
     throw Error("Original Interactive Pi session is not a bounded regular file");
-  const sessionBytes = sessionPath ? await readFile(sessionPath) : null;
+  const fullBytes = sessionPath ? await readFile(sessionPath) : null;
+  if (writerArchive && (!fullBytes || !Number.isSafeInteger(negative.piSessionBytes) || negative.piSessionBytes! <= 0 || negative.piSessionBytes! > fullBytes.length))
+    throw Error("Archived Interactive prerequisite lacks its bounded transcript prefix");
+  const sessionBytes = writerArchive ? fullBytes!.subarray(0, negative.piSessionBytes) : fullBytes;
   const sessionHash = sessionBytes ? digest(sessionBytes) : null;
   if ((negative.piSessionSha256 ?? null) !== sessionHash) throw Error("Original Interactive Pi session changed");
   if (sessionBytes) {
@@ -832,13 +840,14 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
           negative.invocation.baseline, negative.invocation.assignment))
       throw Error("Original Interactive contradiction lacks its settled invocation proof");
     const response = await verifySettledAssignment({ proof: negative.invocationProof,
-      directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId),
+      directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId, negative.writerContinuation ? negative.invocation.sourceDigest : undefined),
       sessionId: negative.piSessionId, sessionFile: negative.piSessionFile,
-      sessionRoots: [directory], effect: null });
+      sessionRoots: [directory], effect: null, historical: !!writerArchive });
     if (JSON.stringify(parseInteractiveManifest(JSON.stringify(response), negative.domain)) !== JSON.stringify(reported) ||
         reported.paths.length ||
         JSON.stringify(reported.conflicts) !== JSON.stringify(negative.conflicts) ||
-        JSON.stringify(reported.obligations) !== JSON.stringify(negative.obligations))
+        JSON.stringify(reported.obligations) !== JSON.stringify(negative.obligations) ||
+        JSON.stringify(reported.dependencyFinding) !== JSON.stringify(negative.dependencyFinding))
       throw Error("Original Interactive report differs from the settled Pi transcript");
   }
   const event = JSON.parse(await readFile(join(job.stateDir,
@@ -851,7 +860,11 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
   if (negative.domain === "puzzle") {
     verifyCommit(job, receipt, choice!, choice!.beforeHead!, choice!.commitSha!);
     git(job, "merge-base", "--is-ancestor", choice!.commitSha!, negative.beforeHead);
-    await assertNativeReviewDependencies(job, negative.id);
+    if (writerArchive) {
+      const point = await (await import("./recovery-checkpoints.js")).inspectHistoricalRecoveryCheckpoint(job, choice!.commitSha!);
+      if (point.workItem !== choice!.id || !["passed", "not-required"].includes(point.semanticReview))
+        throw Error("Archived Puzzle prerequisite lost its independently reviewed Choice");
+    } else await assertNativeReviewDependencies(job, negative.id);
   }
   if (allowHistoricalDescendant) git(job, "merge-base", "--is-ancestor", negative.beforeHead, head);
   const reportHash = interactiveConflictReportDigest(receipt, negative, sessionPath, sessionHash);
@@ -865,6 +878,55 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
     precedingChoiceSource: negative.domain === "puzzle" ? choice!.beforeHead : undefined,
     conflicts: negative.conflicts,
     obligations: negative.obligations!, piSessionFile: sessionPath };
+}
+function interactiveWriterArchive(job: JobStartResult, milestone: string, domain: InteractiveDomain, sealDigest: string) {
+  if (!validMilestone.test(milestone) || !["choice", "puzzle"].includes(domain) || !/^[a-f0-9]{64}$/.test(sealDigest))
+    throw Error("Invalid Interactive prerequisite archive identity");
+  return join(job.stateDir, "interactive-writer-prerequisites", milestone.slice(10) + "-" + domain + "-" + sealDigest + ".json");
+}
+export async function inspectInteractiveWriterDependency(job: JobStartResult, milestone: string,
+    domain: InteractiveDomain, sealDigest: string) {
+  const archive = interactiveWriterArchive(job, milestone, domain, sealDigest);
+  const historical = existsSync(archive);
+  const proof = await inspectInteractiveConflict(job, milestone, historical, historical ? archive : undefined);
+  const file = historical ? archive : join(job.stateDir, proof.relative);
+  const receipt = JSON.parse(await readFile(file, "utf8")) as Receipt;
+  const unit = receipt.units[domain === "choice" ? 0 : 1];
+  if (receipt.baseSha !== job.baseSha || proof.domain !== domain || proof.reportDigest !== sealDigest ||
+      receipt.worker !== "pi" || !unit.assignmentKey || !unit.dependencyFinding || !unit.invocation?.assignment.dependencyObligations)
+    throw Error("Interactive prerequisite lost its exact original typed writer report");
+  return { stage: domain, milestoneId: milestone, workItemId: unit.id, planVersion: receipt.planVersion, sealDigest,
+    assignmentKey: unit.assignmentKey, head: proof.expectedHead, sourcePaths: unit.invocation.assignment.sourcePaths,
+    obligations: unit.invocation.assignment.dependencyObligations, finding: unit.dependencyFinding };
+}
+export async function archiveInteractiveWriterDependency(job: JobStartResult, milestone: string, domain: InteractiveDomain, sealDigest: string) {
+  const original = await inspectInteractiveWriterDependency(job, milestone, domain, sealDigest);
+  const archive = interactiveWriterArchive(job, milestone, domain, sealDigest);
+  if (!existsSync(archive)) await persist(archive, (await inspectInteractiveUnit(job, milestone, domain))!.receipt);
+  return original;
+}
+export async function rebindInteractiveAfterWriterDependency(job: JobStartResult,
+    source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
+  if (source.stage !== "choice" && source.stage !== "puzzle") throw Error("Invalid Interactive prerequisite stage");
+  const { verifiedWriterSupport } = await import("./writer-dependency.js");
+  const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
+  const archive = interactiveWriterArchive(job, source.milestoneId, source.stage, source.sealDigest);
+  const archived = JSON.parse(await readFile(archive, "utf8")) as Receipt;
+  const saved = await inspectInteractiveUnit(job, source.milestoneId, source.stage);
+  if (!saved) throw Error("Missing suspended Interactive writer");
+  const index = source.stage === "choice" ? 0 : 1;
+  const original = archived.units[index];
+  const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.piSessionSha256! };
+  if (saved.unit.writerContinuation) {
+    if (JSON.stringify(saved.unit.writerContinuation) !== JSON.stringify(binding)) throw Error("Interactive continuation changed");
+    return;
+  }
+  if (dirty(job).length || JSON.stringify(saved.receipt) !== JSON.stringify(archived))
+    throw Error("Interactive prerequisite changed before reentry");
+  const { invocation, invocationProof, conflicts, obligations, paths, claimedPaths, digest: _digest, failure,
+    piSessionSha256, piSessionBytes, dependencyFinding, ...rest } = saved.unit;
+  saved.receipt.units[index] = { ...rest, phase: "pending", beforeHead: await trustedHead(job), writerContinuation: binding };
+  await persist(join(job.stateDir, "interactive-items", source.milestoneId.slice(10) + ".json"), saved.receipt);
 }
 function completed(receipt: Receipt) {
   return (receipt.units[0].phase === "committed" &&
@@ -950,7 +1012,7 @@ export async function inspectPendingInteractiveInvocation(job: JobStartResult, m
         !unit.piSessionId || !unit.piSessionFile || unit.invocationProof.sourceDigest !== sourceDigest)
       throw Error("Interrupted Interactive commit lacks its original settled effect");
     await verifySettledAssignment({ proof: unit.invocationProof,
-      directory: interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId),
+      directory: interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined),
       sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
       sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)], effect: unit.digest! });
   }
@@ -981,7 +1043,7 @@ export async function inspectInteractiveFailure(job: JobStartResult, milestone: 
   if (await interactiveSourceDigest(job, receipt, unit, baseline, assignment) !== sourceDigest ||
       await openSkillSnapshot(receipt.snapshot!.id) !== receipt.snapshot!.path)
     throw Error("Original Interactive diagnostic source changed");
-  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId);
+  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined);
   const options = { directory, sourceDigest, sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
     sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)] };
   const head = historicalHead ?? git(job, "rev-parse", "HEAD");
@@ -1272,6 +1334,13 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: head });
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
+      if (unit.writerContinuation && ["pending", "writing"].includes(unit.phase)) {
+        const source = await (await import("./writer-dependency.js")).authenticateWriterContinuation(job, unit.writerContinuation, unit.domain, state.milestoneId, input.round?.assignmentKey);
+        const archive = JSON.parse(await readFile(interactiveWriterArchive(job, state.milestoneId, unit.domain, source.sealDigest), "utf8")) as Receipt;
+        const original = archive.units[index]!;
+        if (original.assignmentKey !== unit.assignmentKey || original.piSessionId !== unit.piSessionId || original.piSessionFile !== unit.piSessionFile || original.piSessionSha256 !== unit.writerContinuation.sessionSha256)
+          throw Error("Interactive continuation lost its original writer");
+      }
       if (unit.phase === "pending") await processAuthorUpdatesAtBoundary(job);
       const sourceHead = index ? state.units[0]!.commitSha : state.eventHead;
       const before = unit.beforeHead ?? (unit.phase === "pending" && sourceHead
@@ -1363,7 +1432,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       }
       const assign = { ...selected,
         ...(puzzleDecision ? { puzzleObligation: puzzleDecision } : {}),
-        ...(input.task ? { authorTask: input.task } : {}) };
+        ...(input.task ? { authorTask: input.task } : {}),
+        ...(unit.invocation ? { dependencyObligations: unit.invocation.assignment.dependencyObligations } : input.turnPlanDigest ?
+          { dependencyObligations: (await (await import("./dependency-state.js")).dependencyTurn(job)).objective?.obligations } : {}) };
       if (state.worker === "pi" && ["pending", "writing"].includes(unit.phase)) {
         if (!input.round || !/^[a-f0-9]{64}$/.test(input.round.assignmentKey) ||
             unit.assignmentKey && unit.assignmentKey !== input.round.assignmentKey ||
@@ -1392,7 +1463,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
         try {
           const verifyDraft = async (evidence: InteractiveEvidence) => {
             if (evidence.modifiedRecords.length === 0 &&
-                (unit.domain === "choice" || puzzleDecision?.required !== false)) {
+                (evidence.dependencyFinding || unit.domain === "choice" || puzzleDecision?.required !== false)) {
               if (!evidence.conflicts.length) throw Error("Interactive negative report has no explicit conflict");
               assertHead(job, before);
               if (dirty(job).length)
@@ -1476,7 +1547,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
                   throw Error("Interactive invocation session changed");
                 unit.piSessionFile = session; unit.piSessionId = id; await persist(file, state);
               }, verifyDraft, { sourceDigest: unit.invocation!.sourceDigest,
-                sessionFile: unit.piSessionFile, sessionId: unit.piSessionId,
+                sessionFile: unit.piSessionFile, sessionId: unit.piSessionId, continuation: unit.writerContinuation,
                 authorize: authorizeInvocation, effect: () => interactiveEffect(job, before) }, input.round!.command);
             if ("round" in authored) return authored.round;
             evidence = authored;
@@ -1484,7 +1555,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             if (!unit.invocationProof || !unit.piSessionId || !unit.piSessionFile)
               throw Error("Interactive result lacks its original settled invocation");
             await verifySettledAssignment({ proof: unit.invocationProof,
-              directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId),
+              directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined),
               sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
               sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
               effect: await interactiveEffect(job, before) });
@@ -1495,7 +1566,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           unit.skillReads = evidence.skillReads;
           unit.piSessionFile = evidence.piSessionFile ?? unit.piSessionFile;
           if (evidence.modifiedRecords.length === 0 &&
-              (unit.domain === "choice" || puzzleDecision?.required !== false)) {
+              (evidence.dependencyFinding || unit.domain === "choice" || puzzleDecision?.required !== false)) {
             if (!evidence.conflicts.length || !state.snapshot?.id ||
                 (state.worker === "pi" && !unit.piSessionFile))
               throw Error("Interactive no-write has no original completed worker and pinned assignment");
@@ -1506,7 +1577,9 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             if (sessionPath && (!sessionPath.startsWith(directory + "/") ||
                 unit.piSessionFile !== sessionPath || !sessionPath.endsWith(".jsonl")))
               throw Error("Interactive no-write session is outside its original assignment");
-            unit.piSessionSha256 = sessionPath ? digest(await readFile(sessionPath)) : undefined;
+            const transcript = sessionPath ? await readFile(sessionPath) : undefined;
+            unit.piSessionSha256 = transcript ? digest(transcript) : undefined;
+            if (evidence.dependencyFinding) { unit.dependencyFinding = evidence.dependencyFinding; unit.piSessionBytes = transcript?.length; }
             unit.paths = [];
             unit.digest = interactiveConflictReportDigest(state, unit,
               sessionPath, unit.piSessionSha256 ?? null);
@@ -1571,7 +1644,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
               unit.invocationProof.sourceDigest !== unit.invocation.sourceDigest)
             throw Error("Interactive authored effect lacks its original invocation proof");
           await verifySettledAssignment({ proof: unit.invocationProof,
-            directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId),
+            directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined),
             sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
             sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
             effect: unit.digest });

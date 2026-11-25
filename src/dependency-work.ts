@@ -469,6 +469,70 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
   return runSupportingDependency(job, input, reportDigest, config);
 }
 
+/** The same parent prerequisite lane for an authenticated precommit writer.
+ * Support is separately reviewed before affected-only revalidation, and
+ * the original logical writer remains suspended throughout. */
+export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "target"> & {
+  source: import("./writer-dependency.js").WriterDependencySource;
+  inventory: import("./generation-plan.js").GenerationInventory;
+}, config?: RunnableConfig) {
+  if (input.fixture) throw Error("Writer prerequisite requires original Pi evidence.");
+  const job = await startStoryJob({ story: input.story, job: input.job }, false);
+  const { inspectWriterDependency } = await import("./writer-dependency.js");
+  const { source, report, reportDigest } = await inspectWriterDependency(job, input.source);
+  await withStoryJobLock(job, "dependency-authorization", async () => {
+    let plan = await inspectDependencyPlan(job);
+    let entry = plan?.entries.find(e => e.reportDigest === reportDigest);
+    if (entry?.phase === "verified") return;
+    if (entry?.phase === "rejected") {
+      if (entry.rejection?.kind) throw new DependencyPlanningUnresolvedError(reportDigest);
+      throw Error("Independent prerequisite Review rejected the supporting work.");
+    }
+    if (!entry || entry.phase !== "authorized" || !plan?.entries.some(e => e.parent?.reportDigest === reportDigest))
+      await supportingBoundary(job, entry);
+    if (!entry) {
+      if (source.stage === "event")
+        await (await import("./event-work.js")).archiveEventWriterDependency(job, source.milestoneId, source.sealDigest);
+      else if (source.stage === "composition")
+        await (await import("./composition-work.js")).archiveCompositionWriterDependency(job, source.milestoneId, source.sealDigest);
+      else await (await import("./interactive-work.js")).archiveInteractiveWriterDependency(job, source.milestoneId, source.stage, source.sealDigest);
+      ({ plan, entry } = await recordDependency(job, report, false, undefined, source));
+    }
+    if (!plan || !entry) throw Error("Missing original writer dependency ledger entry.");
+    await admitDependency(job, plan, entry, input);
+  });
+  let entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
+  if (entry?.phase !== "verified")
+    await runSupportingDependency(job, { ...input, target: source.targetId }, reportDigest, config);
+  entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
+  if (!entry || entry.phase !== "verified" || !entry.commitSha || entry.review?.verdict !== "pass")
+    throw Error("Writer prerequisite has no independently verified support.");
+  const support = entry;
+  await withStoryJobLock(job, "writer-dependency-revalidation", async () => {
+    const { executionId } = await import("./checkpoint-assurance.js");
+    const upstream = input.inventory.items.find(i => i.id === executionId(source.producer.workItem) &&
+      i.status === "verified" && i.verifiedSha);
+    if (!upstream?.verifiedSha) throw Error("Writer prerequisite producer is not a completed original inventory item.");
+    dependencyGit(job, "merge-base", "--is-ancestor", source.producer.commitSha, upstream.verifiedSha);
+    const { revalidateAfterReviewedCorrection } = await import("./selective-revalidation-work.js");
+    await revalidateAfterReviewedCorrection({ job, otherOwnerPath: source.targetPath,
+      inventory: { ...input.inventory, headSha: report.sourceSha },
+      correction: { version: 1, planVersion: source.planVersion, baseSha: report.sourceSha,
+        successorSha: support.commitSha!, upstreamItemId: upstream.id, predecessorCommitSha: upstream.verifiedSha,
+        turnDigest: report.turnDigest, reviewDigest: dependencyDigest(support.review),
+        changedPaths: [source.targetPath], permittedPaths: [source.targetPath] },
+      contract: input.contract, task: input.task,
+      provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
+      skillsSource: input.skillsSource, validatorSource: input.validatorSource });
+    if (source.stage === "event")
+      await (await import("./event-work.js")).rebindEventAfterWriterDependency(job, source, reportDigest, dependencyDigest(support));
+    else if (source.stage === "composition")
+      await (await import("./composition-work.js")).rebindCompositionAfterWriterDependency(job, source, reportDigest, dependencyDigest(support));
+    else await (await import("./interactive-work.js")).rebindInteractiveAfterWriterDependency(job, source, reportDigest, dependencyDigest(support));
+  });
+  return { reportDigest, supportRef: dependencyDigest(support), head: await trustedHead(job) };
+}
+
 async function runSupportingDependency(job: import("./job.js").JobStartResult,
   input: FocusedWorkOptions, reportDigest: string, config?: RunnableConfig, caseId?: string) {
   let saved = await inspectDependencyPlan(job);

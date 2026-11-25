@@ -35,7 +35,10 @@ const HASH = /^[a-f0-9]{64}$/;
 const MILESTONE = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const REQUIRED = ["nt-event-design/SKILL.md", "nt-catalog/SKILL.md"] as const;
 type Owner = "event" | "interactive" | "composition";
+import { parseWriterDependencyFinding, type WriterDependencyFinding } from "./dependency-amendments.js";
+
 export interface MilestoneBlueprint {
+  upstreamCorrection?: WriterDependencyFinding;
   schema: "noveltea-milestone-blueprint/v1";
   milestoneId: string;
   events: Array<{
@@ -506,7 +509,8 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
   policy: "admission" | "sealed-replay" | "review-draft" | "sealed-rejected" = "admission"): MilestoneBlueprint {
   let raw: unknown;
   try { raw = parse(text); } catch { throw Error("Milestone planner returned invalid or oversized JSON."); }
-  if (!exact(raw, ["schema", "milestoneId", "events", "downstream"]) ||
+  if (!exact(raw, ["schema", "milestoneId", "events", "downstream",
+        ...(object(raw) && "upstreamCorrection" in raw ? ["upstreamCorrection"] : [])]) ||
       raw.schema !== "noveltea-milestone-blueprint/v1" || raw.milestoneId !== assignment.milestoneId ||
       !Array.isArray(raw.events) || raw.events.length < 1 || raw.events.length > 5 ||
       !Array.isArray(raw.downstream) || raw.downstream.length < 1 || raw.downstream.length > 10)
@@ -564,6 +568,12 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
         !["event", "interactive", "composition"].includes(item.owner) ||
         !string(item.obligation))
       invalid("downstream[" + i + "]", "Milestone downstream obligation needs exact owner (event, interactive or composition) and nonempty obligation");
+  if (raw.upstreamCorrection !== undefined) {
+    const finding = parseWriterDependencyFinding(raw.upstreamCorrection);
+    if (!finding.affectedIds.includes(assignment.milestoneId) ||
+        finding.sources.some(s => !assignment.sourcePaths.includes(s.path)))
+      throw Error("Milestone upstream correction must cite the selected source scope.");
+  }
   const draft = raw as unknown as MilestoneBlueprint;
   if (policy === "admission" || policy === "sealed-replay")
     assertMilestoneSources(draft, assignment);
@@ -1225,6 +1235,9 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "evidence:[{anchorPath,source,observation,access,establishes,limits,characterSources:[{id,availability,role}]}],participants,knowledge," +
     "routes:[{condition,consequence}]}],downstream:[{owner:'event|interactive|composition',obligation}]}. " +
     "An Event id is a provisional slug, not a canonical event.* ID. " +
+    (assignment.dependencyObligations ? "If already-realized upstream canon contradicts this Milestone's required delivery, preserve the intended local design and append upstreamCorrection: " +
+      JSON.stringify({ obligationIndex: 0, targetId: "event.earlier", missing: "exact correction of existing canon", affectedIds: [assignment.milestoneId, "arc.related", "event.earlier"], sources: [{path: "canonical/path.md", quote: "exact contradictory source quote"}], likelySpecialist: "nt-event-design", authorDecisionRequired: false }) +
+      ". Cite an existing earlier owned record and its typed source relation. Do not report future planned delivery. A passing design with this finding does NOT authorize Event writing until the upstream correction is independently verified. Original delivery obligations: " + JSON.stringify(assignment.dependencyObligations) + ". " : "") +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
     "\nCHARACTER IDS: " + JSON.stringify(assignment.characterIds) +
     "\nAUTHOR OBJECTIVE: " + task +
@@ -1249,6 +1262,7 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "Check each proposed Event against the selected Milestone's exact canonical change and limits, and relevant already-authored Event records. " +
     "Reject duplicated prior/later occurrences, advancement beyond this Milestone's promised knowledge or outcomes, and unsupported prerequisites. " +
     "An inspection performed only by the player can legitimately have participants: []. " +
+    (draft.upstreamCorrection ? "Independently inspect the exact existing canonical sources in upstreamCorrection. PASS only if the proposed correction is necessary to deliver the original objective and is not prospective downstream work; the controller must independently authorize and verify that correction before any Event writer. " : "") +
     "Verify EVERY material witness, informant, testimony provider or other Character evidence source " +
     "is explicitly declared in characterSources and participants. The subject of a statement is not automatically its provider. " +
     "Reject a missing declaration by citing the evidence field; " +

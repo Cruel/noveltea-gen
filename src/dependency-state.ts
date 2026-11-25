@@ -14,7 +14,7 @@ import { deriveReviewDependencyRequest, reviewOtherOwners, type OtherOwnerCheckp
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
-import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, selectBlueprintArcSources, parseDependencyReport,
+import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, authorizeWriterDependency, selectBlueprintArcSources, parseDependencyReport,
   type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
   type DependencyAmendment, DependencyAuthorizationRefusedError } from "./dependency-amendments.js";
 export { DependencyAuthorizationRefusedError };
@@ -71,6 +71,7 @@ export function blueprintSourceOf(entry: Pick<DependencyEntry, "blueprintSource"
 }
 
 export interface DependencyEntry {
+  writerSource?: import("./writer-dependency.js").WriterDependencySource;
   blueprintSource?: BlueprintDependencySource;
   /** Existing ledger edge: the child was reported by this exact admitted support writer. */
   parent?: { reportDigest: string; suspensionDigest: string; planVersion: number };
@@ -291,6 +292,20 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
         entry.report.turnDigest !== turn.digest || typeof entry.fixture !== "boolean" ||
         !["reported", "planning", "authorized", "reviewing", "verified", "rejected"].includes(entry.phase))
       throw Error("Dependency report provenance is corrupt.");
+    if (entry.writerSource) {
+      if (entry.fixture || entry.parent || entry.blueprintSource || entry.reviewSourceSha)
+        throw Error("Writer dependency cannot substitute another source.");
+      if (!grantsOnly) {
+        const original = await (await import("./writer-dependency.js")).inspectWriterDependency(job, entry.writerSource);
+        if (original.reportDigest !== entry.reportDigest || dependencyDigest(original.report) !== dependencyDigest(entry.report))
+          throw Error("Writer dependency lost its original settled source.");
+      }
+      if (entry.amendment && (entry.amendment.assignment.targets.join() !== entry.writerSource.targetId ||
+          entry.amendment.assignment.specialist !== entry.report.likelySpecialist ||
+          JSON.stringify(entry.amendment.assignment.authority.existingPaths) !== JSON.stringify([entry.writerSource.targetPath]) ||
+          entry.amendment.assignment.authority.newPaths?.length || entry.amendment.assignment.authority.mayCreate))
+        throw Error("Writer dependency grant changed its exact existing owner scope.");
+    }
     if (entry.report.assignmentId.startsWith("dependency:") && !entry.parent)
       throw Error("Nested dependency is missing its originating parent.");
     if (entry.parent) {
@@ -744,7 +759,8 @@ export async function registerReviewDependency(
   return { plan, entry };
 }
 
-export async function recordDependency(job: JobStartResult, value: unknown, fixture: boolean, blueprintSource?: BlueprintDependencySource) {
+export async function recordDependency(job: JobStartResult, value: unknown, fixture: boolean, blueprintSource?: BlueprintDependencySource,
+  writerSource?: DependencyEntry["writerSource"]) {
   if (fixture) throw Error("Historical dependency fixture execution is retired.");
   const report = parseDependencyReport(value);
   const turn = await dependencyTurn(job);
@@ -758,7 +774,8 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
   const reportDigest = dependencyDigest(report);
   const prior = plan.entries.find(e => e.reportDigest === reportDigest);
   if (prior) {
-    if (prior.fixture !== fixture || JSON.stringify(prior.blueprintSource) !== JSON.stringify(blueprintSource)) throw Error("Dependency worker mode or source changed.");
+    if (prior.fixture !== fixture || JSON.stringify(prior.blueprintSource) !== JSON.stringify(blueprintSource) ||
+        JSON.stringify(prior.writerSource) !== JSON.stringify(writerSource)) throw Error("Dependency worker mode or source changed.");
     return { plan, entry: prior };
   }
   const ancestors = parent ? dependencyAncestors(plan.entries, parent) : new Set<string>();
@@ -779,7 +796,7 @@ export async function recordDependency(job: JobStartResult, value: unknown, fixt
       planVersion: arch.plan.version };
   }
   const entry: DependencyEntry = { report, reportDigest, fixture, phase: "reported",
-    ...(parentSource ? { parent: parentSource } : {}), ...(blueprintSource ? { blueprintSource } : {}) };
+    ...(parentSource ? { parent: parentSource } : {}), ...(blueprintSource ? { blueprintSource } : {}), ...(writerSource ? { writerSource } : {}) };
   plan.entries.push(entry);
   await saveDependencyPlan(job, plan);
   return { plan, entry };
@@ -830,7 +847,10 @@ export async function inspectDependencyAdmission(job: JobStartResult, plan: Depe
     if (JSON.stringify(expected) !== JSON.stringify(source.arcCandidates))
       throw Error("Blueprint prerequisite candidates differ from native canonical source.");
   }
-  return blueprintSource
+  return entry.writerSource
+    ? authorizeWriterDependency({ plan: turn, head, report: entry.report, reportDigest: entry.reportDigest,
+        proposal, records: report.records, sources, version: plan.version, source: entry.writerSource, priorAmendments })
+    : blueprintSource
     ? authorizeBlueprintCharacterDependency({ plan: turn, head, report: entry.report,
         reportDigest: entry.reportDigest, proposal: proposal as ReviewCharacterProposal,
         records: report.records, sources, version: plan.version, source: blueprintSource,

@@ -246,6 +246,138 @@ test("R14K current archive reaches actual reviewed Composition and Turn fulfillm
     assert.ok(points.some(p => p.workItem === workItem && p.eligible && p.semanticReview === (workItem === "composition-reckoning" ? "not-required" : "passed")), JSON.stringify(points.map(p => ({ workItem: p.workItem, eligible: p.eligible, semanticReview: p.semanticReview, reason: p.reason }))));
 });
 
+for (const stage of ["composition", "choice", "puzzle", "blueprint"] as const) test((stage === "blueprint" ? "R08 " : "R07 ") + stage + " suspends for independently verified upstream owner and continues original writer", {
+  skip: !available, timeout: 240_000,
+}, async () => {
+  const f = setup("r07-" + stage + "-writer");
+  await useScriptedArchiveCli(f);
+  if (stage === "blueprint") Object.assign(f.env, { NT_TEST_SCRIPTED_EARLY_ACCOUNT: "1" });
+  const paused = f.cli([...f.start, "--pause-after", stage === "composition" ? "interactive" : "event"]);
+  assert.equal(paused.status, "paused", paused.reason);
+  const old = Object.fromEntries(Object.keys(f.env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, f.env);
+  const saver = SqliteSaver.fromConnString(paused.checkpointPath);
+  const restoreSandbox = fixtureSandboxClient(f.job.jobId, f.job.worktreeStoryRoot);
+  try {
+    const graph = createGenerationGraph(saver, "cli");
+    const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
+    const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
+    const { archiveStages, earlyAccountOverreach } = await import("./support/scripted-archive-stages.js");
+    const ordinary = archiveStages(f.job, turn);
+    const blueprint = stage === "blueprint";
+    const target = blueprint ? "event.disclose-ledger" : "character.neri";
+    const path = blueprint ? "events/disclose-ledger.md" : "characters/neri.md";
+    const specialist = blueprint ? "nt-event-design" : "nt-character-development";
+    const milestone = blueprint ? "milestone.reckoning" : "milestone.disclosure";
+    const milestonePath = "milestones/" + milestone.slice(10) + ".md";
+    const correction = blueprint ? "Remove the premature inquiry acceptance from the earlier Event; preserve only the ledger discovery and its original routes." :
+      "Make Neri's firsthand authentication of the original signature explicit.";
+    if (blueprint) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(earlyAccountOverreach));
+    const finding = () => ({ targetId: target, obligationIndex: 0, missing: correction,
+      affectedIds: [milestone, "arc.truth", target], sources: [milestonePath, "arcs/truth.md", path].map(p => ({
+        path: p, quote: blueprint && p === path ? earlyAccountOverreach : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))!,
+      })), likelySpecialist: specialist, authorDecisionRequired: false });
+    let negative = false, planned = false, written = false, supported = false;
+    const runtime = await scriptedStoryRuntime((index, context) => {
+      const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
+      const prompt = messages.filter(m => m.role === "user").flatMap(m =>
+        typeof m.content === "string" ? [m.content] : m.content.map(c => c.text ?? "")).at(-1) ?? "";
+      const stop = (v: unknown) => ({ content: scriptedText(v), reason: "stop" as const });
+      const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
+      const skills = (name: string) => boundedPinnedSources(name).map(p => "skill://" + p);
+      if (blueprint && !supported && prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT")) {
+        const value = ordinary(index, context);
+        if (value.reason === "stop") {
+          assert.equal(value.content[0]?.type, "text");
+          const design = JSON.parse((value.content[0] as { text: string }).text);
+          assert.equal(design.milestoneId, milestone);
+          return stop({ ...design, upstreamCorrection: finding() });
+        }
+        return value;
+      }
+      if (!blueprint && prompt.includes(stage === "composition" ? "You are a pinned nt-narrative-composition author" : stage === "choice" ? "Complete exactly ONE Choice unit" : "Assess exactly ONE Puzzle unit") && !prompt.includes("AUTHENTICATED VERIFIED PREREQUISITE") && !supported) {
+        const tail = prompt.split(stage === "composition" ? "\nASSIGNMENT:\n" : "\nAUTHORIZED ASSIGNMENT\n")[1]!;
+        const assign = JSON.parse(tail.slice(0, tail.lastIndexOf("}") + 1));
+        assert.equal(assign.milestoneId, "milestone.disclosure");
+        if (!negative) { negative = true; return read(stage === "composition" ? [...new Set([...skills("nt-narrative-composition"),
+          "skill://nt-catalog/references/glossary.md", ...assign.sourcePaths])] : skills(stage === "choice" ? "nt-interactive-narrative" : "nt-puzzle-design")); }
+        return stop({ modifiedRecords: [], architecturalConflicts: [correction], laterObligations: [],
+          dependencyFinding: { targetId: target, obligationIndex: 0, missing: correction, affectedIds: ["milestone.disclosure", "arc.truth", target],
+            sources: ["milestones/disclosure.md", "arcs/truth.md", path].map(path => ({ path,
+              quote: readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").split("\n").find(l => l.startsWith("id:"))! })),
+            likelySpecialist: "nt-character-development", authorDecisionRequired: false } });
+      }
+      if (prompt.includes("dependency") && prompt.includes("nt-story-orchestrate") && !supported && !written) {
+        if (!planned) { planned = true; return read(["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+          "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"].map(p => "skill://" + p).concat(path)); }
+        return stop({ target, specialist, outcome: correction, reason: "Correct the existing canonical predecessor." });
+      }
+      if (planned && !supported && prompt.includes(specialist) && !prompt.includes("IMMUTABLE REVIEW PACKET") && !prompt.includes("MILESTONE PLAN REVIEW")) {
+        if (!written) { written = true; return read(skills(specialist)); }
+        const before = readFileSync(join(f.job.worktreeStoryRoot, path), "utf8");
+        if (blueprint ? before.includes(earlyAccountOverreach) : !before.includes(correction)) return { content: [{ type: "toolCall", name: "edit", id: "comp-support-edit",
+          arguments: { path, edits: [{ oldText: before, newText: blueprint ? before.replace("\n" + earlyAccountOverreach + "\n", "") : before + "\n" + correction + "\n" }] } }], reason: "toolUse" };
+        return stop({ modifiedRecords: [path], architecturalConflicts: [], laterObligations: [] });
+      }
+      if (written && !supported && prompt.includes("IMMUTABLE REVIEW PACKET")) {
+        const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        if (!messages.some(m => m.role === "toolResult" && JSON.stringify(m.content).includes("nt-narrative-review"))) {
+          // The review packet may use a prior session; its next phase is determined by this packet's own tool reads.
+          const marker = messages.filter(m => m.role === "assistant").length;
+          if (!marker || !JSON.stringify(messages).includes("skill://nt-narrative-review/SKILL.md"))
+            return read(skills("nt-narrative-review"));
+        }
+        const item = packet.items[0];
+        supported = true;
+        return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+          evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
+            explanation: "Verified the bounded Character correction." }] });
+      }
+      return ordinary(index, context);
+    });
+    const item = paused.inventory.items.find((entry: { id: string }) => entry.id === (blueprint ? "event" : stage === "composition" ? "composition" : "interactive") + ":" + milestone);
+    assert.ok(item);
+    await graph.updateState(cfg, { status: "running", reason: null, active: item, result: null, pauseAfter: null }, "author_update_intake");
+    const suspended = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
+    assert.ok(suspended.focusedPrerequisite?.writerSource, JSON.stringify({ reason: suspended.reason, recovery: suspended.recoverySources, active: suspended.active }));
+    const receipt = () => {
+      const r = JSON.parse(readFileSync(join(f.job.stateDir, blueprint ? "event-items/reckoning.json" : stage === "composition" ? "composition-items/disclosure.json" : "interactive-items/disclosure.json"), "utf8"));
+      return blueprint || stage === "composition" ? r : r.units[stage === "choice" ? 0 : 1];
+    };
+    const original = receipt();
+    assert.equal(suspended.focusedPrerequisite!.writerSource!.stage, blueprint ? "event" : stage);
+    if (blueprint) {
+      assert.equal(suspended.focusedPrerequisite!.writerSource!.origin, "blueprint");
+      assert.equal(original.sessionFile, undefined);
+      assert.equal(original.phase, "ready");
+      assert.ok(original.blueprintPin);
+    }
+    const verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+    assert.ok(verified.focusedPrerequisite?.supportRef, JSON.stringify({ reason: verified.reason, recovery: verified.recoverySources }));
+    const result = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
+    assert.equal(result.result?.status, blueprint ? "event-cluster-committed" : stage === "composition" ? "composition-committed" : stage === "choice" ? "review-handoff" : "interactive-slice-committed", JSON.stringify({ reason: result.reason, recovery: result.recoverySources }));
+    const current = receipt();
+    if (blueprint) {
+      assert.ok(current.sessionId);
+      assert.notDeepEqual(current.blueprintPin, original.blueprintPin);
+      assert.ok(!readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(earlyAccountOverreach));
+      assert.equal(current.blueprintPin.sourceSha, verified.inventory?.headSha);
+    } else assert.equal(stage === "composition" ? current.writerSessionId : current.piSessionId, stage === "composition" ? original.writerSessionId : original.piSessionId);
+    assert.equal(current.phase, "committed");
+    assert.equal(current.assignmentKey, original.assignmentKey);
+    if (stage === "composition") { assert.ok(current.reviewPin); assert.notEqual(current.sessionFile, current.reviewSessionFile); }
+    else assert.ok(current.invocationProof);
+    assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+  } finally {
+    saver.db.close();
+    restoreSandbox();
+    for (const [key, value] of Object.entries(old)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 function captureRecoveryIdea(f: ReturnType<typeof setup>, id: string, prerequisites = ["milestone.disclosure"]) {
   const file = join(root, id + "-recovery-idea.json");
   writeFileSync(file, JSON.stringify({
@@ -809,8 +941,8 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
-  skip: !available, timeout: ["prospective-review-stalled-continue", "prospective"].includes(mode) ? 240_000 : 120_000,
+for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+  skip: !available, timeout: ["prospective-review-stalled-continue", "prospective", "writer-other-owner"].includes(mode) ? 240_000 : 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
   const settledNoWrite = mode === "settled-no-write" || mode === "stale-choice-finding";
@@ -826,8 +958,9 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
   const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport || outsideSupport || stalledSupport || authorSupport || nativeSupport;
   const prospective = mode === "prospective" || sourceRecovery || multi;
   const negativeReviewSupport = mode === "support-negative";
+  const writerOwner = mode === "writer-other-owner";
   const worldOwner = mode === "other-owner-world";
-  const otherOwner = mode === "other-owner" || worldOwner;
+  const otherOwner = mode === "other-owner" || worldOwner || writerOwner;
   const needsCharacter = mode === "support" || negativeReviewSupport;
   const bindingDiagnosis = mode === "binding-diagnosis";
   const diagnosis = mode === "diagnosis" || bindingDiagnosis;
@@ -1141,6 +1274,48 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         status: "pass", findings: [], prior: [] }), reason: "stop" };
       const write = (content: string) => ({ content: [{ type: "toolCall" as const,
         id: "r14d-event-" + index, name: "write", arguments: { path, content } }], reason: "toolUse" as const });
+      if (writerOwner) {
+        if (index === 5) return { content: scriptedText({ modifiedRecords: [], architecturalConflicts: [requiredCorrection],
+          laterObligations: [], dependencyFinding: { targetId: supportTarget, obligationIndex: 0, missing: requiredCorrection,
+            affectedIds: ["milestone.disclosure", "arc.truth", supportTarget],
+            sources: ["milestones/disclosure.md", "arcs/truth.md", supportPath].map(path => ({
+              path, quote: readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").split("\n").find(l => l.startsWith("id:"))!,
+            })), likelySpecialist: supportSpecialist, authorDecisionRequired: false } }), reason: "stop" };
+        if (index === 6) return { content: scriptedReadCalls([
+          "nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+          "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md",
+        ].map(p => "skill://" + p).concat(supportPath), index), reason: "toolUse" };
+        if (index === 7) return { content: scriptedText({ target: supportTarget, specialist: supportSpecialist,
+          outcome: requiredCorrection, reason: "The original Event uses this existing typed prerequisite." }), reason: "stop" };
+        if (index === 8) return { content: scriptedReadCalls([supportSpecialist + "/SKILL.md", "nt-catalog/SKILL.md",
+          "nt-catalog/references/records.md"].map(p => "skill://" + p), index), reason: "toolUse" };
+        if (index === 9) {
+          const before = readFileSync(join(f.job.worktreeStoryRoot, supportPath), "utf8");
+          return { content: [{ type: "toolCall", id: "writer-support", name: "edit",
+            arguments: { path: supportPath, edits: [{ oldText: before, newText: before + "\nNeri personally verified the concealed ledger signature during his night shift.\n" }] } }], reason: "toolUse" };
+        }
+        if (index === 10) return { content: scriptedText({ modifiedRecords: [supportPath], architecturalConflicts: [], laterObligations: [] }), reason: "stop" };
+        if ([11, 20].includes(index)) return { content: scriptedReadCalls(boundedPinnedSources("nt-narrative-review").map(p => "skill://" + p), index), reason: "toolUse" };
+        if ([12, 21].includes(index)) {
+          const messages = context.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+          const prompt = messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
+            .map(c => c.text ?? "").findLast(t => t.includes("\nIMMUTABLE REVIEW PACKET\n"))!;
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          return { content: scriptedText({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+            evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id,
+              path: index === 12 ? supportPath : path, line: 1, explanation: "Verified bounded assignment." }] }), reason: "stop" };
+        }
+        if ([13, 15, 17].includes(index)) {
+          if (index === 17) assert.match(JSON.stringify(context.messages), /AUTHENTICATED VERIFIED PREREQUISITE/);
+          return { content: scriptedReadCalls(readSources, index), reason: "toolUse" };
+        }
+        if (index === 14) return { content: scriptedText(plan), reason: "stop" };
+        if (index === 16) return { content: scriptedText({ schema: "noveltea-milestone-blueprint-review/v5", status: "pass", findings: [], prior: [] }), reason: "stop" };
+        if (index === 18) return write(authored);
+        if (index === 19) return { content: scriptedText(manifest), reason: "stop" };
+        throw Error("Unexpected writer prerequisite call " + index);
+      }
       if (mode === "future-choice" || mode === "scene-evidence" || settledNoWrite) {
         if (index === 5) return { content: scriptedReadCalls(["milestones/disclosure.md"], index), reason: "toolUse" };
         if (index === 6) {
@@ -1336,6 +1511,39 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
       saver.db.close();
       saver = SqliteSaver.fromConnString(paused.checkpointPath);
       graph = createGenerationGraph(saver, "cli");
+    }
+    if (writerOwner) {
+      const suspended = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
+      assert.ok(suspended.focusedPrerequisite?.writerSource, JSON.stringify({ reason: suspended.reason, lifecycle: suspended.recoveryLifecycle, calls: observed.length }));
+      assert.equal(suspended.focusedPrerequisite.suspension.pendingPhase, "writer");
+      assert.equal(observed.length, 6);
+      const original = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(original.phase, "prerequisite-reported");
+      await crashAtSubmission("focused-committed", 11, { interruptAfter: ["dependency_amendment"] });
+      const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
+      assert.ok(supported.focusedPrerequisite?.supportRef, JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
+      assert.deepEqual(supported.focusedPrerequisite.identity, suspended.focusedPrerequisite.identity);
+      const { inspectDependencyPlan } = await import("../src/dependency-state.js");
+      const entry = (await inspectDependencyPlan(f.job))!.entries[0]!;
+      assert.equal(entry.phase, "verified");
+      assert.equal(entry.writerSource?.producer.workItem, "character-foundations");
+      const rebound = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(rebound.expectedHead, entry.commitSha);
+      assert.equal(rebound.sessionId, original.sessionId);
+      assert.equal(rebound.assignmentKey, original.assignmentKey);
+      const after = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
+      assert.equal(after.result?.status, "event-cluster-committed", JSON.stringify({ reason: after.reason, lifecycle: after.recoveryLifecycle, sources: after.recoverySources, calls: observed.length }));
+      const committed = JSON.parse(readFileSync(join(f.job.stateDir, "event-items/disclosure.json"), "utf8"));
+      assert.equal(committed.sessionId, original.sessionId);
+      assert.equal(committed.assignmentKey, original.assignmentKey);
+      assert.notDeepEqual(committed.blueprintPin, original.blueprintPin);
+      assert.equal(committed.blueprintPin.sourceSha, entry.commitSha);
+      const next = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["specialist_dispatch"] }));
+      assert.equal(next.inventory?.items.find(i => i.id === item.id)?.status, "verified");
+      assert.equal(next.active?.id, "event:milestone.reckoning");
+      assert.equal(observed.length, 22);
+      assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
+      return;
     }
     if (settledNoWrite) {
       const head = git(f.job.worktreeRoot, "rev-parse", "HEAD");

@@ -25,6 +25,7 @@ export const archiveInteractiveRecords = [
   ["puzzles/ledger-proof.md", "events/discover-mark.md", "events/discover-seal.md", "events/decode-ledger.md",
     "events/request-testimony.md", "revelations/puzzle-evidence.md", "authored-content/watermark-clue.md", "authored-content/seal-clue.md"],
 ].map(paths => Object.fromEntries(paths.map(p => [p, bytes(p)])));
+export const earlyAccountOverreach = "The inquiry then accepts the final redacted account and the investigation concludes.";
 const eventPath = "events/disclose-ledger.md";
 const openingEvent = bytes(eventPath).replace(/steps:\n[\s\S]*?(?=\n---)/,
   "steps:\n  - id: decision-offered\n    branches:\n      - id: protect\n        conditions: []\n        effects: []\n      - id: challenge\n        conditions: []\n        effects: []")
@@ -326,6 +327,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const records: Record<string, string> = first ? { [eventPath]: recoverEvent ? openingEvent.replace("value: knows", "value: known") : openingEvent } :
         { [secondEventPath]: secondEvent, [reckoning]: secondMilestone(onDisk(reckoning)) };
       if (!phase) return read([...skills("nt-event-design"), assignment.milestonePath]);
+      if (first && process.env.NT_TEST_SCRIPTED_EARLY_ACCOUNT === "1") records[eventPath] += "\n" + earlyAccountOverreach + "\n";
       if (phase === 1) return write(records);
       if (phase === 2) return validate();
       assert.equal(phase, 3);
@@ -339,6 +341,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const choice = prompt.includes("Complete exactly ONE Choice unit");
       const records = { ...archiveInteractiveRecords[choice ? 0 : 1]! };
       if (recoverEvent && choice) records[eventPath] += "\n" + correctionQuote + "\n";
+      if (choice && process.env.NT_TEST_SCRIPTED_EARLY_ACCOUNT === "1") records[eventPath] += "\n" + earlyAccountOverreach + "\n";
       if (!phase) return read(skills(choice ? "nt-interactive-narrative" : "nt-puzzle-design"));
       if (phase === 1) return write(records);
       if (phase === 2) return validate();

@@ -769,3 +769,22 @@ timed out before Interactive/Composition/final Review (240 seconds). The
 bounded regression verifies recovery and next dispatch, not full-Story
 completion. R07 downstream qualification and investigation of the prolonged
 verification remain open.
+
+### #274 follow-up: precommit existing-owner writer and Blueprint admission
+
+| Transferred issue | Production boundary and verification | Remaining qualification |
+| --- | --- | --- |
+| #252 | `inspectInteractiveWriterDependency`, `rebindInteractiveAfterWriterDependency`, `runInteractiveAssignmentChildren` use the shared parent support child and original logical/session identity. R07 Choice and Puzzle both pass with native commits and mandatory independent Review. | Declined C06 omission requiring corrective execution rather than operator advice. |
+| #253 | `reconstructWriterDependency`, `authorizeWriterDependency`, `advanceWriterDependency` authenticate the actual prior native producer, exact linked records and original obligation, then verify support and selective revalidation. R14D writer-other-owner exercises a real SQLite restart and next ordinary dispatch; R04 nested/other-owner-world cover nested and non-Character support. | Multiple sequential root findings and full integrated R07 progression. |
+| #254 | `blueprintOwnerSeal`, `inspectEventWriterDependency`, `rebindEventAfterWriterDependency` distinguish a pre-dispatch Blueprint contradiction from a settled Event writer. R08 blueprint suspends for an earlier Event whose actual content prematurely concludes a later inquiry, removes the premature claim in a reviewed Git commit, obtains a new reviewed pin and commits the original later Event. | Expanded Accounts scenario, affected downstream consumers in the same R08 run and full R08 matrix. |
+| #264 | `authenticateSettledEventNoWrite`, `inspectEventWriterDependency` and `runNarrativeAssignmentChild` admit a typed existing owner instead of choosing from conflict keywords. R14D writer-other-owner passes; prior future-choice and stale-choice-finding remain separate negative cases. | Broader missing-record and multiple-owner admission. |
+| #265 | `inspectCompositionWriterDependency`, `rebindCompositionAfterWriterDependency`, `runNarrativeAssignmentChild` preserve the original writer session and independent editor; R07 composition passes. | Other missing record kinds and integrated downstream progression. |
+| #266 | Existing Architecture protected approval and canonical Review boundaries unchanged by precommit writer reentry. | Full residual adapter audit. |
+| #267 | `parseMilestoneBlueprint`, `runEventWorkItem` preserve the independently reviewed design with a typed earlier canonical correction before Event admission. R08 proves an actual earlier Event correction and newly reviewed descendant pin. | Expanded R08 qualification; Story Blueprint and existing challenge regression sweep. |
+
+The C01 reviewed source-exit baseline adds the exact author-intake resume
+guard and dependency-amendment return/throw for this source, not another
+scheduler or Case ledger. R01/R02 and R14/R14L fingerprints cover the
+changed shared child, native invocation, manifest and admission gates.
+All 21 AST audit tests pass. The bounded scripted production regressions
+are not evidence of completion of the remaining transferred requirements.
