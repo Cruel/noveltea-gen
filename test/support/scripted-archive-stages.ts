@@ -338,7 +338,8 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       assert.equal(phase, 3);
       return stop({ modifiedRecords: Object.keys(records), architecturalConflicts: [],
         laterObligations: first && !completeChoiceEvent ? ["Formal Choice Point binding must enact protect and challenge before Milestone fulfillment."] :
-          ["Present the independently corroborated redacted account in playable prose."] });
+          ["Present the independently corroborated redacted account in playable prose.",
+            ...(!first ? ["Bind the later formal Choice, its declared outcomes, and corresponding effects in another Milestone."] : [])] });
     }
     if (prompt.includes("Complete exactly ONE Choice unit") || prompt.includes("Assess exactly ONE Puzzle unit")) {
       const assignment = JSON.parse(prompt.split("\nAUTHORIZED ASSIGNMENT\n")[1]!);

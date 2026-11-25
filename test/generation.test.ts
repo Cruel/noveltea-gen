@@ -2046,10 +2046,12 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
             assert.match(raw, /local-repair: owner=event:milestone.disclosure/);
           }
           return { content: scriptedText({ schema: "noveltea-recovery-diagnostic-proposal/v1", signature, sourceRef,
-            category: "defect", diagnosis: bindingDiagnosis
+            category: bindingDiagnosis ? "invalid-assignment" : "defect", diagnosis: bindingDiagnosis
               ? "The Event is structurally sound but the manifest omitted the current Milestone's outstanding formal Choice binding. Restore that precise handoff without claiming fulfillment."
               : "The Event knowledge condition must use the valid enum value knows.",
-            strategy: "local-repair", owner: "event:milestone.disclosure", scopeRef: sourceRef, prerequisites: [],
+            strategy: "local-repair", owner: "event:milestone.disclosure",
+            scopeRef: bindingDiagnosis ? "Only the original Milestone binding, preserving its body and decisions" : sourceRef,
+            prerequisites: bindingDiagnosis ? ["Run story_validate and report the cumulative manifest.", "Independent semantic Review must verify narrative sufficiency."] : [],
             uncertainty: "The native validator must verify the exact original Event correction." }), reason: "stop" };
         }
         if (index === 12) return write(authored);

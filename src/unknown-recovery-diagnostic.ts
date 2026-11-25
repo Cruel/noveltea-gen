@@ -384,6 +384,7 @@ export async function diagnoseUnknownCompletion(job: JobStartResult, evidence: D
       "The strategy vocabulary describes diagnoses, not executable capability. The verified packet's availableAdapters lists candidate adapters for this original failure only. " +
       "You may identify a needed but missing capability; do not claim it was executed or that the original failure is resolved. " +
       "A proposal never grants authority; the controller independently decides whether an exact existing adapter is safe. " +
+      "For local-repair, choose the exact available owner; scopeRef and prerequisites are advisory descriptions, not grants. Native validation and independent Review are always controller-owned gates. " +
       "VERIFIED PACKET: " + JSON.stringify(packet ?? { failedOperation: evidence.operation,
         failedCheck: evidence.check, sourceProof: evidence.proofRef }) :
       "INDEPENDENT READ-ONLY EXECUTION FAILURE DIAGNOSIS. No tools, Story edits, " +

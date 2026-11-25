@@ -1159,3 +1159,25 @@ authority (including free-text World conflict without a typed source grant)
 still intentionally cannot authorize a writer. Paid live Discovery and
 complete new-Story certification remain separate #260 work; this deterministic
 gate is passed, not a claim that live certification already passed.
+
+### #260 live retry: local Milestone handoff and diagnostic admission
+
+The Nov 25 Luna retry at f30f89e verified Character support but hit contradictory
+Event fulfillment instructions because a future Choice in another Milestone
+matched a prose heuristic. For reviewed Milestone plans, the Event draft,
+commit and Interactive consumer now use the authenticated local Blueprint
+owner declaration; prose is not the authority for deferral. Native reachable
+fulfillment and independent semantic Review remain mandatory, and a reviewed
+Interactive obligation cannot be omitted. Historical unpinned source
+inspection retains its existing interpretation. The Event consequence packet
+uses the same reviewed staging decision.
+
+A settled read-only local-repair proposal had the correct original owner and
+strategy but supplied the category invalid-assignment and descriptive scope
+and validation prerequisites. Local-repair now derives its grant exclusively
+from exact original receipt and controller-verified defects, in both original
+writer and native Review continuation (including historical proof). Advisory
+scope/prerequisite prose cannot grant additional work or veto the existing
+bounded correction. Foreign owner, foreign source, unsupported strategy and
+unverified defects remain inadmissible. The original independently verified
+source, attempt, budget and validation/Review checks remain required.

@@ -743,7 +743,10 @@ export async function authenticateOperationDiagnosticProof(job: JobStartResult, 
   return !!original && isDeepStrictEqual(original, d.evidence.at(-1)) &&
     isDeepStrictEqual(d.evidence.slice(0, -1), c.evidence);
 }
-/** A diagnostic may only select an admitted, existing bounded writer
+/** Local-repair scope and prerequisites are advisory descriptions, never executable
+ * grants or vetoes. The exact original receipt and controller-verified defects
+ * exclusively determine the correction; another owner or source still refuses.
+ * A diagnostic may only select an admitted, existing bounded writer
  * adapter. Owner, scope, source, defect and actual prerequisites are checked
  * independently; prose is never a writer grant. */
 function diagnosticWriterSupported(assignment: string | undefined | null) {
@@ -756,9 +759,8 @@ function assignmentDiagnosticDecision(c: RecoveryCase,
   const proof = diagnostic.evidence.at(-1);
   if (c.origin.operation !== "specialist-result" || !diagnosticWriterSupported(c.origin.assignmentId) ||
       c.kind !== "semantic" || c.observation !== "returned-failure" ||
-      proposal.strategy !== "local-repair" || proposal.category !== "defect" ||
-      proposal.owner !== c.origin.assignmentId || proposal.scopeRef !== proposal.sourceRef ||
-      proposal.prerequisites.length || !proof?.digest || proof.store !== "specialist-receipt" ||
+      proposal.strategy !== "local-repair" || !["defect", "invalid-assignment"].includes(proposal.category) ||
+      proposal.owner !== c.origin.assignmentId || !proof?.digest || proof.store !== "specialist-receipt" ||
       proposal.sourceRef !== [proof.store, proof.ref, proof.digest].join(":") ||
       !isDeepStrictEqual(diagnostic.evidence.slice(0, -1), c.evidence) ||
       diagnostic.caseId !== c.id || diagnostic.checkedSourceHeadSha !== c.origin.sourceHeadSha)
@@ -889,8 +891,8 @@ async function nativeReviewDiagnosticDecision(job: JobStartResult, s: State, c: 
       !proof?.digest || proof.store !== "specialist-receipt" || proof.ref !== failure.ref ||
       proof.digest !== failure.proof.receiptDigest || !isDeepStrictEqual(diagnostic.evidence.slice(0, -1), c.evidence) ||
       diagnostic.caseId !== c.id || diagnostic.checkedSourceHeadSha !== c.origin.sourceHeadSha ||
-      proposal.category !== "defect" || proposal.strategy !== "local-repair" || proposal.prerequisites.length ||
-      proposal.owner !== failure.nativeOwner.workItem || proposal.scopeRef !== proposal.sourceRef ||
+      !["defect", "invalid-assignment"].includes(proposal.category) || proposal.strategy !== "local-repair" ||
+      proposal.owner !== failure.nativeOwner.workItem ||
       proposal.sourceRef !== [proof.store, proof.ref, proof.digest].join(":")) return null;
   if ("supportReportDigest" in failure) {
     const owner = await originalNoWriteOwnerProof(job, s, c);
@@ -940,8 +942,8 @@ export async function authenticatePublishedNativeDiagnostic(job: JobStartResult,
   const proposal = await inspectOriginalUnknownDiagnosis(job, target);
   const attempt = await inspectDiagnosticAttempt(job, target, c.id);
   if (!("strategy" in proposal) || proposal.strategy !== "local-repair" ||
-      proposal.category !== "defect" || proposal.owner !== workItem || proposal.prerequisites.length ||
-      proposal.scopeRef !== proposal.sourceRef || proposal.sourceRef !== target.proofRef ||
+      !["defect", "invalid-assignment"].includes(proposal.category) || proposal.owner !== workItem ||
+      proposal.sourceRef !== target.proofRef ||
       attempt.phase !== "settled" || attempt.mode !== "read-only" ||
       pendingDigest({decision: diagnostic, attempt, proposal}) !== grant.decisionDigest)
     throw Error("Published native correction lost its original diagnostic grant");
@@ -1594,10 +1596,10 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           observation: "Repeated source-bound assignment correction did not converge; draft remains uncommitted.",
         };
         if (isNativeReviewFailure(originalDraft) && assignmentDiagnosticDefects(originalDraft, originalDraft.nativeOwner.workItem))
-          packet.availableAdapters = ["local-repair: owner=" + originalDraft.nativeOwner.workItem + ", scopeRef=exact sourceRef; only the original controller-verified native defects in the existing " + originalDraft.nativeOwner.phase + " grant"];
+          packet.availableAdapters = ["local-repair: owner=" + originalDraft.nativeOwner.workItem + ", scopeRef is advisory; controller binds only the original controller-verified native defects in the existing " + originalDraft.nativeOwner.phase + " grant"];
         else if (!("supportReportDigest" in originalDraft) && diagnosticWriterSupported(c.origin.assignmentId) && c.origin.operation === "specialist-result" &&
             assignmentDiagnosticDefects(originalDraft, c.origin.assignmentId))
-          packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef=exact sourceRef; only the exact original controller-verified defects within the existing write grant, no other owner or new prerequisites"];
+          packet.availableAdapters = ["local-repair: owner=" + c.origin.assignmentId + ", scopeRef is advisory; controller binds only the exact original controller-verified defects within the existing write grant, no other owner or new prerequisites"];
       }
       await diagnoseUnknownCompletion(job, target, s.request.provider ?? policy.profile.provider,
         s.request.model ?? policy.profile.model, packet);

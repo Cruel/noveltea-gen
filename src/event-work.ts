@@ -355,7 +355,10 @@ async function consequenceProof(job: JobStartResult, report: Report,
     return { path, metadata: record.metadata,
       content: await readFile(join(job.worktreeStoryRoot, path), "utf8") };
   }));
-  return buildEventConsequenceProof(sources, assignment.milestoneId, authored, obligations);
+  const staged = assignment.milestoneBlueprint ?
+    sources.some(source => source.metadata.id === assignment.milestoneId && source.metadata.completeness === "partial") &&
+      currentMilestoneChoiceBinding(obligations, assignment.milestoneId, "", assignment.milestoneBlueprint.design) : undefined;
+  return buildEventConsequenceProof(sources, assignment.milestoneId, authored, obligations, staged);
 }
 function metadataReferences(value: unknown, found = new Set<string>()): Set<string> {
   if (typeof value === "string") {
@@ -381,7 +384,15 @@ export function hasDeferredChoiceBinding(obligations: string[]): boolean {
  * it never changes the immutable author objective or grants permission. */
 export function currentMilestoneChoiceBinding(
   obligations: string[], milestoneId: string, sourceChange: string,
+  reviewed?: import("./milestone-blueprint.js").MilestoneBlueprint,
 ): boolean {
+  // Current production authority is the independently reviewed local plan.
+  // The writer handoff must be present, but its wording is not authority.
+  if (reviewed) {
+    if (reviewed.milestoneId !== milestoneId) throw Error("Foreign Milestone Blueprint obligation.");
+    return obligations.length > 0 && reviewed.downstream.some(item => item.owner === "interactive");
+  }
+  // Historical pre-Blueprint sources have no typed owner projection.
   // Model-generated handoff language cannot manufacture a Choice
   // requirement in an observed, nondecision Milestone. A later Choice can
   // still bind this Milestone only when the handoff explicitly says its
@@ -458,10 +469,13 @@ function acceptance(report: Report, assignment: EventAssignment, paths: string[]
     throw new Error("Selected Milestone lacks a valid fulfillment declaration.");
   }
   const missingChoice = currentMilestoneChoiceBinding(
-    obligations, assignment.milestoneId, String(milestone.metadata.change ?? ""));
+    obligations, assignment.milestoneId, String(milestone.metadata.change ?? ""), assignment.milestoneBlueprint?.design);
   const deferredChoice = milestone.metadata.completeness === "partial" &&
     milestone.metadata.fulfillment.any_of.length === 0 && missingChoice;
-  if (missingChoice && !deferredChoice) {
+  // A reviewed Interactive delivery obligation does not by itself mean the
+  // Event cannot bind a reachable route. The independent Review verifies
+  // semantic sufficiency; Interactive omission is separately prohibited.
+  if (!assignment.milestoneBlueprint && missingChoice && !deferredChoice) {
     throw new Error("Unbound Choice obligation cannot certify a completed Milestone or authored fulfillment IDs.");
   }
   if (!deferredChoice && (!milestone.metadata.fulfillment.any_of.length ||
@@ -1334,7 +1348,7 @@ export async function runEventWorkItem(input: EventOptions) {
             const sourceChange = String(sourceMilestone?.metadata.change ?? "");
             const falseChoiceDeferral = candidate.claimedPaths.length > 0 &&
               scopedNondecisionChoiceDeferral(candidate.conflicts, sourceChange) &&
-              !currentMilestoneChoiceBinding(candidate.obligations, assign.milestoneId, sourceChange);
+              !currentMilestoneChoiceBinding(candidate.obligations, assign.milestoneId, sourceChange, assign.milestoneBlueprint?.design);
             const laterChoiceSetup = candidate.claimedPaths.length > 0 &&
               scopedDecisionSetupConflict(assign, sourceChange, candidate.conflicts);
             const authoredEventIds = draft.records
@@ -1478,8 +1492,8 @@ export async function runEventWorkItem(input: EventOptions) {
         if (receipt.phase === "prerequisite-reported") return { receipt };
         if (receipt.blueprintRequired && (!receipt.blueprintPin || !receipt.assignment))
           throw Error("Event commit requires its independently reviewed Milestone plan.");
-        if (receipt.blueprintPin && receipt.assignment)
-          await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment);
+        const reviewedDesign = receipt.blueprintPin && receipt.assignment
+          ? await readReviewedMilestoneBlueprint(job, receipt.blueprintPin, receipt.assignment) : undefined;
         const recovering = git(job, "rev-parse", "HEAD") !== prior;
         if (recovering && (!receipt.contentDigest || !receipt.paths || dirty(job).length ||
             git(job, "rev-parse", "HEAD^") !== prior ||
@@ -1489,6 +1503,7 @@ export async function runEventWorkItem(input: EventOptions) {
         const checked = await validate(prior);
         const report = reportOf(checked, prior);
         const assign = selectedAssignment(job, arch.plan!, report, receipt.milestoneId, receipt.workItemId);
+        if (reviewedDesign) assign.milestoneBlueprint = { digest: receipt.blueprintPin!.digest, design: reviewedDesign };
         if (!receipt.paths || !receipt.contentDigest || receipt.conflicts?.length ||
             await contentDigest(job, receipt.paths) !== receipt.contentDigest) {
           throw new Error("Authored Event inventory changed or has architectural conflicts.");

@@ -90,6 +90,23 @@ test("later Story Choice obligations do not block the source-supported opening n
   "An unqualified outstanding Choice binding must still fail closed.");
 });
 
+test("reviewed Milestone owner declarations override unrelated future Choice prose", () => {
+  const change = "The passengers recognize that Mara is unaccounted for during the unexpected stop, and the protagonist takes responsibility for finding out what happened rather than accepting an untested assumption that she left.";
+  const later = ["Bind the later formal Choice, its declared outcomes, and corresponding effects; route the outcomes to later conditional Event work for disclosure, privacy, and accountability."];
+  const reviewed: import("../src/milestone-blueprint.js").MilestoneBlueprint = {
+    schema: "noveltea-milestone-blueprint/v1", milestoneId: "milestone.discovery", events: [],
+    downstream: [{owner: "event", obligation: "Author the bounded occurrence."},
+      {owner: "composition", obligation: "Present the witness exchange."}],
+  };
+  assert.equal(currentMilestoneChoiceBinding(later, reviewed.milestoneId, change, reviewed), false);
+  const interactive = {...reviewed, downstream: [...reviewed.downstream,
+    {owner: "interactive" as const, obligation: "Implement the local branch."}]};
+  assert.equal(currentMilestoneChoiceBinding(["Continue the reviewed handoff."],
+    reviewed.milestoneId, change, interactive), true);
+  assert.equal(currentMilestoneChoiceBinding([], reviewed.milestoneId, change, interactive), false);
+  assert.throws(() => currentMilestoneChoiceBinding(later, "milestone.foreign", change, reviewed), /Foreign Milestone/);
+});
+
 test("an authored Event's missing in-scope access evidence receives a bounded correction, not a new authority", () => {
   const milestone = "milestone.disappearance-established";
   const assignment = { milestoneId: milestone,

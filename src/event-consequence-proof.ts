@@ -84,7 +84,7 @@ export const eventConsequenceProofDigest = (proof: EventConsequenceProof) => dig
  * independent review against the source promises and routes. */
 export function buildEventConsequenceProof(
   sources: EventProofSource[], milestoneId: string, eventPaths: string[],
-  laterObligations: string[],
+  laterObligations: string[], reviewedDeferredChoice?: boolean,
 ): EventConsequenceProof {
   if (sources.length > 32 || eventPaths.length > 16 || laterObligations.length > 16)
     throw Error("Event consequence proof exceeds bounded source inventory.");
@@ -95,7 +95,7 @@ export function buildEventConsequenceProof(
     throw Error("Event consequence proof lacks an authored Event source.");
   const diagnostics: EventProofDiagnostic[] = [];
   const unresolvedChoiceOutcomes: EventConsequenceProof["unresolvedChoiceOutcomes"] = [];
-  const deferredChoice = laterObligations.some(text =>
+  const deferredChoice = reviewedDeferredChoice ?? laterObligations.some(text =>
     /choice[ -]?(?:point|binding|specialist|writer|owner)|\bformal choice\b/i.test(text));
   const records = events.map(event => {
     const outcomes: EventConsequenceProof["events"][number]["outcomes"] = [];

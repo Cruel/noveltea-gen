@@ -175,7 +175,7 @@ export function selectAssignment(plan: Plan, report: Report, milestoneId: string
   // marker. The Event's selected Milestone needs a separately authorized,
   // source-bound completeness/fulfillment reconciliation instead.
   if (staged && !currentMilestoneChoiceBinding(eventSource!.missingObligations,
-      milestoneId, String(milestone!.metadata.change ?? "")))
+      milestoneId, String(milestone!.metadata.change ?? ""), milestoneBlueprint?.design))
     throw new Error("Historical nondecision Event was left partial for a later Story Choice, " +
       "not a Choice obligation on " + milestoneId + ". Reconcile the selected Event " +
       "Milestone's fulfillment/completeness with native validation and independent " +
