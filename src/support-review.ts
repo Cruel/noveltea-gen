@@ -18,7 +18,7 @@ export async function inspectSharedSupportReview(job: JobStartResult, entry: Dep
   head: string): Promise<EditorialVerdict> {
   const root = entry.supportRootSha;
   const assignment = entry.amendment?.assignment;
-  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
   const original = points.find(p => p.commitSha === root && p.workItem === assignment?.id);
   if (!root || !assignment || !original?.assurance) throw Error("Support Review lost its original checkpoint.");
   const digest = original.assurance.assignmentDigest;

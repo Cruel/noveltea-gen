@@ -212,6 +212,7 @@ async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
   } else if (p.reviewMode !== "fixture" || p.reviewerSession !== null ||
       p.reviewerSessionSha256 !== null || p.reviewerSnapshotId !== null || p.evidence.length)
     throw Error("Event-only fixture incorrectly claims an independent review.");
+  const changed: string[] = [];
   for (const [source, hash] of Object.entries(p.sourceHashes)) {
     if (!HASH.test(hash) || !/^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(source))
       throw Error("Event-only source inventory was altered.");
@@ -231,9 +232,16 @@ async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
         throw Error("Historical Event-only source bytes differ from the original review.");
     } else {
       const path = join(job.worktreeStoryRoot, source);
-      if (await realpath(path) !== path || sha256(await readFile(path)) !== hash)
-        throw Error("Event-only canonical evidence changed after review.");
+      if (await realpath(path) !== path) throw Error("Unsafe Event-only source.");
+      if (sha256(await readFile(path)) !== hash) changed.push(source);
     }
+  }
+  if (changed.length) {
+    // The immutable original seal is still required. Only the existing
+    // selective revalidation adapter can carry it to a changed source.
+    await verifyEventOnlyOmission(job, milestone, ref, expected, "historical");
+    const { assertRevalidatedEventOnlySource } = await import("./selective-revalidation-work.js");
+    await assertRevalidatedEventOnlySource(job, p, ref!.digest, changed);
   }
   if (!Object.keys(p.sourceHashes).some(path => path.startsWith("milestones/")) ||
       !p.eventIds.every(id => Object.keys(p.sourceHashes).some(path => path.startsWith("events/"))))
@@ -242,6 +250,53 @@ async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
   git(job, "merge-base", "--is-ancestor", p.reviewHead, "HEAD");
   return p;
 }
+/** A negative omission Review only retains the original owner's work.
+ * It is never itself a new canonical write grant. */
+export async function inspectDeclinedEventOnlyReview(job: JobStartResult, milestone: string,
+    expected: { eventHead: string; reviewHead: string; planDigest: string; planVersion: number; turnDigest: string; eventSnapshotId: string }) {
+  const path = pathFor(job, milestone);
+  if (!existsSync(path)) return null;
+  const seal = JSON.parse(await readFile(path, "utf8")) as DeclinedSeal;
+  const p = seal.payload;
+  if (seal.phase !== "declined" || !p || seal.digest !== sha256(p) ||
+      !/^[0-9a-f-]{36}$/.test(seal.nonce) || p.version !== 1 ||
+      p.decision !== "retain-interactive" || p.jobId !== job.jobId || p.threadId !== job.threadId ||
+      p.branch !== job.branch || p.baseSha !== job.baseSha || p.milestoneId !== milestone ||
+      p.eventHead !== expected.eventHead || p.reviewHead !== expected.reviewHead ||
+      p.planDigest !== expected.planDigest || p.planVersion !== expected.planVersion ||
+      p.turnDigest !== expected.turnDigest || p.eventSnapshotId !== expected.eventSnapshotId ||
+      p.validatorVersion !== job.validatorVersion || p.reviewMode !== "pi" ||
+      !p.reviewerSnapshotId || !HASH.test(p.reviewerSnapshotId) || !await openSkillSnapshot(p.reviewerSnapshotId) ||
+      !p.reviewerSession || !p.reviewerSessionSha256 ||
+      await sessionDigest(job, p.reviewerSession) !== p.reviewerSessionSha256 ||
+      !Array.isArray(p.findings) || !p.findings.length || JSON.stringify(p.findings).length > 16_000 ||
+      !p.eventIds?.length || !Object.keys(p.sourceHashes).some(k => k.startsWith("milestones/")) ||
+      !Object.keys(p.sourceHashes).some(k => k.startsWith("events/")))
+    throw Error("Retained Interaction lost its original independent omission Review.");
+  const transcript = (await readFile(p.reviewerSession, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const last = transcript.filter(entry => entry.type === "message" && entry.message?.role === "assistant").at(-1)?.message;
+  if (last?.stopReason !== "stop") throw Error("Declined omission is not a settled independent verdict.");
+  const verdict = JSON.parse(last.content.filter((part: {type: string}) => part.type === "text").map((part: {text: string}) => part.text).join("\n"));
+  if (verdict.verdict !== "block" || JSON.stringify(verdict.findings) !== JSON.stringify(p.findings))
+    throw Error("Declined omission Review differs from its original verdict.");
+  for (const [source, hash] of Object.entries(p.sourceHashes)) {
+    if (!HASH.test(hash) || !/^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(source))
+      throw Error("Invalid declined omission source.");
+    const canonical = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + source;
+    if (!/^100(?:644|755) blob [a-f0-9]{40}\t/.test(git(job, "ls-tree", p.reviewHead, "--", canonical)))
+      throw Error("Declined omission source is not a canonical Git blob.");
+    const env = { ...process.env };
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[key];
+    const bytes = execFileSync("git", ["show", p.reviewHead + ":" + canonical], {
+      cwd: job.worktreeRoot, env, maxBuffer: 4 * 1024 * 1024,
+    });
+    if (sha256(bytes) !== hash) throw Error("Declined omission source changed.");
+  }
+  git(job, "merge-base", "--is-ancestor", p.eventHead, p.reviewHead);
+  git(job, "merge-base", "--is-ancestor", p.reviewHead, "HEAD");
+  return { digest: seal.digest, findings: p.findings };
+}
+
 /** Live authority: current source bytes must still match the reviewed
  * omission before any pending Choice/Puzzle or Composition may be skipped. */
 export async function readEventOnlyOmission(job: JobStartResult, milestone: string,

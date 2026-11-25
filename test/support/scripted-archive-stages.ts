@@ -2,7 +2,7 @@
  * No scheduler, receipt, approval or validation replacement is provided here.
  * Unexpected model prompts and changed source bytes fail closed. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TurnFulfillmentPacket } from "../../src/turn-fulfillment.js";
@@ -25,7 +25,7 @@ export const archiveInteractiveRecords = [
   ["puzzles/ledger-proof.md", "events/discover-mark.md", "events/discover-seal.md", "events/decode-ledger.md",
     "events/request-testimony.md", "revelations/puzzle-evidence.md", "authored-content/watermark-clue.md", "authored-content/seal-clue.md"],
 ].map(paths => Object.fromEntries(paths.map(p => [p, bytes(p)])));
-export const earlyAccountOverreach = "The inquiry then accepts the final redacted account and the investigation concludes.";
+export const earlyAccountOverreach = "The witness then searches the sealed archive, recovers the missing ledger, gives corroborating testimony, and the inquiry accepts the final redacted account and concludes.";
 const eventPath = "events/disclose-ledger.md";
 const openingEvent = bytes(eventPath).replace(/steps:\n[\s\S]*?(?=\n---)/,
   "steps:\n  - id: decision-offered\n    branches:\n      - id: protect\n        conditions: []\n        effects: []\n      - id: challenge\n        conditions: []\n        effects: []")
@@ -92,7 +92,9 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
     beats: baselineCompact.beats.map(b => b.id === "reckoning" ? { ...b, arcId: "safety" } : b),
   } : baselineCompact;
   const foundationPath = "creative-direction/foundation.md";
-  const foundation = adaptive ? readFileSync(join(job.worktreeStoryRoot, foundationPath), "utf8") : renderFoundation({
+  const approvalFile = join(job.stateDir, "chat-approved-foundation.json");
+  const foundation = existsSync(approvalFile) ? renderFoundation(JSON.parse(readFileSync(approvalFile, "utf8")).foundation, "approved") :
+    adaptive ? readFileSync(join(job.worktreeStoryRoot, foundationPath), "utf8") : renderFoundation({
     id: "foundation", title: "The Archive Witness",
     premise: compact.premise, central_conflict: "Ada must prove concealment without exposing a witness.",
     genre: "Mystery", tone: "Intimate and suspenseful", player_experience: "Compare sources and make a consequential decision.",
@@ -149,7 +151,7 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       const expected: Record<string, string[]> = {
         foundation: [foundationPath], architecture: Object.keys(architecture),
         "world-foundations": worldPaths, "character-foundations": castPaths,
-        "event-disclosure": [eventPath], "event-reckoning": [secondEventPath, reckoning],
+        "event-disclosure": process.env.NT_TEST_SCRIPTED_COMPLETE_CHOICE_EVENT === "1" ? [eventPath, disclosure] : [eventPath], "event-reckoning": [secondEventPath, reckoning],
         "interactive-choice-disclosure": Object.keys(archiveInteractiveRecords[0]!),
         "interactive-puzzle-disclosure": Object.keys(archiveInteractiveRecords[1]!),
         "composition-disclosure": prosePaths, "composition-reckoning": [secondProsePath],
@@ -326,13 +328,16 @@ export function archiveStages(job: JobStartResult, plan: TurnEvidence, adaptive 
       assert.ok(first || assignment.milestoneId === "milestone.reckoning");
       const records: Record<string, string> = first ? { [eventPath]: recoverEvent ? openingEvent.replace("value: knows", "value: known") : openingEvent } :
         { [secondEventPath]: secondEvent, [reckoning]: secondMilestone(onDisk(reckoning)) };
+      const completeChoiceEvent = first && process.env.NT_TEST_SCRIPTED_COMPLETE_CHOICE_EVENT === "1";
+      if (completeChoiceEvent) records[disclosure] = onDisk(disclosure).replace("completeness: partial\nfulfillment: {any_of: []}",
+        "completeness: complete\nfulfillment: {any_of: [[event.disclose-ledger]]}");
       if (!phase) return read([...skills("nt-event-design"), assignment.milestonePath]);
       if (first && process.env.NT_TEST_SCRIPTED_EARLY_ACCOUNT === "1") records[eventPath] += "\n" + earlyAccountOverreach + "\n";
       if (phase === 1) return write(records);
       if (phase === 2) return validate();
       assert.equal(phase, 3);
       return stop({ modifiedRecords: Object.keys(records), architecturalConflicts: [],
-        laterObligations: first ? ["Formal Choice Point binding must enact protect and challenge before Milestone fulfillment."] :
+        laterObligations: first && !completeChoiceEvent ? ["Formal Choice Point binding must enact protect and challenge before Milestone fulfillment."] :
           ["Present the independently corroborated redacted account in playable prose."] });
     }
     if (prompt.includes("Complete exactly ONE Choice unit") || prompt.includes("Assess exactly ONE Puzzle unit")) {

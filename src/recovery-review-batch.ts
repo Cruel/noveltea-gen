@@ -81,6 +81,7 @@ export async function collectReviewedOmissionBatch(job: JobStartResult,
         throw Error("Interrupted independent Event-only review must be reconciled, never replayed.");
       continue;
     }
+    if (candidate.phase === "declined") continue;
     if (candidate.phase !== "sealed" || !SHA.test(candidate.payload?.reviewHead ?? ""))
       throw Error("Event-only review receipt has an unrecognized or incomplete disposition.");
     const reviewHead = candidate.payload!.reviewHead;
@@ -143,6 +144,22 @@ export async function sealReviewedOmissionBatch(job: JobStartResult,
   if (git(job, "status", "--porcelain=v1", "-z", "--untracked-files=all") ||
       git(job, "rev-parse", "HEAD").trim() !== checkpoint.commitSha)
     throw Error("Review-batch boundary requires a clean, verified Story HEAD.");
+  // A revalidated omission can remain current for this original job, but
+  // its original sealed reviewer cannot be transplanted as a new fork
+  // review. Keep the old batch immutable; fork admission independently
+  // refuses any changed source without transferable exact-byte evidence.
+  let revalidated = false;
+  for (const item of reviewed) {
+    const slug = item.milestone!.slice(10);
+    const receipt = JSON.parse(await readFile(sourcePath(job, slug), "utf8"));
+    const proof = await readEventOnlyOmission(job, item.milestone!, receipt.units?.[0]?.eventOnly);
+    for (const [relative, expected] of Object.entries(proof.sourceHashes)) {
+      const treePath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + relative;
+      if (sha(git(job, "show", checkpoint.commitSha + ":" + treePath)) !== expected)
+        revalidated = true;
+    }
+  }
+  if (revalidated) return;
   const batch = await collectReviewedOmissionBatch(job, checkpoint);
   if (!batch || reviewed.some(item =>
     !batch.entries.some(entry => entry.milestoneId === item.milestone)))

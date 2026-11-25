@@ -27,7 +27,7 @@ import { preservesWholeStoryInteraction } from "./adaptive-assignments.js";
 import { parseStoryPlanning } from "./story-planning.js";
 import { puzzleObligation, sealPuzzleNoWrite, readPuzzleNoWrite, puzzleNoWriteSessionDigest,
   type PuzzleNoWriteRef } from "./puzzle-obligation.js";
-import { decideEventOnlyOmission, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
+import { decideEventOnlyOmission, eventOnlySourceCandidate, readEventOnlyOmission, type EventOnlyRef } from "./interactive-event-only.js";
 import { historicalMilestoneHandoff, reviewedMilestoneHandoff, consumedCorrection,
   assertMilestoneInteractiveDisposition, type ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 import { correctPendingBlueprint } from "./milestone-blueprint-correction.js";
@@ -50,6 +50,7 @@ interface Unit {
   piSessionBytes?: number;
   dependencyFinding?: import("./dependency-amendments.js").WriterDependencyFinding;
   writerContinuation?: import("./writer-dependency.js").WriterContinuation;
+  retainedChoice?: RetainedChoiceContinuation;
   eventOnly?: EventOnlyRef;
   validation?: { status: "passed"; validatorVersion: string; protectionBase: string;
     choices: ChoiceEvidence[]; puzzles: PuzzleEvidence[]; downstreamObligations: string[]; searchTruncated: boolean };
@@ -96,13 +97,19 @@ interface ChoiceEvidence {
     consequence: string; downstream: string[] }>;
 }
 interface PuzzleEvidence { id: string; solutions: Array<{ event: string; status: Status; clueAccess: Status; clueIds: string[] }> }
+export interface RetainedChoiceContinuation {
+  caseId: string; reportDigest: string; originalHead: string; sessionSha256: string;
+  turnDigest: string; planVersion: number; adaptiveVersion: number; amendmentDigest: string;
+  blueprintDigest: string; decline: "protected-author" | "story-wide-obligation" | "native-required" | "independent-review";
+  reviewDigest?: string;
+}
 export interface InteractiveOptions {
   story: string; job: string; action: "run" | "inspect" | "review-omission"; milestone: string;
   skillsSource?: string; validatorSource?: string; fixture?: boolean; provider?: string; model?: string; task?: string; thinking?: "low" | "medium" | "high";
   /** Production graph can checkpoint Choice and Puzzle independently; the
    * persisted two-unit receipt and original writer/review gates are shared. */
   unit?: InteractiveDomain;
-  round?: { assignmentKey: string; command: AssignmentRoundCommand };
+  round?: { assignmentKey: string; command: AssignmentRoundCommand; retainedChoice?: RetainedChoiceContinuation };
   /** The composite parent owns the boundary between independently reviewed units. */
   deferBoundary?: boolean;
   interactionInventory?: ExecutionItem[];
@@ -414,6 +421,7 @@ async function interactiveSourceDigest(job: JobStartResult, receipt: Receipt, un
     branch: job.branch, plan: receipt.planDigest, planVersion: receipt.planVersion,
     head: unit.beforeHead, unit: unit.id, assignmentKey: unit.assignmentKey, eventSource: receipt.eventSource,
     ...(unit.writerContinuation ? { writerContinuation: unit.writerContinuation } : {}),
+    ...(unit.retainedChoice ? { retainedChoice: unit.retainedChoice } : {}),
     blueprint: receipt.correctedBlueprintPin, snapshot: receipt.snapshot.id,
     worker: receipt.worker, provider: receipt.provider, model: receipt.model,
     selected: resolved.selected, thinking: resolved.thinking, validator: job.validatorVersion,
@@ -762,6 +770,8 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
   allowHistoricalDescendant = false, writerArchive?: string) {
   if (!validMilestone.test(milestoneId)) throw Error("Invalid Interactive conflict Milestone");
   const relative = "interactive-items/" + milestoneId.slice(10) + ".json";
+  if (writerArchive && (await realpath(writerArchive) !== writerArchive || !(await lstat(writerArchive)).isFile()))
+    throw Error("Unsafe archived Interactive contradiction.");
   let receipt = JSON.parse(await readFile(writerArchive ?? join(job.stateDir, relative), "utf8")) as Receipt;
   if (receipt.supersededNegative) {
     const ref = receipt.supersededNegative;
@@ -840,7 +850,7 @@ export async function inspectInteractiveConflict(job: JobStartResult, milestoneI
           negative.invocation.baseline, negative.invocation.assignment))
       throw Error("Original Interactive contradiction lacks its settled invocation proof");
     const response = await verifySettledAssignment({ proof: negative.invocationProof,
-      directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId, negative.writerContinuation ? negative.invocation.sourceDigest : undefined),
+      directory: interactiveInvocationDirectory(job, receipt.workItemId, negative.domain, negative.piSessionId, (negative.writerContinuation || negative.retainedChoice) ? negative.invocation.sourceDigest : undefined),
       sessionId: negative.piSessionId, sessionFile: negative.piSessionFile,
       sessionRoots: [directory], effect: null, historical: !!writerArchive });
     if (JSON.stringify(parseInteractiveManifest(JSON.stringify(response), negative.domain)) !== JSON.stringify(reported) ||
@@ -884,6 +894,153 @@ function interactiveWriterArchive(job: JobStartResult, milestone: string, domain
     throw Error("Invalid Interactive prerequisite archive identity");
   return join(job.stateDir, "interactive-writer-prerequisites", milestone.slice(10) + "-" + domain + "-" + sealDigest + ".json");
 }
+/** Preserve the settled negative in its original invocation directory.  The
+ * retained obligation must already exist in the independently approved
+ * Milestone design and the original adaptive assignment; no scope expansion. */
+async function retainedChoiceEvidence(job: JobStartResult, milestone: string,
+    pin: RetainedChoiceContinuation, original: Receipt) {
+  const unit = original.units[0];
+  const { readAdaptiveState } = await import("./adaptive-state.js");
+  const adaptive = await readAdaptiveState(job, pin.turnDigest, pin.planVersion);
+  if (!adaptive || adaptive.version < pin.adaptiveVersion ||
+      !adaptive.entries.some(entry => entry.digest === pin.amendmentDigest &&
+        entry.afterVersion <= pin.adaptiveVersion && entry.order.includes("interactive:" + milestone)))
+    throw Error("Retained Choice lacks its original adaptive assignment.");
+  const event = JSON.parse(await readFile(join(job.stateDir, "event-items", milestone.slice(10) + ".json"), "utf8")) as SourceReceipt;
+  const blueprint = await historicalMilestoneHandoff(job, event);
+  if (!blueprint || blueprint.pin.digest !== pin.blueprintDigest ||
+      !blueprint.design.downstream.some(item => item.owner === "interactive") ||
+      !unit.assignmentKey || !unit.invocation?.assignment || unit.writerContinuation || unit.retainedChoice ||
+      original.planVersion !== pin.planVersion || unit.beforeHead !== pin.originalHead ||
+      unit.digest !== pin.reportDigest || unit.piSessionSha256 !== pin.sessionSha256 ||
+      original.worker !== "pi" || !unit.piSessionFile || !unit.piSessionId)
+    throw Error("Retained Choice is not an in-scope original approved Interactive obligation.");
+  const { readReviewTurnEvidence } = await import("./fork-review-turn.js");
+  const turn = await readReviewTurnEvidence(job);
+  if (!turn || turn.digest !== pin.turnDigest || !turn.objective ||
+      pin.decline === "protected-author" && !turn.objective.requestedTargets.some(id =>
+        id === milestone || id.startsWith("choice-point.") || id.startsWith("puzzle.")))
+    throw Error("Retained Choice lost its original author requirements.");
+  if (pin.decline === "independent-review") {
+    const review = await (await import("./interactive-event-only.js")).inspectDeclinedEventOnlyReview(job, milestone, {
+      eventHead: original.eventHead, reviewHead: pin.originalHead, planDigest: original.planDigest,
+      planVersion: pin.planVersion, turnDigest: pin.turnDigest, eventSnapshotId: event.snapshot!.id,
+    });
+    if (!review || review.digest !== pin.reviewDigest)
+      throw Error("Retained Choice independent omission Review changed.");
+  } else if (pin.reviewDigest) throw Error("A deterministic retained obligation cannot claim an independent verdict.");
+  if (pin.decline === "native-required" &&
+      (!event.validation || eventOnlySourceCandidate(unit.invocation.baseline, milestone, event.validation.eventIds)))
+    throw Error("Retained Choice native eligibility decline is not authenticated by its original source.");
+  return unit;
+}
+
+export async function inspectRetainedChoiceContinuation(job: JobStartResult, milestone: string) {
+  const saved = await inspectInteractiveUnit(job, milestone, "choice");
+  const pin = saved?.unit.retainedChoice;
+  if (!pin) return null;
+  const archive = interactiveWriterArchive(job, milestone, "choice", pin.reportDigest);
+  const negative = await inspectInteractiveConflict(job, milestone, true, archive);
+  const original = JSON.parse(await readFile(archive, "utf8")) as Receipt;
+  const unit = await retainedChoiceEvidence(job, milestone, pin, original);
+  if (saved.unit.writerContinuation) {
+    const { authenticateWriterContinuation, inspectWriterDependency, assertWriterAssignmentRoot, verifiedWriterSupport } = await import("./writer-dependency.js");
+    const continuation = saved.unit.writerContinuation;
+    const source = await authenticateWriterContinuation(job, continuation, "choice", milestone, unit.assignmentKey);
+    const prerequisite = await inspectWriterDependency(job, source);
+    await assertWriterAssignmentRoot(job, prerequisite, pin.originalHead);
+    await verifiedWriterSupport(job, source, continuation.reportDigest, continuation.supportRef, saved.unit.beforeHead);
+  } else if (saved.unit.beforeHead !== pin.originalHead) throw Error("Retained Choice source changed without verified support.");
+  if (negative.domain !== "choice" || negative.reportDigest !== pin.reportDigest ||
+      saved.unit.assignmentKey !== unit.assignmentKey || saved.unit.piSessionId !== unit.piSessionId ||
+      saved.unit.piSessionFile !== unit.piSessionFile ||
+      saved.receipt.planDigest !== original.planDigest || saved.receipt.eventHead !== original.eventHead ||
+      !/^[a-f0-9]{64}$/.test(pin.caseId))
+    throw Error("Retained Choice continuation lost its exact original assignment/session.");
+  return { pin, original, saved, assignmentKey: unit.assignmentKey! };
+}
+
+export async function prepareRetainedChoiceContinuation(job: JobStartResult, milestone: string, input: {
+  caseId: string; reportDigest: string; turnDigest: string; adaptiveVersion: number;
+  decline: RetainedChoiceContinuation["decline"];
+}) {
+  const previous = await inspectRetainedChoiceContinuation(job, milestone);
+  if (previous) {
+    if (previous.pin.caseId !== input.caseId || previous.pin.reportDigest !== input.reportDigest ||
+        previous.pin.decline !== input.decline || previous.pin.turnDigest !== input.turnDigest ||
+        previous.pin.adaptiveVersion !== input.adaptiveVersion)
+      throw Error("Original retained Choice correction changed.");
+    return previous.pin;
+  }
+  const negative = await inspectInteractiveConflict(job, milestone);
+  const saved = await inspectInteractiveUnit(job, milestone, "choice");
+  if (!saved || negative.domain !== "choice" || negative.reportDigest !== input.reportDigest ||
+      !saved.unit.piSessionSha256 || !saved.unit.piSessionFile || !saved.unit.assignmentKey)
+    throw Error("Retained Choice has no settled original writer.");
+  const original = saved.receipt;
+  const adaptive = await (await import("./adaptive-state.js")).readAdaptiveState(job, input.turnDigest, original.planVersion);
+  if (adaptive) (await import("./adaptive-state.js")).assertAdaptiveSettled(adaptive);
+  const amendment = adaptive?.entries.filter(entry => entry.afterVersion <= input.adaptiveVersion &&
+    entry.order.includes("interactive:" + milestone)).at(-1);
+  if (!adaptive || adaptive.version !== input.adaptiveVersion || !amendment)
+    throw Error("Retained Choice original adaptive version is unavailable.");
+  const event = JSON.parse(await readFile(join(job.stateDir, "event-items", milestone.slice(10) + ".json"), "utf8")) as SourceReceipt;
+  const blueprint = await historicalMilestoneHandoff(job, event);
+  if (!blueprint) throw Error("Retained Choice has no approved local design.");
+  const review = input.decline === "independent-review" ?
+    await (await import("./interactive-event-only.js")).inspectDeclinedEventOnlyReview(job, milestone, {
+      eventHead: original.eventHead, reviewHead: negative.expectedHead, planDigest: original.planDigest,
+      planVersion: original.planVersion, turnDigest: input.turnDigest, eventSnapshotId: event.snapshot!.id,
+    }) : null;
+  const pin: RetainedChoiceContinuation = { ...input, originalHead: negative.expectedHead,
+    sessionSha256: saved.unit.piSessionSha256, planVersion: original.planVersion,
+    amendmentDigest: amendment.digest, blueprintDigest: blueprint.pin.digest,
+    ...(review ? { reviewDigest: review.digest } : {}) };
+  await retainedChoiceEvidence(job, milestone, pin, original);
+  // Legacy negative reports did not record the prefix length; it can be
+  // recovered only before appending to the authenticated original transcript.
+  const historic = structuredClone(original);
+  historic.units[0].piSessionBytes = (await readFile(saved.unit.piSessionFile)).length;
+  const archive = interactiveWriterArchive(job, milestone, "choice", pin.reportDigest);
+  if (existsSync(archive)) {
+    if (JSON.stringify(JSON.parse(await readFile(archive, "utf8"))) !== JSON.stringify(historic))
+      throw Error("Retained Choice original negative history changed.");
+  } else await persist(archive, historic);
+  const { invocation, invocationProof, conflicts, obligations, paths, claimedPaths, digest: _digest, failure,
+    piSessionSha256, piSessionBytes, dependencyFinding, ...rest } = saved.unit;
+  original.units[0] = { ...rest, phase: "pending", retainedChoice: pin };
+  await persist(join(job.stateDir, "interactive-items", milestone.slice(10) + ".json"), original);
+  return pin;
+}
+
+export async function inspectRetainedChoiceCompletion(job: JobStartResult, milestone: string,
+    expected: { caseId: string; reportDigest: string; turnDigest: string; sourceHead: string; planVersion: number | null }) {
+  const retained = await inspectRetainedChoiceContinuation(job, milestone);
+  if (!retained || retained.pin.caseId !== expected.caseId || retained.pin.reportDigest !== expected.reportDigest ||
+      retained.pin.turnDigest !== expected.turnDigest || retained.pin.planVersion !== expected.planVersion ||
+      retained.pin.originalHead !== expected.sourceHead || retained.saved.unit.phase !== "committed" ||
+      !retained.saved.unit.commitSha || !retained.saved.unit.invocationProof)
+    return null;
+  const { receipt, unit } = retained.saved;
+  if (!unit.invocation || !unit.paths || !unit.digest || !unit.piSessionId || !unit.piSessionFile ||
+      unit.invocation.sourceDigest !== await interactiveSourceDigest(job, receipt, unit, unit.invocation.baseline, unit.invocation.assignment))
+    throw Error("Retained Choice correction invocation lost its original source.");
+  const parent = unit.beforeHead!;
+  verifyCommit(job, receipt, unit, parent, unit.commitSha!);
+  await verifySettledAssignment({ proof: unit.invocationProof!, sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
+    directory: interactiveInvocationDirectory(job, receipt.workItemId, "choice", unit.piSessionId, unit.invocation.sourceDigest),
+    sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, "choice")],
+    effect: assignmentCommittedEffect(job, parent, unit.commitSha!, unit.paths, unit.digest), historical: true });
+  const point = await (await import("./recovery-checkpoints.js")).inspectHistoricalRecoveryCheckpoint(job, retained.saved.unit.commitSha);
+  if (point.workItem !== retained.saved.unit.id || git(job, "rev-parse", retained.saved.unit.commitSha + "^") !== parent ||
+      point.assurance?.turnDigest !== expected.turnDigest || retained.saved.receipt.planVersion !== expected.planVersion ||
+      retained.saved.unit.validation?.status !== "passed" || point.semanticReview !== "passed")
+    return null;
+  return { head: retained.saved.unit.commitSha, ref: "interactive-items/" + milestone.slice(10) + ".json",
+    digest: digest(JSON.stringify({ pin: retained.pin, original: retained.original.units[0].digest,
+      commit: retained.saved.unit.commitSha, assurance: point.assurance, proof: point.proofDigest })) };
+}
+
 export async function inspectInteractiveWriterDependency(job: JobStartResult, milestone: string,
     domain: InteractiveDomain, sealDigest: string) {
   const archive = interactiveWriterArchive(job, milestone, domain, sealDigest);
@@ -897,7 +1054,8 @@ export async function inspectInteractiveWriterDependency(job: JobStartResult, mi
     throw Error("Interactive prerequisite lost its exact original typed writer report");
   return { stage: domain, milestoneId: milestone, workItemId: unit.id, planVersion: receipt.planVersion, sealDigest,
     assignmentKey: unit.assignmentKey, head: proof.expectedHead, sourcePaths: unit.invocation.assignment.sourcePaths,
-    obligations: unit.invocation.assignment.dependencyObligations, finding: unit.dependencyFinding };
+    obligations: unit.invocation.assignment.dependencyObligations, finding: unit.dependencyFinding,
+    predecessor: (await import("./writer-dependency.js")).writerPredecessor(unit.writerContinuation) };
 }
 export async function archiveInteractiveWriterDependency(job: JobStartResult, milestone: string, domain: InteractiveDomain, sealDigest: string) {
   const original = await inspectInteractiveWriterDependency(job, milestone, domain, sealDigest);
@@ -917,7 +1075,7 @@ export async function rebindInteractiveAfterWriterDependency(job: JobStartResult
   const index = source.stage === "choice" ? 0 : 1;
   const original = archived.units[index];
   const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.piSessionSha256! };
-  if (saved.unit.writerContinuation) {
+  if (saved.unit.writerContinuation?.reportDigest === reportDigest) {
     if (JSON.stringify(saved.unit.writerContinuation) !== JSON.stringify(binding)) throw Error("Interactive continuation changed");
     return;
   }
@@ -1012,7 +1170,7 @@ export async function inspectPendingInteractiveInvocation(job: JobStartResult, m
         !unit.piSessionId || !unit.piSessionFile || unit.invocationProof.sourceDigest !== sourceDigest)
       throw Error("Interrupted Interactive commit lacks its original settled effect");
     await verifySettledAssignment({ proof: unit.invocationProof,
-      directory: interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined),
+      directory: interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId, (unit.writerContinuation || unit.retainedChoice) ? unit.invocation?.sourceDigest : undefined),
       sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
       sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)], effect: unit.digest! });
   }
@@ -1043,7 +1201,7 @@ export async function inspectInteractiveFailure(job: JobStartResult, milestone: 
   if (await interactiveSourceDigest(job, receipt, unit, baseline, assignment) !== sourceDigest ||
       await openSkillSnapshot(receipt.snapshot!.id) !== receipt.snapshot!.path)
     throw Error("Original Interactive diagnostic source changed");
-  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined);
+  const directory = interactiveInvocationDirectory(job, receipt.workItemId, domain, unit.piSessionId, (unit.writerContinuation || unit.retainedChoice) ? unit.invocation?.sourceDigest : undefined);
   const options = { directory, sourceDigest, sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
     sessionRoots: [join(job.stateDir, "interactive-sessions", receipt.workItemId, domain)] };
   const head = historicalHead ?? git(job, "rev-parse", "HEAD");
@@ -1158,8 +1316,14 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
           event.obligations ?? [], { fixture: false, skillsSource: input.skillsSource,
             provider: input.provider ?? "openai", model: input.model ?? "gpt-6-luna",
             blueprint: await historicalMilestoneHandoff(job, event) });
-        if (!omission) return { status: "omission-not-justified", headSha: head,
-          milestoneId: input.milestone };
+        if (!omission) {
+          const decline = await (await import("./interactive-event-only.js")).inspectDeclinedEventOnlyReview(job, input.milestone, {
+            eventHead: event.commitSha, reviewHead: head, planDigest: receipt.planDigest,
+            planVersion: receipt.planVersion, turnDigest: input.turnPlanDigest!, eventSnapshotId: event.snapshot.id,
+          });
+          return { status: "omission-not-justified", headSha: head, milestoneId: input.milestone,
+            omissionDecline: decline ? "independent-review" as const : "native-required" as const };
+        }
         await correctPendingBlueprint(job, architecture.plan, event, {
           head, fixture: false, omission, protectionBase: baseline.protection.base,
           objective: input.generationObjective, turnDigest: input.turnPlanDigest,
@@ -1334,6 +1498,13 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
       input.validatorSource ?? input.skillsSource ?? config.novelteaSkills, { ...job, baseSha: head });
     async function executeUnit(unit: Unit, state: Receipt) {
       const index = state.units.indexOf(unit);
+      if (unit.retainedChoice && ["pending", "writing"].includes(unit.phase)) {
+        const retained = await inspectRetainedChoiceContinuation(job, state.milestoneId);
+        if (!retained || unit.domain !== "choice" || !input.round ||
+            input.round.assignmentKey !== retained.assignmentKey ||
+            JSON.stringify(input.round.retainedChoice) !== JSON.stringify(retained.pin))
+          throw Error("Retained Choice has no original parent recovery admission.");
+      }
       if (unit.writerContinuation && ["pending", "writing"].includes(unit.phase)) {
         const source = await (await import("./writer-dependency.js")).authenticateWriterContinuation(job, unit.writerContinuation, unit.domain, state.milestoneId, input.round?.assignmentKey);
         const archive = JSON.parse(await readFile(interactiveWriterArchive(job, state.milestoneId, unit.domain, source.sealDigest), "utf8")) as Receipt;
@@ -1547,7 +1718,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
                   throw Error("Interactive invocation session changed");
                 unit.piSessionFile = session; unit.piSessionId = id; await persist(file, state);
               }, verifyDraft, { sourceDigest: unit.invocation!.sourceDigest,
-                sessionFile: unit.piSessionFile, sessionId: unit.piSessionId, continuation: unit.writerContinuation,
+                sessionFile: unit.piSessionFile, sessionId: unit.piSessionId, continuation: unit.writerContinuation ?? unit.retainedChoice,
                 authorize: authorizeInvocation, effect: () => interactiveEffect(job, before) }, input.round!.command);
             if ("round" in authored) return authored.round;
             evidence = authored;
@@ -1555,7 +1726,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
             if (!unit.invocationProof || !unit.piSessionId || !unit.piSessionFile)
               throw Error("Interactive result lacks its original settled invocation");
             await verifySettledAssignment({ proof: unit.invocationProof,
-              directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined),
+              directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId, (unit.writerContinuation || unit.retainedChoice) ? unit.invocation?.sourceDigest : undefined),
               sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
               sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
               effect: await interactiveEffect(job, before) });
@@ -1579,7 +1750,8 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
               throw Error("Interactive no-write session is outside its original assignment");
             const transcript = sessionPath ? await readFile(sessionPath) : undefined;
             unit.piSessionSha256 = transcript ? digest(transcript) : undefined;
-            if (evidence.dependencyFinding) { unit.dependencyFinding = evidence.dependencyFinding; unit.piSessionBytes = transcript?.length; }
+            unit.piSessionBytes = transcript?.length;
+            if (evidence.dependencyFinding) unit.dependencyFinding = evidence.dependencyFinding;
             unit.paths = [];
             unit.digest = interactiveConflictReportDigest(state, unit,
               sessionPath, unit.piSessionSha256 ?? null);
@@ -1644,7 +1816,7 @@ export async function runInteractiveWorkItem(input: InteractiveOptions) {
               unit.invocationProof.sourceDigest !== unit.invocation.sourceDigest)
             throw Error("Interactive authored effect lacks its original invocation proof");
           await verifySettledAssignment({ proof: unit.invocationProof,
-            directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId, unit.writerContinuation ? unit.invocation?.sourceDigest : undefined),
+            directory: interactiveInvocationDirectory(job, state.workItemId, unit.domain, unit.piSessionId, (unit.writerContinuation || unit.retainedChoice) ? unit.invocation?.sourceDigest : undefined),
             sessionId: unit.piSessionId, sessionFile: unit.piSessionFile,
             sessionRoots: [join(job.stateDir, "interactive-sessions", state.workItemId, unit.domain)],
             effect: unit.digest });

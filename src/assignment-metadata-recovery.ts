@@ -37,7 +37,7 @@ const metadataCodes = new Set(["schema", "yaml", "frontmatter"]);
 /** Coordinates are navigation hints, not evidence of improvement. A smaller
  * strict set of blockers or an actual native pass exposing a later source
  * check is progress; merely trading one schema error for another is not. */
-function materialProgress(before: readonly AssignmentDefect[], after: readonly AssignmentDefect[]): boolean {
+export function materialProgress(before: readonly AssignmentDefect[], after: readonly AssignmentDefect[]): boolean {
   if (before.some(d => d.kind === "metadata") && after.every(d => d.kind === "provenance")) return true;
   // Architecture verification is ordered. A later independently verified gate
   // means the previous gate passed, not merely that its error prose changed.

@@ -101,7 +101,7 @@ async function verifyIndependentReviewRepairSuccessor(job: JobStartResult, commi
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
   const proof = await readRepairCommitProof(job, item);
   const receipt = await inspectRejectedRepair(job, sourceSha);
-  const checkpoints = await inspectRecoveryCheckpoints(job);
+  const checkpoints = await inspectRecoveryCheckpoints(job, "historical");
   const point = checkpoints.find(p => p.eligible && p.commitSha === commit);
   const source = checkpoints.find(p => p.eligible && p.commitSha === sourceSha);
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
@@ -157,7 +157,7 @@ async function verifyReviewedSpecialistSuccessor(job: JobStartResult, commit: st
   }
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
   const { resolvedCheckpointReviews } = await import("./checkpoint-assurance.js");
-  const checkpoints = await inspectRecoveryCheckpoints(job);
+  const checkpoints = await inspectRecoveryCheckpoints(job, "historical");
   const point = checkpoints.find(item => item.eligible && item.commitSha === commit);
   if (!point || point.workItem !== workItem || point.parentSha !== parent ||
       !point.assurance ||
@@ -208,16 +208,31 @@ export async function verifiedNarrativeChain(job: JobStartResult, source: string
       continue;
     }
     if (trailers.some(line => /^NovelTea-Work-Item: dependency:[0-9]+:[a-z][a-z-]*\.[a-z0-9-]+$/.test(line))) {
-      const { inspectDependencyPlan, dependencyWriterBase, dependencyAncestors } = await import("./dependency-state.js");
+      const { inspectDependencyPlan, dependencyWriterBase, dependencyAncestors, dependencyDigest } = await import("./dependency-state.js");
       const plan = await inspectDependencyPlan(job);
       const entry = plan?.entries.find(e =>
         e.phase === "verified" && (e.supportRootSha ?? e.commitSha) === commit && e.amendment &&
         trailers.includes("NovelTea-Work-Item: " + e.amendment.assignment.id));
-      // The existing Blueprint rebind exemption extends only to its authenticated
-      // predecessor chain, not arbitrary narrative changes from other callers.
-      if (plan && entry && dependencyWriterBase(plan, entry) === parents[1] &&
-          plan.entries.find(e => dependencyAncestors(plan.entries, entry).has(e.reportDigest))?.blueprintSource &&
-          trailers.includes("NovelTea-Job: " + job.jobId)) continue;
+      if (plan && entry &&
+          dependencyWriterBase(plan, entry) === parents[1] &&
+          trailers.includes("NovelTea-Job: " + job.jobId)) {
+        const ancestors = dependencyAncestors(plan.entries, entry);
+        const root = plan.entries.find(e => ancestors.has(e.reportDigest));
+        // inspectDependencyPlan authenticates the exact native receipt,
+        // committed diff and independent support Review. Writer-origin
+        // support additionally needs completed affected-dependent revalidation.
+        if (root?.writerSource && !root.fixture && root.phase === "verified" && root.commitSha &&
+            root.review?.verdict === "pass") {
+          const { assertCompletedOtherOwnerRevalidation } = await import("./selective-revalidation-work.js");
+          await assertCompletedOtherOwnerRevalidation(job, {
+            baseSha: root.report.sourceSha, successorSha: root.commitSha,
+            turnDigest: root.report.turnDigest, path: root.writerSource.targetPath,
+            historicalChainHead: head, correctionReviewDigest: dependencyDigest(root.review),
+          });
+          continue;
+        }
+        if (root?.blueprintSource) continue;
+      }
     }
     if (await verifyReviewedSpecialistSuccessor(job, commit, parents[1]!, paths, trailers))
       continue;

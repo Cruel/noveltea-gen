@@ -16,6 +16,7 @@ import { validateStoryJob } from "./validator.js";
 import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
 import { preflightCompositionBoundary, type CompositionBoundaryDecision,
   type CompositionBoundaryRequest } from "./cross-domain-prerequisite-controller.js";
+import { nativeMetadataDefects, type AssignmentDefect } from "./assignment-metadata-recovery.js";
 import { authorMilestoneCloseout } from "./cross-domain-closeout-specialist.js";
 import { admitPrerequisiteRepair, submitPrerequisiteRepair, settlePrerequisiteRepair,
   inspectRepairLedger } from "./repair-ledger.js";
@@ -197,6 +198,11 @@ async function assertOnlyOwnedEdit(job: JobStartResult, proposal: CloseoutPropos
   assertMilestoneFulfillmentOnly(gitRaw(job, "show", proposal.sourceSha + ":" + expected),
     await readFile(target, "utf8"));
 }
+class CloseoutNativeDefects extends Error {
+  constructor(readonly defects: AssignmentDefect[]) {
+    super("Milestone closeout is not canonically valid, complete and reachable.");
+  }
+}
 async function validateCloseoutDraft(job: JobStartResult, request: CloseoutRunRequest,
   proposal: CloseoutProposal, committed = false) {
   // A recovered original Git commit has no dirty draft. Its exact path and
@@ -210,16 +216,29 @@ async function validateCloseoutDraft(job: JobStartResult, request: CloseoutRunRe
       any_of?: string[][] } } }>;
     coverage?: { milestoneRoutes: Array<{ id: string; routes: Array<{ status: string }> }>;
       search?: { truncated?: boolean } } } | undefined;
-  if (outcome.status !== "passed" || !report || report.diagnostics?.length ||
-      report.protection?.status !== "checked" || report.protection.base !== proposal.sourceSha ||
-      report.protection.changes.length || report.protection.warnings.length ||
-      report.coverage?.search?.truncated ||
-      !report.records?.some(r => r.path === proposal.allowedPaths[0] &&
-        r.metadata.id === proposal.milestoneId && r.metadata.completeness === "complete" &&
-        Array.isArray(r.metadata.fulfillment?.any_of) && r.metadata.fulfillment.any_of.length > 0) ||
-      !report.coverage?.milestoneRoutes.find(m => m.id === proposal.milestoneId)?.routes.some(r =>
-        r.status === "reachable"))
-    throw Error("Milestone closeout is not canonically valid, complete and reachable.");
+  if (!report || report.protection?.status !== "checked" || report.protection.base !== proposal.sourceSha ||
+      report.protection.changes.length || report.protection.warnings.length || report.coverage?.search?.truncated)
+    throw Error("Milestone closeout lost its exact native/protected source evidence.");
+  if (outcome.status === "rejected") {
+    throw new CloseoutNativeDefects(nativeMetadataDefects(outcome, {
+      jobId: job.jobId, baseSha: proposal.sourceSha, worktreeStoryRoot: job.worktreeStoryRoot,
+      validatorVersion: job.validatorVersion, paths: proposal.allowedPaths,
+    }));
+  }
+  if (outcome.status !== "passed" || report.diagnostics?.length)
+    throw Error("Milestone closeout native validation did not settle successfully.");
+  const defects: AssignmentDefect[] = [];
+  const path = proposal.allowedPaths[0]!;
+  const record = report.records?.find(r => r.path === path && r.metadata.id === proposal.milestoneId);
+  const routes = report.coverage?.milestoneRoutes?.find(m => m.id === proposal.milestoneId);
+  if (!record || !routes) throw Error("Milestone closeout lost its native record/route evidence.");
+  if (record.metadata.completeness !== "complete")
+    defects.push({ kind: "requirement", path, code: "closeout-incomplete" });
+  if (!Array.isArray(record.metadata.fulfillment?.any_of) || !record.metadata.fulfillment.any_of.length)
+    defects.push({ kind: "requirement", path, code: "closeout-empty-fulfillment" });
+  if (!routes.routes.some(r => r.status === "reachable"))
+    defects.push({ kind: "requirement", path, code: "closeout-unreachable" });
+  if (defects.length) throw new CloseoutNativeDefects(defects);
   return { report, outcome };
 }
 /** Recover the exact crash window after Git committed the already-authored
@@ -646,10 +665,8 @@ export async function advanceCrossDomainCloseout(request: CloseoutRunRequest) {
         try {
           await validateCloseoutDraft(job, request, proposal); return [];
         } catch (error) {
-          const message = String(error);
-          if (/Cross-domain specialist changed files outside|Unsafe Milestone|changed unrelated frontmatter|protected decisions or body/.test(message))
-            throw error; // A scope violation is never a repairable model feedback loop.
-          return [message];
+          if (!(error instanceof CloseoutNativeDefects)) throw error;
+          return error.defects;
         }
       };
       try {

@@ -102,6 +102,16 @@ export async function inspectActiveRecoveryResolution(
   git(job, "merge-base", "--is-ancestor", resolution.correctedHeadSha, head);
   const { correction, correctedHeadSha } = resolution;
   if (source.channel === "operationRecovery" && original.origin.operation === "specialist-result") {
+    const negative = (source.input as unknown as GenerationOperationRecovery).evidence?.interactiveNoWrite;
+    if (negative?.domain === "choice" && correction.store === "specialist-receipt" &&
+        correction.ref === "interactive-items/" + negative.milestoneId.slice(10) + ".json" &&
+        original.origin.assignmentId === "interactive:" + negative.milestoneId) {
+      const completed = await (await import("./interactive-work.js")).inspectRetainedChoiceCompletion(job,
+        negative.milestoneId, { caseId: original.id, reportDigest: negative.reportDigest,
+          turnDigest: original.origin.turnDigest, sourceHead: original.origin.sourceHeadSha,
+          planVersion: original.origin.planVersion });
+      return !!completed && completed.head === correctedHeadSha && completed.digest === correction.digest;
+    }
     const readiness = (source.input as unknown as GenerationOperationRecovery).evidence?.eventBlueprintPrerequisite;
     if (readiness) {
       if (correction.store !== "dependency-plan" || correction.ref !== readiness.reportDigest ||

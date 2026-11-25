@@ -225,7 +225,7 @@ export async function reviewOtherOwnerCheckpoint(job: JobStartResult, turn: Turn
       reviewOtherOwners(turn, originalId, path).length) return undefined;
   const repoPath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path;
   const last = dependencyGit(job, "log", "-1", "--format=%H", sourceSha, "--", repoPath);
-  const point = (points ?? await inspectRecoveryCheckpoints(job)).find(p =>
+  const point = (points ?? await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.commitSha === last && p.commitSha !== sourceSha && p.eligible &&
     p.assurance?.turnDigest === turn.digest && p.assurance.changedPaths.includes(path) &&
     (p.semanticReview === "passed" || p.semanticReview === "not-required") &&
@@ -254,7 +254,7 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
   // not to later model statements or a mutable Story catalog. Reconstruct its
   // exact digest on every read and keep it outside the writer grant list.
   if (!grantsOnly && saved.reviewRequests?.length) {
-    const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.assurance);
+    const checkpoints = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible && p.assurance);
     for (const request of saved.reviewRequests) {
       const point = checkpoints.find(p => p.commitSha === request.sourceSha);
       const original = turn.assignments.find(a => a.id === request.originalAssignmentId);
@@ -299,6 +299,18 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
         const original = await (await import("./writer-dependency.js")).inspectWriterDependency(job, entry.writerSource);
         if (original.reportDigest !== entry.reportDigest || dependencyDigest(original.report) !== dependencyDigest(entry.report))
           throw Error("Writer dependency lost its original settled source.");
+      }
+      if (entry.writerSource.predecessor) {
+        const pin = entry.writerSource.predecessor;
+        const prior = saved.entries.find(e => e.reportDigest === pin.reportDigest);
+        if (!prior?.writerSource || !seen.has(prior.reportDigest) || prior.phase !== "verified" ||
+            !prior.commitSha || prior.report.sourceSha !== pin.originalHead || dependencyDigest(prior) !== pin.supportRef ||
+            prior.writerSource.stage !== entry.writerSource.stage ||
+            prior.writerSource.workItemId !== entry.writerSource.workItemId ||
+            prior.writerSource.milestoneId !== entry.writerSource.milestoneId ||
+            prior.writerSource.planVersion !== entry.writerSource.planVersion)
+          throw Error("Writer dependency lost its earlier verified continuation.");
+        dependencyGit(job, "merge-base", "--is-ancestor", prior.commitSha, entry.report.sourceSha);
       }
       if (entry.amendment && (entry.amendment.assignment.targets.join() !== entry.writerSource.targetId ||
           entry.amendment.assignment.specialist !== entry.report.likelySpecialist ||
@@ -405,7 +417,7 @@ async function inspectDependencyLedger(job: JobStartResult, grantsOnly: boolean)
       const correction = entry.eventRepair;
       const proof = await readRepairCommitProof(job, "repair-" + correction.sourceSha);
       const first = await readRepairCommitProof(job, "repair-" + request!.sourceSha);
-      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
       const point = points.find(p => p.commitSha === correction.commitSha);
       const sealed = point && await inspectCheckpointReview(job, point);
       const eventPath = request?.findings[0]?.path;
@@ -688,7 +700,7 @@ export async function registerReviewDependency(
     // Reviewer prose cannot convert an invented Event into a genuine
     // prerequisite. Authenticate the original committed Event writer and
     // Pi session BEFORE any new Character path is allocated.
-    const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
       p.eligible && p.commitSha === request.sourceSha &&
       p.workItem === request.originalWorkItem &&
       p.assurance?.assignmentId === request.originalAssignmentId);
@@ -967,7 +979,7 @@ export async function finalizeReviewEventDependency(job: JobStartResult, failedS
   }
   if (!repairedCommit) return false;
   const proof = await readRepairCommitProof(job, "repair-" + repairedSource);
-  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === repairedCommit);
   const sealed = point && await inspectCheckpointReview(job, point);
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";

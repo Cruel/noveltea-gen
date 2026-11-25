@@ -994,3 +994,57 @@ return. It does not select an ordinary successor until the original writer
 and its mandatory Review settle. The new intake and dependency-amendment
 returns are graph progress, not success verdicts; a mismatched original
 assignment or support receipt is a classified exception.
+
+### #274: verified sequential support, retained Interaction and omission lineage
+
+A second prerequisite for the same original writer must originate at the
+exact verified predecessor of that writer. The dependency ledger retains
+each original report, negative invocation, and independently accepted support
+receipt. The continuation proves the root logical assignment through the
+entire ordered chain, then binds the next physical invocation namespace to
+the latest support digest. A later root finding is not a fresh assignment.
+A supporting child that needs support enters the already existing nested
+parent path; it cannot grant its own expanded authority.
+
+An eligible Choice no-write is not automatically permission to omit a
+required interaction. A native requirement, protected author commitment,
+Story-wide obligation or independently declined omission retains the original
+Choice. The same parent RecoveryCase admits its original scope and original
+session against the archived settled negative receipt and approved local
+design. A subsequent typed prerequisite uses the same suspension/admission
+path. Only the real native-verified Choice commit and its independent
+Review discharge the Case; subsequent Puzzle and Composition scheduling
+remain ordinary work. The verified resolution and dependency-history pins
+must be recoverable from the old checkpoint without repeating any completed
+writer, reviewer, commit or model charge.
+
+For an existing record, the authenticated last actual native producer can
+be a cross-domain assignment that was allowed to edit it (for example a
+Choice writer editing an Event). Canonical owner authority is still derived
+from its typed record identity, exact source-connected witness and approved
+grant, not from the producer's coarse specialist record-type list. The first
+verified realization in the current Turn is the revalidation anchor if the
+record was subsequently edited, so earlier realized consumers cannot be
+excluded by choosing the latest producer. No protected decisions, unrelated
+paths, or unsupported creations are authorized by this exception.
+
+Historical checkpoint inspection is not current omission authority. Native
+support/repair publication and its independent Review may authenticate old
+omissions at their original reviewed revision, without granting a downstream
+skip against changed bytes. Ordinary live omission admission additionally
+requires unchanged canonical source or the exact completed affected-dependent
+independent revalidation bound to the verified supporting Review, historical
+seal, Turn, plan, and current Git content. Missing/altered dependent review,
+an intervening unverified edit, or an unrelated successor fences continuation.
+A previously sealed omission batch is never repinned to changed bytes: this
+original Thread can proceed after revalidation, but a new fork must satisfy
+its separate transferable source-evidence gate. A declined omission is not a
+sealed no-write batch entry.
+
+The narrow Event-owned Milestone closeout keeps its original two-field grant.
+Only typed native metadata or requirement defects at that owned source may
+enter in-session feedback; protection, scope, source, and infrastructure
+failures propagate to the parent. The common material-progress policy, not
+a fixed specialist retry ceiling or diagnostic-message matching, governs
+those feedback rounds. A native pass does not substitute for the separate
+postcommit independent editorial Review.

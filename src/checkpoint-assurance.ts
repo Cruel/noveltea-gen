@@ -548,7 +548,7 @@ export async function sealIndependentReview(job: JobStartResult, point: Recovery
   result: IndependentReviewResult): Promise<void> {
   const assurance = point.assurance;
   const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
-  const finalized = (await inspectRecoveryCheckpoints(job)).some(saved =>
+  const finalized = (await inspectRecoveryCheckpoints(job, "historical")).some(saved =>
     saved.eligible && saved.commitSha === point.commitSha &&
     saved.proofDigest === point.proofDigest &&
     JSON.stringify(saved.assurance) === JSON.stringify(assurance));

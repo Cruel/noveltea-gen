@@ -62,15 +62,18 @@ export function logicalAssignmentKey(identity: LifecycleIdentity): string {
  * assignment's saved child state. The physical parent task namespace remains
  * the restart anchor; add the exact logical assignment and phase to it. */
 export function assignmentChildConfig(config: RunnableConfig, identity: LifecycleIdentity,
-  phase: "original" | "correction" = "original"): RunnableConfig {
+  phase: "original" | "correction" = "original", continuation?: string): RunnableConfig {
   const parent = config.configurable?.checkpoint_ns;
   if (typeof parent !== "string" || !parent)
     throw Error("Assignment child requires its checkpointed parent task namespace.");
+  if (continuation !== undefined && !/^[a-f0-9]{64}$/.test(continuation))
+    throw Error("Assignment continuation lacks its authenticated support digest.");
   return { ...config, configurable: { ...config.configurable,
     checkpoint_id: undefined,
     // checkpointer:true strips task-id suffixes after colons. Keep the
     // logical key in the namespace name, not in its stripped task suffix.
-    checkpoint_ns: parent + "|assignment-" + logicalAssignmentKey(identity) + "-" + phase,
+    checkpoint_ns: parent + "|assignment-" + logicalAssignmentKey(identity) + "-" + phase +
+      (continuation ? "-support-" + continuation : ""),
   } };
 }
 

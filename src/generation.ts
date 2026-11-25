@@ -778,7 +778,7 @@ async function applyLiveSteeringAtBoundary(job: JobStartResult, request: Generat
   return null;
 }
 
-async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<State, "inventory">>, unit?: InteractiveDomain | "world" | "character", round?: { assignmentKey: string; command: AssignmentRoundCommand; publish?: true }) {
+async function dispatch(s: Pick<State, "request" | "active"> & Partial<Pick<State, "inventory">>, unit?: InteractiveDomain | "world" | "character", round?: { assignmentKey: string; command: AssignmentRoundCommand; publish?: true; retainedChoice?: import("./interactive-work.js").RetainedChoiceContinuation }) {
   const foundationUnit = unit === "world" || unit === "character" ? unit : undefined;
   const interactiveUnit = unit === "choice" || unit === "puzzle" ? unit : undefined;
   const input = s.request;
@@ -1965,9 +1965,9 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
   });
   const authenticateSupport = async () => {
     if (!writerPin?.writerSource || !writerPin.supportRef) return false;
-    const { inspectWriterDependency } = await import("./writer-dependency.js");
+    const { inspectWriterDependency, verifiedWriterSupport } = await import("./writer-dependency.js");
     const original = await inspectWriterDependency(job, writerPin.writerSource);
-    const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === original.reportDigest);
+    const entry = await verifiedWriterSupport(job, writerPin.writerSource, original.reportDigest, writerPin.supportRef, s.inventory!.headSha);
     return original.original.assignmentKey === key && isDeepStrictEqual(suspensionOf(original), writerPin.suspension) &&
       entry?.phase === "verified" && dependencyDigest(entry) === writerPin.supportRef;
   };
@@ -2014,7 +2014,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       const saved = await runEventWorkItem({ ...s.request, milestone, action: "inspect" });
       if (saved.blueprintOwnerFinding) return reconstructWriterDependency(job,
         await (await import("./event-work.js")).inspectEventWriterDependency(job, milestone, saved.blueprintOwnerFinding.sealDigest));
-      const evidence = await inspectEventNoWrite(job, milestone, sourceHead, s.planVersion);
+      const evidence = await inspectEventNoWrite(job, milestone, saved.expectedHead, s.planVersion);
       if (!evidence.dependencyFinding) return null;
       return reconstructWriterDependency(job, await (await import("./event-work.js")).inspectEventWriterDependency(
         job, milestone, evidence.prerequisite.reportDigest));
@@ -2036,7 +2036,9 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       if (["event-prerequisite-reported", "event-blueprint-owner-prerequisite", "composition-prerequisite-reported"].includes(result.status)) {
         const original = await inspectWriterFinding();
         if (original) {
-          if (writerPin || original.original.assignmentKey !== key)
+          if (original.original.assignmentKey !== key ||
+              !!writerPin !== !!original.source.predecessor ||
+              writerPin && original.source.predecessor?.supportRef !== writerPin.supportRef)
             throw Error("Writer prerequisite cannot replace the original suspended assignment.");
           return suspensionOf(original);
         }
@@ -2569,7 +2571,8 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
  * amendments; neither Choice nor Puzzle can certify the other. */
 async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig,
     reviewBoundary: (state: State, correctionSelected?: boolean) => Promise<Partial<State>>,
-    correctionSelected = false, diagnostic?: AssignmentDiagnosticContinuation): Promise<Partial<State>> {
+    correctionSelected = false, diagnostic?: AssignmentDiagnosticContinuation,
+    retainedChoice?: import("./interactive-work.js").RetainedChoiceContinuation): Promise<Partial<State>> {
   if (!s.active?.milestone || !s.inventory ||
       !["interactive", "choice", "puzzle"].includes(s.active.stage))
     throw Error("Interactive child requires its original parent assignment");
@@ -2627,7 +2630,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       }
     }
   }
-  const domains: InteractiveDomain[] = writerDomain === "choice" || writerDomain === "puzzle" ? [writerDomain] : correctionDomain ? [correctionDomain] :
+  const domains: InteractiveDomain[] = retainedChoice ? ["choice"] : writerDomain === "choice" || writerDomain === "puzzle" ? [writerDomain] : correctionDomain ? [correctionDomain] :
     active.stage === "interactive" ? (pending || choiceReviewed ? ["puzzle"] : ["choice", "puzzle"]) : [active.stage as InteractiveDomain];
   for (const domain of domains) {
     const original = await inspectInteractiveUnit(job, milestone, domain);
@@ -2644,7 +2647,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     };
     const key = logicalAssignmentKey(identity);
     const diagnosis = assignmentDiagnosticReentry(s, job, identity, diagnostic);
-    const continuation = correction?.id ?? diagnosis.ref ?? writerPin?.supportRef ?? null;
+    const continuation = correction?.id ?? diagnosis.ref ?? writerPin?.supportRef ?? retainedChoice?.caseId ?? null;
     if (writerPin && logicalAssignmentKey(writerPin.identity) !== key)
       throw Error("Interactive prerequisite reentry changed its logical assignment");
     const suspensionOf = (finding: Awaited<ReturnType<typeof import("./writer-dependency.js").reconstructWriterDependency>>): AssignmentPrerequisiteSuspension => ({
@@ -2661,11 +2664,18 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     };
     const authenticateSupport = async () => {
       if (!writerPin?.writerSource || !writerPin.supportRef) return false;
-      const { inspectWriterDependency } = await import("./writer-dependency.js");
+      const { inspectWriterDependency, verifiedWriterSupport } = await import("./writer-dependency.js");
       const finding = await inspectWriterDependency(job, writerPin.writerSource);
-      const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === finding.reportDigest);
+      const entry = await verifiedWriterSupport(job, writerPin.writerSource, finding.reportDigest, writerPin.supportRef, effectiveHead);
       return finding.original.assignmentKey === key && isDeepStrictEqual(suspensionOf(finding), writerPin.suspension) &&
         entry?.phase === "verified" && dependencyDigest(entry) === writerPin.supportRef;
+    };
+    const authenticateRetainedChoice = async () => {
+      if (!retainedChoice || domain !== "choice" || s.recoveryLifecycle.active?.id !== retainedChoice.caseId ||
+          s.recoveryLifecycle.decision?.action !== "plan-amendment" ||
+          s.recoveryLifecycle.decision.adapter !== "adaptive-work") return false;
+      const original = await (await import("./interactive-work.js")).inspectRetainedChoiceContinuation(job, milestone);
+      return !!original && original.assignmentKey === key && isDeepStrictEqual(original.pin, retainedChoice);
     };
     const ref = "interactive-items/" + milestone.slice(10) + ".json#" + workItem;
     let patch: Partial<State> | undefined;
@@ -2688,6 +2698,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           throw new ProtocolIntegrityBlockedError("Interactive child correction lacks its original assignment key or admitted Review case");
         const saved = await inspectInteractiveUnit(job, milestone, domain);
         if (writerPin && !await authenticateSupport()) throw Error("Interactive continuation has no verified supporting work");
+        if (retainedChoice && !await authenticateRetainedChoice()) throw Error("Retained Choice lacks its original recovery case.");
         if (saved?.unit.beforeHead && saved.unit.beforeHead !== effectiveHead)
           throw Error("Interactive child source changed");
         if (!correction && !saved?.unit.beforeHead && await trustedHead(job) !== effectiveHead)
@@ -2698,12 +2709,14 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         try {
           const stopped = await preflight();
           if (stopped) return stopped;
-          result = await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command) }) as typeof result;
+          result = await dispatch(s, domain, { assignmentKey: key, command: diagnosis.command(command), retainedChoice }) as typeof result;
           if (!result) throw Error("Interactive child returned no original receipt");
           if (result.status === "interactive-conflict-reported") {
             const finding = await inspectFinding();
             if (finding) {
-              if (writerPin || finding.original.assignmentKey !== key)
+              if (finding.original.assignmentKey !== key ||
+                  !!writerPin !== !!finding.source.predecessor ||
+                  writerPin && finding.source.predecessor?.supportRef !== writerPin.supportRef)
                 throw Error("Interactive prerequisite cannot replace its original suspended assignment");
               return suspensionOf(finding);
             }
@@ -2801,7 +2814,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         return outcome("verified", { headSha: await trustedHead(job), reviewRef: "review-checkpoints:" + unit.commitSha });
     };
     const child = createAssignmentLifecycleGraph({
-      authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : writerPin ? await authenticateSupport() : await authenticateCorrection()),
+      authenticateContinuation: async state => state.continuationRef === continuation && (diagnostic ? await diagnosis.authenticate() : writerPin ? await authenticateSupport() : retainedChoice ? await authenticateRetainedChoice() : await authenticateCorrection()),
       reenterWriter: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
       preflight: async state => { assertIdentity(state); return preflight(); },
       invoke: async state => { assertIdentity(state); return invokeRound({ phase: "invoke" }); },
@@ -2830,7 +2843,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
     const finished = await child.invoke({ identity,
       submission: diagnostic ? diagnosis.submission : correction && s.result ? { receiptRef: ref, status: s.result.status, headSha: s.result.headSha } : null,
       submissionKey: correction || diagnostic ? key : null, outcome: null, continuationRef: continuation, suspension: writerPin?.suspension ?? null },
-      { ...assignmentChildConfig(config, identity, correction || diagnostic ? "correction" : "original"), durability: "sync" });
+      { ...assignmentChildConfig(config, identity, correction || diagnostic || retainedChoice ? "correction" : "original", retainedChoice && writerPin ? writerPin.supportRef ?? undefined : undefined), durability: "sync" });
     if (!finished.outcome || finished.outcome.assignmentKey !== key)
       throw Error("Interactive child returned no authenticated outcome");
     const settled = finished.outcome;
@@ -2881,7 +2894,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
 
     // Inherited Choice has already crossed its original Review boundary.
     // There is no local checkpoint for the parent to wait on in this fork.
-    if (domain === "choice" && (domains.length === 2 || (diagnostic || writerPin) && active.stage === "interactive") && !settled.reviewRef?.startsWith("recovery-fork:") &&
+    if (domain === "choice" && (domains.length === 2 || (diagnostic || writerPin || retainedChoice) && active.stage === "interactive") && !settled.reviewRef?.startsWith("recovery-fork:") &&
         (await inspectInteractiveUnit(job, milestone, domain))?.unit.phase === "committed")
       return { result: { status: "review-handoff", headSha: settled.headSha }, ...(writerPin ? { focusedPrerequisite: null } : {}) };
     if (domain === domains.at(-1)) {
@@ -2962,6 +2975,51 @@ async function authorBoundary(job: JobStartResult, s: State): Promise<Partial<St
  * read-only; the rejected original writer gets only a bounded repair lease.
  * Preserve s.result across pauses, otherwise LangGraph could replay the
  * already-committed specialist on resume. */
+/** Run the same checkpointed owner child after the assessor has retained
+ * the original Choice obligation. This is not a new scheduling lane. */
+/** Authenticate and advance the same suspended writer in either the ordinary
+ * parent dependency node or an already admitted recovery case. */
+export async function advanceSuspendedWriter(s: CoreState, config: RunnableConfig) {
+  const job = await openJob(s);
+  const pin = s.focusedPrerequisite;
+  if (!pin?.writerSource || !s.active) throw Error("Writer prerequisite lacks its suspended assignment.");
+  const source = pin.writerSource!;
+  const { inspectWriterDependency } = await import("./writer-dependency.js");
+  const original = await inspectWriterDependency(job, source);
+  const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active!;
+  if ((s.active?.stage !== source.stage && !(s.active?.stage === "interactive" && ["choice", "puzzle"].includes(source.stage))) || s.active?.milestone !== source.milestoneId || !s.inventory ||
+      pin.supportRef || pin.identity.assignmentId !== source.workItemId ||
+      pin.identity.graphThreadId !== config.configurable?.thread_id ||
+      pin.identity.jobId !== job.jobId || pin.identity.jobThreadId !== job.threadId ||
+      pin.identity.planVersion !== s.planVersion || pin.identity.turnDigest !== s.request.turnPlanDigest ||
+      pin.identity.scopeDigest !== dependencyDigest({ scope, ...(["choice", "puzzle"].includes(source.stage) ? { domain: source.stage } : {}), task: s.request.task, contract: s.request.contract }) ||
+      logicalAssignmentKey(pin.identity) !== original.original.assignmentKey ||
+      pin.suspension.assignmentKey !== original.original.assignmentKey ||
+      pin.suspension.pendingPhase !== "writer" || pin.suspension.evidenceRef !== original.reportDigest ||
+      pin.suspension.scopeRef !== original.reportDigest || pin.suspension.suspensionRef !== dependencyDigest(source) ||
+      pin.suspension.owner !== original.report.likelySpecialist)
+    throw Error("Writer dependency amendment lost its checkpointed original suspension.");
+  await (await import("./writer-dependency.js")).assertWriterAssignmentRoot(job, original, pin.identity.sourceHeadSha);
+  const { advanceWriterDependency } = await import("./dependency-work.js");
+  const resolved = await advanceWriterDependency({ ...s.request, source, inventory: s.inventory }, config, s.recoveryLifecycle.active?.id);
+  return { result: null, focusedPrerequisite: { ...pin, supportRef: resolved.supportRef },
+    inventory: { ...s.inventory, headSha: resolved.head },
+    dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], resolved.reportDigest) };
+}
+
+export async function runRetainedInteractiveChoice(state: CoreState, config: RunnableConfig,
+    pin: import("./interactive-work.js").RetainedChoiceContinuation) {
+  const s = { ...state, ...projectRecovery(state) } as State;
+  const item = s.inventory?.items.find(item => item.id === s.recoveryLifecycle.active?.origin.assignmentId);
+  if (!item || item.stage !== "interactive" || item.status !== "blocked" || s.active || s.result)
+    throw Error("Retained Choice lost the original blocked parent assignment.");
+  const active = { ...item, status: "pending" as const, blockingReason: undefined };
+  if (s.focusedPrerequisite?.writerSource && !s.focusedPrerequisite.supportRef)
+    return { ...await advanceSuspendedWriter({ ...s, active }, config), status: "running" as const };
+  return runInteractiveAssignmentChildren({ ...s, active },
+    config, independentAssignmentBoundary, false, undefined, pin);
+}
+
 async function independentAssignmentBoundary(s: State, correctionSelected = false): Promise<Partial<State>> {
   if (!s.result || !s.active ||
       s.result.status !== "review-handoff" &&
@@ -4677,29 +4735,7 @@ export function createGenerationGraph(
           return { reviewPrerequisite: { ...pin, supportRef: supported.ref } };
         }
         if (s.focusedPrerequisite?.writerSource) {
-          const pin = s.focusedPrerequisite;
-          const source = pin.writerSource!;
-          const { inspectWriterDependency } = await import("./writer-dependency.js");
-          const original = await inspectWriterDependency(job, source);
-          const { status: _status, verifiedSha: _sha, blockingReason: _reason, ...scope } = s.active!;
-          if ((s.active?.stage !== source.stage && !(s.active?.stage === "interactive" && ["choice", "puzzle"].includes(source.stage))) || s.active?.milestone !== source.milestoneId || !s.inventory ||
-              pin.supportRef || pin.identity.assignmentId !== source.workItemId ||
-              pin.identity.graphThreadId !== config.configurable?.thread_id ||
-              pin.identity.jobId !== job.jobId || pin.identity.jobThreadId !== job.threadId ||
-              pin.identity.planVersion !== s.planVersion || pin.identity.turnDigest !== s.request.turnPlanDigest ||
-              pin.identity.sourceHeadSha !== original.report.sourceSha ||
-              pin.identity.scopeDigest !== dependencyDigest({ scope, ...(["choice", "puzzle"].includes(source.stage) ? { domain: source.stage } : {}), task: s.request.task, contract: s.request.contract }) ||
-              logicalAssignmentKey(pin.identity) !== original.original.assignmentKey ||
-              pin.suspension.assignmentKey !== original.original.assignmentKey ||
-              pin.suspension.pendingPhase !== "writer" || pin.suspension.evidenceRef !== original.reportDigest ||
-              pin.suspension.scopeRef !== original.reportDigest || pin.suspension.suspensionRef !== dependencyDigest(source) ||
-              pin.suspension.owner !== original.report.likelySpecialist)
-            throw Error("Writer dependency amendment lost its checkpointed original suspension.");
-          const { advanceWriterDependency } = await import("./dependency-work.js");
-          const resolved = await advanceWriterDependency({ ...s.request, source, inventory: s.inventory }, config);
-          return { result: null, focusedPrerequisite: { ...pin, supportRef: resolved.supportRef },
-            inventory: { ...s.inventory, headSha: resolved.head },
-            dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], resolved.reportDigest) };
+          return await advanceSuspendedWriter(s, config);
         }
         if (s.active?.stage !== "focus" || !s.active.milestone)
           throw Error("Dependency amendment is not bound to a focused assignment.");

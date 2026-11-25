@@ -859,7 +859,8 @@ export async function inspectEventWriterDependency(job: JobStartResult, mileston
     return { stage: "event", origin: "blueprint", milestoneId: milestone, workItemId: receipt.workItemId,
       planVersion: receipt.planVersion, sealDigest, assignmentKey: receipt.assignmentKey,
       head: receipt.expectedHead, sourcePaths: receipt.assignment.sourcePaths,
-      obligations: receipt.assignment.dependencyObligations, finding };
+      obligations: receipt.assignment.dependencyObligations, finding,
+      predecessor: (await import("./writer-dependency.js")).writerPredecessor(receipt.writerContinuation) };
   }
   const seal = await authenticateSettledEventNoWrite(job, receipt, historical);
   if (receipt.milestoneId !== milestone || seal.reportDigest !== sealDigest ||
@@ -870,7 +871,8 @@ export async function inspectEventWriterDependency(job: JobStartResult, mileston
   return { stage: "event", milestoneId: milestone, workItemId: receipt.workItemId,
     planVersion: receipt.planVersion, sealDigest, assignmentKey: receipt.assignmentKey,
     head: receipt.expectedHead, sourcePaths: receipt.assignment.sourcePaths,
-    obligations: receipt.assignment.dependencyObligations, finding: receipt.dependencyFinding };
+    obligations: receipt.assignment.dependencyObligations, finding: receipt.dependencyFinding,
+    predecessor: (await import("./writer-dependency.js")).writerPredecessor(receipt.writerContinuation) };
 }
 
 export async function archiveEventWriterDependency(job: JobStartResult, milestone: string, sealDigest: string) {
@@ -908,7 +910,7 @@ export async function rebindEventAfterWriterDependency(job: JobStartResult,
   const current = JSON.parse(await readFile(file, "utf8")) as EventReceipt;
   const binding = { reportDigest, supportRef, originalHead: original.head,
     ...(historical.prerequisite ? { sessionSha256: historical.prerequisite.sessionSha256 } : {}) };
-  if (current.writerContinuation) {
+  if (current.writerContinuation?.reportDigest === reportDigest) {
     if (JSON.stringify(current.writerContinuation) !== JSON.stringify(binding) ||
         current.assignmentKey !== original.assignmentKey || !original.origin && (current.sessionFile !== historical.sessionFile ||
         current.sessionId !== historical.sessionId))
@@ -1176,7 +1178,7 @@ export async function runEventWorkItem(input: EventOptions) {
           undefined, input.round?.assignmentKey ?? receipt.assignmentKey, input.turnPlanDigest, input.blueprintAssessment);
         receipt.blueprintPin = local.pin;
         if (local.blueprint.upstreamCorrection) {
-          if (!receipt.assignmentKey || !planningAssign.dependencyObligations || receipt.writerContinuation)
+          if (!receipt.assignmentKey || !planningAssign.dependencyObligations || receipt.sessionId)
             throw Error("Blueprint owner finding has no original authority or still contradicts corrected canon.");
           receipt.assignment = planningAssign;
           const finding = local.blueprint.upstreamCorrection;

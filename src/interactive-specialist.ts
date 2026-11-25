@@ -172,7 +172,7 @@ export function interactiveSpecialistPrompt(
       : "Report downstream prose or other-owner dependencies; do not treat read access or " +
         "review suggestions as write approval.",
     requiredOutput:
-      "Return exactly ONE unfenced JSON object with ONLY three arrays, in this exact order: " +
+      "Return exactly ONE unfenced JSON object with three required arrays, in this exact order (and only the explicitly authorized optional finding below): " +
       "modifiedRecords, architecturalConflicts, laterObligations. " +
       (optionalNoWrite
         ? "For a genuine optional no-write use this exact SHAPE, substituting source-specific findings: " +
@@ -203,7 +203,7 @@ export async function authorInteractive(
   onSession: (file: string, id: string) => Promise<void>,
   verifyDraft: (evidence: InteractiveEvidence) => Promise<(string | AssignmentDefect)[]>,
   original: { sourceDigest: string; sessionFile?: string; sessionId?: string;
-    continuation?: import("./writer-dependency.js").WriterContinuation;
+    continuation?: import("./writer-dependency.js").WriterContinuation | import("./interactive-work.js").RetainedChoiceContinuation;
     authorize: () => Promise<void>; effect: () => Promise<string | null> },
   round: AssignmentRoundCommand,
 ): Promise<InteractiveEvidence | { round: AssignmentRoundResult }> {
@@ -282,7 +282,12 @@ export async function authorInteractive(
       session, directory: interactiveInvocationDirectory(job, assignment.workItemId, domain, session.sessionId, original.continuation ? original.sourceDigest : undefined),
       initialTranscriptSha256: original.continuation?.sessionSha256,
       sourceDigest: original.sourceDigest, sessionRoots: [dir],
-      initialPrompt: context.contextNote + (original.continuation ? "\nAUTHENTICATED VERIFIED PREREQUISITE " + original.continuation.reportDigest + ": Continue the original Interactive unit after rereading the verified current sources.\n" : "") + interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools)),
+      initialPrompt: context.contextNote + (original.continuation ?
+        "decline" in original.continuation
+          ? "\nAUTHENTICATED RETAINED INTERACTION " + original.continuation.reportDigest +
+            ": Omission was declined. Correct the original settled no-write result within the original approved Choice authority; preserve all author requirements and scope. Reread the current approved Blueprint and canonical sources. Report any actual prerequisite through the typed dependency finding, never invent permission or waive the obligation.\n"
+          : "\nAUTHENTICATED VERIFIED PREREQUISITE " + original.continuation.reportDigest + ": Continue the original Interactive unit after rereading the verified current sources.\n"
+        : "") + interactiveSpecialistPrompt(snapshot, domain, assignment, Boolean(sandboxTools)),
       authorize: original.authorize, effect: original.effect,
       beforeTurn: async () => {
         const control = await readJobControl(job);

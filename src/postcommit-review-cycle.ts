@@ -210,7 +210,7 @@ export async function openPostcommitReviewCycle(
       const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
       const { inspectRejectedRepair } = await import("./rejected-review-repair.js");
       const source = item.priorNegative.sourceCommitSha;
-      const previous = (await inspectRecoveryCheckpoints(job)).find(
+      const previous = (await inspectRecoveryCheckpoints(job, "historical")).find(
         (p) => p.eligible && p.commitSha === source && p.assurance,
       );
       const oldDigest = previous?.assurance?.assignmentDigest;
@@ -295,7 +295,7 @@ export async function bindPostcommitReviewCycle(
   let predecessor: PostcommitReviewCycle["predecessor"];
   if (item.priorNegative) {
     const { inspectRecoveryCheckpoints } = await import("./recovery-checkpoints.js");
-    const oldPoint = (await inspectRecoveryCheckpoints(job)).find(
+    const oldPoint = (await inspectRecoveryCheckpoints(job, "historical")).find(
       (point) => point.eligible && point.commitSha === item.priorNegative!.sourceCommitSha,
     );
     const oldDigest = oldPoint?.assurance?.assignmentDigest;

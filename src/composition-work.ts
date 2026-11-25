@@ -145,7 +145,8 @@ export async function inspectCompositionWriterDependency(job: JobStartResult, mi
   if (!historical && (await trustedHead(job) !== s.beforeHead || changes(job).length)) throw Error("Composition prerequisite source is not clean.");
   return { stage: "composition", milestoneId: milestone, workItemId: s.workItemId, planVersion: s.planVersion, sealDigest,
     assignmentKey: s.assignmentKey, head: s.beforeHead, sourcePaths: s.invocationAssignment.sourcePaths,
-    obligations: s.invocationAssignment.dependencyObligations, finding: s.dependencyFinding };
+    obligations: s.invocationAssignment.dependencyObligations, finding: s.dependencyFinding,
+    predecessor: (await import("./writer-dependency.js")).writerPredecessor(s.writerContinuation) };
 }
 export async function archiveCompositionWriterDependency(job: JobStartResult, milestone: string, sealDigest: string) {
   const original = await inspectCompositionWriterDependency(job, milestone, sealDigest);
@@ -169,7 +170,7 @@ export async function rebindCompositionAfterWriterDependency(job: JobStartResult
   const file = join(job.stateDir, "composition-items", source.milestoneId.slice(10) + ".json");
   const current = JSON.parse(await readFile(file, "utf8")) as Receipt;
   const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.writerNegative!.sessionSha256 };
-  if (current.writerContinuation) {
+  if (current.writerContinuation?.reportDigest === reportDigest) {
     if (!isDeepStrictEqual(current.writerContinuation, binding)) throw Error("Composition continuation changed.");
     return;
   }

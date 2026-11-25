@@ -268,7 +268,7 @@ export function authorizeWriterDependency(input: {
   if (plan.kind !== "full-story" || plan.objective?.breadth !== "whole-story" ||
       !origin || !owner || !target || !anchor || !reached.has(source.targetId) ||
       target.metadata.type !== source.targetId.split(".")[0] ||
-      !owner.authority.recordTypes.includes(target.metadata.type) ||
+      !plan.assignments.some(a => a.authority.recordTypes.includes(target.metadata.type)) ||
       target.metadata.status === "superseded" || cited.some(r => r.metadata.status === "superseded") ||
       cited.length !== report.sources.length ||
       cited.some(r => !report.affectedIds.includes(r.metadata.id)) ||

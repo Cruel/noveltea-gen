@@ -20,6 +20,7 @@ export interface WriterDependencySource {
   targetId: string;
   targetPath: string;
   producer: OtherOwnerCheckpoint;
+  predecessor?: Omit<WriterContinuation, "sessionSha256">;
 }
 
 export interface OriginalWriterDependency {
@@ -34,6 +35,7 @@ export interface OriginalWriterDependency {
   sourcePaths: string[];
   obligations: string[];
   finding: WriterDependencyFinding;
+  predecessor?: Omit<WriterContinuation, "sessionSha256">;
 }
 
 /** Canonical record identity is read from the historical native-validated
@@ -79,14 +81,21 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
     point.workItem !== original.workItemId && !point.workItem.startsWith("repair-") && !point.workItem.startsWith("dependency:")))
     throw Error("Writer prerequisite is not an independently verified earlier owner.");
   const priorOwner = point?.assurance && turn.assignments.find(a => a.id === point.assurance!.assignmentId);
-  if (!point?.assurance || !priorOwner || !priorOwner.authority.recordTypes.includes(checkpointRecordType(targetPath) ?? ""))
+  // A verified historical checkpoint already authenticates the effective
+  // cross-domain grant (e.g. Choice legitimately updating an Event).
+  // The producer is not necessarily the canonical correction owner.
+  const recordType = checkpointRecordType(targetPath);
+  if (!point?.assurance || !priorOwner || !recordType ||
+      !point.assurance.changedRecordTypes.includes(recordType) ||
+      !turn.assignments.some(a => a.authority.recordTypes.includes(recordType)))
     throw Error("Writer prerequisite has no independently verified earlier owner checkpoint.");
   const producer: OtherOwnerCheckpoint = { assignmentId: priorOwner.id, workItem: point.workItem,
     commitSha: last, assuranceDigest: dependencyDigest(point.assurance) };
   const source: WriterDependencySource = { stage: original.stage, milestoneId: original.milestoneId,
     workItemId: original.workItemId, planVersion: original.planVersion, sealDigest: original.sealDigest,
     ...(original.origin ? { origin: original.origin } : {}),
-    targetId: f.targetId, targetPath, producer };
+    targetId: f.targetId, targetPath, producer,
+    ...(original.predecessor ? { predecessor: original.predecessor } : {}) };
   const report: DependencyReport = parseDependencyReport({ sourceSha: original.head, turnDigest: turn.digest,
     assignmentId: origin, obligation, missing: f.missing, affectedIds: f.affectedIds,
     sources, likelySpecialist: f.likelySpecialist, authorDecisionRequired: f.authorDecisionRequired });
@@ -106,11 +115,45 @@ export async function inspectWriterDependency(job: JobStartResult, source: Write
   return rebuilt;
 }
 
+/** Source of the latest suspension, rather than a replacement logical identity. */
+export function writerPredecessor(pin?: Omit<WriterContinuation, "sessionSha256">) {
+  return pin ? { reportDigest: pin.reportDigest, supportRef: pin.supportRef, originalHead: pin.originalHead } : undefined;
+}
+
+/** Verify the original logical source through the already admitted dependency
+ * chain, with each subsequent negative source at its verified predecessor. */
+export async function assertWriterAssignmentRoot(job: JobStartResult,
+    original: Awaited<ReturnType<typeof inspectWriterDependency>>, rootHead: string) {
+  let current = original;
+  const plan = await (await import("./dependency-state.js")).inspectDependencyPlan(job);
+  const seen = new Set<string>();
+  while (current.source.predecessor) {
+    const predecessor = current.source.predecessor;
+    if (seen.has(predecessor.reportDigest)) throw Error("Writer prerequisite has cyclic continuation evidence.");
+    seen.add(predecessor.reportDigest);
+    const previous = plan?.entries.find(e => e.reportDigest === predecessor.reportDigest);
+    if (!previous?.writerSource || previous.reportDigest === current.reportDigest ||
+        previous.report.sourceSha !== predecessor.originalHead ||
+        previous.phase !== "verified" || dependencyDigest(previous) !== predecessor.supportRef ||
+        previous.writerSource.stage !== current.source.stage ||
+        previous.writerSource.workItemId !== current.source.workItemId ||
+        previous.writerSource.milestoneId !== current.source.milestoneId ||
+        previous.writerSource.planVersion !== current.source.planVersion)
+      throw Error("Writer prerequisite lost its verified predecessor.");
+    await verifiedWriterSupport(job, previous.writerSource, previous.reportDigest, predecessor.supportRef, current.original.head);
+    const earlier = await inspectWriterDependency(job, previous.writerSource);
+    if (earlier.original.assignmentKey !== original.original.assignmentKey)
+      throw Error("Sequential prerequisite would replace the original assignment.");
+    current = earlier;
+  }
+  if (current.original.head !== rootHead) throw Error("Writer prerequisite is not rooted at the original logical source.");
+}
+
 export interface WriterContinuation {
   reportDigest: string; supportRef: string; originalHead: string; sessionSha256: string;
 }
 export async function verifiedWriterSupport(job: JobStartResult, source: WriterDependencySource,
-    reportDigest: string, supportRef: string) {
+    reportDigest: string, supportRef: string, expectedContinuationHead?: string) {
   const { inspectDependencyPlan } = await import("./dependency-state.js");
   const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   if (!entry?.writerSource || dependencyDigest(entry.writerSource) !== dependencyDigest(source) ||
@@ -119,7 +162,8 @@ export async function verifiedWriterSupport(job: JobStartResult, source: WriterD
     throw Error("Writer continuation lacks independently verified original supporting work.");
   const { assertCompletedOtherOwnerRevalidation } = await import("./selective-revalidation-work.js");
   await assertCompletedOtherOwnerRevalidation(job, { baseSha: entry.report.sourceSha,
-    successorSha: entry.commitSha, turnDigest: entry.report.turnDigest, path: source.targetPath });
+    successorSha: entry.commitSha, turnDigest: entry.report.turnDigest, path: source.targetPath, expectedContinuationHead,
+    correctionReviewDigest: dependencyDigest(entry.review) });
   return entry;
 }
 export async function authenticateWriterContinuation(job: JobStartResult, pin: WriterContinuation,

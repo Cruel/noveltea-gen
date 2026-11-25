@@ -144,7 +144,7 @@ export async function prepareSemanticReview(job: JobStartResult,
   requested: RecoveryCheckpoint[], challenge?: ReviewDisputeClaim): Promise<SemanticReviewPacket> {
   if (!requested.length || requested.length > MAX_ITEMS)
     throw new Error("Semantic review group must be bounded to 1–8 checkpoints.");
-  const saved = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.assurance);
+  const saved = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible && p.assurance);
   const plan = await readReviewTurnEvidence(job);
   if (!plan) throw new Error("Semantic reviewer requires the pinned original Turn.");
   const seen = new Set<string>();

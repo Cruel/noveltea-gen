@@ -926,6 +926,88 @@ export async function pausedBlueprintDependencyDecision(job: JobStartResult, s: 
     await inspectBlueprintSupportProgress(job, readiness, graphThreadId) ? decision : null;
 }
 
+async function executeRetainedChoice(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle,
+    pin: import("./interactive-work.js").RetainedChoiceContinuation,
+    config?: import("@langchain/core/runnables").RunnableConfig): Promise<Partial<State>> {
+  const c = lifecycle.active!, decision = lifecycle.decision!;
+  const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery");
+  const op = source?.input as GenerationOperationRecovery | undefined;
+  const negative = op?.evidence.interactiveNoWrite;
+  if (!config || !s.inventory || !source || !negative || negative.domain !== "choice" ||
+      decision.action !== "plan-amendment" || decision.adapter !== "adaptive-work" ||
+      decision.scopeRef.digest !== pin.reportDigest || c.origin.assignmentId !== "interactive:" + negative.milestoneId ||
+      pin.caseId !== c.id || pin.reportDigest !== negative.reportDigest ||
+      pin.originalHead !== c.origin.sourceHeadSha || pin.turnDigest !== c.origin.turnDigest ||
+      pin.planVersion !== c.origin.planVersion || pin.adaptiveVersion !== s.adaptiveVersion ||
+      config.configurable?.thread_id !== c.origin.graphThreadId)
+    throw Error("Retained Choice correction lost its original authenticated decision.");
+  const { inspectRetainedChoiceCompletion, inspectRetainedChoiceContinuation } = await import("./interactive-work.js");
+  const retained = await inspectRetainedChoiceContinuation(job, negative.milestoneId);
+  if (!retained || !isDeepStrictEqual(retained.pin, pin))
+    throw Error("Retained Choice original receipt changed.");
+  const expected = { caseId: c.id, reportDigest: pin.reportDigest, turnDigest: pin.turnDigest,
+    sourceHead: c.origin.sourceHeadSha, planVersion: c.origin.planVersion };
+  const control = await readJobControl(job);
+  if (control !== "running") return { status: control, reason: "Author control precedes retained Choice correction.",
+    recoveryLifecycle: lifecycle };
+  let completed = await inspectRetainedChoiceCompletion(job, negative.milestoneId, expected);
+  if (!completed) {
+    let result: Partial<State>;
+    try { result = await (await import("./generation.js")).runRetainedInteractiveChoice(s, config, pin); }
+    catch (error) {
+      if (error instanceof PiModelUnavailableError || error instanceof Error && error.name === "PiBudgetPause")
+        return { status: "paused", reason: error.message, recoveryLifecycle: lifecycle };
+      throw error;
+    }
+    if (result.status === "paused" || result.status === "cancelled")
+      return { ...result, recoveryLifecycle: lifecycle };
+    if (result.focusedPrerequisite?.writerSource) {
+      // Persist the typed suspension/support handoff before resuming the same
+      // child. The original recovery Case stays active throughout.
+      return { focusedPrerequisite: result.focusedPrerequisite, inventory: result.inventory ?? s.inventory,
+        dependencyHistory: result.dependencyHistory ?? s.dependencyHistory,
+        status: "running", reason: null, recoveryLifecycle: { ...lifecycle, assessorPending: true } };
+    }
+    completed = await inspectRetainedChoiceCompletion(job, negative.milestoneId, expected);
+    if (!completed)
+      return { status: "blocked", reason: result.reason ?? "Retained Choice correction has not settled its native and independent Review successor.",
+        recoveryLifecycle: lifecycle };
+  }
+  const assurance = { store: "specialist-receipt" as const, ref: completed.ref, digest: completed.digest };
+  const { inspectActiveRecoveryResolution } = await import("./generation-recovery-resolution.js");
+  if (!await inspectActiveRecoveryResolution(job, c, source, {
+      case: c, correction: assurance, correctedHeadSha: completed.head, disposition: "active-verified",
+    }, { request: s.request, inventory: s.inventory }))
+    throw Error("Retained Choice correction did not authenticate its original parent handoff.");
+  // Restore the exact verified support pins even if the parent checkpoint
+  // predates publication of the retained writer's supporting work.
+  let dependencyHistory = s.dependencyHistory ?? [];
+  const verified = await inspectRetainedChoiceContinuation(job, negative.milestoneId);
+  const continuation = verified?.saved.unit.writerContinuation;
+  if (continuation) {
+    const { inspectDependencyPlan, pinVerifiedDependencyHistory } = await import("./dependency-state.js");
+    const plan = await inspectDependencyPlan(job);
+    let entry = plan?.entries.find(e => e.reportDigest === continuation.reportDigest);
+    const roots: string[] = [];
+    while (entry?.writerSource) {
+      roots.unshift(entry.reportDigest);
+      const predecessor = entry.writerSource.predecessor;
+      if (!predecessor) break;
+      entry = plan?.entries.find(e => e.reportDigest === predecessor.reportDigest);
+    }
+    for (const root of roots) dependencyHistory = await pinVerifiedDependencyHistory(job, dependencyHistory, root);
+  }
+  const failures = { ...s.failures };
+  delete failures[c.origin.assignmentId!];
+  const item = s.inventory.items.find(item => item.id === c.origin.assignmentId)!;
+  const active = { ...item, status: "pending" as const, blockingReason: undefined };
+  return { recoveryLifecycle: finishVerifiedRecovery({ ...lifecycle, assessorPending: false },
+    { status: "verified", caseId: c.id, sourceHeadSha: completed.head, assurance }, true),
+    active, result: { status: "review-handoff", headSha: completed.head },
+    inventory: { ...s.inventory, items: s.inventory.items.map(item => item.id === active.id ? active : item) },
+    failures, dependencyHistory, focusedPrerequisite: null, escalation: null, status: "running", reason: null };
+}
+
 export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle, config?: import("@langchain/core/runnables").RunnableConfig): Promise<Partial<State> | null> {
   const c = lifecycle.active!, d = lifecycle.decision!;
   if (!lifecycle.assessorPending || !d || !c || !s.recoverySources.some(x => x.caseId === c.id && x.channel === "operationRecovery") ||
@@ -1056,6 +1138,14 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           ref: readiness.reportDigest, digest: readiness.reportDigest } }
       : { ...base(c), action: "pause", reason };
   try {
+    if (d.action === "plan-amendment" && d.adapter === "adaptive-work") {
+      const original = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined;
+      const negative = original?.evidence.interactiveNoWrite;
+      if (negative?.domain === "choice") {
+        const retained = await (await import("./interactive-work.js")).inspectRetainedChoiceContinuation(job, negative.milestoneId);
+        if (retained) return await executeRetainedChoice(job, s, lifecycle, retained.pin, config);
+      }
+    }
     const control = await readJobControl(job);
     if (control !== "running") return stop(pauseDecision(control === "paused" ? "author-pause" : "cancelled"), "Author control precedes corrective work.", control);
     if (d.action === "plan-amendment" && d.adapter === "dependency-work" && readiness) {
@@ -1215,26 +1305,14 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
             inventory, failures: priorFailures, completedStages, adaptiveVersion: result.version,
             active: null, result: null, escalation: null, status: "running", reason: null };
         }
-        if (result.outcome === "declined") return {
-          recoveryLifecycle: { ...lifecycle, assessorPending: false }, status: "blocked",
-          reason: (result.decline === "protected-author" ?
-            "The original author explicitly requires the targeted Choice/Puzzle. " :
-            result.decline === "story-wide-obligation" ?
-            "The original Story-wide Interaction profile still requires consequential gameplay. " :
-            "Independent omission Review retained this Milestone's required Choice/Puzzle. ") +
-            "The original no-write specialist and author commitments are preserved; " +
-            "a separate source-backed owner correction is required.",
-          escalation: { kind: "dependency-replan",
-            requiresTrustedApproval: result.decline === "protected-author",
-            sources: [{ source: source.milestoneId,
-              message: result.decline === "independent-review" ?
-                "Source-bound independent Review retained the mandatory local Interactive obligation" :
-                "Authenticated author/Story-wide scope retains the missing Interactive obligation",
-              repair: "interactive" }],
-            action: "Have the Interactive plan owner correct the cited missing Choice/Puzzle " +
-              "within the authenticated original author objective, or obtain a separately " +
-              "reviewed prerequisite amendment before dispatch. Do not replay the original " +
-              "negative Choice session or substitute an invented no-write approval." } };
+        if (result.outcome === "declined" && result.decline) {
+          const pin = await withStoryJobLock(job, "retained-interactive-choice", () =>
+            import("./interactive-work.js").then(module => module.prepareRetainedChoiceContinuation(job, source.milestoneId, {
+              caseId: c.id, reportDigest: source.reportDigest, turnDigest: c.origin.turnDigest,
+              adaptiveVersion: s.adaptiveVersion!, decline: result.decline!,
+            })));
+          return await executeRetainedChoice(job, s, lifecycle, pin, config);
+        }
       }
       throw Error("Selected omission adapter no longer matches the original producer or its verified disposition.");
     }

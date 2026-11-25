@@ -3,6 +3,9 @@
  * The independent narrative reviewer, not the author, judges semantic
  * fulfillment after native validation. No unchecked writer replay on resume.
  */
+import { createHash } from "node:crypto";
+import { assignmentDraftEffect, materialProgress, AssignmentNonconvergenceError, type AssignmentDefect } from "./assignment-metadata-recovery.js";
+import { reviewRoundProgress } from "./review-cycle.js";
 import { join, sep } from "node:path";
 import { existsSync } from "node:fs";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -33,7 +36,7 @@ export async function authorMilestoneCloseout(
   job: JobStartResult, snapshot: SkillSnapshot, proposal: CloseoutProposal,
   sourcePaths: string[], provider: string, model: string,
   onSession: (file: string) => Promise<void>,
-  audit: () => Promise<string[]>,
+  audit: () => Promise<AssignmentDefect[]>,
   retry?: { sourceSession: string; feedback: string },
 ): Promise<CloseoutSpecialistResponse> {
   if (await openSkillSnapshot(snapshot.id) !== snapshot.path)
@@ -112,7 +115,10 @@ export async function authorMilestoneCloseout(
         "attempt. Correct only the previously allowed Milestone fields. " +
         "Never soften or erase the negative finding. REVIEW EVIDENCE:\n" +
         retry.feedback.slice(0, 2400) : "");
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const priorDigests: string[] = [];
+    let previous: AssignmentDefect[] | undefined;
+    let stalled = 0;
+    for (let attempt = 0; ; attempt++) {
       await context.beforeTurn(sessionFile);
       await promptStorySpecialist(session, prompt);
       const last = [...session.messages].reverse().find(m => m.role === "assistant");
@@ -155,14 +161,18 @@ export async function authorMilestoneCloseout(
         await context.completed(sessionFile, session.sessionId);
         return { sessionFile, evidence: answer.evidence as string[] };
       }
-      if (attempt === 2) throw Error("Milestone closeout exhausted its bounded in-session corrections: " +
-        diagnostics.join("; "));
+      const effect = await assignmentDraftEffect(job, proposal.sourceSha);
+      const draftDigest = createHash("sha256").update(JSON.stringify({ effect, diagnostics })).digest("hex");
+      const progress = reviewRoundProgress({ previousDigests: priorDigests, draftDigest,
+        material: !!previous && materialProgress(previous, diagnostics),
+        regressed: false, stalledBefore: stalled, status: "revise" });
+      if (progress.reassess) throw new AssignmentNonconvergenceError();
+      priorDigests.push(draftDigest); previous = diagnostics; stalled = progress.stalled;
       prompt = "The controller rejected the UNCOMMITTED Milestone edit. Only the same two " +
         "fields of the original selected Milestone may change. Correct only these issues " +
         "within this SAME session, revalidate, and return JSON with source evidence. " +
         "Do not reinterpret another-owner issues as a new grant. EXACT DIAGNOSTICS:\n" +
-        diagnostics.join("\n");
+        JSON.stringify(diagnostics);
     }
-    throw Error("Milestone closeout ended without an audited source edit.");
   } finally { session.dispose(); }
 }

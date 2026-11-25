@@ -475,7 +475,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
 export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "target"> & {
   source: import("./writer-dependency.js").WriterDependencySource;
   inventory: import("./generation-plan.js").GenerationInventory;
-}, config?: RunnableConfig) {
+}, config?: RunnableConfig, caseId?: string) {
   if (input.fixture) throw Error("Writer prerequisite requires original Pi evidence.");
   const job = await startStoryJob({ story: input.story, job: input.job }, false);
   const { inspectWriterDependency } = await import("./writer-dependency.js");
@@ -503,22 +503,43 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
   });
   let entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   if (entry?.phase !== "verified")
-    await runSupportingDependency(job, { ...input, target: source.targetId }, reportDigest, config);
+    await runSupportingDependency(job, { ...input, target: source.targetId }, reportDigest, config, caseId);
   entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
   if (!entry || entry.phase !== "verified" || !entry.commitSha || entry.review?.verdict !== "pass")
     throw Error("Writer prerequisite has no independently verified support.");
   const support = entry;
   await withStoryJobLock(job, "writer-dependency-revalidation", async () => {
     const { executionId } = await import("./checkpoint-assurance.js");
-    const upstream = input.inventory.items.find(i => i.id === executionId(source.producer.workItem) &&
+    const producer = input.inventory.items.find(i => i.id === executionId(source.producer.workItem) &&
       i.status === "verified" && i.verifiedSha);
-    if (!upstream?.verifiedSha) throw Error("Writer prerequisite producer is not a completed original inventory item.");
-    dependencyGit(job, "merge-base", "--is-ancestor", source.producer.commitSha, upstream.verifiedSha);
+    if (!producer?.verifiedSha) throw Error("Writer prerequisite producer is not a completed original inventory item.");
+    dependencyGit(job, "merge-base", "--is-ancestor", source.producer.commitSha, producer.verifiedSha);
+    // A later cross-domain writer may legitimately edit a record created by
+    // an earlier specialist. Its last-writer proof authenticates the source,
+    // but impact must start at the first independently verified realization,
+    // not at the later edit (which could skip intervening consumers).
+    const repoPath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + source.targetPath;
+    const first = dependencyGit(job, "log", "--reverse", "--diff-filter=A", "--format=%H",
+      report.sourceSha, "--", repoPath).split("\n")[0];
+    let upstream = producer;
+    if (first && first !== source.producer.commitSha &&
+        first !== job.baseSha && dependencyGit(job, "merge-base", first, job.baseSha) !== first) {
+      const { inspectHistoricalRecoveryCheckpoint } = await import("./recovery-checkpoints.js");
+      const original = await inspectHistoricalRecoveryCheckpoint(job, first);
+      const item = input.inventory.items.find(i => i.id === executionId(original.workItem) &&
+        i.status === "verified" && i.verifiedSha);
+      if (!item?.verifiedSha || original.assurance?.turnDigest !== report.turnDigest ||
+          !original.assurance.changedPaths.includes(source.targetPath) ||
+          !["passed", "not-required"].includes(original.semanticReview))
+        throw Error("Writer prerequisite lost the earlier verified realization of its source.");
+      dependencyGit(job, "merge-base", "--is-ancestor", first, item.verifiedSha);
+      upstream = item;
+    }
     const { revalidateAfterReviewedCorrection } = await import("./selective-revalidation-work.js");
     await revalidateAfterReviewedCorrection({ job, otherOwnerPath: source.targetPath,
       inventory: { ...input.inventory, headSha: report.sourceSha },
       correction: { version: 1, planVersion: source.planVersion, baseSha: report.sourceSha,
-        successorSha: support.commitSha!, upstreamItemId: upstream.id, predecessorCommitSha: upstream.verifiedSha,
+        successorSha: support.commitSha!, upstreamItemId: upstream.id, predecessorCommitSha: upstream.verifiedSha!,
         turnDigest: report.turnDigest, reviewDigest: dependencyDigest(support.review),
         changedPaths: [source.targetPath], permittedPaths: [source.targetPath] },
       contract: input.contract, task: input.task,
@@ -604,7 +625,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
       });
       const entry = await current();
       const root = entry.supportRootSha!;
-      const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === root);
+      const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible && p.commitSha === root);
       if (!point) throw Error("Support Review lost its checkpoint.");
       if (point.semanticReview === "failed" && await trustedHead(job) === root) {
         const { inspectCheckpointReview } = await import("./checkpoint-assurance.js");

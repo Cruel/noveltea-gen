@@ -12,7 +12,7 @@ import type { GenerationInventory, ExecutionItem } from "./generation-plan.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { inheritedReviewedCheckpoint, readRecoveryFork } from "./recovery-fork-state.js";
 import { inspectCheckpointReview } from "./checkpoint-assurance.js";
-import { readEventOnlyOmission, type EventOnlyPayload } from "./interactive-event-only.js";
+import { readHistoricalEventOnlyOmission, type EventOnlyPayload } from "./interactive-event-only.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { verifyPlanHistory } from "./architecture.js";
 import { isFocusedScope } from "./focused-scope.js";
@@ -127,7 +127,7 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
   if (!turn || turn.digest !== correction.turnDigest ||
       turn.source.verifiedSha !== job.baseSha)
     throw Error("Reviewed upstream correction lost its original Turn authority.");
-  const checkpoints = (await inspectRecoveryCheckpoints(job)).filter(p =>
+  const checkpoints = (await inspectRecoveryCheckpoints(job, "historical")).filter(p =>
     p.eligible && p.assurance?.turnDigest === turn.digest);
   const inheritedProofs = Object.entries(readRecoveryFork(job)?.commits ?? {}).flatMap(([id, entry]) => {
     const inherited = inheritedReviewedCheckpoint(job, id, entry.sha);
@@ -206,7 +206,7 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
           !choice.claimedPaths?.length && !puzzle.claimedPaths?.length &&
           receipt.jobId === job.jobId && receipt.worker === "pi" &&
           receipt.planVersion === item.planVersion) {
-        const proof = await readEventOnlyOmission(job, item.milestone, choice.eventOnly);
+        const proof = await readHistoricalEventOnlyOmission(job, item.milestone, choice.eventOnly);
         if (proof.reviewMode !== "pi" || proof.reviewHead !== choice.beforeHead ||
             proof.reviewHead !== item.verifiedSha || proof.turnDigest !== turn.digest ||
             proof.planVersion !== item.planVersion || proof.planDigest !== receipt.planDigest ||

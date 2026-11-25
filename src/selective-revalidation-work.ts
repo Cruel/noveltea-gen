@@ -224,7 +224,8 @@ export async function assertCompletedSelectiveRevalidation(
  * supporting grant itself is verified by inspectDependencyPlan at the caller.
  */
 export async function assertCompletedOtherOwnerRevalidation(job: JobStartResult, source: {
-  baseSha: string; successorSha: string; turnDigest: string; path: string;
+  baseSha: string; successorSha: string; turnDigest: string; path: string; expectedContinuationHead?: string;
+  historicalChainHead?: string; correctionReviewDigest?: string;
 }) {
   const state = await read(fileOf(job, source.successorSha));
   if (state) assertSelectiveRevalidationPlan(state.proposal);
@@ -233,12 +234,22 @@ export async function assertCompletedOtherOwnerRevalidation(job: JobStartResult,
       state.proposal.sourceSha !== source.baseSha ||
       state.proposal.successorSha !== source.successorSha ||
       state.proposal.turnDigest !== source.turnDigest ||
+      (source.correctionReviewDigest !== undefined &&
+        state.proposal.correctionReviewDigest !== source.correctionReviewDigest) ||
       JSON.stringify(state.proposal.changedPaths) !== JSON.stringify([source.path]) ||
       state.state !== "completed" || state.reviewing || state.correctiveAssignment ||
       await openSkillSnapshot(state.snapshot.id) !== state.snapshot.path ||
-      !state.finalHead)
+      !state.finalHead || source.expectedContinuationHead && state.finalHead !== source.expectedContinuationHead)
     throw Error("Other-owner revalidation lacks a completed source-bound dependent review.");
-  await verifiedNarrativeChain(job, state.finalHead, await trustedHead(job));
+  // The outer successor walker validates later commits; do not recursively
+  // walk its own interval while authenticating this support commit.
+  if (source.historicalChainHead) {
+    const { dependencyGit } = await import("./dependency-state.js");
+    dependencyGit(job, "merge-base", "--is-ancestor", state.finalHead, source.historicalChainHead);
+    await verifiedNarrativeChain(job, source.successorSha, state.finalHead);
+  } else {
+    await verifiedNarrativeChain(job, state.finalHead, source.expectedContinuationHead ?? await trustedHead(job));
+  }
   const heads = await authenticatedCorrectionHeads(job, state);
   const expected = [...state.proposal.affected, ...state.proposal.unknown];
   if (state.results.length !== expected.length ||
@@ -255,6 +266,44 @@ export async function assertCompletedOtherOwnerRevalidation(job: JobStartResult,
       f.status !== "resolved"))
     throw Error("Unresolved downstream correction cannot be carried forward.");
   return state.proposal;
+}
+
+/** Current authority for a historical no-write pair after a reviewed support
+ * correction. The original seal is unchanged; each changed path must match
+ * the exact current-source independent dependent-review evidence. */
+export async function assertRevalidatedEventOnlySource(job: JobStartResult,
+    original: import("./interactive-event-only.js").EventOnlyPayload, sealDigest: string, changed: string[]) {
+  const { inspectDependencyPlan, dependencyGit, dependencyDigest } = await import("./dependency-state.js");
+  const head = await trustedHead(job);
+  const plan = await inspectDependencyPlan(job);
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  for (const path of changed) {
+    const repoPath = prefix + path;
+    // A stale seal cannot authorize an uncommitted draft or a later unrelated
+    // edit, even if some older revalidation passed.
+    if (dependencyGit(job, "diff", "--name-only", head, "--", repoPath))
+      throw Error("Event-only canonical evidence changed after review.");
+    const last = dependencyGit(job, "log", "-1", "--format=%H", head, "--", repoPath);
+    const entry = plan?.entries.find(e => e.writerSource?.targetPath === path &&
+      e.phase === "verified" && e.commitSha === last && e.review?.verdict === "pass");
+    if (!entry?.writerSource || !entry.commitSha || !entry.review)
+      throw Error("Event-only canonical evidence changed after review.");
+    const state = await read(fileOf(job, entry.commitSha));
+    const review = state?.results.find(r => r.itemId === "interactive:" + original.milestoneId &&
+      r.originalCommitSha === original.reviewHead && r.originalReviewDigest === sealDigest &&
+      r.status === "passed");
+    if (!review || !state?.finalHead || state.proposal.turnDigest !== original.turnDigest ||
+        state.proposal.planVersion !== original.planVersion)
+      throw Error("Event-only canonical evidence changed without its independent revalidation.");
+    await assertCompletedOtherOwnerRevalidation(job, {
+      baseSha: entry.report.sourceSha, successorSha: entry.commitSha,
+      turnDigest: original.turnDigest, path, historicalChainHead: head,
+      correctionReviewDigest: dependencyDigest(entry.review),
+    });
+    if (dependencyGit(job, "rev-parse", review.sourceSha + ":" + repoPath) !==
+        dependencyGit(job, "rev-parse", head + ":" + repoPath))
+      throw Error("Event-only source changed after dependent revalidation.");
+  }
 }
 
 export interface RevalidateAfterCorrectionOptions {

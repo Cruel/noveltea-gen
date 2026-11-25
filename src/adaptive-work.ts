@@ -259,7 +259,7 @@ export async function resolveAdaptiveNoWriteSupersession(input: {
   pinnedVersion: number | null;
 }): Promise<{ outcome: "corrected" | "declined"; version?: number;
   sourceSha?: string; proof?: AdaptiveOmissionProof;
-  decline?: "protected-author" | "story-wide-obligation" | "independent-review" }> {
+  decline?: "protected-author" | "story-wide-obligation" | "native-required" | "independent-review" }> {
   const { job, request, plan, inventory, assignmentId } = input;
   if (request.fixture || !request.turnPlanDigest ||
       request.orchestrationPolicy !== "explicit" || plan.contract.scope.kind !== "full-story" ||
@@ -284,14 +284,6 @@ export async function resolveAdaptiveNoWriteSupersession(input: {
   const planning = parseStoryPlanning(direction.metadata.planning);
   const protectedPaths = report.records.filter(r =>
     r.metadata.type === "creative-direction" || (r.metadata.decisions?.length ?? 0) > 0).map(r => r.path);
-  // An authenticated unmet author/Story-wide gameplay requirement is NOT
-  // corrupt recovery evidence. Preserve the original failed writer and route
-  // to its correct owner; no independent omission reviewer may waive it.
-  if (turn.objective.requestedTargets.includes(item.milestone) ||
-      turn.objective.requestedTargets.some(id => id.startsWith("choice-point.") || id.startsWith("puzzle.")))
-    return { outcome: "declined", decline: "protected-author" };
-  if (!preservesWholeStoryInteraction(inventory.items, item, planning))
-    return { outcome: "declined", decline: "story-wide-obligation" };
   const negative = await inspectInteractiveConflict(job, item.milestone, true);
   if (negative.worker !== "pi" || negative.expectedHead !== head)
     throw Error("Original Choice no-write is not a settled, unchanged Pi specialist report.");
@@ -313,6 +305,14 @@ export async function resolveAdaptiveNoWriteSupersession(input: {
   if (rejected.some(a => a.sourceSha !== head) || rejected.length > 1 ||
       state.attempts.some(a => a.phase === "planning"))
     throw Error("C06 cannot replace an unrelated or interrupted original planner response.");
+  // An authenticated unmet author/Story-wide gameplay requirement is NOT
+  // corrupt recovery evidence. Preserve the original failed writer and route
+  // to its correct owner; no independent omission reviewer may waive it.
+  if (turn.objective.requestedTargets.includes(item.milestone) ||
+      turn.objective.requestedTargets.some(id => id.startsWith("choice-point.") || id.startsWith("puzzle.")))
+    return { outcome: "declined", decline: "protected-author" };
+  if (!preservesWholeStoryInteraction(inventory.items, item, planning))
+    return { outcome: "declined", decline: "story-wide-obligation" };
   const reviewed = await runInteractiveWorkItem({
     story: job.storyRoot, job: job.jobId, action: "review-omission",
     milestone: item.milestone, fixture: false, generationObjective: request.task,
@@ -320,8 +320,11 @@ export async function resolveAdaptiveNoWriteSupersession(input: {
     skillsSource: request.skillsSource, validatorSource: request.validatorSource,
     provider: request.provider, model: request.model,
   });
-  if (reviewed.status === "omission-not-justified")
-    return { outcome: "declined", decline: "independent-review" };
+  if (reviewed.status === "omission-not-justified") {
+    if (!("omissionDecline" in reviewed) || !reviewed.omissionDecline)
+      throw Error("Original settled Choice omission has no authenticated decline classification.");
+    return { outcome: "declined", decline: reviewed.omissionDecline };
+  }
   if (reviewed.status !== "interactive-slice-committed" || reviewed.headSha !== head)
     throw Error("C06 received no independently completed, commitless correction.");
   const newValidation = await validateStoryJob(job, request.validatorSource ?? request.skillsSource,

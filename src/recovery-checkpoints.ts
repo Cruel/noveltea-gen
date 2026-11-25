@@ -622,7 +622,8 @@ export async function inspectHistoricalRecoveryCheckpoint(job: JobStartResult,
     semanticReview: review?.status ?? "untracked" };
 }
 
-export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<RecoveryInspection[]> {
+export async function inspectRecoveryCheckpoints(job: JobStartResult,
+  sourceMode: "live" | "historical" = "live"): Promise<RecoveryInspection[]> {
   if (!existsSync(dir(job))) return [];
   const files = (await readdir(dir(job))).filter(name => /^[a-f0-9]{40}\.json$/.test(name)).sort();
   const results: RecoveryInspection[] = [];
@@ -645,7 +646,7 @@ export async function inspectRecoveryCheckpoints(job: JobStartResult): Promise<R
     try {
       if (boundaryError) throw boundaryError;
       const point = await readFinal(job, file.slice(0, 40));
-      await verifyFinal(job, point, head);
+      await verifyFinal(job, point, head, sourceMode);
       const review = point.assurance ? await inspectCheckpointReview(job, point) : null;
       results.push({ ...point, eligible: true, reason: null,
         semanticReview: review?.status ?? "untracked" });
@@ -732,12 +733,14 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   } else await atomic(pending, intent);
   // Deterministic crash-boundary certification. Fixture receipts only; a live
   // Pi worker must never be interrupted by test fault injection.
+  const sourceMode = workItem.startsWith("dependency:") || workItem.startsWith("repair-") ||
+    workItem.startsWith("dependent-repair-") ? "historical" as const : "live" as const;
   if (existsSync(finalizedFile(job, commitSha))) {
     const point = await readFinal(job, commitSha);
-    await verifyFinal(job, point);
+    await verifyFinal(job, point, undefined, sourceMode);
     return point;
   }
-  const previous = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible && p.commitSha !== commitSha &&
+  const previous = (await inspectRecoveryCheckpoints(job, sourceMode)).filter(p => p.eligible && p.commitSha !== commitSha &&
     isAncestor(job, p.commitSha, commitSha));
   const baseline = verifiedBaselineStages(job, plan, workItem);
   const history = [...baseline, ...previous.flatMap(p => p.completedWorkItems)];
@@ -780,7 +783,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   }
   const unique = mergeRecoveryOmissions(
     ...previous.map(point => point.omittedWorkItems ?? []), inherited, localOmissions);
-  const omitted = await verifyOmissions(job, unique, commitSha);
+  const omitted = await verifyOmissions(job, unique, commitSha, sourceMode);
   const remaining = work.order.filter(id => !completed.includes(id) && !omitted.has(id));
   const next = remaining.find(id => (work.dependencies[id] ?? []).every(dep =>
     completed.includes(dep) || omitted.has(dep))) ?? null;
@@ -802,7 +805,7 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   };
   point.assurance = await checkpointAssurance(job, point);
   await atomic(finalizedFile(job, commitSha), point);
-  await verifyFinal(job, point);
+  await verifyFinal(job, point, undefined, sourceMode);
   return point;
 }
 /** Crash repair consults persisted specialist receipts, not a writer or a live graph. */

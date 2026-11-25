@@ -183,7 +183,7 @@ test("#240: a genuine scripted Pi correction starts, edits only its bounded Mile
       f.job, snapshot, f.proposal, [f.path], scriptedModel.provider, scriptedModel.id,
       async file => { originalSession = file; },
       async () => readFileSync(f.target, "utf8") === completed ? [] :
-        ["The original bounded fields have not been correctly amended."],
+        [{ kind: "requirement", path: f.path, code: "closeout-incomplete" }],
     )));
   assert.equal(verified.sessionFile, originalSession);
   assert.deepEqual(verified.evidence, [f.path + ":5"]);
