@@ -1059,3 +1059,18 @@ pnpm exec tsx --test test/generation-recovery-coverage.test.ts test/generation-m
 The Focused and Generation selections each passed 4/4, with zero failures,
 skips or cancellations; the Generation selection includes both earlier
 Blueprint native-diagnosis continuations. The source audit passed 25/25.
+
+The previously unqualified supporting Review-assessment route is now
+independently exercised by the R04 `writer-review-assessment` and
+`review-review-assessment` regressions. Each executes two cosmetic repairs
+with negative independent verdicts, checkpoints the actual supporting
+Review assessment before calling the read-only diagnostic, reopens SQLite,
+executes the same supporting writer's third correction, independently reviews
+the material change, and resumes the original parent. The writer case
+discharges its own support Case; the Review case retains the existing negative
+Review Case and seals the original reassessment. Original session, logical
+assignment, scope and exact commit counts are checked by the parent fixture.
+Both passed without skips or cancellation against production source e9bbc09
+in an isolated archive with only the additional test fixture changed.
+Command: `node --import tsx --test --test-name-pattern='^R04 cross-owner prerequisite .*review-assessment' test/focused-generation.test.ts`.
+Log: `/tmp/nt275-qualification.ibYUWE/assessment.log`.
