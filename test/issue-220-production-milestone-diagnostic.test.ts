@@ -1171,7 +1171,7 @@ A witness at the gate personally saw a named visitor enter today and can be inte
           await readReviewedMilestoneBlueprint(controlJob, outcome.pin, assignment);
           delete receipt.rounds[0].reviewerVerdict;
           writeFileSync(controlFile, JSON.stringify(receipt));
-          await assert.rejects(readReviewedMilestoneBlueprint(controlJob, outcome.pin, assignment), /sealed Pi answers/);
+          await assert.rejects(readReviewedMilestoneBlueprint(controlJob, outcome.pin, assignment), /sealed Pi answers|must account for every prior material finding/);
           writeFileSync(controlFile, raw);
         }
         assert.equal(controlCalls.filter(c => c.prompt.includes("FORMAT CORRECTION")).length, mode === "malformed" ? 2 : 0);
