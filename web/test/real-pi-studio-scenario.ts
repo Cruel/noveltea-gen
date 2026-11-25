@@ -188,16 +188,24 @@ test(fullStory
       .split('\n').filter(path => path.endsWith('.md')).length, 0,
       'live Foundation baseline must not contain unvalidated Story Markdown')
     const jobId = randomUUID(), storyId = randomUUID(), repositoryId = randomUUID()
-    const job = await acquireCachedStory({ cacheDirectory: cache, ownerId: user.id,
-      repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story',
-      commit, jobId, verifiedSizeBytes: Buffer.byteLength(baselineStory), verifiedBlobCount: 1 })
-    acquiredJob = job
-    if (fullStory) writeFileSync(join(root, 'certification-source.json'), JSON.stringify({
-      version: 1, mode: process.env.NT_TEST_WEB_PI_STORY_MODE === 'collaborative' ? 'collaborative' : 'autonomous',
-      jobId, storyId, ownerId: user.id, repositoryId, sourceSha: commit,
-      storyRoot: job.storyRoot, nativeCli: process.env.NT_NATIVE_CLI,
-      skillsSource: skills,
-    }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+    // The full-Story path must not acquire or register a Generation Job
+    // before the approved Discovery handoff admits the provider effect.
+    const acquireJob = async () => {
+      const acquired = await acquireCachedStory({ cacheDirectory: cache, ownerId: user.id,
+        repositoryId: 'github:123', remoteUrl: 'file://' + repo, token: '', directory: 'story',
+        commit, jobId, verifiedSizeBytes: Buffer.byteLength(baselineStory), verifiedBlobCount: 1 })
+      acquiredJob = acquired
+      await store.persistence.generation.jobs.register(user.id, jobId, storyId,
+        'Live', commit, '2026-11-01')
+      await ensureRootThreads(store, user.id, storyId)
+      if (fullStory) writeFileSync(join(root, 'certification-source.json'), JSON.stringify({
+        version: 1, mode: process.env.NT_TEST_WEB_PI_STORY_MODE === 'collaborative' ? 'collaborative' : 'autonomous',
+        jobId, storyId, ownerId: user.id, repositoryId, sourceSha: commit,
+        storyRoot: acquired.storyRoot, nativeCli: process.env.NT_NATIVE_CLI,
+        skillsSource: skills,
+      }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+      return acquired
+    }
     await store.persistence.repositories.upsert(user.id, 'github', '123',
       'Story/Live', null, repositoryId, '2026-11-01')
     await store.persistence.onboarding.importStory({
@@ -242,28 +250,28 @@ test(fullStory
     const chatCase = { auth, store, headers, baseURL: config.baseURL,
       ownerId: user.id, storyId, jobId, repositoryId, sourceSha: commit, mode: creativeMode }
     const discovery = fullStory ? await beginLiveNewStoryChat(chatCase) : null
-    await store.persistence.generation.jobs.register(user.id, jobId, storyId,
-      'Live', commit, '2026-11-01')
-    // Both the preapproved and direct smoke paths require an authenticated Thread.
-    await ensureRootThreads(store, user.id, storyId)
-    assert.equal(await store.persistence.continuation.runThread(user.id, jobId),
-      'root:' + jobId, 'real Pi workers require an authenticated Story Thread')
+    if (fullStory) {
+      assert.equal(await store.persistence.generation.jobs.identity(jobId), null,
+        'Unapproved Discovery must not have a Generation Job')
+      assert.equal(acquiredJob, undefined, 'Unapproved Discovery must not have acquired a worktree')
+      console.log('Live ' + creativeMode + ' Discovery: verified proposal ready for exact approval')
+    }
+    const job = fullStory ? undefined : await acquireJob()
     const { task, contract } = interpretNaturalStoryPrompt(
       'Write a concise mystery visual novel about an archivist on a stranded train. You can decide unspecified details.')
     const request = { task, contract }
-    if (objectivePlannerTest && !fullStory) {
-      // #149: exercise the real authenticated web queue and the same immutable
-      // first-Turn objective admission used by the normal Chat composer.
+    if (job) {
+      assert.equal(await store.persistence.continuation.runThread(user.id, jobId),
+        'root:' + jobId, 'real Pi workers require an authenticated Story Thread')
+      // Every executable Generation request needs an immutable current Turn,
+      // including the direct Foundation-only smoke test.
       await saveJobTurnPlan(job, planObjective({ kind: 'full-story', request: task,
         contract, base: commit }))
+      await store.persistence.generation.jobs.saveConfiguration(user.id, jobId,
+        JSON.stringify({ version: 1, headSha: job.headSha, ...request,
+          limits: { steps: 8 }, pauseAfter: 'foundation', model: selected }),
+        new Date().toISOString())
     }
-    // Two specialist steps cannot complete the skill-read + authoring +
-    // native-validation sequence with a real model. Keep a bounded budget
-    // without forcing a premature stop before the first verified commit.
-    if (!fullStory) await store.persistence.generation.jobs.saveConfiguration(user.id, jobId,
-      JSON.stringify({ version: 1, headSha: job.headSha, ...request,
-        limits: { steps: 8 }, pauseAfter: 'foundation', model: selected }),
-      new Date().toISOString())
     server.listen(socket)
     await once(server, 'listening')
     // Web admission no longer executes LangGraph. It must dispatch through
@@ -317,13 +325,14 @@ test(fullStory
     assert.equal(ready, true, 'independent trusted agent must accept and execute real Pi jobs')
     if (fullStory) {
       assert.ok(discovery)
-      await approveLiveNewStoryChat(chatCase, discovery, job)
-      await verifyLiveNewStory({ ...chatCase, job, root, skills, model: selected.id })
+      const approvedJob = await approveLiveNewStoryChat(chatCase, discovery, acquireJob)
+      await verifyLiveNewStory({ ...chatCase, job: approvedJob, root, skills, model: selected.id })
       if (oauthFailure) throw oauthFailure
       assert.equal(git(repo, 'rev-parse', 'HEAD'), commit,
         'certification must not change the original source repository')
       return
     }
+    assert.ok(job, 'Direct smoke test requires its authenticated Job')
     // Optional real SDK certification for #86. It uses the same separate
     // trusted agent and rootless Pi process, NOT the test's in-memory fake.
     // Steering must reach the exact Pi session; a future Turn must stay in

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from 'node:path'
 import { submitFirstStoryTurn } from '../../src/lib/story-first-chat.server'
 import { storyChatDiscoveryRequest } from '../../src/lib/story-chat-discovery.server'
-import { onboardingPiRequest, type ChatDiscoveryBinding } from '../../src/lib/onboarding-pi.server'
+import { authorizedStoryJob } from '../../src/lib/fixture-jobs.server'
 import { authorInteractionRequest } from '../../src/lib/author-interactions.server'
 import { generationControlRequest } from '../../src/lib/generation-controls.server'
 import { listGenerationEvents } from '../../src/lib/generation-progress.server'
@@ -147,17 +147,12 @@ export async function beginLiveNewStoryChat(args: ChatCase) {
 /** The source Git repo is real; only remote provider acquisition is replaced
  * with the already verified local worktree. All Studio validation, planning,
  * source pinning, worker execution, and actual Pi remain real. */
-export async function approveLiveNewStoryChat(args: ChatCase, proposed: Discovery, job: JobStartResult) {
-  const { auth, store, headers, baseURL, storyId, jobId, sourceSha, repositoryId, mode } = args
-  const binding: ChatDiscoveryBinding = {
-    storyId,
-    firstTurnId: jobId,
-    repositoryId,
-    directory: 'story',
-    sourceSha,
-    originalObjective: prompt,
-  }
-  const response = await onboardingPiRequest(
+export async function approveLiveNewStoryChat(args: ChatCase, proposed: Discovery,
+  acquireJob: () => Promise<JobStartResult>) {
+  const { auth, store, headers, baseURL, ownerId, storyId, jobId, sourceSha, mode } = args
+  assert.equal(await store.persistence.generation.jobs.identity(jobId), null,
+    'Unapproved Discovery cannot own a Generation Job')
+  const response = await storyChatDiscoveryRequest(
     auth,
     store,
     new Request(baseURL + '/api/story-chat-discovery', {
@@ -166,13 +161,18 @@ export async function approveLiveNewStoryChat(args: ChatCase, proposed: Discover
       body: JSON.stringify({ action: 'approve', revision: proposed.revision, digest: proposed.digest }),
     }),
     baseURL,
+    storyId,
+    jobId,
     undefined,
-    binding,
     {
-      github: async (_auth, _store, request) => {
+      github: async (_auth, _store, request, _baseURL, effect) => {
         const value = (await request.json()) as { storyId: string; jobId: string; commit: string }
         assert.deepEqual(value, { storyId, jobId, commit: sourceSha })
-        return Response.json({ job: { headSha: sourceSha } })
+        await effect?.('provider-verified')
+        await effect?.('worktree-started')
+        const job = await acquireJob()
+        assert.equal(job.headSha, sourceSha)
+        return Response.json({ job: { headSha: job.headSha } })
       },
     },
   )
@@ -187,11 +187,13 @@ export async function approveLiveNewStoryChat(args: ChatCase, proposed: Discover
     'queued',
     'Exact approval must automatically continue the original Turn: ' + JSON.stringify(parsed.continuation),
   )
+  const job = await authorizedStoryJob(store, ownerId, jobId)
   const receipt = await readChatApprovedFoundation(job)
   assert.equal(receipt?.scope, 'whole-story')
   assert.equal(receipt?.proposalDigest, proposed.digest)
   assert.equal(receipt?.creativeMode, mode)
   console.log('Live ' + mode + ' Chat: exact approval continued the original Turn')
+  return job
 }
 
 /** Full-Story variant of the existing real-Pi integration runner. No new
