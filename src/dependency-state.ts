@@ -14,7 +14,7 @@ import { deriveReviewDependencyRequest, type EventCharacterRepairGrant,
 import { readTurnEvidence, type TurnEvidence } from "./turn-plan-evidence.js";
 import { validateStoryJob } from "./validator.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
-import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, parseDependencyReport,
+import { authorizeDependency, authorizeReviewCharacterDependency, authorizeReviewOtherOwnerDependency, authorizeBlueprintCharacterDependency, selectBlueprintArcSources, parseDependencyReport,
   type DependencyReport, type DependencyProposal, type ReviewCharacterProposal,
   type DependencyAmendment } from "./dependency-amendments.js";
 import type { SkillSnapshot } from "./snapshot.js";
@@ -31,7 +31,44 @@ export class ProtectedCrossOwnerPrerequisiteError extends Error {
 
 export const dependencyDigest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export const sourceDigest = (value: string) => createHash("sha256").update(value).digest("hex");
-export interface BlueprintDependencySource { milestoneId: string; readinessDigest: string; target: string; arcPath: string }
+export interface BlueprintArcSource { id: string; path: string }
+export interface BlueprintDependencySource {
+  milestoneId: string; readinessDigest: string; target: string; arcCandidates: BlueprintArcSource[];
+  readiness: "unrealized-character" | "outside-event-authority";
+  targetPath?: string;
+}
+/** Native catalog IDs, not filenames, define the possible enclosing Arc links.
+ * An explicit Arc anchor narrows the candidates; a Milestone anchor does not. */
+export function blueprintArcCandidates(
+  assignment: { arcIds: string[]; sourcePaths: string[] },
+  anchors: string[], records: CanonicalScopeRecord[],
+): BlueprintArcSource[] {
+  const arcs = records.filter(r => r.metadata.type === "arc" && r.metadata.status !== "superseded" &&
+    assignment.arcIds.includes(r.metadata.id) && assignment.sourcePaths.includes(r.path))
+    .map(r => ({ id: r.metadata.id, path: r.path })).sort((a, b) => a.id.localeCompare(b.id));
+  if (arcs.length !== new Set(assignment.arcIds).size ||
+      new Set(arcs.map(a => a.id)).size !== arcs.length)
+    throw Error("Blueprint Arc sources differ from the native canonical assignment.");
+  const cited = arcs.filter(a => anchors.includes(a.path));
+  return cited.length && anchors.every(path => cited.some(a => a.path === path)) ? cited : arcs;
+}
+/** Previously persisted v1 entries retain their original receipt bytes and
+ * digest. Read the canonical ID from their sealed report, not the filename. */
+export function blueprintSourceOf(entry: Pick<DependencyEntry, "blueprintSource" | "report">): BlueprintDependencySource | undefined {
+  const source = entry.blueprintSource;
+  if (!source) return undefined;
+  if (Array.isArray(source.arcCandidates)) return source;
+  const legacy = source as unknown as { milestoneId: string; readinessDigest: string; target: string; arcPath?: string };
+  const [id, milestone] = entry.report.affectedIds;
+  const [arc] = entry.report.sources;
+  if (!legacy.arcPath || !id?.startsWith("arc.") || milestone !== legacy.milestoneId ||
+      entry.report.affectedIds.length !== 2 || arc?.path !== legacy.arcPath ||
+      arc.quote.trim() !== "id: " + id)
+    throw Error("Legacy Blueprint prerequisite lacks its sealed canonical Arc identity.");
+  return { milestoneId: legacy.milestoneId, readinessDigest: legacy.readinessDigest,
+    target: legacy.target, arcCandidates: [{ id, path: legacy.arcPath }], readiness: "unrealized-character" };
+}
+
 export interface DependencyEntry {
   blueprintSource?: BlueprintDependencySource;
   report: DependencyReport; reportDigest: string;
@@ -88,41 +125,59 @@ export async function blueprintDependencyReport(job: JobStartResult, source: Blu
   const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(
     job, source.milestoneId, source.readinessDigest);
   const blockers = original.report.blockers.filter(b => b.characterId === source.target);
-  const arcs = original.assignment.sourcePaths.filter(path => /^arcs\/[a-z][a-z0-9-]*\.md$/.test(path));
-  const cited = [...new Set(blockers.map(b => b.anchorPath).filter(path => arcs.includes(path)))];
-  const arcPath = cited.length === 1 ? cited[0] : cited.length === 0 && arcs.length === 1 ? arcs[0] : undefined;
-  const arcId = arcPath && "arc." + arcPath.slice(5, -3);
+  const arcs = source.arcCandidates;
+  const cited = Array.isArray(arcs) ? arcs.filter(a => blockers.some(b => b.anchorPath === a.path)) : [];
+  const onlyArcAnchors = blockers.every(b => original.assignment.sourcePaths.includes(b.anchorPath) &&
+    cited.some(a => a.path === b.anchorPath));
   const obligation = turn.objective?.obligations.find(x => /\bcharacters\b/i.test(x));
-  if (!arcPath || source.arcPath !== arcPath || !arcId || !original.assignment.arcIds.includes(arcId) ||
-      !blockers.length || blockers.some(b => b.readiness !== "unrealized-character") ||
+  if (!Array.isArray(arcs) || !arcs.length || new Set(arcs.map(a => a.id)).size !== arcs.length ||
+      new Set(arcs.map(a => a.path)).size !== arcs.length ||
+      arcs.some(a => !original.assignment.sourcePaths.includes(a.path) ||
+        !original.assignment.arcIds.includes(a.id)) ||
+      (onlyArcAnchors ? cited.length !== arcs.length : arcs.length !== original.assignment.arcIds.length) ||
+      !blockers.length || blockers.some(b => b.readiness !== source.readiness) ||
+      (source.readiness === "outside-event-authority") !== !!source.targetPath ||
       !obligation || turn.kind !== "full-story" || turn.objective?.breadth !== "whole-story")
-    throw Error("Blueprint prerequisite lacks one unambiguous delegated Character/Arc owner.");
+    throw Error("Blueprint prerequisite lacks authenticated Character/Arc source candidates.");
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
-  const sources = [arcPath, original.assignment.milestonePath].map(path => {
+  const sources = [...arcs, { path: original.assignment.milestonePath, id: source.milestoneId },
+    ...(source.targetPath ? [{ path: source.targetPath, id: source.target }] : [])].map(({ path, id }) => {
     const bytes = dependencyGit(job, "show", head + ":" + prefix + path);
-    const id = path === arcPath ? arcId : source.milestoneId;
-    const quote = bytes.split(/\r?\n/).find(line => line.trim() === "id: " + id);
+    // The ID comes from native metadata at admission. Preserve a literal
+    // source quote and hash to authenticate it at historical Git revisions.
+    const quote = bytes.split(/\r?\n/).find(line =>
+      /^id:\s*/.test(line.trim()) &&
+      [id, '"' + id + '"', "'" + id + "'"].includes(line.trim().replace(/^id:\s*/, "")));
     if (!quote) throw Error("Blueprint prerequisite source ID differs from the original assignment.");
     return { path, sha256: sourceDigest(bytes), quote };
   });
   return parseDependencyReport({
     sourceSha: head, turnDigest: turn.digest, assignmentId: "event", obligation,
-    missing: "Realize " + source.target + " for " + source.milestoneId + ": " +
+    missing: (source.readiness === "outside-event-authority" ? "Link existing " : "Realize ") + source.target + " for " + source.milestoneId + ": " +
       [...new Set(blockers.map(b => b.role))].join("; "),
-    affectedIds: [arcId, source.milestoneId], sources,
+    affectedIds: [...arcs.map(a => a.id), source.milestoneId, ...(source.targetPath ? [source.target] : [])], sources,
     likelySpecialist: "nt-character-development", authorDecisionRequired: false,
   });
 }
 export async function registerBlueprintDependency(job: JobStartResult,
-  milestoneId: string, readinessDigest: string, target: string) {
+  milestoneId: string, readinessDigest: string, target: string, validatorSource?: string) {
   const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(job, milestoneId, readinessDigest);
-  const arcs = original.assignment.sourcePaths.filter(path => /^arcs\/[a-z][a-z0-9-]*\.md$/.test(path));
-  const cited = [...new Set(original.report.blockers.filter(b => b.characterId === target)
-    .map(b => b.anchorPath).filter(path => arcs.includes(path)))];
-  const arcPath = cited.length === 1 ? cited[0] : cited.length === 0 && arcs.length === 1 ? arcs[0] : undefined;
-  if (!arcPath) throw Error("Blueprint Character prerequisite has ambiguous Arc ownership.");
-  const source = { milestoneId, readinessDigest, target, arcPath };
-  const report = await blueprintDependencyReport(job, source, await dependencyBoundary(job), await dependencyTurn(job));
+  const head = await dependencyBoundary(job);
+  const native = await validateStoryJob(job, validatorSource, { ...job, baseSha: head });
+  const catalog = native.report?.records as CanonicalScopeRecord[] | undefined;
+  if (native.status !== "passed" || !catalog)
+    throw Error("Blueprint prerequisite requires a verified native canonical catalog.");
+  const arcCandidates = blueprintArcCandidates(original.assignment,
+    original.report.blockers.filter(b => b.characterId === target).map(b => b.anchorPath), catalog);
+  const readiness = original.report.blockers.find(b => b.characterId === target)?.readiness;
+  if (!readiness) throw Error("Blueprint target is not an authenticated prerequisite.");
+  const targetRecord = catalog.find(r => r.metadata.id === target && r.metadata.type === "character" &&
+    r.metadata.status !== "superseded");
+  if ((readiness === "outside-event-authority") !== !!targetRecord)
+    throw Error("Blueprint prerequisite changed native readiness.");
+  const source = { milestoneId, readinessDigest, target, arcCandidates, readiness,
+    ...(targetRecord ? { targetPath: targetRecord.path } : {}) };
+  const report = await blueprintDependencyReport(job, source, head, await dependencyTurn(job));
   return recordDependency(job, report, false, source);
 }
 
@@ -179,7 +234,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         !["reported", "planning", "authorized", "reviewing", "verified", "rejected"].includes(entry.phase))
       throw Error("Dependency report provenance is corrupt.");
     if (entry.blueprintSource) {
-      const source = entry.blueprintSource;
+      const source = blueprintSourceOf(entry)!;
       const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(
         job, source.milestoneId, source.readinessDigest);
       const earlier = saved.entries.slice(0, saved.entries.indexOf(entry))
@@ -191,10 +246,15 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         throw Error("Blueprint dependency lost the original reviewed prerequisite or serial predecessor.");
       if (entry.amendment) {
         const a = entry.amendment.assignment;
+        const selected = selectBlueprintArcSources(source, entry.proposal as ReviewCharacterProposal);
+        const existing = source.readiness === "outside-event-authority";
         if (a.specialist !== "nt-character-development" ||
             JSON.stringify(a.targets) !== JSON.stringify([source.target]) ||
-            JSON.stringify(a.authority) !== JSON.stringify({ recordTypes: ["arc", "character"],
-              existingPaths: [source.arcPath], newPaths: ["characters/" + source.target.slice(10) + ".md"], mayCreate: true }) ||
+            JSON.stringify(a.authority) !== JSON.stringify({
+              recordTypes: existing ? ["arc"] : ["arc", "character"],
+              existingPaths: selected.map(a => a.path),
+              ...(existing ? {} : { newPaths: ["characters/" + source.target.slice(10) + ".md"] }),
+              mayCreate: !existing }) ||
             a.outcome !== entry.report.missing || entry.proposal?.target !== source.target)
           throw Error("Blueprint dependency grant differs from the exact reviewed predecessor.");
       }
@@ -308,9 +368,11 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         throw Error("Dependency committed bytes or exact diff differ from the work receipt.");
       if (entry.blueprintSource) {
         const { auditArcLink } = await import("./focused-work.js");
-        const arc = prefix + entry.blueprintSource.arcPath;
-        auditArcLink(dependencyGit(job, "show", a.sourceSha + ":" + arc),
-          dependencyGit(job, "show", entry.commitSha + ":" + arc), entry.blueprintSource.target);
+        for (const path of a.assignment.authority.existingPaths) {
+          const arc = prefix + path;
+          auditArcLink(dependencyGit(job, "show", a.sourceSha + ":" + arc),
+            dependencyGit(job, "show", entry.commitSha + ":" + arc), entry.blueprintSource.target);
+        }
       }
       dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha!, "HEAD");
     }
@@ -561,10 +623,20 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
     .map(e => e.amendment!.assignment);
   const request = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
     r.sourceSha === entry.reviewSourceSha) : undefined;
-  const amendment = entry.blueprintSource
+  const blueprintSource = blueprintSourceOf(entry);
+  if (blueprintSource) {
+    const source = blueprintSource;
+    const original = await (await import("./event-work.js")).inspectArchivedEventBlueprintPrerequisite(
+      job, source.milestoneId, source.readinessDigest);
+    const expected = blueprintArcCandidates(original.assignment,
+      original.report.blockers.filter(b => b.characterId === source.target).map(b => b.anchorPath), report.records);
+    if (JSON.stringify(expected) !== JSON.stringify(source.arcCandidates))
+      throw Error("Blueprint prerequisite candidates differ from native canonical source.");
+  }
+  const amendment = blueprintSource
     ? authorizeBlueprintCharacterDependency({ plan: turn, head, report: entry.report,
         reportDigest: entry.reportDigest, proposal: proposal as ReviewCharacterProposal,
-        records: report.records, sources, version: plan.version, source: entry.blueprintSource,
+        records: report.records, sources, version: plan.version, source: blueprintSource,
         priorAmendments })
     : request?.classification === "other-owner"
     ? authorizeReviewOtherOwnerDependency({ plan: turn, head, request,

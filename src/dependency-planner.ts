@@ -12,7 +12,7 @@ import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProto
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
 import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
-import { dependencyBoundary, dependencyTurn, dependencyDigest, saveDependencyPlan,
+import { dependencyBoundary, dependencyTurn, dependencyDigest, saveDependencyPlan, blueprintSourceOf,
   type DependencyEntry, type DependencyPlan } from "./dependency-state.js";
 import type { DependencyProposal } from "./dependency-amendments.js";
 
@@ -36,20 +36,22 @@ export function bindDependencyProposalIdentity(
 
 /** Shape errors alone consume the protocol allowance. Scope and causal
  * disagreements remain controller admission failures, not format retries. */
-export function inspectDependencyProposalResponse(text: string, reviewCharacter: boolean): ResponseContractFailure[] {
+export function inspectDependencyProposalResponse(text: string, reviewCharacter: boolean, blueprint = false): ResponseContractFailure[] {
   let value: unknown;
   try { value = JSON.parse(text.trim()); } catch { return [{ path: "$", expected: "one complete JSON object" }]; }
   if (!value || typeof value !== "object" || Array.isArray(value))
     return [{ path: "$", expected: "proposal or rejection object" }];
   const v = value as Record<string, unknown>;
   const fields = v.rejected === true ? ["rejected", "reason"] :
-    ["target", "specialist", "outcome", "reason", ...(reviewCharacter ? ["title"] : [])];
+    ["target", "specialist", "outcome", "reason", ...(reviewCharacter ? ["title"] : []), ...(blueprint ? ["arcIds"] : [])];
   const failures: ResponseContractFailure[] = [];
   if (Object.keys(v).some(k => !fields.includes(k) && !["sourceSha", "reportDigest"].includes(k)))
     failures.push({ path: "$", expected: "no undeclared proposal fields" });
   for (const key of fields.filter(k => k !== "rejected"))
-    if (typeof v[key] !== "string" || !(v[key] as string).trim())
-      failures.push({ path: "$." + key, expected: "nonempty string" });
+    if (key === "arcIds" ? !Array.isArray(v[key]) || !(v[key] as unknown[]).length ||
+        (v[key] as unknown[]).some(id => typeof id !== "string" || !id.trim())
+      : typeof v[key] !== "string" || !(v[key] as string).trim())
+      failures.push({ path: "$." + key, expected: key === "arcIds" ? "nonempty array of typed Arc IDs" : "nonempty string" });
   if (v.rejected === true && Object.keys(v).some(k => !fields.includes(k)))
     failures.push({ path: "$", expected: "rejected and reason only" });
   for (const key of ["sourceSha", "reportDigest"])
@@ -67,7 +69,8 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
   if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Stale dependency planning source.");
   const reviewRequest = entry.reviewSourceSha ? plan.reviewRequests?.find(r =>
     r.sourceSha === entry.reviewSourceSha) : undefined;
-  const reviewCharacter = reviewRequest?.classification === "new-full-story-record";
+  const blueprint = blueprintSourceOf(entry);
+  const reviewCharacter = !!blueprint || reviewRequest?.classification === "new-full-story-record";
   if (entry.reviewSourceSha && (!reviewRequest ||
       reviewRequest.action !== "controller-amendment-required"))
     throw Error("Review dependency planner lost its sealed controller request.");
@@ -82,7 +85,7 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
     jobId: job.jobId, threadId: job.threadId, turn: turn.digest, report: entry.reportDigest,
     source: entry.report.sourceSha, version: plan.version, snapshot: snapshot.id, provider, model,
   }), contract: "dependency.proposal.v1", sessionRoots: [dir],
-    validate: (text: string) => inspectDependencyProposalResponse(text, reviewCharacter),
+    validate: (text: string) => inspectDependencyProposalResponse(text, reviewCharacter, !!blueprint),
     parse: (text: string) => JSON.parse(text.trim()) as DependencyProposal };
   if (entry.phase === "planning") {
     if (!entry.planner || entry.planner.snapshot.id !== snapshot.id)
@@ -141,7 +144,16 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       "A source-bound addition to a canonical Event's existing inspection step may establish actual " +
       "knowledge through a typed knowledge effect; do not conflate that bounded on-screen " +
       "causal correction with inventing an off-page occurrence or granting new-record authority. " +
-      (reviewCharacter
+      (blueprint
+        ? "This is an independently reviewed prospective prerequisite. Choose only the necessary " +
+          "enclosing Arcs from the authenticated canonical candidate IDs below; inspect the actual " +
+          "Milestone and all candidates, and choose the narrowest source-grounded links. " +
+          "The Character ID is already fixed by the approved Blueprint; reuse it unchanged if it exists, otherwise create it. Do not rename it or create " +
+          "another record. Do not add an Arc link merely because it is a candidate. " +
+          "Return ONLY JSON {target,specialist,title,arcIds,outcome,reason}, where arcIds are the " +
+          "canonical typed IDs, never filenames. If no bounded causal choice is justified, reject. " +
+          "Authenticated candidates and required target: " + JSON.stringify(blueprint) + "\n"
+        : reviewCharacter && reviewRequest
         ? "This is a SEALED negative review for a missing central Character under the existing approved " +
           "whole-Story objective, not a request to widen scope. This is an OMISSION " +
           "finding: the named Character may have NO record or mention in the " +

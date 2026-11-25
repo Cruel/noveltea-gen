@@ -663,7 +663,7 @@ export async function inspectBlueprintPredecessorCompletion(job: JobStartResult,
   const plan = await inspectDependencyPlan(job);
   const entries = plan?.entries.filter(e => e.blueprintSource?.readinessDigest === digest) ?? [];
   const targets = [...new Set(original.report.blockers.map(b => b.characterId))];
-  if (entries.length !== targets.length || original.report.blockers.some(b => b.readiness !== "unrealized-character") ||
+  if (entries.length !== targets.length ||
       entries.some(e => e.phase !== "verified" || !e.commitSha || e.review?.verdict !== "pass") ||
       targets.some(target => !entries.some(e => e.blueprintSource?.target === target)))
     throw Error("Blueprint predecessor work is not yet independently verified.");

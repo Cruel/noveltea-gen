@@ -230,3 +230,88 @@ test("a Fact prerequisite follows an actual knowledge predicate, never an invent
     metadata: { ...event.metadata, steps: [], facts: [fact.metadata.id] } }, fact] }),
     /unrelated dependency record/);
 });
+
+test("Milestone-anchored prerequisites preserve multiple native Arc identities despite different filenames", async () => {
+  const { blueprintArcCandidates } = await import("../src/dependency-state.js");
+  const arcs = [
+    { path: "arcs/first-file.md", metadata: { id: "arc.accounts", type: "arc", status: "draft" } },
+    { path: "arcs/second-file.md", metadata: { id: "arc.investigation", type: "arc", status: "draft" } },
+    { path: "arcs/unrelated.md", metadata: { id: "arc.unrelated", type: "arc", status: "draft" } },
+  ];
+  const assignment = { arcIds: ["arc.accounts", "arc.investigation"],
+    sourcePaths: ["arcs/first-file.md", "arcs/second-file.md", "milestones/accounts.md"] };
+  const expected = [
+    { id: "arc.accounts", path: "arcs/first-file.md" },
+    { id: "arc.investigation", path: "arcs/second-file.md" },
+  ];
+  assert.deepEqual(blueprintArcCandidates(assignment, ["milestones/accounts.md"], arcs), expected);
+  assert.deepEqual(blueprintArcCandidates(assignment, ["arcs/second-file.md"], arcs), [expected[1]]);
+  assert.deepEqual(blueprintArcCandidates(assignment, ["arcs/second-file.md", "milestones/accounts.md"], arcs), expected);
+  assert.throws(() => blueprintArcCandidates(assignment, ["milestones/accounts.md"], arcs.slice(0, 1)), /native/i);
+});
+
+test("ambiguous reviewed prerequisite selects only necessary native Arc links and preserves existing Characters", async () => {
+  const { authorizeBlueprintCharacterDependency } = await import("../src/dependency-amendments.js");
+  const arcCandidates = [{ id: "arc.accounts", path: "arcs/first-file.md" },
+    { id: "arc.investigation", path: "arcs/second-file.md" }];
+  const native = [
+    ...arcCandidates.map(a => ({ path: a.path, metadata: { id: a.id, type: "arc", status: "draft", characters: [], decisions: [] } })),
+    { path: "milestones/accounts.md", metadata: { id: "milestone.accounts", type: "milestone", status: "draft",
+      arcs: arcCandidates.map(a => a.id) } },
+  ];
+  const full: TurnEvidence = { ...plan, kind: "full-story", objective: { ...plan.objective,
+    breadth: "whole-story", obligations: ["Realize the Characters"] },
+    assignments: [
+      { ...plan.assignments[0], id: "event", specialist: "nt-event-design", authority: { recordTypes: ["event"], existingPaths: [], mayCreate: true } },
+      { ...plan.assignments[0], id: "character-foundations", specialist: "nt-worldbuilding + nt-character-development",
+        authority: { recordTypes: ["character"], existingPaths: [], mayCreate: true } },
+      { ...plan.assignments[0], id: "architecture", specialist: "nt-story-architecture",
+        authority: { recordTypes: ["arc"], existingPaths: [], mayCreate: true } },
+    ] };
+  const sources = native.map(r => ({ path: r.path, sha256: source.sha256, quote: r.metadata.id }));
+  const evidence = { ...report, assignmentId: "event", obligation: full.objective!.obligations[0]!,
+    sources, affectedIds: native.map(r => r.metadata.id), likelySpecialist: "nt-character-development" };
+  const base = { plan: full, head, report: evidence, reportDigest: proposal.reportDigest, records: native,
+    sources, version: 1, priorAmendments: [] };
+  const blueprint = { milestoneId: "milestone.accounts", readinessDigest: "e".repeat(64),
+    target: "character.mara", arcCandidates, readiness: "unrealized-character" as const };
+  const proposed = { ...proposal, specialist: evidence.likelySpecialist, target: blueprint.target,
+    outcome: evidence.missing, title: "Mara" };
+  const input = { ...base, source: blueprint, proposal: { ...proposed, arcIds: ["arc.investigation"] } };
+  assert.deepEqual(authorizeBlueprintCharacterDependency(input).assignment.authority, {
+    recordTypes: ["arc", "character"], existingPaths: ["arcs/second-file.md"],
+    newPaths: ["characters/mara.md"], mayCreate: true,
+  });
+  const second = authorizeBlueprintCharacterDependency({ ...input, version: 2,
+    priorAmendments: [authorizeBlueprintCharacterDependency(input).assignment],
+    source: { ...blueprint, target: "character.neri" },
+    proposal: { ...proposed, target: "character.neri", title: "Neri", arcIds: ["arc.accounts", "arc.investigation"] } });
+  assert.deepEqual(second.assignment.authority.existingPaths, ["arcs/first-file.md", "arcs/second-file.md"]);
+  assert.equal(second.resumes, "event");
+  const existing = { path: "characters/alternate-name.md", metadata: { id: "character.mara", type: "character", status: "draft" } };
+  const link = authorizeBlueprintCharacterDependency({ ...input, records: [...native, existing],
+    source: { ...blueprint, readiness: "outside-event-authority", targetPath: existing.path } });
+  assert.deepEqual(link.assignment.authority, { recordTypes: ["arc"], existingPaths: ["arcs/second-file.md"], mayCreate: false });
+  assert.throws(() => authorizeBlueprintCharacterDependency({ ...input, proposal: proposed }), /Arc candidates/);
+  assert.throws(() => authorizeBlueprintCharacterDependency({ ...input, proposal: { ...proposed, arcIds: ["arc.unrelated"] } }), /Arc candidates/);
+  assert.throws(() => authorizeBlueprintCharacterDependency({ ...input, head: "f".repeat(40) }), /authority/);
+  assert.throws(() => authorizeBlueprintCharacterDependency({ ...input, proposal: { ...input.proposal, specialist: "nt-event-design" } }), /authority/);
+  assert.throws(() => authorizeBlueprintCharacterDependency({ ...input, records: native.map(r =>
+    r.metadata.id === "arc.investigation" ? { ...r, metadata: { ...r.metadata, decisions: [{ origin: "user" }] } } : r) }), /authority/);
+  assert.deepEqual(inspectDependencyProposalResponse(JSON.stringify(input.proposal), true, true), []);
+  assert.ok(inspectDependencyProposalResponse(JSON.stringify(proposed), true, true).length);
+});
+
+test("legacy Blueprint source reads the sealed canonical identity without changing persisted receipt bytes", async () => {
+  const { blueprintSourceOf } = await import("../src/dependency-state.js");
+  const legacy = { milestoneId: "milestone.accounts", readinessDigest: "e".repeat(64),
+    target: "character.mara", arcPath: "arcs/first-file.md" };
+  const oldReport = { ...report, affectedIds: ["arc.accounts", "milestone.accounts"],
+    sources: [{ path: legacy.arcPath, sha256: source.sha256, quote: "id: arc.accounts" }] };
+  const entry = { blueprintSource: legacy, report: oldReport } as unknown as Parameters<typeof blueprintSourceOf>[0];
+  const before = JSON.stringify(entry);
+  assert.deepEqual(blueprintSourceOf(entry)?.arcCandidates, [{ id: "arc.accounts", path: legacy.arcPath }]);
+  assert.equal(JSON.stringify(entry), before);
+  assert.throws(() => blueprintSourceOf({ ...entry, report: { ...oldReport,
+    affectedIds: ["arc.unrelated", "milestone.accounts"] } }), /sealed canonical Arc identity/);
+});

@@ -341,7 +341,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
   outcome?: string, policy: CreativePolicy = DEFAULT_CREATIVE_POLICY,
   create?: PlannedFocusCreate, obligations: string[] = [], steering = "",
   resume?: SpecialistChoiceReceipt,
-  arcLink?: { path: string; characterId: string },
+  arcLink?: { paths: string[]; characterId: string },
   eventReviewSupport = false, dependencyResume?: { file: string; id: string; changedPaths: string[] },
   round: AssignmentRoundCommand | undefined = undefined, verifyDraft?: (manifest: Record<string, unknown>) => Promise<AssignmentDefect[]>): Promise<DependencyReport | {
     authorQuestion: SpecialistChoiceQuestion; sessionFile: string; sessionId: string;
@@ -439,7 +439,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
         "Translate them only into the permitted typed schema fields below, following nt-catalog.\n" +
         creationReferenceInstructions(create) +
         (arcLink
-          ? "Also edit ONLY the existing Arc at " + arcLink.path +
+          ? "Also edit ONLY the existing Arcs at " + arcLink.paths.join(", ") +
             ": add " + arcLink.characterId + " to its characters array without changing any " +
             "other Arc metadata, protected decisions, formatting outside that array or prose. " +
             "Do not modify or create any other preexisting or new file. " :
@@ -477,9 +477,9 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
         "Do NOT stop and ask the original dialogue specialist or another Event specialist " +
         "to make these changes: YOU ARE the assigned specialist. Do not introduce unrelated edits.\n" : "") +
       (arcLink ?
-        "CHARACTER CREATION PRECISION: The new Character ID is exactly " +
-        arcLink.characterId + "; no other new record is authorized. The single permitted Arc " +
-        "change is its characters list. Do not retcon any established knowledge or history, " +
+        "CHARACTER LINK PRECISION: The Character ID is exactly " +
+        arcLink.characterId + "; no other new record is authorized. The only permitted Arc " +
+        "change is its characters list, appending this exact Character ID to each authorized Arc. Do not retcon any established knowledge or history, " +
         "or change any existing Character/Fact/Relationship. " : "") +
       (receipt.workItemId.startsWith("dependency:") && receipt.target.startsWith("event.") ?
         "EVENT SCHEMA PRECISION: Read the pinned nt-catalog progression reference before editing. " +
@@ -611,27 +611,32 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     const reviewRequest = dependency?.reviewSourceSha ?
       (await inspectDependencyPlan(job))?.reviewRequests?.find(r => r.sourceSha === dependency.reviewSourceSha) : undefined;
     let reviewCreate: PlannedFocusCreate | undefined;
-    let reviewArc: string | undefined;
+    let reviewArcs: string[] = [];
+    let existingBlueprintLink = false;
     if (reviewAuthority && (reviewRequest?.classification === "new-full-story-record" || dependency?.blueprintSource)) {
       const grant = reviewAuthority.authority;
       const proposal = dependency!.proposal as ReviewCharacterProposal | undefined;
-      const foundation = dependency!.blueprintSource || dependency!.reviewSourceSha &&
+      const blueprint = dependency!.blueprintSource;
+      const foundation = !!blueprint || dependency!.reviewSourceSha &&
         (await inspectDependencyPlan(job))?.reviewRequests?.some(r =>
           r.sourceSha === dependency!.reviewSourceSha &&
           r.originalWorkItem === "character-foundations");
-      const requiredTypes = foundation ? ["arc", "character"] : ["character"];
+      existingBlueprintLink = blueprint?.readiness === "outside-event-authority";
+      const requiredTypes = existingBlueprintLink ? ["arc"] : foundation ? ["arc", "character"] : ["character"];
       if (reviewAuthority.specialist !== "nt-character-development" ||
           !/^character\.[a-z][a-z0-9-]*$/.test(input.target) ||
           JSON.stringify(grant.recordTypes) !== JSON.stringify(requiredTypes) ||
-          grant.existingPaths.length !== (foundation ? 1 : 0) ||
-          grant.newPaths?.length !== 1 ||
-          grant.newPaths[0] !== "characters/" + input.target.slice(10) + ".md" ||
-          (foundation && !grant.existingPaths[0]?.startsWith("arcs/")) ||
+          (foundation ? grant.existingPaths.length < 1 : grant.existingPaths.length !== 0) ||
+          (!blueprint && foundation && grant.existingPaths.length !== 1) ||
+          (existingBlueprintLink ? grant.mayCreate || !!grant.newPaths?.length
+            : grant.newPaths?.length !== 1 ||
+              grant.newPaths[0] !== "characters/" + input.target.slice(10) + ".md") ||
+          (foundation && grant.existingPaths.some(path => !path.startsWith("arcs/"))) ||
           !proposal?.title || proposal.target !== input.target)
-        throw Error("Review dependency lacks one authorized Character creation with exact source ownership.");
-      reviewCreate = { id: input.target, path: grant.newPaths[0], title: proposal.title,
+        throw Error("Review dependency lacks authorized Character and exact source ownership.");
+      if (!existingBlueprintLink) reviewCreate = { id: input.target, path: grant.newPaths![0]!, title: proposal.title,
         references: [], dependsOn: [] };
-      reviewArc = foundation ? grant.existingPaths[0] : undefined;
+      reviewArcs = foundation ? grant.existingPaths : [];
     } else if (reviewAuthority) {
       const grant = reviewAuthority.authority;
       const exactPath = reviewRequest && reviewRequest.otherOwnerPath;
@@ -699,34 +704,41 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
     // Review amendments deliberately cannot extend the immutable full-Story
     // contract. Their separate grant identifies one new Character plus the Arc
     // already cited by the negative reviewer. No supporting scope is inferred.
-    const selection = reviewCreate ? (() => {
-      const cited = dependency!.report.sources[0]?.path;
-      const parent = catalog.find(r => r.path === cited &&
-        r.metadata.type === (reviewArc ? "arc" : "event") &&
-        r.metadata.status !== "superseded");
-      if (!parent || reviewArc && (!Array.isArray(parent.metadata.characters) ||
-          parent.path !== reviewArc) ||
-          !reviewArc && !Array.isArray(parent.metadata.participants))
+    const selection = reviewCreate || existingBlueprintLink ? (() => {
+      const parents = reviewArcs.length ? reviewArcs.map(path => catalog.find(r => r.path === path &&
+        r.metadata.type === "arc" && r.metadata.status !== "superseded")) :
+        [catalog.find(r => r.path === dependency!.report.sources[0]?.path &&
+          r.metadata.type === "event" && r.metadata.status !== "superseded")];
+      if (parents.some(parent => !parent || !Array.isArray(reviewArcs.length
+          ? parent.metadata.characters : parent.metadata.participants)))
         throw Error("Controller-approved Character prerequisite source is absent from native canon.");
-      const participants = (reviewArc ? parent.metadata.characters : parent.metadata.participants) as string[];
+      const participants = parents.flatMap(parent =>
+        (reviewArcs.length ? parent!.metadata.characters : parent!.metadata.participants) as string[]);
+      const existing = existingBlueprintLink ? catalog.find(r => r.metadata.id === input.target &&
+        r.metadata.type === "character" && r.metadata.status !== "superseded" &&
+        r.path === dependency!.blueprintSource!.targetPath) : undefined;
+      if (existingBlueprintLink && !existing) throw Error("Existing Character prerequisite lost its canonical source.");
       const existingCharacters = catalog.filter(r => r.metadata.type === "character" &&
         participants.includes(r.metadata.id));
-      const selected: CanonicalScopeRecord[] = [...(reviewArc ? [parent] : []),
-        { path: reviewCreate.path,
-          metadata: { id: reviewCreate.id, type: "character", status: "planned" } }];
-      return { selected, context: [parent, ...existingCharacters,
+      const selected: CanonicalScopeRecord[] = [...(reviewArcs.length ? parents as CanonicalScopeRecord[] : []),
+        ...(reviewCreate ? [{ path: reviewCreate.path,
+          metadata: { id: reviewCreate.id, type: "character", status: "planned" } }] : [])];
+      const context = [...parents as CanonicalScopeRecord[], ...existingCharacters,
+        ...(existing ? [existing] : []),
+        ...catalog.filter(r => dependency!.report.sources.some(source => source.path === r.path)),
         ...catalog.filter(r => ["fact", "world-entity"].includes(r.metadata.type) &&
-          r.metadata.status !== "superseded").slice(0, 24)],
-        allowedPaths: [...(reviewArc ? [reviewArc] : []), reviewCreate.path].sort() };
+          r.metadata.status !== "superseded").slice(0, 24)];
+      return { selected, context: [...new Map(context.map(r => [r.path, r])).values()],
+        allowedPaths: [...reviewArcs, ...(reviewCreate ? [reviewCreate.path] : [])].sort() };
     })() : resolveFocusedScope(catalog, effectiveContract);
     const create = reviewCreate ?? effectiveContract.scope.creates?.find(item => item.id === input.target);
     const own = selection.selected.find(r => r.metadata.id === input.target);
-    if (!own) throw new Error("Unknown focused target: " + input.target);
-    // Shared supporting targets are authorized exactly once, with the first target.
-    if (reviewRequest?.classification === "other-owner" && own.path !== reviewRequest.otherOwnerPath)
+    if (!own && !existingBlueprintLink) throw new Error("Unknown focused target: " + input.target);
+    if (reviewRequest?.classification === "other-owner" && own?.path !== reviewRequest.otherOwnerPath)
       throw Error("Other-owner source is not the selected native record.");
-    const paths = [own.path, ...(reviewArc ? [reviewArc] :
-      !dependency && input.target === input.contract.scope.targets[0] ? selection.selected
+    const paths = dependency ? [...dependency.amendment!.assignment.authority.existingPaths,
+      ...(dependency.amendment!.assignment.authority.newPaths ?? [])].sort() :
+      [own!.path, ...(input.target === input.contract.scope.targets[0] ? selection.selected
         .filter(r => input.contract.scope.supportingTargets?.includes(r.metadata.id)).map(r => r.path) : [])].sort();
     const types = [...new Set(paths.map(path => selection.selected.find(r => r.path === path)?.metadata.type))];
     if (types.some(type => !type)) throw new Error("A specialist path has no canonical record type.");
@@ -901,14 +913,16 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
           item.metadata.type === create.id.split(".")[0] && item.path === create.path &&
           item.metadata.status !== "superseded"))
         throw new Error("Native canonical validation did not recognize the exact new focused record.");
-      if (reviewCreate && reviewArc) {
-        const originalArc = git(job, "show", "HEAD:" + repoPath(job, reviewArc));
-        const revisedArc = await readFile(join(job.worktreeStoryRoot, reviewArc), "utf8");
-        auditArcLink(originalArc, revisedArc, input.target);
-        const canonicalArc = accepted.find(r => r.path === reviewArc && r.metadata.type === "arc");
-        if (!canonicalArc || !Array.isArray(canonicalArc.metadata.characters) ||
-            !canonicalArc.metadata.characters.includes(input.target))
-          throw Error("Native catalog does not verify the new Character's exact Arc link.");
+      if (reviewArcs.length) {
+        for (const arc of reviewArcs) {
+          const originalArc = git(job, "show", "HEAD:" + repoPath(job, arc));
+          const revisedArc = await readFile(join(job.worktreeStoryRoot, arc), "utf8");
+          auditArcLink(originalArc, revisedArc, input.target);
+          const canonicalArc = accepted.find(r => r.path === arc && r.metadata.type === "arc");
+          if (!canonicalArc || !Array.isArray(canonicalArc.metadata.characters) ||
+              !canonicalArc.metadata.characters.includes(input.target))
+            throw Error("Native catalog does not verify the Character's exact Arc link.");
+        }
       } else resolveFocusedScope(accepted, effectiveContract);
       return [];
     };
@@ -917,8 +931,8 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       const output = await writeWithPi(job, receipt, input.task, turnAssignment?.outcome,
         turnPlan?.creativePolicy ?? DEFAULT_CREATIVE_POLICY, create, turnPlan?.objective?.obligations,
         input.steering, answered,
-        reviewArc ? { path: reviewArc, characterId: input.target } : undefined,
-        !!reviewCreate && !reviewArc, dependencyResume, input.round?.command, verifyDraft);
+        reviewArcs.length ? { paths: reviewArcs, characterId: input.target } : undefined,
+        !!reviewCreate && !reviewArcs.length, dependencyResume, input.round?.command, verifyDraft);
       if (output && "round" in output) return { status: "writer-round", round: output.round };
       if (output && "authorQuestion" in output) {
         if (answered) await completeSpecialistChoice(job, receipt.authorChoiceId!);

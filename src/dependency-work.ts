@@ -14,10 +14,10 @@ import { startStoryJob } from "./job.js";
 import { withStoryJobLock } from "./job-lock.js";
 import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
-  recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency,
+  recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency, blueprintSourceOf,
   inspectDependencyPlan, saveDependencyPlan } from "./dependency-state.js";
 import { proposeDependency } from "./dependency-planner.js";
-import { type DependencyReport, type DependencyProposal } from "./dependency-amendments.js";
+import { type DependencyReport } from "./dependency-amendments.js";
 import type { ReviewDependencyRequest } from "./review-repair-amendment.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { createSkillSnapshot } from "./snapshot.js";
@@ -101,6 +101,36 @@ function supportingWriterRounds(job: import("./job.js").JobStartResult, identity
   };
 }
 
+/** All prerequisite sources use the same controller admission boundary.
+ * A deterministic proposal is permitted only for a uniquely bounded source;
+ * otherwise the existing read-only planner supplies a proposal. */
+async function admitDependency(job: import("./job.js").JobStartResult,
+  plan: NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>,
+  entry: NonNullable<Awaited<ReturnType<typeof inspectDependencyPlan>>>["entries"][number],
+  input: Pick<FocusedWorkOptions, "provider" | "model" | "validatorSource" | "skillsSource">) {
+  if (entry.amendment) return;
+  if (await dependencyBoundary(job) !== entry.report.sourceSha)
+    throw Error("Dependency proposal HEAD is stale.");
+  const { policy } = await inspectPiPolicy(job);
+  const source = blueprintSourceOf(entry);
+  const proposal = source?.arcCandidates.length === 1 && entry.phase === "reported"
+    ? { sourceSha: entry.report.sourceSha, reportDigest: entry.reportDigest, target: source.target,
+        specialist: entry.report.likelySpecialist, outcome: entry.report.missing,
+        reason: "Required by the independently reviewed prospective Milestone Blueprint.",
+        title: source.target.slice(10).split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" "),
+        arcIds: [source.arcCandidates[0]!.id] }
+    : await proposeDependency(job, plan, entry,
+        input.provider ?? policy.profile.provider, input.model ?? policy.profile.model);
+  try {
+    await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
+  } catch (error) {
+    entry.phase = "rejected";
+    entry.rejection = { reason: error instanceof Error ? error.message : String(error), proposal };
+    await saveDependencyPlan(job, plan);
+    throw error;
+  }
+}
+
 /** Serialized sub-work at the originating assignment's no-write boundary.
  * The parent stays on that assignment, so no second origin writer is scheduled.
  * All external effects are fenced by private receipts, independently of graph checkpoints. */
@@ -138,21 +168,7 @@ export async function advanceFocusedDependency(input: FocusedWorkOptions, config
       return entry.amendment.assignment;
     if (entry.phase === "reviewing" || entry.phase === "rejected")
       throw Error("Interrupted or rejected dependency work requires original receipt reconciliation; no replay.");
-    if (!entry.amendment) {
-      if (head !== report.sourceSha) throw Error("Dependency proposal HEAD is stale.");
-      const { policy } = await inspectPiPolicy(job);
-      let proposal: DependencyProposal;
-      proposal = await proposeDependency(job, plan, entry,
-        input.provider ?? policy.profile.provider, input.model ?? policy.profile.model);
-      try {
-        await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
-      } catch (error) {
-        entry.phase = "rejected";
-        entry.rejection = { reason: error instanceof Error ? error.message : String(error), proposal };
-        await saveDependencyPlan(job, plan);
-        throw error;
-      }
-    }
+    await admitDependency(job, plan, entry, input);
     return entry.amendment!.assignment;
   });
   return runSupportingDependency(job, input, reportDigest, config);
@@ -217,7 +233,7 @@ async function runSupportingDependency(job: import("./job.js").JobStartResult,
       routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
       turnGoal: "ONLY review the necessary supporting prerequisite for this original author goal: " + turn.goal +
         (entry.blueprintSource
-          ? ". Verify the new Character's exact prospective role and the limited Arc reference. Do not require the suspended Event to have happened yet."
+          ? ". Verify the Character's exact prospective role and the independently authorized Arc references. Do not require the suspended Event to have happened yet."
           : ". The originating author dialogue is suspended and will be written only AFTER this review passes; its current incompleteness is not a failure of the supporting assignment."),
       specialistAssignments: [assignment],
       dependency: { sourceSha: report.sourceSha, commitSha: head,
@@ -279,9 +295,8 @@ export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions,
       ? inspectArchivedEventBlueprintPrerequisite(job, readiness.milestoneId, readiness.reportDigest)
       : archiveEventBlueprintPrerequisite(job, readiness, input.validatorSource ?? input.skillsSource));
   if (input.fixture || JSON.stringify(original.report) !== JSON.stringify(readiness) ||
-      readiness.blockers.some(b => b.readiness !== "unrealized-character") ||
       (await dependencyTurn(job)).digest !== input.turnPlanDigest)
-    throw Error("Blueprint prerequisite is not an authorized new Character dependency.");
+    throw Error("Blueprint prerequisite is not an authorized reviewed dependency.");
   for (const target of [...new Set(readiness.blockers.map(b => b.characterId))]) {
     const admitted = await withStoryJobLock(job, "blueprint-dependency-authorization", async () => {
       let plan = await inspectDependencyPlan(job);
@@ -289,21 +304,16 @@ export async function advanceBlueprintDependency(input: Omit<FocusedWorkOptions,
         e.blueprintSource.target === target);
       if (entry?.phase === "verified") return entry;
       if (entry?.phase === "rejected") throw Error("Independent prerequisite review rejected the supporting work.");
-      const head = await supportingBoundary(job, entry);
+      await supportingBoundary(job, entry);
       if (!entry) {
         const { processAuthorUpdatesAfterWork } = await import("./author-updates.js");
         const author = await processAuthorUpdatesAfterWork(job);
         if ("error" in author || author.status !== "ready") throw new AssignmentAuthorPauseError();
-        ({ plan, entry } = await registerBlueprintDependency(job, readiness.milestoneId, readiness.reportDigest, target));
+        ({ plan, entry } = await registerBlueprintDependency(job, readiness.milestoneId, readiness.reportDigest, target,
+          input.validatorSource ?? input.skillsSource));
       }
       if (!plan || !entry) throw Error("Missing Blueprint dependency ledger entry.");
-      if (!entry.amendment) {
-        const proposal = { sourceSha: head, reportDigest: entry.reportDigest, target,
-          specialist: "nt-character-development", outcome: entry.report.missing,
-          reason: "Required by the independently reviewed prospective Milestone Blueprint.",
-          title: target.slice(10).split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ") };
-        await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
-      }
+      await admitDependency(job, plan, entry, input);
       return entry;
     });
     if (admitted.phase !== "verified")
@@ -351,21 +361,7 @@ export async function advanceReviewDependency(input: {
       throw Error("Interrupted or rejected review-dependency work requires exact manual reconciliation; never replay model sessions.");
     if (entry.phase !== "reported" && entry.phase !== "planning" && entry.phase !== "authorized")
       throw Error("Review dependency has an unsupported work-plan phase.");
-    if (!entry.amendment) {
-      if (head !== request.sourceSha)
-        throw Error("Review-dependency proposal is stale relative to the reviewed Story HEAD.");
-      const { policy } = await inspectPiPolicy(job);
-      const proposal = await proposeDependency(job, plan, entry,
-        input.provider ?? policy.profile.provider, input.model ?? policy.profile.model);
-      try {
-        await approveDependency(job, plan, entry, proposal, input.validatorSource ?? input.skillsSource);
-      } catch (error) {
-        entry.phase = "rejected";
-        entry.rejection = { reason: error instanceof Error ? error.message : String(error), proposal };
-        await saveDependencyPlan(job, plan);
-        throw error;
-      }
-    }
+    await admitDependency(job, plan, entry, input);
     return entry.amendment!.assignment;
   });
   const saved = await inspectDependencyPlan(job);

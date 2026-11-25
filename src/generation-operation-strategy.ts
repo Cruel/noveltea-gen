@@ -902,8 +902,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
     if (control !== "running") return stop({ ...base(c), action: "pause", reason: control === "paused" ? "author-pause" : "cancelled" }, "Author control precedes corrective work.", control);
     const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
       x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
-    if (d.action === "plan-amendment" && d.adapter === "dependency-work" && readiness &&
-        readiness.blockers.every(b => b.readiness === "unrealized-character")) {
+    if (d.action === "plan-amendment" && d.adapter === "dependency-work" && readiness) {
       if (!await authenticateOperationOwnerProof(job, s, c, d) ||
           s.request.turnPlanDigest !== c.origin.turnDigest || s.request.job !== c.origin.jobId ||
           job.threadId !== c.origin.jobThreadId || s.planVersion !== c.origin.planVersion)
