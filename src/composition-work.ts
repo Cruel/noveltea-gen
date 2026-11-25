@@ -165,14 +165,15 @@ async function authenticateCompositionContinuation(job: JobStartResult, s: Recei
 export async function rebindCompositionAfterWriterDependency(job: JobStartResult,
     source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
   if (source.stage !== "composition" || !source.milestoneId) throw Error("Invalid composition prerequisite scope.");
-  const { verifiedWriterSupport } = await import("./writer-dependency.js");
+  const { verifiedWriterSupport, assertWriterReentry, writerContinuationBinding } = await import("./writer-dependency.js");
   const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
   const original = JSON.parse(await readFile(compositionNegativePath(job, source.milestoneId, source.sealDigest), "utf8")) as Receipt;
   const file = join(job.stateDir, "composition-items", source.milestoneId.slice(10) + ".json");
   const current = JSON.parse(await readFile(file, "utf8")) as Receipt;
-  const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.writerNegative!.sessionSha256 };
+  const binding = writerContinuationBinding(reportDigest, supportRef, entry.report.sourceSha, original.writerNegative!.sessionSha256);
   if (current.writerContinuation?.reportDigest === reportDigest) {
-    if (!isDeepStrictEqual(current.writerContinuation, binding)) throw Error("Composition continuation changed.");
+    assertWriterReentry({ ...current, sessionId: current.writerSessionId },
+      { assignmentKey: original.assignmentKey, sessionId: original.writerSessionId, sessionFile: original.sessionFile }, binding);
     return;
   }
   if (changes(job).length || !isDeepStrictEqual(original, current)) throw Error("Composition prerequisite receipt changed before reentry.");

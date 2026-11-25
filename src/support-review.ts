@@ -36,7 +36,7 @@ export async function inspectSharedSupportReview(job: JobStartResult, entry: Dep
       if (point.workItem !== "repair-" + parent || point.parentSha !== parent)
         throw Error("Support correction lost its exact predecessor.");
       const proof = await readRepairCommitProof(job, point.workItem);
-      const repair = await inspectRejectedRepair(job, parent);
+      const repair = await inspectRejectedRepair(job, parent, "historical");
       if (proof.rootFailureSha !== root || repair.rootFailureSha !== root ||
           repair.origin.workItem !== assignment.id || repair.repairedCommitSha !== point.commitSha ||
           repair.phase !== (point.semanticReview === "passed" ? "passed" : "failed"))

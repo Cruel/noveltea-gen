@@ -1066,7 +1066,7 @@ export async function archiveInteractiveWriterDependency(job: JobStartResult, mi
 export async function rebindInteractiveAfterWriterDependency(job: JobStartResult,
     source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
   if ((source.stage !== "choice" && source.stage !== "puzzle") || !source.milestoneId) throw Error("Invalid Interactive prerequisite stage");
-  const { verifiedWriterSupport } = await import("./writer-dependency.js");
+  const { verifiedWriterSupport, assertWriterReentry, writerContinuationBinding } = await import("./writer-dependency.js");
   const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
   const archive = interactiveWriterArchive(job, source.milestoneId, source.stage, source.sealDigest);
   const archived = JSON.parse(await readFile(archive, "utf8")) as Receipt;
@@ -1074,9 +1074,10 @@ export async function rebindInteractiveAfterWriterDependency(job: JobStartResult
   if (!saved) throw Error("Missing suspended Interactive writer");
   const index = source.stage === "choice" ? 0 : 1;
   const original = archived.units[index];
-  const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.piSessionSha256! };
+  const binding = writerContinuationBinding(reportDigest, supportRef, entry.report.sourceSha, original.piSessionSha256!);
   if (saved.unit.writerContinuation?.reportDigest === reportDigest) {
-    if (JSON.stringify(saved.unit.writerContinuation) !== JSON.stringify(binding)) throw Error("Interactive continuation changed");
+    assertWriterReentry({ ...saved.unit, sessionId: saved.unit.piSessionId, sessionFile: saved.unit.piSessionFile },
+      { assignmentKey: original.assignmentKey, sessionId: original.piSessionId, sessionFile: original.piSessionFile }, binding);
     return;
   }
   if (dirty(job).length || JSON.stringify(saved.receipt) !== JSON.stringify(archived))

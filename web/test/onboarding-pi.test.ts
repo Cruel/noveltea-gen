@@ -14,6 +14,7 @@ import { userPiCredentials, availableUserPiModels } from '../src/lib/pi-credenti
 import { candidate } from '../src/lib/story-foundation.server'
 import { hasUserProtectedDecision } from '../../src/foundation-record'
 import { withFixtureSemanticReview } from './support/discovery-semantic-fixture'
+import { readDiscoveryResponse, type DiscoveryAttempt } from '../src/lib/discovery-evidence.server'
 
 const url = 'http://localhost:3000'
 const structuredQuestions = (questions: unknown[]) => JSON.stringify({
@@ -109,13 +110,14 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
     const request = async (method: 'GET' | 'POST', value?: unknown, who = own, origin = url,
       inferStep = infer, workspace = 'projects/demo',
       review?: Parameters<typeof withFixtureSemanticReview>[1],
-      disputes?: Parameters<typeof withFixtureSemanticReview>[2]) => {
+      disputes?: Parameters<typeof withFixtureSemanticReview>[2],
+      continuation?: Parameters<typeof withFixtureSemanticReview>[3]) => {
       const response = await onboardingPiRequest(auth, store,
         new Request(url + '/api/onboarding/pi?' + new URLSearchParams({
           repositoryId: repo, workspace,
         }), { method, headers: {cookie: who, origin},
           ...(method === 'POST' ? {body: JSON.stringify(value)} : {}) }), url,
-        withFixtureSemanticReview(inferStep, review, disputes))
+        withFixtureSemanticReview(inferStep, review, disputes, continuation))
       return { status: response.status, body: await response.json() as any }
     }
     assert.equal((await request('GET', undefined, '')).status, 401)
@@ -429,6 +431,70 @@ test('Pi discovery is multi-round, owner-scoped, restart-safe and exact-proposal
         replacementPasses ? 'accepted' : 'rejected')
       assert.equal(!!saved.semanticReview, replacementPasses)
       if (!replacementPasses) assert.equal(saved.recovery.reason, 'reviewer-drift')
+    }
+
+    // An independent diagnosis can agree with the original rejected claim
+    // and still identify a safe correction. It cannot itself approve the draft.
+    for (const mode of ['continue', 'stop', 'stalled'] as const) {
+      const workspace = 'projects/semantic-continuation-' + mode
+      let writers = 0, diagnoses = 0
+      const roles: string[] = []
+      const correctionText = 'Narrow the delegated assertion to a hopeful ending.'
+      const writer: DiscoveryInference = async (state, instructions) => {
+        if (state.turns.length === 1) return structuredQuestions([
+          { id: 'ending', kind: 'yes-no', question: 'Should the ending be hopeful?', allowStudioDecision: true },
+        ])
+        writers++
+        const diagnosed = instructions.includes(correctionText)
+        if (mode === 'continue' && diagnoses) assert.equal(diagnosed, true)
+        return JSON.stringify({ ...JSON.parse(proposed), foundation: {
+          ...JSON.parse(proposed).foundation, decisions: [{
+            statement: mode === 'continue' && diagnosed ? 'A hopeful ending' : 'A hopeful ending and expensive illustrated backgrounds',
+            authority: 'delegated',
+            source: { kind: 'answer', setId: state.accepted![0]!.setId, questionId: 'ending' },
+          }] } })
+      }
+      const review: NonNullable<Parameters<typeof withFixtureSemanticReview>[1]> = (packet, role) => {
+        roles.push(role!)
+        if (role === 'semantic-diagnostic') diagnoses++
+        return packet.claims.map(claim => ({ claimId: claim.id,
+          verdict: claim.statement === 'A hopeful ending' ? 'supported' : 'unsupported',
+          reason: 'The submitted question authorizes the ending, not the art budget.' }))
+      }
+      const continuation: NonNullable<Parameters<typeof withFixtureSemanticReview>[3]> = packet =>
+        mode === 'stop' ? { action: 'stop', reason: 'No safe correction established from the available author source.' } :
+          { action: 'continue', corrections: packet.claims.map(claim => ({
+            claimId: claim.id, claimQuote: claim.statement, sourceQuote: claim.question, correction: correctionText })) }
+      const start = await request('POST', { action: 'start', model, text: 'A short mystery' },
+        own, url, writer, workspace, review, undefined, continuation)
+      const qs = start.body.session.questions
+      const result = await request('POST', { action: 'answer', revision: start.body.session.revision,
+        setId: qs.id, setRevision: qs.revision,
+        responses: [{ questionId: 'ending', answer: { kind: 'delegate', note: '' } }],
+      }, own, url, writer, workspace, review, undefined, continuation)
+      assert.equal(result.status, mode === 'continue' ? 200 : 503, JSON.stringify(result.body))
+      const saved = JSON.parse((await store.persistence.onboarding.conversation(alice.id, repo, workspace))!.state)
+      assert.equal(saved.phase, mode === 'continue' ? 'proposed' : 'blocked')
+      assert.equal(!!saved.semanticReview, mode === 'continue')
+      assert.equal(saved.approval, undefined)
+      assert.equal(diagnoses, 1)
+      if (mode === 'continue') {
+        assert.equal(roles.at(-1), 'semantic-review')
+        assert.ok(writers > 3)
+        const paths = saved.discoveryEvidencePaths as string[]
+        const negative = paths.find(path => path.includes('-semantic-review-'))!
+        assert.equal(JSON.parse(readFileSync(join(negative, 'validation.json'), 'utf8')).status, 'rejected')
+        const attempts: DiscoveryAttempt[] = saved.settledAttempts.filter((attempt: DiscoveryAttempt) =>
+          attempt.status === 'started' && attempt.sourceDigest === saved.settledAttempts.at(-1).sourceDigest)
+        const receipts = await Promise.all(attempts.map(attempt =>
+          readDiscoveryResponse(attempt, attempt.sourceDigest!, attempt.role, true)))
+        const writerReceipts = receipts.filter(receipt => receipt.reference!.role === 'writer')
+        const reviewers = receipts.filter(receipt => receipt.reference!.role === 'reviewer')
+        const diagnostic = receipts.find(receipt => receipt.reference!.role === 'diagnostic')!
+        assert.equal(new Set(writerReceipts.map(receipt => receipt.reference!.id)).size, 1)
+        assert.equal(new Set(reviewers.map(receipt => receipt.reference!.id)).size, 1)
+        assert.equal(new Set([writerReceipts[0]!.reference!.id, reviewers[0]!.reference!.id, diagnostic.reference!.id]).size, 3)
+      } else assert.equal(saved.recovery.reason, 'nonconverging')
     }
 
     // Structural correction must not consume subsequent independent semantic review.

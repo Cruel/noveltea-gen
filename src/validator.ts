@@ -1,4 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import type { CanonicalScopeRecord } from "./focused-scope.js";
 import { join } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { nativeValidate } from "./native-validator.js";
@@ -96,4 +99,40 @@ export async function validateStoryJob(job: JobStartResult, _sourceCheckout?: st
   const result = nativeValidate(view ? { ...job, ...view } : job, pin);
   if (result.status !== "passed") snapshot("validation-failed");
   return result;
+}
+
+/** Native identity on the exact sealed revision, not a YAML spelling
+ * heuristic or a record read from a potentially dirty/current draft. */
+export async function historicalCanonicalCatalog(job: JobStartResult, head: string): Promise<CanonicalScopeRecord[]> {
+  if (!/^[a-f0-9]{40}$/.test(head)) throw Error("Invalid historical catalog source.");
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX"]) delete env[key];
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: job.worktreeRoot, env,
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 32 * 1024 * 1024 }).trim();
+  git("merge-base", "--is-ancestor", head, "HEAD");
+  const pin = await nativePin(job);
+  const read = (root: string) => {
+    const result = nativeValidate({ ...job, worktreeRoot: root,
+      worktreeStoryRoot: join(root, job.storyRelativePath), baseSha: head }, pin);
+    const report = result.report as { records?: CanonicalScopeRecord[]; diagnostics?: unknown[];
+      protection?: { status?: string; base?: string; changes?: unknown[]; warnings?: unknown[] } } | undefined;
+    if (result.status !== "passed" || !Array.isArray(report?.records) ||
+        report.diagnostics?.length || report.protection?.status !== "checked" ||
+        report.protection.base !== head || report.protection.changes?.length || report.protection.warnings?.length)
+      throw Error("Historical prerequisite requires exact native canonical/protection verification.");
+    return report.records;
+  };
+  if (git("rev-parse", "HEAD") === head && !git("status", "--porcelain=v1", "--untracked-files=all"))
+    return read(job.worktreeRoot);
+  const scratch = await mkdtemp(join(tmpdir(), "nt-historical-catalog-"));
+  const root = join(scratch, "source");
+  let added = false;
+  try {
+    git("-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", root, head);
+    added = true;
+    return await read(root);
+  } finally {
+    try { if (added) git("worktree", "remove", "--force", root); }
+    finally { await rm(scratch, { recursive: true, force: true }); }
+  }
 }

@@ -104,7 +104,7 @@ export async function revalidateOtherOwnerPrerequisite(input: {
     checkpoints.some(point => point.commitSha === item.verifiedSha) &&
     (!producer || item.id === executionId(producer.workItem)));
   if (producer && upstream.length === 1 && upstream[0]?.verifiedSha)
-    dependencyGit(job, "merge-base", "--is-ancestor", producer.commitSha, upstream[0].verifiedSha);
+    dependencyGit(job, "merge-base", "--is-ancestor", producer.verifiedCommitSha ?? producer.commitSha, upstream[0].verifiedSha);
   if (upstream.length !== 1 || !upstream[0]?.verifiedSha)
     throw Error("Prerequisite's previous reviewed owner has no unique completed inventory node.");
   dependencyGit(job, "merge-base", "--is-ancestor", upstream[0].verifiedSha, request.sourceSha);

@@ -532,19 +532,19 @@ export async function rebindCharacterAfterWriterDependency(job: JobStartResult, 
     reportDigest: string, supportRef: string) {
   if (source.stage !== "character" || source.workItemId !== "character-foundations" || source.milestoneId !== undefined)
     throw Error("Invalid Character prerequisite scope.");
-  const { verifiedWriterSupport } = await import("./writer-dependency.js");
+  const { verifiedWriterSupport, assertWriterReentry, writerContinuationBinding } = await import("./writer-dependency.js");
   const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
   const original = JSON.parse(await readFile(join(job.stateDir, characterNegativePath(source.sealDigest)), "utf8")) as Receipt;
   const file = join(job.stateDir, "character-world.json");
   const current = JSON.parse(await readFile(file, "utf8")) as Receipt;
   const unit = current.units[1];
-  const binding = { reportDigest, supportRef, originalHead: entry.report.sourceSha, sessionSha256: original.units[1].piSessionSha256! };
+  const binding = writerContinuationBinding(reportDigest, supportRef, entry.report.sourceSha, original.units[1].piSessionSha256!);
   if (unit.writerContinuation?.reportDigest === reportDigest) {
-    if (!isDeepStrictEqual(unit.writerContinuation, binding) ||
-        unit.assignmentKey !== original.units[1].assignmentKey ||
-        !isDeepStrictEqual(unit.assignment, original.units[1].assignment) ||
-        unit.piSessionId !== original.units[1].piSessionId || unit.piSessionFile !== original.units[1].piSessionFile)
-      throw Error("Character continuation changed its original writer.");
+    assertWriterReentry({ ...unit, sessionId: unit.piSessionId, sessionFile: unit.piSessionFile },
+      { assignmentKey: original.units[1].assignmentKey, sessionId: original.units[1].piSessionId,
+        sessionFile: original.units[1].piSessionFile }, binding);
+    if (!isDeepStrictEqual(unit.assignment, original.units[1].assignment))
+      throw Error("Character continuation changed its original assignment.");
     return;
   }
   if (dirty(job).length || !isDeepStrictEqual(original, current))

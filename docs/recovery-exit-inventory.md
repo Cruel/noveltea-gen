@@ -1199,3 +1199,71 @@ The R14D prospective case covers actual supporting commit, new child
 admission, replacement Turn, original work preservation, next native
 Event checkpoint and nested continuation. Compatibility tests reject
 incomplete, foreign and failed support receipts.
+
+### #246 follow-up: confirmed diagnostics and repaired producer lineage
+
+The earlier #275 qualification is historical, not a new qualification of the
+following source changes. The Studio semantic diagnostic consumer now separates
+a confirmed negative with a source-bound corrective continuation from a
+no-safe-path stop. The writer uses the existing correction path; the
+independent Review and exact author approval boundary remain mandatory.
+A repeated diagnosed source cannot mint another assessment window. The parser
+rejects foreign, duplicate and fabricated quoted sources. The R14 model-call
+counts are unchanged.
+
+The writer prerequisite source gate now uses the pinned native validator at
+the exact sealed commit (a detached temporary view when needed), independently
+from Git quotation and content-digest checks. The producer gate authenticates
+the path-changing checkpoint and original failed Review/repair chain, or
+recursively resolves a settled existing-record support through its original
+producer. It preserves the original owner and passing repair tip, rather than
+inventing a new assignment or granting authority based on a path spelling.
+The historical Event support lookup validates the exact request and support
+without recursively inspecting a later consuming writer's report. The common
+selective-revalidation gate maps a verified repaired subunit back to its original
+inventory item and original consumer receipt. The writer-only repeat-support
+admission excludes settled grants from the overlapping-active-writer check;
+all other dependency admission and authority checks remain in force.
+
+The common continuation-binding and identity checks cover Event, Interactive,
+Composition and Character (including idempotent re-entry). The source-bound
+proof gate inventory now explicitly fingerprints these helpers, historical
+native catalog validation, producer resolution, supporting verification, and
+dependency admission. Existing model/effect consumer fingerprints reflect the
+changed bodies without increasing the model invocation count or adding a new
+recovery policy.
+
+Focused regression coverage: authenticated Studio Discovery confirmed
+negative -> source-quoted correction -> original Pi writer -> independent
+Review, explicit stop and repeated nonproductive source; exact quote rejection
+in the diagnostic parser; C04 World fact with a valid commented YAML ID
+through Character prerequisite reconstruction; R07 real Event -> rejected
+Review -> passing repair -> Composition finding citing the repaired bytes ->
+independently reviewed support -> selective revalidation and continuation,
+including failed and tampered repair lineage controls; R07 consecutive
+existing-record support from Event and Choice against the same Character.
+
+Targeted evidence on the follow-up to `93b1a8e`:
+
+- 50 unit and source-gate checks passed, including the diagnostic parser,
+  Event-work, other-owner admission and recovery/consumer audits; the 25
+  recovery/consumer/matrix checks passed again after switching historical
+  repair and support inspection to the historical checkpoint view.
+- Both authenticated onboarding integration tests passed, including the
+  confirmed-negative correction, explicit stop, no second diagnosis for the
+  same stalled source, and authenticated original writer/reviewer Pi session
+  identity.
+- Both C04 commented-ID regressions passed (ordinary and native diagnosis).
+- Both new R07 integrated producer regressions passed (repaired Event and
+  previously supported Character); the repaired Event case also rejects
+  unverified and tampered repair proofs, resumes the original Composition Pi
+  writer and verifies its checkpoint before subsequent scheduling.
+- R14D support, other-owner and other-owner-world passed (3/3).
+- Root and Studio typechecking (including Studio build), lint, formatting,
+  and diff checks passed. No paid model invocations were made by this
+  follow-up. The whole #275 matrix has not been rerun on this changed source.
+
+Logs: `/tmp/nt246-discovery-bounded-final.log`,
+`/tmp/nt246-commented-id-final.log`, `/tmp/nt246-supported-producer.log`,
+`/tmp/nt246-repaired-producer-final2.log`, `/tmp/nt246-review-deps-final.log`,
+`/tmp/nt246-audit-bounded-final.log`, `/tmp/nt246-audit-historical-final.log`.

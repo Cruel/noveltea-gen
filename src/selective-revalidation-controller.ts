@@ -11,7 +11,7 @@ import type { JobStartResult } from "./job.js";
 import type { GenerationInventory, ExecutionItem } from "./generation-plan.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
 import { inheritedReviewedCheckpoint, readRecoveryFork } from "./recovery-fork-state.js";
-import { inspectCheckpointReview } from "./checkpoint-assurance.js";
+import { inspectCheckpointReview, readRepairCommitProof } from "./checkpoint-assurance.js";
 import { readHistoricalEventOnlyOmission, type EventOnlyPayload } from "./interactive-event-only.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { verifyPlanHistory } from "./architecture.js";
@@ -149,24 +149,26 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
     // historical subunit is a completed source, not the composite assignment.
     const partialWorld = item.stage === "foundations" && item.id === correction.upstreamItemId &&
       item.verifiedSha === correction.predecessorCommitSha &&
-      checkpoints.some(p => p.workItem === "world-foundations" && p.commitSha === item.verifiedSha && p.semanticReview === "passed") &&
+      checkpoints.some(p => p.workItem === "world-foundations" && ancestor(job, p.commitSha, item.verifiedSha!)) &&
       !checkpoints.some(p => p.workItem === "character-foundations" && ancestor(job, p.commitSha, correction.baseSha));
     const matches = partialWorld ? ["world-foundations"] : workItems(item);
-    let points = checkpoints.filter(point => matches.includes(point.workItem));
-    // A repaired upstream Event is still the same inventory assignment.
-    // Authenticate its exact passing successor; never promote the failed
-    // original Review or infer a replacement from the current worktree.
-    if (item.id === correction.upstreamItemId && item.stage === "event" &&
-        points.length === 1 && points[0]!.semanticReview === "failed" &&
-        item.verifiedSha === correction.predecessorCommitSha) {
-      const original = points[0]!;
-      const successor = checkpoints.find(p => p.commitSha === item.verifiedSha &&
-        p.planVersion === item.planVersion && p.semanticReview === "passed" &&
-        p.workItem.startsWith("repair-"));
+    const originalBySuccessor = new Map<string, RecoveryInspection>();
+    const points = await Promise.all(checkpoints.filter(point => matches.includes(point.workItem)).map(async original => {
+      if (original.semanticReview !== "failed" || !item.verifiedSha) return original;
+      const candidates = checkpoints.filter(p => p.semanticReview === "passed" &&
+        p.workItem.startsWith("repair-") && p.assurance?.assignmentId === original.assurance?.assignmentId &&
+        p.planVersion === original.planVersion && ancestor(job, p.commitSha, item.verifiedSha!) &&
+        ancestor(job, p.commitSha, correction.baseSha));
+      const successors = [];
+      for (const p of candidates)
+        if ((await readRepairCommitProof(job, p.workItem)).rootFailureSha === original.commitSha) successors.push(p);
+      if (successors.length !== 1) return original;
+      const successor = successors[0]!;
       const { verifyReviewCycleSuccessor } = await import("./generation-recovery-resolution.js");
-      if (successor && await verifyReviewCycleSuccessor(job, original.commitSha, successor.commitSha))
-        points = [successor];
-    }
+      if (!await verifyReviewCycleSuccessor(job, original.commitSha, successor.commitSha)) return original;
+      originalBySuccessor.set(successor.commitSha, original);
+      return successor;
+    }));
     originalPoints[item.id] = points;
     const historical = ancestor(job, item.verifiedSha ?? "", correction.predecessorCommitSha);
     // A previously author-approved Foundation can be inherited without a
@@ -264,7 +266,7 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
         accepted = false; break;
       }
       const precedesUpstream = ancestor(job, point.commitSha, correction.predecessorCommitSha);
-      const referenced = precedesUpstream ? [] : await sourceReceipt(job, item, point);
+      const referenced = precedesUpstream ? [] : await sourceReceipt(job, item, originalBySuccessor.get(point.commitSha) ?? point);
       if (!referenced) { accepted = false; break; }
       files.push(...referenced);
       reviews.push(hash(review.result));

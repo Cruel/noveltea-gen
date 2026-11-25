@@ -1,12 +1,12 @@
 import type { DiscoveryInference } from '../../src/lib/onboarding-pi.server'
-import type { DiscoverySemanticPacket } from '../../../src/discovery-semantic-review'
+import type { DiscoverySemanticPacket, DiscoverySemanticContinuation } from '../../../src/discovery-semantic-review'
 
 /** Test-only independent reviewer. Production has no access to this fixture:
  * all production review turns use a distinct tool-less Pi session. */
 export function withFixtureSemanticReview(infer: DiscoveryInference,
   evaluate?: (packet: DiscoverySemanticPacket, role?: 'semantic-review' | 'semantic-diagnostic' | 'semantic-replacement') => Array<{
     claimId: string; verdict: 'supported' | 'unsupported' | 'uncertain'; reason: string
-  }>, disputes?: (packet: DiscoverySemanticPacket) => Array<{ claimId: string; claimQuote: string; sourceQuote: string }>): DiscoveryInference {
+  }>, disputes?: (packet: DiscoverySemanticPacket) => Array<{ claimId: string; claimQuote: string; sourceQuote: string }>, continuation?: (packet: DiscoverySemanticPacket) => DiscoverySemanticContinuation): DiscoveryInference {
   return (session, instructions, role) => {
     if (role !== 'semantic-review' && role !== 'semantic-diagnostic' && role !== 'semantic-replacement') return infer(session, instructions, role)
     const marker = 'REVIEW_PACKET_JSON:\n'
@@ -19,6 +19,6 @@ export function withFixtureSemanticReview(infer: DiscoveryInference,
       ? evaluate(packet, role)
       : packet.claims.map(claim => ({ claimId: claim.id, verdict: 'supported',
         reason: 'Fixture-only semantic acceptance for deterministic controller coverage.' })),
-      ...(role === 'semantic-diagnostic' ? { disputes: disputes?.(packet) ?? [] } : {}) }))
+      ...(role === 'semantic-diagnostic' ? { disputes: disputes?.(packet) ?? [], continuation: continuation?.(packet) ?? { action: 'stop', reason: 'No further source-specific correction identified.' } } : {}) }))
   }
 }

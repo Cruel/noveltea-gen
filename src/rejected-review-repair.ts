@@ -370,7 +370,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   return withStoryJobLockOrReuse(job, "rejected-review-admission",
     ["rejected-review-next-attempt"], admit);
 }
-export async function inspectRejectedRepair(job: JobStartResult, sha: string): Promise<RepairReceipt> {
+export async function inspectRejectedRepair(job: JobStartResult, sha: string, sourceMode: "live" | "historical" = "live"): Promise<RepairReceipt> {
   if (!SHA.test(sha)) throw Error("Invalid repair source SHA.");
   const file = pathFor(job, sha), stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128_000)
@@ -415,7 +415,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
         !state.findings.some(f => f.path === state.dispute!.path && f.line === state.dispute!.line) ||
         !["disputing", "adjudicating", "blocked"].includes(state.phase))))
     throw Error("Repair receipt identity or state is invalid.");
-  const checkpoints = await inspectRecoveryCheckpoints(job);
+  const checkpoints = await inspectRecoveryCheckpoints(job, sourceMode);
   const original = checkpoints.find(p => p.eligible && p.commitSha === state.rootFailureSha);
   const current = checkpoints.find(p => p.eligible && p.commitSha === state.sourceCommitSha);
   if (!original || !current) throw Error("Repair no longer matches the original, immutable failure.");
@@ -436,7 +436,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string): P
   const turn = await readReviewTurnEvidence(job);
   if (!turn) throw Error("Repair lost its pinned original Turn plan.");
   const previous = current.workItem.startsWith("repair-")
-    ? await inspectRejectedRepair(job, current.workItem.slice(7)) : null;
+    ? await inspectRejectedRepair(job, current.workItem.slice(7), sourceMode) : null;
   const origin = previous ? predecessorOrigin(previous, current) : await readRejectedRepairOrigin(job, current);
   const eventMilestone = current.workItem.startsWith("event-") &&
       current.assurance!.changedPaths.some(p => p.startsWith("milestones/"))

@@ -467,10 +467,10 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
   }
 });
 
-test("R07 integrated Event, Interactive and Composition carry cross-owner support through ordinary scheduling", {
+for (const producerMode of ["ordinary", "repaired", "supported"] as const) test("R07 integrated Event, Interactive and Composition carry cross-owner support through ordinary scheduling" + (producerMode === "ordinary" ? "" : " with " + producerMode + " producer"), {
   skip: !available, timeout: 480_000,
 }, async () => {
-  const f = setup("r07-integrated-writer");
+  const f = setup("r07-integrated-writer-" + producerMode);
   await useScriptedArchiveCli(f);
   const paused = f.cli([...f.start, "--pause-after", "foundations"]);
   assert.equal(paused.status, "paused", paused.reason);
@@ -483,8 +483,15 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
     const cfg = { configurable: { thread_id: paused.threadId }, recursionLimit: 1000 };
     const turn = JSON.parse(readFileSync(join(f.job.stateDir, "turn-plan.json"), "utf8"));
     const ordinary = (await import("./support/scripted-archive-stages.js")).archiveStages(f.job, turn);
-    const milestone = "milestone.disclosure";
-    const cases = [
+    const milestone = producerMode === "repaired" ? "milestone.reckoning" : "milestone.disclosure";
+    const repairedPath = "events/redacted-account.md";
+    const repairedQuote = "The inquiry verifies the visible signatures before accepting the redacted account.";
+    let rejectedEventHead = "", repairedEventHead = "";
+    const cases = producerMode === "repaired" ? [{ stage: "composition", prompt: "You are a pinned nt-narrative-composition author",
+      target: "event.redacted-account", path: repairedPath, specialist: "nt-event-design",
+      correction: "Ada states the exact matching dates before the inquiry accepts the redacted account.",
+      witnesses: ["milestones/reckoning.md", "arcs/truth.md", repairedPath],
+      ids: [milestone, "arc.truth", "event.redacted-account"], writer: "nt-narrative-composition" }] : [
       { stage: "event", prompt: "Author exactly ONE Event-design cluster", target: "character.neri",
         path: "characters/neri.md", specialist: "nt-character-development",
         correction: "Neri personally authenticates the signed archive register.",
@@ -501,6 +508,11 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
         witnesses: ["milestones/disclosure.md", "arcs/truth.md", "events/disclose-ledger.md"],
         ids: [milestone, "arc.truth", "event.disclose-ledger"], writer: "nt-narrative-composition" },
     ];
+    if (producerMode === "supported") cases[1] = { ...cases[1]!, target: "character.neri",
+      path: "characters/neri.md", specialist: "nt-character-development",
+      correction: "Neri explains why the signed register is independent of his account.",
+      witnesses: ["milestones/disclosure.md", "arcs/truth.md", "characters/neri.md"],
+      ids: [milestone, "arc.truth", "character.neri"] };
     let current = 0, negative = false, planned = false, written = false, supported = false;
     const runtime = await scriptedStoryRuntime((index, context) => {
       const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
@@ -509,6 +521,37 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
       const stop = (v: unknown) => ({ content: scriptedText(v), reason: "stop" as const });
       const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
       const skills = (name: string) => boundedPinnedSources(name).map(p => "skill://" + p);
+      if (producerMode === "repaired") {
+        if (prompt.includes("Continue your ORIGINAL specialist Pi session to correct a rejected draft.") && rejectedEventHead && !repairedEventHead) {
+          const old = readFileSync(join(f.job.worktreeStoryRoot, repairedPath), "utf8");
+          if (!old.includes(repairedQuote)) return { reason: "toolUse", content: [{
+            type: "toolCall", name: "edit", id: "repaired-producer-edit", arguments: {
+              path: repairedPath, edits: [{ oldText: old, newText: old + "\n" + repairedQuote + "\n" }] } }] };
+          return stop("Clarified the original Event's evidence.");
+        }
+        if (prompt.includes("IMMUTABLE REVIEW PACKET") && !repairedEventHead) {
+          const packet = JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+          const item = packet.items[0];
+          if (item.reviewedWorkItem === "event-reckoning" || rejectedEventHead &&
+              item.reviewedWorkItem === "repair-" + rejectedEventHead) {
+            if (!messages.some(m => m.role === "toolResult" && JSON.stringify(m.content).includes("nt-narrative-review")))
+              return read(skills("nt-narrative-review"));
+            const ref = { commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path: repairedPath, line: 1 };
+            if (!rejectedEventHead) {
+              rejectedEventHead = item.assurance.commitSha;
+              return stop({ sourceDigest: packet.sourceDigest, verdict: "fail", evidence: [],
+                findings: [{ ...ref, kind: "missing-requirement", message: "The visible signatures are not yet explicit.",
+                  requiredCorrection: repairedQuote, affectedPaths: [repairedPath] }] });
+            }
+            repairedEventHead = item.assurance.commitSha;
+            assert.ok(readFileSync(join(f.job.worktreeStoryRoot, repairedPath), "utf8").includes(repairedQuote));
+            return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
+              evidence: [{ ...ref, explanation: "The signatures are explicit." }],
+              progressDiagnosis: { status: "material", reason: "Added visible signatures.",
+                evidence: { path: repairedPath, quote: repairedQuote, change: "added" } } });
+          }
+        }
+      }
       const c = cases[current];
       if (!c || supported) return ordinary(index, context);
       if (prompt.includes(c.prompt) && !prompt.includes("AUTHENTICATED VERIFIED PREREQUISITE")) {
@@ -522,7 +565,7 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
         }
         return stop({ modifiedRecords: [], architecturalConflicts: [c.correction], laterObligations: [],
           dependencyFinding: { targetId: c.target, obligationIndex: 0, missing: c.correction, affectedIds: c.ids,
-            sources: c.witnesses.map(p => ({ path: p, quote: readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))! })),
+            sources: c.witnesses.map(p => ({ path: p, quote: producerMode === "repaired" && p === repairedPath ? repairedQuote : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))! })),
             likelySpecialist: c.specialist, authorDecisionRequired: false } });
       }
       if (negative && !written && prompt.includes("dependency") && prompt.includes("nt-story-orchestrate")) {
@@ -550,13 +593,30 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
     });
     const readReceipt = (stage: string) => {
       if (stage === "choice") return JSON.parse(readFileSync(join(f.job.stateDir, "interactive-items/disclosure.json"), "utf8")).units[0];
-      return JSON.parse(readFileSync(join(f.job.stateDir, stage + "-items/disclosure.json"), "utf8"));
+      return JSON.parse(readFileSync(join(f.job.stateDir, stage + "-items/" + milestone.slice(10) + ".json"), "utf8"));
     };
     await graph.updateState(cfg, { status: "running", reason: null, pauseAfter: null }, "schedule");
     const originals: Array<{ key: string; session: string }> = [];
     for (const c of cases) {
       const suspended = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptBefore: ["dependency_amendment"] }));
       assert.equal(suspended.focusedPrerequisite?.writerSource?.stage, c.stage, JSON.stringify({reason: suspended.reason, recovery: suspended.recoverySources, active: suspended.active}));
+      if (producerMode === "repaired") {
+        assert.ok(rejectedEventHead && repairedEventHead);
+        const source = suspended.focusedPrerequisite!.writerSource!;
+        assert.equal(source.producer.workItem, "event-reckoning");
+        assert.equal(source.producer.commitSha, rejectedEventHead);
+        assert.equal(source.producer.verifiedCommitSha, repairedEventHead);
+        const { verifiedPathProducer, inspectWriterDependency } = await import("../src/writer-dependency.js");
+        await assert.rejects(() => verifiedPathProducer(f.job, turn.digest, rejectedEventHead, repairedPath), /independently verified/);
+        const proof = join(f.job.stateDir, "review-repairs", "proofs", rejectedEventHead + ".json");
+        const raw = readFileSync(proof, "utf8");
+        try {
+          writeFileSync(proof, JSON.stringify({ ...JSON.parse(raw), sourceReviewDigest: "0".repeat(64) }));
+          await assert.rejects(() => inspectWriterDependency(f.job, source));
+        } finally { writeFileSync(proof, raw); }
+        const sealed = await inspectWriterDependency(f.job, source);
+        assert.equal(sealed.report.sources.find(s => s.path === repairedPath)?.quote, repairedQuote);
+      }
       const original = readReceipt(c.stage);
       originals.push({ key: original.assignmentKey, session: original.sessionId ?? original.piSessionId ?? original.writerSessionId });
       const verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
@@ -566,7 +626,7 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
       assert.ok(readFileSync(join(f.job.worktreeStoryRoot, c.path), "utf8").includes(c.correction));
       const revalidated = JSON.parse(readFileSync(join(f.job.stateDir, "revalidation-items", entry.commitSha + ".json"), "utf8"));
       assert.equal(revalidated.state, "completed");
-      if (c.stage === "composition") {
+      if (c.stage === "composition" && producerMode !== "repaired") {
         assert.equal(entry.writerSource?.producer.workItem, "interactive-choice-disclosure");
         assert.equal(revalidated.proposal.upstreamItemId, "event:" + milestone);
         assert.ok(revalidated.results.some((r: {itemId: string; status: string}) => r.itemId === "interactive:" + milestone && r.status === "passed"));
@@ -585,6 +645,8 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
         } finally { writeFileSync(reviewPath, originalReview); }
         await readEventOnlyOmission(f.job, omitted, omission);
       }
+      if (producerMode === "repaired") assert.equal(revalidated.proposal.upstreamItemId, "event:" + milestone);
+      if (producerMode === "supported" && c.stage === "choice") assert.equal(entry.writerSource?.producer.workItem, "character-foundations");
       assert.ok(!revalidated.results.some((r: { itemId: string }) => revalidated.proposal.unaffected.includes(r.itemId)));
       const result = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["specialist_dispatch"] }));
       assert.equal(result.result?.status, c.stage === "event" ? "event-cluster-committed" : c.stage === "choice" ? "review-handoff" : "composition-committed", JSON.stringify({reason: result.reason, recovery: result.recoverySources}));
@@ -599,7 +661,7 @@ test("R07 integrated Event, Interactive and Composition carry cross-owner suppor
     assert.ok(done.active && done.active.id !== "composition:" + milestone);
     assert.equal(git(f.job.worktreeRoot, "status", "--porcelain"), "");
     const ledger = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!;
-    assert.equal(ledger.entries.filter(e => e.writerSource).length, 3);
+    assert.equal(ledger.entries.filter(e => e.writerSource).length, cases.length);
   } finally {
     saver.db.close(); restoreSandbox();
     for (const [key, value] of Object.entries(old)) {
@@ -1397,6 +1459,7 @@ for (const nativeDiagnosis of [false, true]) test("C04 typed Character prerequis
       const stop = (v: unknown) => ({ content: scriptedText(v), reason: "stop" as const });
       const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
       if (prompt.includes("assigned ONE bounded canonical Story work item") && prompt.includes('"domain": "character"') && !supported) {
+        assert.match(readFileSync(join(f.job.worktreeStoryRoot, path), "utf8"), /id: fact\.evidence-concealed # canonical record identity/);
         if (!negative) { negative = true; return read([...new Set([...skills("nt-character-development"), "skill://nt-catalog/references/glossary.md", path])]); }
         return stop({ modifiedRecords: [], architecturalConflicts: [correction], laterObligations: [],
           dependencyFinding: { targetId: target, obligationIndex: 1, missing: correction, affectedIds: [target],
@@ -1446,7 +1509,16 @@ for (const nativeDiagnosis of [false, true]) test("C04 typed Character prerequis
           evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
             explanation: "Verified the bounded World prerequisite." }] });
       }
-      return ordinary(index, context);
+      const reply = ordinary(index, context);
+      if (prompt.includes('"domain": "world"') && prompt.includes("BOUND ASSIGNMENT:")) {
+        for (const item of reply.content) {
+          if (item.type === "toolCall" && item.name === "write" && item.arguments.path === path &&
+              typeof item.arguments.content === "string")
+            item.arguments.content = item.arguments.content.replace("id: " + target,
+              "id: " + target + " # canonical record identity");
+        }
+      }
+      return reply;
     });
     const item = paused.inventory.items.find((i: { id: string }) => i.id === "foundations");
     assert.ok(item);

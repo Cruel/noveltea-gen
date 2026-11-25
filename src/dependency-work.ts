@@ -568,11 +568,11 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
     // for impact analysis; never mark the actual Generation item complete.
     const inventory = source.stage === "character" ? { ...input.inventory, items: input.inventory.items.map(item =>
       item.id === "foundations" && item.status === "pending"
-        ? { ...item, status: "verified" as const, verifiedSha: source.producer.commitSha } : item) } : input.inventory;
+        ? { ...item, status: "verified" as const, verifiedSha: source.producer.verifiedCommitSha ?? source.producer.commitSha } : item) } : input.inventory;
     const producer = inventory.items.find(i => i.id === executionId(source.producer.workItem) &&
       i.status === "verified" && i.verifiedSha);
     if (!producer?.verifiedSha) throw Error("Writer prerequisite producer is not a completed original inventory item.");
-    dependencyGit(job, "merge-base", "--is-ancestor", source.producer.commitSha, producer.verifiedSha);
+    dependencyGit(job, "merge-base", "--is-ancestor", source.producer.verifiedCommitSha ?? source.producer.commitSha, producer.verifiedSha);
     // A later cross-domain writer may legitimately edit a record created by
     // an earlier specialist. Its last-writer proof authenticates the source,
     // but impact must start at the first independently verified realization,
@@ -588,10 +588,13 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
       const item = inventory.items.find(i => i.id === executionId(original.workItem) &&
         i.status === "verified" && i.verifiedSha);
       if (!item?.verifiedSha || original.assurance?.turnDigest !== report.turnDigest ||
-          !original.assurance.changedPaths.includes(source.targetPath) ||
-          !["passed", "not-required"].includes(original.semanticReview))
+          !original.assurance.changedPaths.includes(source.targetPath))
         throw Error("Writer prerequisite lost the earlier verified realization of its source.");
-      dependencyGit(job, "merge-base", "--is-ancestor", first, item.verifiedSha);
+      const initial = await (await import("./writer-dependency.js")).verifiedPathProducer(
+        job, report.turnDigest, item.verifiedSha, source.targetPath);
+      if (initial.commitSha !== first || initial.workItem !== original.workItem)
+        throw Error("Writer prerequisite lost the earlier verified realization of its source.");
+      dependencyGit(job, "merge-base", "--is-ancestor", initial.verifiedCommitSha ?? first, item.verifiedSha);
       upstream = item;
     }
     const { revalidateAfterReviewedCorrection } = await import("./selective-revalidation-work.js");

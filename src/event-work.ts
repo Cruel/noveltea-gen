@@ -909,27 +909,21 @@ export async function archiveEventWriterDependency(job: JobStartResult, mileston
 export async function rebindEventAfterWriterDependency(job: JobStartResult,
   source: import("./writer-dependency.js").WriterDependencySource, reportDigest: string, supportRef: string) {
   if (source.stage !== "event" || !source.milestoneId) throw Error("Invalid event prerequisite scope.");
-  const { inspectDependencyPlan, dependencyDigest } = await import("./dependency-state.js");
-  const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === reportDigest);
-  if (!entry?.writerSource || dependencyDigest(entry.writerSource) !== dependencyDigest(source) ||
-      entry.phase !== "verified" || !entry.commitSha || entry.review?.verdict !== "pass" ||
-      dependencyDigest(entry) !== supportRef)
-    throw Error("Event continuation lacks verified original supporting work.");
+  const { verifiedWriterSupport, assertWriterReentry, writerContinuationBinding } = await import("./writer-dependency.js");
+  const entry = await verifiedWriterSupport(job, source, reportDigest, supportRef);
   const head = await trustedHead(job);
-  const { assertCompletedOtherOwnerRevalidation } = await import("./selective-revalidation-work.js");
-  await assertCompletedOtherOwnerRevalidation(job, { baseSha: entry.report.sourceSha,
-    successorSha: entry.commitSha, turnDigest: entry.report.turnDigest, path: source.targetPath });
   const original = await inspectEventWriterDependency(job, source.milestoneId, source.sealDigest);
   const historical = JSON.parse(await readFile(writerNegativePath(job, source.milestoneId, source.sealDigest), "utf8")) as EventReceipt;
   const file = join(job.stateDir, "event-items", source.milestoneId.slice(10) + ".json");
   const current = JSON.parse(await readFile(file, "utf8")) as EventReceipt;
-  const binding = { reportDigest, supportRef, originalHead: original.head,
-    ...(historical.prerequisite ? { sessionSha256: historical.prerequisite.sessionSha256 } : {}) };
+  if (entry.report.sourceSha !== original.head) throw Error("Event continuation source differs from original writer.");
+  const binding = writerContinuationBinding(reportDigest, supportRef, original.head, historical.prerequisite?.sessionSha256);
   if (current.writerContinuation?.reportDigest === reportDigest) {
-    if (JSON.stringify(current.writerContinuation) !== JSON.stringify(binding) ||
-        current.assignmentKey !== original.assignmentKey || !original.origin && (current.sessionFile !== historical.sessionFile ||
-        current.sessionId !== historical.sessionId))
-      throw Error("Event continuation receipt changed its original writer.");
+    assertWriterReentry({ writerContinuation: current.writerContinuation, assignmentKey: current.assignmentKey,
+      sessionId: original.origin ? undefined : current.sessionId,
+      sessionFile: original.origin ? undefined : current.sessionFile },
+      { assignmentKey: original.assignmentKey, sessionId: original.origin ? undefined : historical.sessionId,
+        sessionFile: original.origin ? undefined : historical.sessionFile }, binding);
     return current.expectedHead;
   }
   if (dirty(job).length || (current.blueprintOwnerFinding?.sealDigest ?? current.prerequisite?.reportDigest) !== source.sealDigest ||

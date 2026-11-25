@@ -69,6 +69,8 @@ export interface OtherOwnerCheckpoint {
   workItem: string;
   commitSha: string;
   assuranceDigest: string;
+  /** Independently passed repair tip; the root remains the producer identity. */
+  verifiedCommitSha?: string;
 }
 export function reviewOtherOwners(turn: TurnEvidence, originalId: string, path: string,
   checkpoint?: OtherOwnerCheckpoint): TurnAssignmentEvidence[] {

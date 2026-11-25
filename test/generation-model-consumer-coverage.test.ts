@@ -104,7 +104,7 @@ const reviewed: Record<string, string> = {
   "src/unknown-recovery-diagnostic.ts:diagnoseUnknownCompletion": "4:f95e9b74052bbf4f7639ba2b",
   "web/src/agent-runner.ts:runPersistedGeneration": "1:a57375990748cf3a4181c550",
   "web/src/lib/onboarding-pi.server.ts:realInference": "4:d8e7bdacf0d34ddacb7fb378",
-  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
+  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:c03db4f85a977f99124aea8f",
   "web/src/lib/pi-credentials.server.ts:buildUserPiRuntime": "2:80bee0d946aa4633f94ea00e",
 };
 
@@ -185,7 +185,7 @@ const downstreamReviewed: Record<string, string> = {
   "src/turn-fulfillment.ts:readTurnFulfillment": "1:6444ae47e2033a25e5c7dfd4",
   "src/turn-fulfillment.ts:assessTurnFulfillment": "1:ef5b7f354e0afb3dc0ca024a",
   "web/src/lib/discovery-evidence.server.ts:meterDiscoveryAttempts": "1:e815c68da3ec4e1c0762231d",
-  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:2f6882d530fd1360e5530e17",
+  "web/src/lib/onboarding-pi.server.ts:onboardingPiRequest": "4:c03db4f85a977f99124aea8f",
   "web/src/lib/story-chat-discovery.server.ts:storyChatDiscoveryRequest": "1:14222f0213a6d39fc9d6254d",
   "src/dependency-work.ts:runSupportingDependency": "1:bb4bc5e943544809688ca76d",
   "src/support-review.ts:reviewSupportRoot": "1:3d6cecfac750e4d860307532",
@@ -243,7 +243,7 @@ const effectReviewed: Record<string, string> = {
   "src/cross-domain-closeout-work.ts:reviewerAssignment": "1:880610212e10fddd54a39ce8",
   "src/cross-domain-prerequisite-controller.ts:preflightCompositionBoundary": "1:93cd9ea2199739db5e6988ea",
   "src/dependency-state.ts:registerReviewDependency": "1:5ddcfd4f862723bd975fb444",
-  "src/dependency-state.ts:inspectDependencyAdmission": "1:62e47675e426365edb731e54",
+  "src/dependency-state.ts:inspectDependencyAdmission": "1:8b899cc1c47a0e2a6bb9b9fb",
   "src/dependency-state.ts:registerBlueprintDependency": "1:cb1ade2913b7acad17b3b7b9",
   "src/dependency-work.ts:supportingWriterRounds": "1:180cbfacbc22d6eb2499f374",
   "src/dependent-correction-work.ts:native": "1:c3469e6a1dcc5740024c502c",

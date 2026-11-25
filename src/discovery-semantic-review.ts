@@ -133,10 +133,14 @@ export function discoverySemanticCorrection(verdict: DiscoverySemanticVerdict): 
 /** Diagnosis may identify a disputed negative only with exact current claim
  * and submitted-source quotations. These are evidence, not a passing Review.
  * The controller checks completeness against the immutable negative receipt. */
+export type DiscoverySemanticContinuation =
+  | { action: 'stop'; reason: string }
+  | { action: 'continue'; corrections: Array<{ claimId: string; claimQuote: string; sourceQuote: string; correction: string }> }
+
 export function parseDiscoverySemanticDiagnostic(raw: string, packet: DiscoverySemanticPacket) {
   if (raw.length > 24_000) throw Error('Discovery diagnostic reply exceeds limit.')
   const parsed: unknown = JSON.parse(clean(raw))
-  if (!plain(parsed) || Object.keys(parsed).sort().join(',') !== 'assessments,disputes' ||
+  if (!plain(parsed) || Object.keys(parsed).sort().join(',') !== 'assessments,continuation,disputes' ||
       !Array.isArray(parsed.disputes) || parsed.disputes.length > packet.claims.length)
     throw Error('Invalid Discovery diagnostic contract.')
   const verdict = parseDiscoverySemanticVerdict(JSON.stringify({ assessments: parsed.assessments }), packet)
@@ -156,5 +160,31 @@ export function parseDiscoverySemanticDiagnostic(raw: string, packet: DiscoveryS
       throw Error('Discovery diagnostic dispute lacks exact source evidence.')
     disputed.add(item.claimId)
   }
-  return { verdict, disputed: [...disputed].sort() }
+  const continuation = parsed.continuation
+  if (!plain(continuation)) throw Error('Discovery diagnosis requires a continuation decision.')
+  if (continuation.action === 'stop') {
+    if (Object.keys(continuation).sort().join(',') !== 'action,reason' ||
+        typeof continuation.reason !== 'string' || !continuation.reason.trim() || continuation.reason.length > 400)
+      throw Error('Discovery diagnostic stop lacks an evidence-backed reason.')
+    return { verdict, disputed: [...disputed].sort(), continuation: continuation as DiscoverySemanticContinuation }
+  }
+  if (continuation.action !== 'continue' || Object.keys(continuation).sort().join(',') !== 'action,corrections' ||
+      !Array.isArray(continuation.corrections) || !continuation.corrections.length ||
+      continuation.corrections.length > packet.claims.length || disputed.size)
+    throw Error('Invalid Discovery diagnostic continuation.')
+  const corrected = new Set<string>()
+  for (const item of continuation.corrections) {
+    if (!plain(item) || Object.keys(item).sort().join(',') !== 'claimId,claimQuote,correction,sourceQuote' ||
+        typeof item.claimId !== 'string' || corrected.has(item.claimId) ||
+        typeof item.claimQuote !== 'string' || typeof item.sourceQuote !== 'string' ||
+        typeof item.correction !== 'string' || !item.correction.trim() || item.correction.length > 600)
+      throw Error('Invalid Discovery diagnostic correction.')
+    const claim = packet.claims.find(claim => claim.id === item.claimId)
+    if (!claim || !exactQuote(claim.statement, item.claimQuote) ||
+        ![claim.question, claim.submittedAnswer].some(source => exactQuote(source, item.sourceQuote as string)) ||
+        !discoverySemanticFailures(verdict).some(failure => failure.claimId === item.claimId))
+      throw Error('Discovery diagnostic correction lacks exact rejected claim and submitted-source evidence.')
+    corrected.add(item.claimId)
+  }
+  return { verdict, disputed: [...disputed].sort(), continuation: continuation as DiscoverySemanticContinuation }
 }

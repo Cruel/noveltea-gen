@@ -226,14 +226,14 @@ export async function reviewOtherOwnerCheckpoint(job: JobStartResult, turn: Turn
       reviewOtherOwners(turn, originalId, path).length) return undefined;
   const repoPath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + path;
   const last = dependencyGit(job, "log", "-1", "--format=%H", sourceSha, "--", repoPath);
-  const point = (points ?? await inspectRecoveryCheckpoints(job, "historical")).find(p =>
-    p.commitSha === last && p.commitSha !== sourceSha && p.eligible &&
-    p.assurance?.turnDigest === turn.digest && p.assurance.changedPaths.includes(path) &&
-    (p.semanticReview === "passed" || p.semanticReview === "not-required") &&
-    !p.workItem.startsWith("repair-") && !p.workItem.startsWith("dependency:"));
-  if (!point?.assurance) return undefined;
-  const checkpoint = { assignmentId: point.assurance.assignmentId, workItem: point.workItem,
-    commitSha: point.commitSha, assuranceDigest: dependencyDigest(point.assurance) };
+  if (!last || last === sourceSha) return undefined;
+  let checkpoint: OtherOwnerCheckpoint;
+  try {
+    checkpoint = await (await import("./writer-dependency.js")).verifiedPathProducer(job, turn.digest, sourceSha, path, points);
+  } catch {
+    // A foreign, stale or unverified producer supplies no write authority.
+    return undefined;
+  }
   if (reviewOtherOwners(turn, originalId, path, checkpoint).length !== 1) return undefined;
   return checkpoint;
 }
@@ -543,6 +543,22 @@ export async function inspectDependencyCheckpointAssignment(job: JobStartResult,
       !entry.supportRootSha || !["reviewing", "verified", "rejected"].includes(entry.phase))
     throw Error("Support checkpoint has no original admitted dependency assignment.");
   return entry.amendment.assignment;
+}
+/** Historical support evidence for an existing target path. This uses the
+ * nonrecursive grant lookup and independently authenticates the terminal
+ * Review, rather than recursively inspecting the consuming writer report. */
+export async function inspectVerifiedHistoricalSupport(job: JobStartResult, id: string,
+    root: string, head: string, path: string) {
+  const plan = await inspectDependencyLedger(job, true);
+  const entry = plan?.entries.find(e => e.amendment?.assignment.id === id);
+  if (!entry?.amendment || entry.fixture || entry.phase !== "verified" ||
+      entry.supportRootSha !== root || entry.commitSha !== head || entry.review?.verdict !== "pass" ||
+      !entry.amendment.assignment.authority.existingPaths.includes(path))
+    throw Error("Writer prerequisite support lacks a settled existing-record grant.");
+  const verdict = await (await import("./support-review.js")).inspectSharedSupportReview(job, entry, head);
+  if (JSON.stringify(verdict) !== JSON.stringify(entry.review))
+    throw Error("Writer prerequisite support lost its independent Review.");
+  return entry;
 }
 /** The original focused support review packet, also used to authenticate a
  * settled negative verdict without starting a new reviewer. */
@@ -876,7 +892,7 @@ export async function inspectDependencyAdmission(job: JobStartResult, plan: Depe
   }
   return entry.writerSource
     ? authorizeWriterDependency({ plan: turn, head, report: entry.report, reportDigest: entry.reportDigest,
-        proposal, records: report.records, sources, version: plan.version, source: entry.writerSource, priorAmendments })
+        proposal, records: report.records, sources, version: plan.version, source: entry.writerSource, priorAmendments: plan.entries.filter(e => e !== entry && e.amendment && e.phase !== "verified").map(e => e.amendment!.assignment) })
     : blueprintSource
     ? authorizeBlueprintCharacterDependency({ plan: turn, head, report: entry.report,
         reportDigest: entry.reportDigest, proposal: proposal as ReviewCharacterProposal,
@@ -912,7 +928,10 @@ export async function approveDependency(job: JobStartResult, plan: DependencyPla
 export async function inspectReviewEventSupport(
   job: JobStartResult, failedSourceSha: string,
 ): Promise<EventCharacterRepairGrant | null> {
-  const plan = await inspectDependencyPlan(job);
+  // The historical Event repair can itself be a later writer's producer.
+  // Reconstruct only this exact grant here, not the consuming writer's
+  // entire dependency plan (which would re-enter the same Event repair).
+  const plan = await inspectDependencyLedger(job, true);
   const request = plan?.reviewRequests?.find(r => r.sourceSha === failedSourceSha);
   if (!request?.originalWorkItem.startsWith("event-") ||
       request.classification !== "new-full-story-record" ||
@@ -920,6 +939,22 @@ export async function inspectReviewEventSupport(
       request.findings.length !== 1) return null;
   const entry = plan?.entries.find(e => e.reviewSourceSha === failedSourceSha);
   if (!entry || !["reviewing", "verified"].includes(entry.phase)) return null;
+  const turn = await dependencyTurn(job);
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
+    p.eligible && p.commitSha === failedSourceSha);
+  const original = turn.assignments.find(a => a.id === request.originalAssignmentId);
+  const sealed = point?.assurance ? await inspectCheckpointReview(job, point) : null;
+  if (!point?.assurance || !original || point.planVersion !== request.basePlanVersion ||
+      sealed?.status !== "failed" || !sealed.result ||
+      JSON.stringify(deriveReviewDependencyRequest({ assurance: point.assurance,
+        review: sealed.result, original, turn, planVersion: request.basePlanVersion,
+        originWorkItem: point.workItem })) !== JSON.stringify(request))
+    throw Error("Event Character support lost its exact failed independent Review.");
+  if (entry.supportRootSha && entry.commitSha) {
+    const verdict = await (await import("./support-review.js")).inspectSharedSupportReview(job, entry, entry.commitSha);
+    if (JSON.stringify(verdict) !== JSON.stringify(entry.review))
+      throw Error("Event Character support lost its independent supporting Review.");
+  }
   const assignment = entry.amendment?.assignment;
   const path = request.findings[0]!.path;
   const target = assignment?.targets[0];

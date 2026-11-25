@@ -7,8 +7,10 @@ import { parseDependencyReport, parseWriterDependencyFinding, type DependencyRep
   type WriterDependencyFinding } from "./dependency-amendments.js";
 import { inspectRecoveryCheckpoints, inspectHistoricalRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import type { OtherOwnerCheckpoint } from "./review-repair-amendment.js";
-import { checkpointRecordType } from "./checkpoint-assurance.js";
+import { checkpointRecordType, readRepairCommitProof } from "./checkpoint-assurance.js";
 import { focusedSpecialist } from "./focused-specialist.js";
+import { historicalCanonicalCatalog } from "./validator.js";
+import { isDeepStrictEqual } from "node:util";
 
 export interface WriterDependencySource {
   stage: "event" | "choice" | "puzzle" | "composition" | "character";
@@ -38,15 +40,66 @@ export interface OriginalWriterDependency {
   predecessor?: Omit<WriterContinuation, "sessionSha256">;
 }
 
-/** Canonical record identity is read from the historical native-validated
- * source, never inferred from the file slug. Admission independently checks
- * the actual native catalog and typed links. */
-function historicalId(bytes: string, id: string) {
-  const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(bytes);
-  if (!header) return false;
-  return header[1]!.split(/\r?\n/).filter(line => /^id:\s*/.test(line)).length === 1 &&
-    header[1]!.split(/\r?\n/).some(line => /^id:\s*/.test(line) &&
-      [id, '"' + id + '"', "'" + id + "'"].includes(line.replace(/^id:\s*/, "").trim()));
+/** Authenticate the last actual path-changing checkpoint, then resolve its
+ * original producer through the immutable failed-Review chain. A support
+ * correction of an existing record traces to the producer at its admitted
+ * source; it cannot claim the suspended consumer's identity. */
+export async function verifiedPathProducer(job: JobStartResult, turnDigest: string, sourceSha: string,
+    path: string, points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>) {
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw Error("Invalid historical producer source.");
+  dependencyGit(job, "merge-base", "--is-ancestor", sourceSha, "HEAD");
+  const pointAt = async (sha: string) => {
+    const point = points ? points.find(p => p.commitSha === sha && p.eligible) :
+      await inspectHistoricalRecoveryCheckpoint(job, sha);
+    if (!point?.assurance || point.assurance.turnDigest !== turnDigest)
+      throw Error("Writer prerequisite lacks an authenticated historical checkpoint.");
+    return { ...point, assurance: point.assurance, commitSha: sha };
+  };
+  const seen = new Set<string>();
+  const trace = async (at: string): Promise<OtherOwnerCheckpoint> => {
+    const last = dependencyGit(job, "log", "-1", "--format=%H", at, "--", prefix + path);
+    if (seen.has(last)) throw Error("Writer prerequisite has cyclic producer lineage.");
+    seen.add(last);
+    const terminal = await pointAt(last);
+    if (!terminal.assurance.changedPaths.includes(path) ||
+        !["passed", "not-required"].includes(terminal.semanticReview))
+      throw Error("Writer prerequisite is not an independently verified earlier owner.");
+    let root = terminal;
+    const repairRoot = root.workItem.startsWith("repair-") ?
+      (await readRepairCommitProof(job, root.workItem)).rootFailureSha : undefined;
+    if (repairRoot && terminal.semanticReview !== "passed")
+      throw Error("Writer prerequisite repair lacks independent acceptance.");
+    while (root.workItem.startsWith("repair-")) {
+      const proof = await readRepairCommitProof(job, root.workItem);
+      const prior = await pointAt(proof.sourceCommitSha);
+      if (seen.has(prior.commitSha) || proof.commitSha !== root.commitSha ||
+          proof.rootFailureSha !== repairRoot || prior.semanticReview !== "failed" ||
+          prior.assurance.assignmentId !== root.assurance.assignmentId ||
+          !prior.assurance.changedPaths.includes(path))
+        throw Error("Writer prerequisite repair lost its original failed owner.");
+      const repair = await (await import("./rejected-review-repair.js")).inspectRejectedRepair(job, prior.commitSha, "historical");
+      if (repair.rootFailureSha !== repairRoot || repair.repairedCommitSha !== root.commitSha ||
+          repair.phase !== (root.semanticReview === "passed" ? "passed" : "failed"))
+        throw Error("Writer prerequisite repair has no settled original-owner successor.");
+      seen.add(prior.commitSha);
+      root = prior;
+    }
+    if (repairRoot && root.commitSha !== repairRoot)
+      throw Error("Writer prerequisite repair root differs from its original owner.");
+    if (root.workItem.startsWith("dependency:")) {
+      const entry = await (await import("./dependency-state.js")).inspectVerifiedHistoricalSupport(job,
+        root.workItem, root.commitSha, terminal.commitSha, path);
+      return trace(entry.report.sourceSha);
+    }
+    if (root.workItem === "world-foundations" && terminal.semanticReview !== "passed" ||
+        !root.assurance.changedRecordTypes.includes(checkpointRecordType(path)!))
+      throw Error("Writer prerequisite producer record type differs from its verified grant.");
+    return { assignmentId: root.assurance.assignmentId, workItem: root.workItem,
+      commitSha: root.commitSha, assuranceDigest: dependencyDigest(root.assurance),
+      ...(repairRoot ? { verifiedCommitSha: terminal.commitSha } : {}) };
+  };
+  return trace(sourceSha);
 }
 
 export async function reconstructWriterDependency(job: JobStartResult, original: OriginalWriterDependency,
@@ -64,36 +117,28 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
       f.likelySpecialist !== focusedSpecialist(f.targetId))
     throw Error("Writer prerequisite lacks exact original Turn, assignment, scope or owner.");
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const catalog = await historicalCanonicalCatalog(job, original.head);
   const targets: string[] = [];
   const sources = f.sources.map(s => {
     const bytes = dependencyGit(job, "show", original.head + ":" + prefix + s.path);
     if (!bytes.includes(s.quote)) throw Error("Writer prerequisite quote differs from original Git source.");
-    if (historicalId(bytes, f.targetId)) targets.push(s.path);
-    if (!f.affectedIds.some(id => historicalId(bytes, id))) throw Error("Writer prerequisite source is outside the cited typed records.");
+    const records = catalog.filter(record => record.path === s.path);
+    if (records.length !== 1 || !f.affectedIds.includes(records[0]!.metadata.id) ||
+        records[0]!.metadata.status === "superseded")
+      throw Error("Writer prerequisite source is outside the cited typed records.");
+    if (records[0]!.metadata.id === f.targetId) targets.push(s.path);
     return { ...s, sha256: sourceDigest(bytes) };
   });
   if (targets.length !== 1) throw Error("Writer prerequisite must cite exactly one existing canonical target.");
   const targetPath = targets[0]!;
-  const last = dependencyGit(job, "log", "-1", "--format=%H", original.head, "--", prefix + targetPath);
-  const point = points ? points.find(p => p.commitSha === last && p.eligible) :
-    await inspectHistoricalRecoveryCheckpoint(job, last);
-  if (!point || !(point.assurance?.turnDigest === turn.digest &&
-    point.assurance.changedPaths.includes(targetPath) &&
-    ["passed", "not-required"].includes(point.semanticReview) &&
-    (original.stage !== "character" || point.workItem === "world-foundations" && point.semanticReview === "passed") &&
-    point.workItem !== original.workItemId && !point.workItem.startsWith("repair-") && !point.workItem.startsWith("dependency:")))
-    throw Error("Writer prerequisite is not an independently verified earlier owner.");
-  const priorOwner = point?.assurance && turn.assignments.find(a => a.id === point.assurance!.assignmentId);
-  // A verified historical checkpoint already authenticates the effective
-  // cross-domain grant (e.g. Choice legitimately updating an Event).
-  // The producer is not necessarily the canonical correction owner.
+  const producer = await verifiedPathProducer(job, turn.digest, original.head, targetPath, points);
+  const priorOwner = turn.assignments.find(a => a.id === producer.assignmentId);
   const recordType = checkpointRecordType(targetPath);
-  if (!point?.assurance || !priorOwner || !recordType ||
-      !point.assurance.changedRecordTypes.includes(recordType) ||
+  if (!priorOwner || !recordType ||
+      producer.workItem === original.workItemId ||
+      (original.stage === "character" && producer.workItem !== "world-foundations") ||
       !turn.assignments.some(a => a.authority.recordTypes.includes(recordType)))
     throw Error("Writer prerequisite has no independently verified earlier owner checkpoint.");
-  const producer: OtherOwnerCheckpoint = { assignmentId: priorOwner.id, workItem: point.workItem,
-    commitSha: last, assuranceDigest: dependencyDigest(point.assurance) };
   const source: WriterDependencySource = { stage: original.stage, ...(original.milestoneId ? { milestoneId: original.milestoneId } : {}),
     workItemId: original.workItemId, planVersion: original.planVersion, sealDigest: original.sealDigest,
     ...(original.origin ? { origin: original.origin } : {}),
@@ -182,4 +227,29 @@ export async function authenticateWriterContinuation(job: JobStartResult, pin: W
   const original = await inspectWriterDependency(job, entry.writerSource);
   if (original.original.assignmentKey !== assignmentKey) throw Error("Writer continuation has a foreign logical assignment.");
   return entry.writerSource;
+}
+
+/** All domain adapters retain the same exact original logical writer and
+ * transcript identity on idempotent re-entry. Domain-specific receipt
+ * transitions remain with their existing owners. */
+export function assertWriterReentry(current: {
+    writerContinuation?: Omit<WriterContinuation, "sessionSha256"> & { sessionSha256?: string }; assignmentKey?: string; sessionId?: string; sessionFile?: string;
+  }, archived: { assignmentKey?: string; sessionId?: string; sessionFile?: string },
+  binding: Omit<WriterContinuation, "sessionSha256"> & { sessionSha256?: string }) {
+  if (!isDeepStrictEqual(current.writerContinuation, binding) ||
+      current.assignmentKey !== archived.assignmentKey ||
+      current.sessionId !== archived.sessionId || current.sessionFile !== archived.sessionFile)
+    throw Error("Writer continuation changed its original writer or support binding.");
+}
+
+export function writerContinuationBinding<T extends string | undefined>(reportDigest: string,
+    supportRef: string, originalHead: string, sessionSha256: T) {
+  if (!/^[a-f0-9]{64}$/.test(reportDigest) || !/^[a-f0-9]{64}$/.test(supportRef) ||
+      !/^[a-f0-9]{40}$/.test(originalHead) ||
+      sessionSha256 !== undefined && !/^[a-f0-9]{64}$/.test(sessionSha256))
+    throw Error("Invalid original writer continuation binding.");
+  return { reportDigest, supportRef, originalHead,
+    ...(sessionSha256 === undefined ? {} : { sessionSha256 }) } as
+    { reportDigest: string; supportRef: string; originalHead: string } &
+    (T extends string ? { sessionSha256: string } : { sessionSha256?: string });
 }

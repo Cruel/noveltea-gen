@@ -118,7 +118,7 @@ test('reviewer replacement diagnosis requires exact material quotes and cannot w
   const assessment = { claimId: claim.id, verdict: 'supported', reason: 'The exact question delegates the ending.' }
   const dispute = { claimId: claim.id, claimQuote: claim.statement, sourceQuote: claim.question }
   const parse = (disputes: unknown[], assessments = [assessment]) =>
-    parseDiscoverySemanticDiagnostic(JSON.stringify({ assessments, disputes }), packet)
+    parseDiscoverySemanticDiagnostic(JSON.stringify({ assessments, disputes, continuation: { action: "stop", reason: "No safe correction." } }), packet)
   assert.deepEqual(parse([dispute]).disputed, [claim.id])
   for (const invalid of [
     { ...dispute, claimId: 'invented' },
@@ -141,4 +141,29 @@ test('independent Review assesses every individually sourced claim beyond the fo
   assert.equal(parseDiscoverySemanticVerdict(JSON.stringify({ assessments }), packet).assessments.length, 52)
   assert.throws(() => parseDiscoverySemanticVerdict(JSON.stringify({ assessments: assessments.slice(0, -1) }), packet),
     /omitted required assessments/)
+})
+
+test('a confirmed negative permits only source-bound diagnostic correction', () => {
+  const packet = discoverySemanticPacket('A short mystery.', [
+    { statement: 'A hopeful ending and twenty illustrations', authority: 'delegated', source: ending },
+  ], [], evidence, context)
+  const claim = packet.claims[0]!
+  const assessment = { claimId: claim.id, verdict: 'unsupported', reason: 'The ending delegation does not cover illustrations.' }
+  const correction = { claimId: claim.id, claimQuote: claim.statement, sourceQuote: claim.question,
+    correction: 'Narrow the decision to a hopeful ending.' }
+  const parse = (corrections: unknown[], assessments = [assessment]) =>
+    parseDiscoverySemanticDiagnostic(JSON.stringify({ assessments, disputes: [],
+      continuation: { action: 'continue', corrections } }), packet)
+  assert.deepEqual(parse([correction]).continuation, { action: 'continue', corrections: [correction] })
+  assert.equal(discoverySemanticFailures(parse([correction]).verdict).length, 1)
+  for (const invalid of [
+    { ...correction, claimId: 'foreign' },
+    { ...correction, claimQuote: 'invented' },
+    { ...correction, sourceQuote: evidence[2]!.statement },
+    { ...correction, correction: '' },
+  ]) assert.throws(() => parse([invalid]), /Discovery diagnostic/)
+  assert.throws(() => parse([correction, correction]), /Invalid Discovery diagnostic/)
+  assert.throws(() => parse([correction], [{ ...assessment, verdict: 'supported' }]), /exact rejected claim/)
+  assert.throws(() => parseDiscoverySemanticDiagnostic(JSON.stringify({ assessments: [assessment], disputes: [] }), packet),
+    /Invalid Discovery diagnostic contract/)
 })

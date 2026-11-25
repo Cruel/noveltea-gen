@@ -1140,3 +1140,36 @@ are derived only if the original native catalog identifies the exact assigned
 canonical ID and the referencing file outside the write grant is byte-for-byte
 unchanged from the verified Git source. All unrelated diagnostics and
 unauthorized effects remain subject to the existing integrity fences.
+
+### Confirmed Discovery findings and historical writer prerequisites (#246 follow-up)
+
+A read-only Discovery diagnostic can corroborate an independent negative
+without exhausting recovery. Its response separates per-claim assessments,
+source-quoted disputes, and a continuation decision. A continuation identifies
+rejected claim IDs, quotes the exact claim and submitted author question/answer,
+and proposes bounded corrective observations. The existing writer resumes with
+that diagnostic data, subject to the original authority checks, and the
+independent reviewer must assess the actual corrected proposal. A stop has a
+source-specific reason; a corroborated but still nonconverging previously
+diagnosed source cannot consume another diagnosis or correction window.
+Neither the diagnostic nor a replacement reviewer grants author approval.
+
+A writer prerequisite identifies the record by the native catalog at its sealed
+Git source; its quoted evidence and exact-byte digests are checked separately.
+The historical producer is the original assignment, not a synthetic repair or
+dependency assignment. A passing repair is resolved through its immutable
+negative Review and exact repair receipts to the original owner; a settled
+existing-record supporting correction is resolved through its independently
+verified grant to the earlier producer. The current cited bytes remain those
+of the sealed consuming source. Failed, stale, foreign or incomplete lineage
+cannot authorize another writer. A distinct later supported finding may correct
+an existing record again only after the former support has settled, with a new
+source-bound report and the same Turn authority, protected-decision,
+dependency-depth and resource limits. Selective revalidation uses the
+verified repair successor while retaining the original work-item identity and
+source consumption evidence.
+
+All Event, Interactive, Composition and Character writer prerequisite adapters
+use the same continuation-binding and original writer identity checks.
+Domain-specific receipt transitions are retained; a pre-writer Blueprint
+finding does not fabricate a Pi writer session.
