@@ -1074,3 +1074,88 @@ Both passed without skips or cancellation against production source e9bbc09
 in an isolated archive with only the additional test fixture changed.
 Command: `node --import tsx --test --test-name-pattern='^R04 cross-owner prerequisite .*review-assessment' test/focused-generation.test.ts`.
 Log: `/tmp/nt275-qualification.ibYUWE/assessment.log`.
+
+### #275 final deterministic acceptance — 2026-11-25
+
+**PASS.** This supersedes the incomplete qualification and deferred-evidence
+notes above. Production revision `e9bbc092268f3c4b48a5f8d13fec87a0bb30c30d`
+includes `802a404`, `81a888d`, `a0c3ca1`, the completed #273/#274 baseline
+and the earlier #275 qualification fixes. Test-only qualification follow-up
+`f30f89e` adds the two R04 supporting Review-assessment cases; it changes no
+production source. The two new cases ran successfully against an archive of
+the exact same production source. Typecheck passed again after adding them.
+
+| Qualification | Passed | Expected skips | Failed/cancelled |
+| --- | ---: | ---: | ---: |
+| Root tests excluding generation.test.ts | 874 | 43 | 0 |
+| All six Generation shards | 103 | 2 | 0 |
+| Studio tests (real SQLite and PostgreSQL) | 555 | 5 | 0 |
+| Native Story certification | 22 | 0 | 0 |
+| Added R04 writer/Review-origin supporting Review assessments | 2 | 0 | 0 |
+| Behavioral mutation controls | 5 baseline passes, 5 intended mutant failures | 0 | 0 unintended |
+
+Generation shards individually: 7/7, 14/14, 17/17, 19/19, 22/23
+(one opt-in live test), 24/25 (one opt-in live test). Root and Studio
+typechecking, lint/persistence boundary, formatting, builds, and migration
+typegen check passed. All deterministic test processes exited 0. The actual
+R14L authenticated Discovery corrections and approved queued Generation Turn
+reached the original verified objective on both real database backends.
+The original #248/#250/#268 and transferred #252/#253/#254/#259/#264–#267/#272
+acceptance crosswalks above are covered by these integrated suites, including
+the ordinary and Blueprint support-diagnosis continuations, nested support,
+source-bound approval, affected-only revalidation, retained original negative
+Review, persisted restart, and ordinary parent scheduling. The C01/R02/R14L
+source alarms supplement the real execution and verifier regressions.
+
+The mutation runner verified all five counterexamples on disposable copies:
+authenticated planner refusal misclassified as integrity; semantic witness
+defects misclassified as protocol; native diagnostic continuation reduced to
+advice; historical discharge ignoring a corrupt diagnosis transcript; and
+supporting Review continuation stopping before verified discharge. Each
+unmodified production baseline passed, and each mutation failed at its
+specified behavioral assertion, not at import or build failure.
+
+Commands (Node 24.18.0, pnpm 11.15.0, local native NovelTea CLI 1.0.0,
+clean local skills revision `4d92c7530a9d60329e83d0d2f85e57db42056abc`):
+
+```sh
+export NT_NATIVE_CLI="$(command -v noveltea)" NT_REAL_NATIVE_CLI="$(command -v noveltea)"
+export NT_SKILLS_CHECKOUT="$HOME/dev/noveltea-skills"
+export LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false TRACE_TO_LANGSMITH=false
+# Unset NT_LIVE_* flags; no paid provider invocation.
+# Disposable postgres:17-alpine, random password, loopback ephemeral port.
+# NT_TEST_PG_URL and NT_KYSELY_PROOF_URL point to that database;
+# NT_REQUIRE_KYSELY_PROOF=1. SQLite uses real test-local files.
+pnpm typecheck && pnpm lint && pnpm format:check && pnpm build
+pnpm --filter @noveltea/studio typegen:check
+pnpm --filter @noveltea/studio typecheck
+pnpm --filter @noveltea/studio build
+files=(); for f in test/*.test.ts; do [[ $f == test/generation.test.ts ]] || files+=("$f"); done
+pnpm exec tsx --test --test-concurrency=2 "${files[@]}"
+# Each shard in its own git archive of the production revision:
+for n in 1 2 3 4 5 6; do
+  NT_GENERATION_TEST_SHARD="$n/6" node --import tsx --test test/generation.test.ts
+done
+(cd web && pnpm exec tsx --test --test-concurrency=2 test/*.test.ts test/*.test.tsx)
+pnpm certify:story
+node scripts/qualify-recovery-mutations.mjs
+# Additional test-only fixture in a production archive:
+node --import tsx --test --test-name-pattern='^R04 cross-owner prerequisite .*review-assessment' test/focused-generation.test.ts
+```
+
+Actual qualification ran the independent suites concurrently with bounded
+worker counts; all used the pinned production source. Logs and original exit
+codes: `/tmp/nt275-qualification.ibYUWE/` (`source`, `checks.log`,
+`root.log`, `generation-{1..6}.log`, `studio.log`, `native.log`,
+`assessment.log`, `mutations.log`, `qualification-typecheck.log` and
+corresponding exit records). The disposable PostgreSQL container was removed.
+
+Limitations: the 50 expected skips are opt-in paid/live, private preserved
+replay captures, browser or optional hosted/rootless-sandbox tests; no
+required deterministic backend was skipped. The qualified matrix covers the
+supported source-bound strategies and explicit terminal controls, not every
+hypothetical combination of arbitrary model output and scope. Unproven
+authority (including free-text World conflict without a typed source grant)
+still intentionally cannot authorize a writer. Paid live Discovery and
+complete new-Story certification remain separate #260 work; this deterministic
+gate is passed, not a claim that live certification already passed.
