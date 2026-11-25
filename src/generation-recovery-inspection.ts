@@ -26,7 +26,7 @@ import { verifyPlanHistory } from "./architecture.js";
 import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { verifyAdaptiveRecoveryProof, type AdaptiveRecovery } from "./adaptive-protocol.js";
 import type { GenerationGraphState } from "./generation.js";
-import { authenticateOperationDiagnosticProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy, authorizeOperationDiagnosticStrategy, authenticateAssignmentDiagnosticDecision, authenticateAssignmentDiagnosticDischarge, assignmentDiagnosticDecisionForLifecycle } from "./generation-operation-strategy.js";
+import { authenticateOperationDiagnosticProof, authenticateOperationOwnerProof, diagnosticCaseForDecision, matchesOriginalCloseout, selectOperationStrategy, authorizeOperationDiagnosticStrategy, authenticateAssignmentDiagnosticDecision, authenticateAssignmentDiagnosticDischarge, assignmentDiagnosticDecisionForLifecycle } from "./generation-operation-strategy.js";
 import { inspectDiagnosticAttempt, inspectOriginalUnknownDiagnosis, type UnknownRecoveryCase } from "./unknown-recovery-diagnostic.js";
 import { inspectBlockedOriginalThreadCorrection } from "./original-thread-continuation.js";
 import { inspectInterruptedCloseoutCommit } from "./cross-domain-closeout-work.js";
@@ -189,6 +189,24 @@ export async function inspectModernGenerationRecovery(
   }
   const expectedTurn = request.turnPlanDigest ?? null;
   const sourceFor = (id: string) => originalSources?.find((s) => s.caseId === id);
+  // A proven publication gap does not make the unpublished successor a
+  // verified revision. Historical cases must still be checked against its
+  // last published parent, and the active child must reconcile its own effect.
+  let supportBase: Promise<string | null> | undefined;
+  const interruptedSupportBase = () => supportBase ??= (async () => {
+    const active = original.active, decision = original.decision;
+    if (!inputsValid || !active || !original.assessorPending ||
+        decision?.action !== "plan-amendment" || decision.adapter !== "dependency-work") return null;
+    const source = sourceFor(active.id);
+    const readiness = source?.channel === "operationRecovery"
+      ? (source.input as unknown as GenerationOperationRecovery).evidence.eventBlueprintPrerequisite : undefined;
+    if (!readiness) return null;
+    try {
+      const { inspectInterruptedBlueprintSupport } = await import("./dependency-work.js");
+      if (!await authenticateOperationOwnerProof(job, values as GenerationGraphState, active, decision)) return null;
+      return await inspectInterruptedBlueprintSupport(job, readiness, threadId);
+    } catch { return null; }
+  })();
   const authenticate = async (origin: RecoveryOrigin, evidence: readonly RecoveryEvidence[]) => {
     if (
       !inputsValid ||
@@ -264,6 +282,13 @@ export async function inspectModernGenerationRecovery(
     }
     if (await authenticateOriginalFailure(job, request, threadId, origin, evidence))
       return true;
+    const base = await interruptedSupportBase();
+    if (base) {
+      try {
+        jobGit(job, "merge-base", "--is-ancestor", origin.sourceHeadSha, base);
+        return authenticateOriginalFailure(job, request, threadId, origin, evidence, true);
+      } catch { return false; }
+    }
     const selected = original.active?.id === caseFile.id && original.assessorPending &&
       original.decision?.action === "plan-amendment" &&
       original.decision.adapter === "cross-domain-closeout";
@@ -417,12 +442,13 @@ export async function inspectModernGenerationRecovery(
       try {
         if (discharge.disposition === "active-verified")
           return await inspectActiveRecoveryResolution(job, discharge.case, source,
-            discharge, { request, inventory: (values.inventory as GenerationInventory | null) ?? null });
+            discharge, { request, inventory: (values.inventory as GenerationInventory | null) ?? null },
+            await interruptedSupportBase() ?? undefined);
         return !!await inspectDeferredCorrection(job, discharge.case, source, {
           inventory: (values.inventory as GenerationInventory | null) ?? null,
           ideaHistory: (values.ideaHistory as IdeaHistoryEntry[] | undefined) ?? [],
           fixture: request.fixture,
-        }, discharge);
+        }, discharge, await interruptedSupportBase() ?? undefined);
       } catch { return false; }
     },
     authenticateVerification: async (l) => {

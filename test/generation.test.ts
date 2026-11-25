@@ -788,14 +788,15 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
   return cycle.reviewer.file;
 }
 
-for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
+for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "source-recovery"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   skip: !available, timeout: 120_000,
 }, async () => {
   const sourceRecovery = mode === "source-recovery";
   const refused = mode === "prospective-refused";
   const unauthorized = mode === "prospective-unauthorized";
   const negativeSupport = mode === "prospective-review-negative";
-  const multi = mode === "prospective-multi" || refused || unauthorized || negativeSupport;
+  const partialPause = mode === "prospective-paused";
+  const multi = mode === "prospective-multi" || partialPause || refused || unauthorized || negativeSupport;
   const prospective = mode === "prospective" || sourceRecovery || multi;
   const needsCharacter = mode === "support";
   const bindingDiagnosis = mode === "binding-diagnosis";
@@ -1234,6 +1235,18 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
           assert.equal(entries[0]!.review?.verdict, "block");
           assert.ok(entries[0]!.amendment && entries[0]!.commitSha);
           assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), entries[0]!.commitSha);
+          const ledgerPath = join(f.job.stateDir, "dependency-plan.json");
+          const originalLedger = readFileSync(ledgerPath, "utf8");
+          const { saveDependencyPlan } = await import("../src/dependency-state.js");
+          const forged = (await inspectDependencyPlan(f.job))!;
+          const entry = forged.entries[0]!;
+          entry.phase = "verified";
+          entry.review = { ...entry.review!, verdict: "pass", findings: [],
+            evidence: ["characters/mara.md:1: Falsely claimed passing Review."] };
+          try {
+            await saveDependencyPlan(f.job, forged);
+            await assert.rejects(inspectDependencyPlan(f.job), /Supporting Review differs from its completed independent transcript/);
+          } finally { writeFileSync(ledgerPath, originalLedger); }
         } else {
           assert.equal(entries[0]!.amendment, undefined);
           assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), before.expectedHead);
@@ -1259,8 +1272,53 @@ for (const mode of ["review", "support", "diagnosis", "binding-diagnosis", "pros
         assert.equal(observed.length, negativeSupport ? 11 : 6);
         return;
       }
+      const headReceiptPath = join(f.job.stateDir, "revisions", "verified-head.json");
+      const priorHeadReceipt = readFileSync(headReceiptPath, "utf8");
       await crashAtSubmission("focused-committed", multi ? 9 : 7 + offset, { interruptAfter: ["assess_recovery"] });
-      const supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      // Reproduce the durable Git/publication gap using the real committed
+      // child and its settled Pi receipt, not a manufactured writer effect.
+      const publishedHeadReceipt = readFileSync(headReceiptPath, "utf8");
+      writeFileSync(headReceiptPath, priorHeadReceipt);
+      try {
+        const inspected = await inspectModernGenerationRecovery(f.job, saver, paused.threadId);
+        assert.equal(inspected?.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(inspected?.inspectionFences.length, 0, JSON.stringify(inspected));
+        assert.equal(inspected?.decision?.adapter, "dependency-work");
+        writeFileSync(headReceiptPath, JSON.stringify({ ...JSON.parse(priorHeadReceipt), jobId: "foreign" }));
+        assert.ok((await inspectModernGenerationRecovery(f.job, saver, paused.threadId))?.inspectionFences.length,
+          "An unpublished writer effect cannot legitimize a foreign verified-HEAD receipt");
+      } finally { writeFileSync(headReceiptPath, publishedHeadReceipt); }
+
+      let resumeInput: Parameters<typeof graph.invoke>[0] = null;
+      if (partialPause) {
+        const putWrites = saver.putWrites.bind(saver);
+        let pausedAfterSupport = false;
+        saver.putWrites = async (config, writes, task) => {
+          const result = await putWrites(config, writes, task);
+          if (!pausedAfterSupport && config.configurable?.checkpoint_ns?.includes("assignment-") &&
+              writes.some(([channel, value]) => channel === "outcome" &&
+                (value as { status?: string } | undefined)?.status === "verified") && observed.length === 11) {
+            pausedAfterSupport = true;
+            await setJobControl(f.job, "paused");
+          }
+          return result;
+        };
+        const stopped = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg }));
+        assert.ok(pausedAfterSupport);
+        assert.equal(stopped.status, "paused", JSON.stringify({ reason: stopped.reason, lifecycle: stopped.recoveryLifecycle }));
+        assert.equal(stopped.recoveryLifecycle.active?.id, failed.recoveryLifecycle.active?.id);
+        assert.equal(stopped.recoveryLifecycle.decision?.resumeRef?.store, "dependency-plan");
+        assert.equal(observed.length, 11);
+        assert.deepEqual(await inspectModernGenerationRecovery(f.job, saver, paused.threadId), stopped.recoveryLifecycle);
+        await setJobControl(f.job, "running");
+        saver.db.close();
+        saver = SqliteSaver.fromConnString(paused.checkpointPath);
+        graph = createGenerationGraph(saver, "cli");
+        resumeInput = { ...stopped, pauseAfter: null };
+      }
+      let supported = await withJobModelRuntime(runtime, () => graph.invoke(resumeInput, { ...cfg, interruptAfter: ["assess_recovery"] }));
+      if (partialPause && supported.recoveryLifecycle.assessorPending)
+        supported = await withJobModelRuntime(runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] }));
       assert.ok(supported.recoveryLifecycle.discharged?.some(c => c.case.id === failed.recoveryLifecycle.active?.id),
         JSON.stringify({ reason: supported.reason, lifecycle: supported.recoveryLifecycle, calls: observed.length }));
       const { inspectDependencyPlan } = await import("../src/dependency-state.js");

@@ -815,3 +815,43 @@ remove an implied player choice instead of manufacturing Interactive work.
 Player-only Events may have empty participants. Event cluster violations
 identify their exact record and field, and unresolved in-scope semantic
 conflicts use the existing writer correction ledger.
+
+### #273 parent handoff: prerequisite receipt closure (incremental)
+
+Integrated baseline: #248 `aa449d84177b7c14ab7fe68510a83064e43eb9d7`,
+#250 `583409bd70ab41ce71db6e17fb1c53276f58d1df`, #268
+`e4e0a889bcfeab90d21660fec11edb672890f822`. All three are ancestors of
+this work; the ten existing R04/R14D prerequisite regressions passed before
+changes. No new scheduler or write authority is introduced.
+
+The existing parent handoff now pins the independently verified subtree in
+`dependencyHistory`, including nested supporting receipts. Blueprint
+completion preserves serial root ordering and includes all nested receipts in
+its digest. The dependency inspector rederives the positive as well as the
+negative focused-support Review from the original sealed transcript. The
+parent rechecks the history, exact current HEAD and rebound Event receipt
+under its existing lock before accepting the active Case discharge; it does
+not accept the child return as independent proof. Ordinary scheduler and
+existing author-control/fulfillment gates remain authoritative.
+
+For the interrupted publication boundary, the selected original Blueprint
+support decision, dependency grant, exact writer identity, native validation,
+settled Pi invocation, Git parent/diff and prior verified-HEAD receipt must
+agree before inspection accepts the interruption. The unpublished child is
+not promoted by inspection; historical Cases still use the published parent.
+The existing child reconciles publication and Review on reentry. A paused original Blueprint support strategy also retains its exact
+resume reference; the parent authenticates each intervening ledger effect
+and restores the same decision after author control allows execution. The
+R14D partial pause test crosses a completed first prerequisite without
+repeating it. The R04
+nested test asserts the parent pins both receipts, and R14D exercises the
+publication gap with a real committed effect and a restored prior HEAD receipt.
+
+Remaining #273 acceptance is not established by these changes alone:
+negative supporting Review and refused planning still require executable
+bounded common-policy correction when safe, not merely an authenticated
+terminal disposition; multi-Case pending scheduling, affected-only consumer
+reconciliation, and resource controls beyond the tested author-pause path
+need further production qualification. #274 owns the remaining specialist adapter
+integration, not a replacement parent or a new retry budget. #275 owns the
+compositional qualification across those integrations.

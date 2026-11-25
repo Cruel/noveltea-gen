@@ -678,3 +678,17 @@ round-origin correction and the exhausted-reviewer parent disposition.
   full Story certification.
 
 - #248 Milestone planner correction: `parseMilestoneBlueprint` separates mechanical shape admission from deterministic `milestoneBlueprintSourceFindings`. The planner response receipt accepts only the wire shape, not narrative validity. Negative source/authority findings are delivered to the existing independent Review and original planner with source scope and exact offending fields; an unchanged negative draft uses the existing Blueprint parent assessment. `ensureMilestoneBlueprint` records an explicit controller veto of any PASS with unresolved deterministic source findings, retains the original independent verdict and corrects through the same cycle; `assertRounds` replays rejected draft shapes and strictly validates approvals. No additional model consumer, retry allowance, canonical authority, or scheduler. Regressions: `issue-227-milestone-review.test.ts`, `issue-220-production-milestone-diagnostic.test.ts`, and `response-contract-recovery.test.ts`.
+
+## #273 incremental parent-boundary correction
+
+| Boundary | Reviewed disposition and evidence |
+| --- | --- |
+| `dependency_amendment/return#3`, `runReviewPrerequisiteChild` | Retain G (verified continuation); pin the entire independently verified supporting subtree, rather than the root receipt alone. R04 nested support verifies parent history and original session continuity. |
+| `executeOperationStrategy` Blueprint prerequisite success | Existing active Case discharge requires independent parent reinspection of complete dependency history, current verified HEAD and original rebound receipt. No new model invocation or grant. |
+| `recoveryNode/return#12–14`, `status#11–13`, `throw#5` | U/G/F: author control preserves pause/cancel; resume requires the same selected dependency strategy and every intervening committed effect independently attested; a lost original grant fences. R14D prospective-paused crosses a verified first support without replay. Prior subsequent exit ordinals shift by three returns/statuses and one throw. |
+| `inspectModernGenerationRecovery` interrupted Blueprint support publication | Read-only exception for the exact already-admitted writer effect, verified native source and exact Git parent/diff; the prior published parent remains the historical lineage anchor. R14D tests the real committed support with its prior verified-HEAD receipt restored. Unauthenticated effects still fence. |
+
+Negative supporting Review correction, further partial-progress resource qualification and the
+complete affected-consumer/multi-Case qualification remain outstanding under
+#273; unsupported specialist adapters remain in #274. This audit update is
+not certification of those unresolved routes.

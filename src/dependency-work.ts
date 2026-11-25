@@ -15,8 +15,65 @@ import { withStoryJobLock } from "./job-lock.js";
 import { inspectFocusedPrerequisite, inspectPendingFocusedInvocation, inspectPendingFocusedCommit, runFocusedWorkItem, type FocusedWorkOptions } from "./focused-work.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, dependencyGit,
   recordDependency, registerReviewDependency, registerBlueprintDependency, approveDependency, blueprintSourceOf,
-  inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, supportingReviewAssignment, DependencyAuthorizationRefusedError, type DependencyEntry } from "./dependency-state.js";
+  inspectDependencyPlan, saveDependencyPlan, dependencyWriterBase, dependencyAncestors, supportingReviewAssignment, DependencyAuthorizationRefusedError, type DependencyEntry } from "./dependency-state.js";
 import { proposeDependency } from "./dependency-planner.js";
+
+/** Authenticate an exact committed, not-yet-published prerequisite effect.
+ * This is inspection only; the existing child remains responsible for publication. */
+export async function inspectInterruptedBlueprintSupport(job: import("./job.js").JobStartResult,
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string,
+  allowPublished = false): Promise<string | null> {
+  const plan = await inspectDependencyPlan(job);
+  if (!plan) return null;
+  const roots = plan.entries.filter(e => e.blueprintSource?.readinessDigest === readiness.reportDigest);
+  const head = dependencyGit(job, "rev-parse", "HEAD");
+  const parent = dependencyGit(job, "rev-parse", "HEAD^");
+  const published = JSON.parse(await readFile(join(job.stateDir, "revisions", "verified-head.json"), "utf8"));
+  if (published.version !== 1 || published.jobId !== job.jobId || (published.headSha !== parent && !(allowPublished && published.headSha === head))) return null;
+  const candidates = plan.entries.filter(e => (e.phase === "authorized" || allowPublished && e.phase === "reviewing") && e.amendment && !e.fixture &&
+    roots.some(root => dependencyAncestors(plan.entries, e).has(root.reportDigest)) &&
+    dependencyWriterBase(plan, e) === parent);
+  const matches = [];
+  for (const entry of candidates) {
+    const amendment = entry.amendment!;
+    const assignment = amendment.assignment;
+    const receipt = await inspectPendingFocusedCommit(job, assignment.targets[0]!, parent, assignment.id);
+    if (!receipt) continue;
+    const identity: AssignmentIdentity = { schema: "noveltea-assignment-identity/v1", jobId: job.jobId,
+      jobThreadId: job.threadId, graphThreadId, turnDigest: entry.report.turnDigest,
+      assignmentId: assignment.id, planVersion: amendment.afterVersion,
+      sourceHeadSha: entry.report.sourceSha, scopeDigest: dependencyDigest(assignment) };
+    if (receipt.commitSha !== head || receipt.worker !== "pi" || receipt.assignmentKey !== logicalAssignmentKey(identity) ||
+        receipt.assignmentDigest !== entry.report.turnDigest || receipt.validation?.status !== "passed" ||
+        receipt.validation.validatorVersion !== job.validatorVersion || receipt.validation.baseSha !== parent ||
+        JSON.stringify(receipt.paths) !== JSON.stringify([...assignment.authority.existingPaths,
+          ...(assignment.authority.newPaths ?? [])].sort())) return null;
+    matches.push(entry.reportDigest);
+  }
+  return matches.length === 1 ? parent : null;
+}
+
+/** A paused prerequisite strategy can resume only across the exact ledger
+ * effects of that original readiness report, never across unrelated commits. */
+export async function inspectBlueprintSupportProgress(job: import("./job.js").JobStartResult,
+  readiness: import("./event-work.js").EventBlueprintPrerequisite, graphThreadId: string): Promise<boolean> {
+  const head = await trustedHead(job);
+  if (head === readiness.expectedHead) return true;
+  const plan = await inspectDependencyPlan(job);
+  if (!plan) return false;
+  const roots = plan.entries.filter(e => e.blueprintSource?.readinessDigest === readiness.reportDigest);
+  const verified = new Set(plan.entries.filter(e => e.phase === "verified" && e.commitSha &&
+    roots.some(root => dependencyAncestors(plan.entries, e).has(root.reportDigest))).map(e => e.commitSha!));
+  dependencyGit(job, "merge-base", "--is-ancestor", readiness.expectedHead, head);
+  let parent = readiness.expectedHead;
+  for (const commit of dependencyGit(job, "rev-list", "--reverse", parent + ".." + head).split("\n")) {
+    if (dependencyGit(job, "rev-parse", commit + "^") !== parent) return false;
+    if (!verified.has(commit) && (commit !== head ||
+        await inspectInterruptedBlueprintSupport(job, readiness, graphThreadId, true) !== parent)) return false;
+    parent = commit;
+  }
+  return parent === head;
+}
 
 /** A settled refusal is not a failed or uncertain writer. The parent must
  * independently authenticate the original ledger before acting on it. */

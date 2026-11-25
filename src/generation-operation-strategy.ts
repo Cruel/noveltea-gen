@@ -854,6 +854,27 @@ export async function authenticateUnresolvedStrategy(job: JobStartResult, s: Sta
   } catch { return false; }
 }
 
+/** Reconstruct the original selected strategy after a real resource/control
+ * stop. The pause is not a new permission or an invitation to reassess at a
+ * later HEAD: every intervening effect must belong to the original grant. */
+export async function pausedBlueprintDependencyDecision(job: JobStartResult, s: State,
+  lifecycle: RecoveryLifecycle, graphThreadId: string): Promise<RecoveryDecision | null> {
+  const c = lifecycle.active, pause = lifecycle.decision;
+  if (!c || pause?.action !== "pause" || pause.resumeRef?.store !== "dependency-plan" ||
+      !["author-pause", "budget", "provider-unavailable", "author-choice"].includes(pause.reason)) return null;
+  const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
+    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+  if (!readiness || pause.resumeRef.ref !== readiness.reportDigest || pause.resumeRef.digest !== readiness.reportDigest ||
+      c.origin.graphThreadId !== graphThreadId) return null;
+  const owner = await originalNoWriteOwnerProof(job, s, c);
+  if (!owner || !isDeepStrictEqual(pause.evidence, [...c.evidence, owner.proof])) return null;
+  const decision = { ...base(c, owner.proof), action: "plan-amendment" as const,
+    adapter: "dependency-work" as const, owner: owner.owner, scopeRef: owner.proof };
+  const { inspectBlueprintSupportProgress } = await import("./dependency-work.js");
+  return await authenticateOperationOwnerProof(job, s, c, decision) &&
+    await inspectBlueprintSupportProgress(job, readiness, graphThreadId) ? decision : null;
+}
+
 export async function executeOperationStrategy(job: JobStartResult, s: State, lifecycle: RecoveryLifecycle, config?: import("@langchain/core/runnables").RunnableConfig): Promise<Partial<State> | null> {
   const c = lifecycle.active!, d = lifecycle.decision!;
   if (!lifecycle.assessorPending || !d || !c || !s.recoverySources.some(x => x.caseId === c.id && x.channel === "operationRecovery") ||
@@ -976,11 +997,16 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   const stop = (decision: RecoveryDecision, reason: string, status: State["status"] = "blocked"): Partial<State> => ({
     recoveryLifecycle: decideRecovery(settled, decision), reason, status,
   });
+  const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
+    x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+  const pauseDecision = (reason: Extract<RecoveryDecision, { action: "pause" }>["reason"]): RecoveryDecision =>
+    readiness && d.action === "plan-amendment" && d.adapter === "dependency-work"
+      ? { ...base(c, d.scopeRef), action: "pause", reason, resumeRef: { store: "dependency-plan",
+          ref: readiness.reportDigest, digest: readiness.reportDigest } }
+      : { ...base(c), action: "pause", reason };
   try {
     const control = await readJobControl(job);
-    if (control !== "running") return stop({ ...base(c), action: "pause", reason: control === "paused" ? "author-pause" : "cancelled" }, "Author control precedes corrective work.", control);
-    const readiness = (s.recoverySources.find(x => x.caseId === c.id &&
-      x.channel === "operationRecovery")?.input as GenerationOperationRecovery | undefined)?.evidence.eventBlueprintPrerequisite;
+    if (control !== "running") return stop(pauseDecision(control === "paused" ? "author-pause" : "cancelled"), "Author control precedes corrective work.", control);
     if (d.action === "plan-amendment" && d.adapter === "dependency-work" && readiness) {
       if (!await authenticateOperationOwnerProof(job, s, c, d) ||
           s.request.turnPlanDigest !== c.origin.turnDigest || s.request.job !== c.origin.jobId ||
@@ -1009,6 +1035,17 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
         }
         throw error;
       }
+      const assurance = { store: "dependency-plan" as const, ref: readiness.reportDigest, digest: result.digest };
+      const source = s.recoverySources.find(x => x.caseId === c.id && x.channel === "operationRecovery")!;
+      const { inspectActiveRecoveryResolution } = await import("./generation-recovery-resolution.js");
+      const { verifyDependencyHistory } = await import("./dependency-state.js");
+      await withStoryJobLock(job, "verify-blueprint-dependency-parent-handoff", async () => {
+        await verifyDependencyHistory(job, result.history);
+        if (await trustedHead(job) !== result.head || !await inspectActiveRecoveryResolution(job, c, source,
+          { case: c, correction: assurance, correctedHeadSha: result.head, disposition: "active-verified" },
+          { request: s.request, inventory: s.inventory }))
+          throw Error("Blueprint support did not authenticate the original parent handoff.");
+      });
       const failures = { ...s.failures };
       delete failures[c.origin.assignmentId!];
       const inventory = { ...s.inventory!, headSha: result.head,
@@ -1017,7 +1054,7 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
           : item) };
       return { recoveryLifecycle: finishVerifiedRecovery(settled, {
         status: "verified", caseId: c.id, sourceHeadSha: result.head,
-        assurance: { store: "dependency-plan", ref: readiness.reportDigest, digest: result.digest },
+        assurance,
       }, true), failures, inventory,
         dependencyHistory: [...s.dependencyHistory.filter(p => !result.history.some(q => q.reportDigest === p.reportDigest)), ...result.history],
         active: null, result: null, escalation: null, reason: null, status: "running" };
@@ -1161,11 +1198,11 @@ export async function executeOperationStrategy(job: JobStartResult, s: State, li
   } catch (error) {
     if (config?.signal?.aborted || (error != null && isGraphBubbleUp(error))) throw error;
     if (error instanceof PiModelUnavailableError)
-      return stop({ ...base(c), action: "pause", reason: "provider-unavailable" },
+      return stop(pauseDecision("provider-unavailable"),
         error.message + "; pinned model and original source remain unchanged.", "paused");
-    if (error instanceof Error && error.name === "PiBudgetPause") return stop({ ...base(c), action: "pause", reason: "budget" }, error.message, "paused");
-    if (error instanceof Error && error.name === "AssignmentAuthorPauseError") return stop({ ...base(c), action: "pause", reason: "author-pause" }, error.message, "paused");
-    if (error instanceof Error && error.name === "StoryCancelledError") return stop({ ...base(c), action: "pause", reason: "cancelled" }, error.message, "cancelled");
+    if (error instanceof Error && error.name === "PiBudgetPause") return stop(pauseDecision("budget"), error.message, "paused");
+    if (error instanceof Error && error.name === "AssignmentAuthorPauseError") return stop(pauseDecision("author-pause"), error.message, "paused");
+    if (error instanceof Error && error.name === "StoryCancelledError") return stop(pauseDecision("cancelled"), error.message, "cancelled");
     if (error instanceof ProtocolExhaustedError && d.action === "diagnostic") {
       // A failed response contract is not a forged or ambiguous writer receipt.
       // The same selector must authenticate the original diagnostic exhaustion

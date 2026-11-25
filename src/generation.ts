@@ -72,7 +72,7 @@ import { proposeSteeringAmendment, readSteeringPlan, saveSteeringAmendment,
   steeringForAssignment, steeringSourceIsAncestor } from "./steering-amendments.js";
 import { dependencyGit } from "./dependency-state.js";
 import { readPendingState, verifyPinnedPendingWork } from "./pending-work-state.js";
-import { inspectDependencyPlan, dependencyDigest, verifyDependencyHistory,
+import { inspectDependencyPlan, dependencyDigest, verifyDependencyHistory, pinVerifiedDependencyHistory,
   type DependencyHistoryPin } from "./dependency-state.js";
 import { isFocusedScope } from "./focused-scope.js";
 import { processAuthorUpdatesAfterWork } from "./author-updates.js";
@@ -2489,8 +2489,7 @@ async function runReviewPrerequisiteChild(s: State, config: RunnableConfig,
   if (head !== finished.outcome.headSha || !await verifyReviewCycleSuccessor(job, request.sourceSha, head))
     throw Error("Returned Review child has no current verified successor.");
   const entry = (await inspectReviewSupport(job, request)).entry;
-  const dependencyHistory = [...s.dependencyHistory.filter(p => p.reportDigest !== entry.reportDigest),
-    { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }];
+  const dependencyHistory = await pinVerifiedDependencyHistory(job, s.dependencyHistory, entry.reportDigest);
   let result: State["result"] = { ...s.result!, headSha: head };
   if (s.result?.status === "review-handoff") {
     const next = s.active?.stage === "foundations" ? "character-foundations" :
@@ -3273,6 +3272,29 @@ export function recoveryNode(
           recoveryLifecycle: { ...admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
             fence: inspectionFence("untrusted-receipt", c.origin, c.evidence, c.evidence[0]!,
               "Reconcile the original diagnostic and writer receipts before resumption.") }), assessorPending: false } };
+      }
+    }
+    if (node === "schedule" && prior.recoveryLifecycle.phase === "paused" &&
+        prior.recoveryLifecycle.decision?.action === "pause" &&
+        prior.recoveryLifecycle.decision.resumeRef?.store === "dependency-plan") {
+      const job = await openJob(state);
+      const control = await readJobControl(job);
+      if (control !== "running") return { status: control === "cancelled" ? "cancelled" : "paused",
+        recoveryLifecycle: prior.recoveryLifecycle };
+      const c = prior.recoveryLifecycle.active!;
+      try {
+        const thread = config.configurable?.thread_id;
+        const { pausedBlueprintDependencyDecision } = await import("./generation-operation-strategy.js");
+        const decision = typeof thread === "string" && await pausedBlueprintDependencyDecision(job, state, prior.recoveryLifecycle, thread);
+        if (!decision || !await authenticateOriginalFailure(job, state.request, c.origin.graphThreadId, c.origin, c.evidence))
+          throw Error("Paused prerequisite lost its original source and verified progress.");
+        return { status: "running", reason: null, recoveryLifecycle: {
+          ...decideRecovery(resumePausedRecovery(prior.recoveryLifecycle, true), decision), assessorPending: true } };
+      } catch {
+        return { status: "blocked", reason: "Paused prerequisite requires original receipt inspection.",
+          recoveryLifecycle: { ...admitRecovery(prior.recoveryLifecycle, { outcome: "fenced",
+            fence: inspectionFence("untrusted-receipt", c.origin, c.evidence, c.evidence[0]!,
+              "Reconcile original prerequisite receipts before resumption.") }), assessorPending: false } };
       }
     }
     // A genuine author pause is not an integrity failure and cannot be
@@ -4571,8 +4593,7 @@ export function createGenerationGraph(
         const entry = (await inspectDependencyPlan(job))?.entries.find(e => e.reportDigest === resolved.reportDigest);
         if (!entry || entry.phase !== "verified") throw Error("Dependency amendment lost its completion evidence.");
         return { result: null, focusedPrerequisite: { ...pin, supportRef: dependencyDigest(entry) },
-          dependencyHistory: [...(s.dependencyHistory ?? []).filter(p =>
-          p.reportDigest !== entry.reportDigest), { reportDigest: entry.reportDigest, entryDigest: dependencyDigest(entry) }] };
+          dependencyHistory: await pinVerifiedDependencyHistory(job, s.dependencyHistory ?? [], entry.reportDigest) };
       } catch (error) {
         if (isGraphBubbleUp(error)) throw error;
         const stop = blocked(error);

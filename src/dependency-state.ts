@@ -432,12 +432,12 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         }
       }
       dependencyGit(job, "merge-base", "--is-ancestor", entry.commitSha!, "HEAD");
-      if (supportRejected) {
+      if (!entry.reviewSourceSha && !entry.fixture) {
         const { inspectCompletedPiReviewContext } = await import("./job-pi-policy.js");
         const { recoveredCloseoutReview } = await import("./cross-domain-closeout-work.js");
         const { openSkillSnapshot } = await import("./snapshot.js");
         if (!proof.snapshot || await openSkillSnapshot(proof.snapshot.id) !== proof.snapshot.path)
-          throw Error("Rejected supporting Review lost its pinned method.");
+          throw Error("Supporting Review lost its pinned method.");
         const packet = supportingReviewAssignment(job, saved, entry, turn);
         const completion = await inspectCompletedPiReviewContext(job, {
           group: "narrative:" + packet.planVersion + ":independent:focused-support:" + entry.reportDigest,
@@ -447,7 +447,7 @@ export async function inspectDependencyPlan(job: JobStartResult): Promise<Depend
         const verdict = await recoveredCloseoutReview(job, entry.reviewerSession!, completion.sessionSha256, packet);
         if (completion.sessionSha256 !== entry.reviewerSessionDigest ||
             JSON.stringify({ ...verdict, sessionFile: entry.reviewerSession }) !== JSON.stringify(entry.review))
-          throw Error("Rejected supporting Review differs from its completed independent transcript.");
+          throw Error("Supporting Review differs from its completed independent transcript.");
       }
     }
   }
@@ -482,6 +482,21 @@ export function supportingReviewAssignment(job: JobStartResult, plan: Dependency
         ...authorizedPaths.map(p => prefix + p)) } };
 }
 export interface DependencyHistoryPin { reportDigest: string; entryDigest: string }
+/** Include the complete verified prerequisite subtree, not just its root. */
+export function verifiedDependencyEntries(plan: DependencyPlan, roots: readonly string[]): DependencyEntry[] {
+  const entries = plan.entries.filter(e => roots.some(root => dependencyAncestors(plan.entries, e).has(root)));
+  if (roots.some(root => !entries.some(e => e.reportDigest === root)) ||
+      entries.some(e => e.phase !== "verified" || !e.commitSha || e.review?.verdict !== "pass"))
+    throw Error("Dependency subtree is not independently verified.");
+  return entries;
+}
+export async function pinVerifiedDependencyHistory(job: JobStartResult, previous: DependencyHistoryPin[], root: string) {
+  const plan = await inspectDependencyPlan(job);
+  if (!plan) throw Error("Dependency history lost its original plan.");
+  const entries = verifiedDependencyEntries(plan, [root]);
+  const pins = entries.map(e => ({ reportDigest: e.reportDigest, entryDigest: dependencyDigest(e) }));
+  return [...previous.filter(p => !pins.some(q => q.reportDigest === p.reportDigest)), ...pins];
+}
 export async function verifyDependencyHistory(job: JobStartResult, pins: DependencyHistoryPin[]) {
   if (!pins.length) return;
   const plan = await inspectDependencyPlan(job);

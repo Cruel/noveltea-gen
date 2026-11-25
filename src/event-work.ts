@@ -659,16 +659,16 @@ export async function archiveEventBlueprintPrerequisite(job: JobStartResult, rep
 export async function inspectBlueprintPredecessorCompletion(job: JobStartResult,
   milestone: string, digest: string) {
   const original = await inspectArchivedEventBlueprintPrerequisite(job, milestone, digest);
-  const { inspectDependencyPlan, dependencyDigest } = await import("./dependency-state.js");
+  const { inspectDependencyPlan, dependencyDigest, verifiedDependencyEntries } = await import("./dependency-state.js");
   const plan = await inspectDependencyPlan(job);
-  const entries = plan?.entries.filter(e => e.blueprintSource?.readinessDigest === digest) ?? [];
+  const roots = plan?.entries.filter(e => e.blueprintSource?.readinessDigest === digest) ?? [];
   const targets = [...new Set(original.report.blockers.map(b => b.characterId))];
-  if (entries.length !== targets.length ||
-      entries.some(e => e.phase !== "verified" || !e.commitSha || e.review?.verdict !== "pass") ||
-      targets.some(target => !entries.some(e => e.blueprintSource?.target === target)))
+  if (!plan || roots.length !== targets.length ||
+      targets.some(target => !roots.some(e => e.blueprintSource?.target === target)))
     throw Error("Blueprint predecessor work is not yet independently verified.");
+  const entries = verifiedDependencyEntries(plan, roots.map(e => e.reportDigest));
   let head = original.report.expectedHead;
-  for (const entry of entries) {
+  for (const entry of roots) {
     if (entry.report.sourceSha !== head) throw Error("Blueprint predecessor chain has a substituted source.");
     head = entry.commitSha!;
   }

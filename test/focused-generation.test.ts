@@ -515,6 +515,8 @@ test("R04 cross-owner prerequisite " + scenario + " uses the original logical as
         const ledger = (await inspectDependencyPlan(job))!;
         assert.equal(ledger.entries.length, 2);
         assert.ok(ledger.entries.every(e => e.phase === "verified"));
+        assert.deepEqual(supported.dependencyHistory.map(p => p.reportDigest).sort(),
+          ledger.entries.map(e => e.reportDigest).sort(), "Parent must pin every nested supporting receipt");
         assert.equal(factWrites, 1);
         const resumed = JSON.parse(readFileSync(join(job.stateDir, "dependency-items",
           ledger.entries[0]!.amendment!.assignment.id + ".json"), "utf8"));

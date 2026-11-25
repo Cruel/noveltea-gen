@@ -91,11 +91,13 @@ export async function inspectActiveRecoveryResolution(
   job: JobStartResult, original: RecoveryCase, source: RecoverySource,
   resolution: RecoveryDischarge,
   state: { request: GenerationRequest; inventory: GenerationInventory | null },
+  /** Only inspection may supply the independently authenticated published parent. */
+  publishedParent?: string,
 ): Promise<boolean> {
   if (resolution.disposition !== "active-verified" ||
       resolution.case.id !== original.id || source.caseId !== original.id ||
       !isDeepStrictEqual(resolution.case, original)) return false;
-  const head = await trustedHead(job);
+  const head = publishedParent ?? await trustedHead(job);
   git(job, "merge-base", "--is-ancestor", original.origin.sourceHeadSha, resolution.correctedHeadSha);
   git(job, "merge-base", "--is-ancestor", resolution.correctedHeadSha, head);
   const { correction, correctedHeadSha } = resolution;
@@ -246,13 +248,14 @@ export async function inspectDeferredCorrection(
   job: JobStartResult, original: RecoveryCase, source: RecoverySource,
   state: DeferredResolutionState,
   expected?: RecoveryDischarge,
+  publishedParent?: string,
 ): Promise<RecoveryDischarge | null> {
   if (source.caseId !== original.id || source.channel !== "operationRecovery" ||
       !["specialist-dispatch", "idea-integration"].includes(original.origin.operation) ||
       !independentObligation(source.input as unknown as GenerationOperationRecovery,
         original.origin.sourceHeadSha))
     return null;
-  const head = await trustedHead(job);
+  const head = publishedParent ?? await trustedHead(job);
   // Original provenance remains immutable even when later work changes HEAD.
   git(job, "merge-base", "--is-ancestor", original.origin.sourceHeadSha, head);
   let discharge: RecoveryDischarge | null = null;
