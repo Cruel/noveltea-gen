@@ -11,6 +11,7 @@ import { once } from 'node:events'
 import { request } from 'node:http'
 import { afterEach, test } from 'node:test'
 import { createControllerFixtureDatabase } from './support/sqlite-controller-fixture'
+import { SANDBOX_RECORD_BYTES } from '../../src/sandbox-limits'
 import { SandboxClient } from '../../src/sandbox-client'
 import { pinChatApprovedFoundation } from '../../src/chat-approved-foundation'
 import { renderFoundation } from '../../src/foundation-record'
@@ -450,7 +451,9 @@ test('trusted agent client acquires and streams execution through the private Un
   const { run } = docker()
   const controller = new SandboxController(config, run)
   // Exercise the transport and streaming shape without invoking a real daemon.
-  controller.execute = async (_id, _argv, onData) => {
+  let received: Buffer | undefined
+  controller.execute = async (_id, _argv, onData, stdin) => {
+    received = stdin
     onData('stdout', 'part one')
     onData('stdout', 'part two')
     return 0
@@ -465,6 +468,13 @@ test('trusted agent client acquires and streams execution through the private Un
     const code = await client.execute(ID, ['sh', '-c', 'echo test'], (_stream, text) => output.push(text))
     assert.deepEqual(output, ['part one', 'part two'])
     assert.equal(code, 0)
+    const large = Buffer.alloc(SANDBOX_RECORD_BYTES, 65)
+    assert.equal(await client.execute(ID, ['cat'], () => {}, large), 0)
+    assert.deepEqual(received, large)
+    await assert.rejects(async () => client.execute(ID, ['cat'], () => {},
+      Buffer.alloc(SANDBOX_RECORD_BYTES + 1)), /HTTP 413/)
+    await assert.rejects(async () => client.execute(ID, ['x'.repeat(9000)], () => {}), /HTTP 413/)
+    assert.deepEqual(received, large)
     assert.equal((await client.inspect(ID)).status, 'running')
     assert.equal((await client.dispose(ID)).status, 'disposed')
   } finally {
@@ -664,6 +674,19 @@ test('real rootless Docker stops delayed background writers before returning suc
     assert.equal(host.NanoCpus, 1_000_000_000)
     assert.deepEqual(host.CapDrop, ['ALL'])
     assert.ok((host.SecurityOpt as string[]).includes('no-new-privileges'))
+    mkdirSync(join(config.socket, '..'), { recursive: true })
+    const tokenFile = join(config.appVolume, 'controller-token')
+    writeFileSync(tokenFile, config.token, {mode: 0o600})
+    const server = createControllerServer(controller)
+    server.listen(config.socket)
+    await once(server, 'listening')
+    try {
+      const client = new SandboxClient(config.socket, tokenFile)
+      const payload = Buffer.alloc(SANDBOX_RECORD_BYTES, 65)
+      assert.equal(await client.execute(ID,['sh','-c','cat > /story/transport-probe.md'],()=>{},payload),0)
+      assert.deepEqual(readFileSync(join(story,'transport-probe.md')),payload)
+      assert.equal(await client.execute(ID,['rm','--','/story/transport-probe.md'],()=>{}),0)
+    } finally {server.close();await once(server,'close')}
     const actualLimits: string[] = []
     assert.equal(await controller.execute(ID,
       ['sh', '-c', 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max'],

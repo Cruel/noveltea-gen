@@ -124,6 +124,7 @@ export function authorChoiceMatchesActiveAssignment(workItem: string, value: unk
 type PendingReviewChoiceState = {
   status?: string; reason?: string | null; active?: unknown; result?: unknown;
   ideaTask?: unknown; ideaResult?: unknown;
+  recoveryLifecycle?: RecoveryLifecycle;
 }
 
 /** Only an exact already-sealed rejected checkpoint and its answered
@@ -150,15 +151,31 @@ export function matchesReviewRepairResumeBoundary(
   const preservedResult = !!result && result.headSha === sha &&
     (result.status === 'review-handoff' ||
       !!stage && result.status === committedStageResult[stage])
+  const lifecycle = saved.recoveryLifecycle
+  const decision = lifecycle?.decision
+  const authenticatedPause = decision?.action === 'pause' && decision.reason === 'author-choice' &&
+    decision.caseId === lifecycle?.active?.id &&
+    lifecycle.active.origin.operation === 'independent-review' &&
+    lifecycle.active.origin.sourceHeadSha === sha &&
+    decision.checkedSourceHeadSha === sha &&
+    decision.resumeRef?.store === 'review-checkpoint' && decision.resumeRef.ref === sha
+  const exactOwner = stage === 'foundation' ? point.workItem === 'foundation' :
+    stage === 'architecture' ? point.workItem === 'global-architecture' :
+    stage === 'composition' ? point.workItem === 'composition-' + String((saved.active as {milestone?:string}).milestone ?? '').replace(/^milestone\./, '') :
+    stage === 'interactive' || stage === 'choice' || stage === 'puzzle' ?
+      (stage !== 'puzzle' && point.workItem === 'interactive-choice-' + String((saved.active as {milestone?:string}).milestone ?? '').replace(/^milestone\./, '') ||
+       stage !== 'choice' && point.workItem === 'interactive-puzzle-' + String((saved.active as {milestone?:string}).milestone ?? '').replace(/^milestone\./, '')) :
+    authorChoiceMatchesActiveAssignment(point.workItem, saved.active)
   return !!sha && saved.status === 'paused' &&
-    saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
+    (authenticatedPause || (!lifecycle?.active &&
+      saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.')) &&
     preservedResult &&
     !saved.ideaTask && !saved.ideaResult &&
     point.eligible && point.commitSha === sha && point.semanticReview === 'failed' &&
     repair.phase === 'awaiting-author' && repair.choiceId === choice.id &&
     repair.baselineHead === sha && repair.sourceCommitSha === sha &&
     repair.origin.workItem === point.workItem &&
-    authorChoiceMatchesActiveAssignment(point.workItem, saved.active)
+    exactOwner
 }
 
 /** A guidance grant is not a new specialist dispatch. Only a stopped,
@@ -328,7 +345,6 @@ export async function verifiedResumeAdmission(job: Awaited<ReturnType<typeof aut
       }
       const sourceSha = choiceAnswer?.workItem.match(/^repair-([a-f0-9]{40})$/)?.[1]
       if (sourceSha && saved.status === 'paused' &&
-          saved.reason === 'Independent reviewer rejected the specialist draft; the original writer disputes correction. An authenticated Author Choice is pending.' &&
           (saved.result as { status?: string; headSha?: string } | null)?.headSha === sourceSha) {
         const repair = await inspectRejectedRepair(job, sourceSha)
         const checkpoint = (await inspectRecoveryCheckpoints(job)).find(p =>

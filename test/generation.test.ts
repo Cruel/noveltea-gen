@@ -203,10 +203,10 @@ async function pinTestDiscoveryApproval(job: import("../src/job.js").JobStartRes
   }));
 }
 
-test("R01 Chat-approved Foundation negative Review admits a new source-bound correction and preserves approval",{
+for(const transportFailure of [false,true]) test("R01 Chat-approved Foundation negative Review admits a new source-bound correction and preserves approval"+(transportFailure?" (transport rejected)":""),{
   skip:!available,timeout:120_000,
 },async()=>{
-  const f=setup("r01-chat-foundation-repair");
+  const f=setup("r01-chat-foundation-repair"+(transportFailure?"-transport":""));
   const contract=JSON.parse(readFileSync(f.contract,"utf8"));
   contract.scope={kind:"full-story",depth:"composition",targets:[],branches:[]};
   const plan=planWholeStory(f.start[3]!,contract,f.job.baseSha);
@@ -214,6 +214,14 @@ test("R01 Chat-approved Foundation negative Review admits a new source-bound cor
   const old=Object.fromEntries(Object.keys(f.env).map(key=>[key,process.env[key]]));
   Object.assign(process.env,f.env);
   const restore=fixtureSandboxClient(f.job.jobId,f.job.worktreeStoryRoot);
+  if(transportFailure) {
+    const {SandboxClient,SandboxExecutionError}=await import("../src/sandbox-client.js");
+    const execute=SandboxClient.prototype.execute;
+    SandboxClient.prototype.execute=async function(...args) {
+      if(args[1][3]==="nt-write")throw new SandboxExecutionError(413,"rejected");
+      return execute.apply(this,args);
+    };
+  }
   const saver=SqliteSaver.fromConnString(join(f.job.stateDir,"chat-foundation-repair.sqlite"));
   try {
     const snapshot=await createSkillSnapshot({discovery:"explicit-only",novelteaSkills:source,skillDirs:[],
@@ -260,7 +268,7 @@ test("R01 Chat-approved Foundation negative Review admits a new source-bound cor
           reason:"toolUse" as const};}
         if(step===2)return {content:[{type:"toolCall" as const,name:"story_validate",id:"chat-repair-validate",arguments:{}}],
           reason:"toolUse" as const};
-        return stop("Corrected the canonical clue and removed proposal commentary.");
+        return stop(transportFailure?"The edit was refused. No changes were saved.":"Corrected the canonical clue and removed proposal commentary.");
       }
       if(index===0)return read(requiredOrchestratorSkillReads("autonomous").map(p=>"skill://"+p));
       if(index===1)return stop({sourceSha:f.job.baseSha,turnDigest:plan.digest,
@@ -275,6 +283,17 @@ test("R01 Chat-approved Foundation negative Review admits a new source-bound cor
       model:scriptedModel.id,orchestrationPolicy:"explicit",
       discoveryHandoffDigest:JSON.parse(readFileSync(join(f.job.stateDir,"discovery-handoff.json"),"utf8")).digest,
     },pauseAfter:"foundation"},cfg));
+    if(transportFailure) {
+      assert.equal(output.status,"blocked",JSON.stringify({reason:output.reason,recovery:output.recoverySources}));
+      const rootReceipt=JSON.parse(readFileSync(join(f.job.stateDir,"foundation.json"),"utf8"));
+      const repair=JSON.parse(readFileSync(join(f.job.stateDir,"review-repairs",rootReceipt.commitSha+".json"),"utf8"));
+      assert.equal(repair.phase,"blocked");
+      assert.match(repair.failure,/sandbox execution failure.*HTTP 413/);
+      assert.equal(repair.choiceId,undefined);
+      assert.equal(reviews,1);assert.equal(writes,1);
+      assert.equal(readFileSync(join(f.job.worktreeStoryRoot,path),"utf8"),renderFoundation(foundation,"approved"));
+      return;
+    }
     assert.equal(output.status,"paused",JSON.stringify({reason:output.reason,recovery:output.recoverySources}));
     assert.equal(reviews,2);assert.equal(writes,1);
     assert.equal(readFileSync(join(f.job.stateDir,"chat-approved-foundation.json"),"utf8"),originalApproval);

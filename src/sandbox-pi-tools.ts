@@ -11,7 +11,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import { SandboxClient } from "./sandbox-client.js";
+import { SANDBOX_RECORD_BYTES, SANDBOX_READ_PAGE_BYTES, SANDBOX_MODEL_OUTPUT_BYTES } from "./sandbox-limits.js";
+import { SandboxClient, SandboxExecutionError } from "./sandbox-client.js";
 import { createSkillReadTool, roleVisibleSkills, type SkillReadRole } from "./skills.js";
 import { verifiedSkillFiles, type SkillSnapshot } from "./snapshot.js";
 import { adaptiveTrackedReadPaths, assertAdaptiveExposedRead } from "./adaptive-source-reads.js";
@@ -22,9 +23,9 @@ export const SANDBOX_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export type SandboxToolAccess = "writer" | "read-only";
 export type SandboxReadScope = "story-and-skills" | "pinned-skills-only" |
   { kind: "adaptive"; sourceSha: string };
-const MAX_WRITE = 128 * 1024;
+const MAX_WRITE = SANDBOX_RECORD_BYTES;
 const MAX_READ_LINES = 500;
-const MAX_OUTPUT = 48 * 1024;
+const MAX_OUTPUT = SANDBOX_MODEL_OUTPUT_BYTES;
 const schema = (properties: Record<string, object>, required: string[] = []) =>
   ({ type: "object", properties, required, additionalProperties: false }) as ToolDefinition["parameters"];
 const str = { type: "string" };
@@ -87,15 +88,15 @@ export async function readSandboxContextFile(
 ): Promise<string> {
   if (!storyRelativePath.endsWith(".md")) throw new Error("Sandbox context requires canonical Markdown.");
   const path = mappedStoryPath(job, storyRelativePath);
-  const chunkSize = 24 * 1024;
+  const chunkSize = SANDBOX_READ_PAGE_BYTES;
   const chunks: Buffer[] = [];
   let digest: string | undefined;
   let total = 0;
-  for (let index = 0; index < 7; index++) {
+  for (let index = 0; index <= Math.floor(SANDBOX_RECORD_BYTES / chunkSize); index++) {
     let stdout = "", stderr = "";
-    const script = 'file="$1"; [ -f "$file" ] && [ ! -L "$file" ] || exit 2; bytes=$(wc -c < "$file") || exit 2; [ "$bytes" -le 131072 ] || exit 3; sha256sum -- "$file" | cut -c1-64; dd if="$file" bs=24576 skip="$2" count=1 status=none | base64 -w0';
+    const script = 'file="$1"; [ -f "$file" ] && [ ! -L "$file" ] || exit 2; bytes=$(wc -c < "$file") || exit 2; [ "$bytes" -le "$3" ] || exit 3; sha256sum -- "$file" | cut -c1-64; dd if="$file" bs="$4" skip="$2" count=1 status=none | base64 -w0';
     const code = await client.execute(job.jobId,
-      ["sh", "-c", script, "nt-context", path, String(index)],
+      ["sh", "-c", script, "nt-context", path, String(index), String(SANDBOX_RECORD_BYTES), String(chunkSize)],
       (stream, data) => { if (stream === "stdout") stdout += data; else stderr += data; });
     if (code !== 0) throw new Error("Sandbox context read failed (exit " + code + "): " + stderr.slice(0, 300));
     const separator = stdout.indexOf("\n");
@@ -113,13 +114,13 @@ export async function readSandboxContextFile(
     }
     chunks.push(part);
     total += part.length;
-    if (total > 128 * 1024) throw new Error("Sandbox context file exceeds 128 KiB.");
+    if (total > SANDBOX_RECORD_BYTES) throw new Error("Sandbox context file exceeds the record limit.");
     if (part.length < chunkSize) {
       const body = Buffer.concat(chunks);
       if (createHash("sha256").update(body).digest("hex") !== digest) {
         throw new Error("Sandbox context file changed during read.");
       }
-      return body.toString("utf8");
+      return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(body);
     }
   }
   throw new Error("Sandbox context file exceeded bounded read.");
@@ -178,15 +179,36 @@ export async function createSandboxPiTools(
       throw new Error("Invalid sandbox tool line/result limit.");
     return value;
   };
-  const write = async (path: string, content: string) => {
-    if (Buffer.byteLength(content) > MAX_WRITE) throw new Error("Sandbox write exceeds the 128 KiB per-file limit.");
-    const encoded = Buffer.from(content, "utf8").toString("base64");
-    const chunks = encoded.match(/.{1,3000}/g) ?? [""];
-    // Docker controller permits at most 64 argv entries; never truncate input.
-    if (chunks.length > 60) throw new Error("Sandbox write exceeds controller argv budget.");
-    const script = 'dest="$1"; shift; tmp="${dest}.noveltea-write-${NT_TMP_SUFFIX}"; mkdir -p -- "$(dirname -- "$dest")" || exit; trap \'rm -f -- "$tmp"\' EXIT; printf "%s" "$@" | base64 -d > "$tmp" && mv -f -- "$tmp" "$dest"';
-    // The suffix is a trusted UUID, never supplied by the model.
-    await checked(["sh", "-c", script.replace("${NT_TMP_SUFFIX}", randomUUID()), "nt-write", path, ...chunks]);
+  const write = async (path: string, content: string, expected?: string) => {
+    const bytes = Buffer.from(content, "utf8");
+    if (bytes.length > MAX_WRITE) throw new Error("Sandbox write exceeds the 1 MiB per-file limit.");
+    // The controller forwards only bounded stdin to Docker; the whole record
+    // never enters the command arguments. Verify size and digest before the
+    // atomic rename (including interrupted or short stdin delivery).
+    const script = 'dest="$1"; tmp="$2"; size="$3"; hash="$4"; expected="$5"; ' +
+      'mkdir -p -- "$(dirname -- "$dest")" || exit; ' +
+      'trap \'rm -f -- "$tmp"\' EXIT; ' +
+      'cat > "$tmp" && [ "$(wc -c < "$tmp")" = "$size" ] && ' +
+      '[ "$(sha256sum -- "$tmp" | cut -c1-64)" = "$hash" ] || exit 3; ' +
+      'if [ -n "$expected" ]; then [ -f "$dest" ] && [ ! -L "$dest" ] && ' +
+      '[ "$(sha256sum -- "$dest" | cut -c1-64)" = "$expected" ] || exit 4; fi; ' +
+      'mv -fT -- "$tmp" "$dest"';
+    const invoke = () => client.execute(job.jobId, ["sh", "-c", script, "nt-write",
+      path, path + ".noveltea-write-" + randomUUID(), String(bytes.length),
+      createHash("sha256").update(bytes).digest("hex"), expected ?? ""], () => {}, bytes);
+    let code: number;
+    try { code = await invoke(); }
+    catch (error) {
+      // A pre-dispatch 404 means the registered container is absent, not
+      // that a writer may have executed. Only that exact rejection is
+      // eligible for a bounded reacquisition, never an ambiguous failure.
+      if (!(error instanceof SandboxExecutionError) || error.disposition !== "rejected" ||
+          error.status !== 404) throw error;
+      const restored = await client.acquire(job.jobId);
+      if (restored.jobId !== job.jobId || restored.status !== "running") throw error;
+      code = await invoke();
+    }
+    if (code !== 0) throw Error("Sandbox atomic file write failed (exit " + code + "); original file was not replaced.");
   };
   const read = async (path: string, offset: number, limit: number) => {
     const script = 'start="$1"; end="$2"; file="$3"; [ -f "$file" ] || exit 2; sed -n "${start},${end}p" -- "$file" | head -c 48000';
@@ -231,11 +253,9 @@ export async function createSandboxPiTools(
         const path = mapped(input.path);
         const edits = input.edits;
         if (!Array.isArray(edits) || !edits.length || edits.length > 30) throw new Error("Edit requires one to thirty replacements.");
-        // Do not edit a file if its complete bytes cannot be read back from
-        // the sandbox. Never silently overwrite unseen lines or binary data.
-        const size = await checked(["wc", "-c", "--", path]);
-        if (Number(size.trim().split(/\s+/)[0]) > MAX_OUTPUT - 1) throw new Error("Sandbox edit target too large for safe complete read.");
-        const before = await checked(["cat", "--", path]);
+        // Fetch exact bytes in digest-bound pages, independent of the
+        // model-visible output budget; never silently edit truncated text.
+        const before = await readSandboxContextFile(job, String(input.path), client);
         let after = before;
         const spans: { start: number; end: number; replacement: string }[] = [];
         for (const item of edits as unknown[]) {
@@ -251,7 +271,7 @@ export async function createSandboxPiTools(
           if (spans[i]!.end > spans[i - 1]!.start) throw new Error("Overlapping sandbox edits are not allowed.");
         }
         for (const span of spans) after = after.slice(0, span.start) + span.replacement + after.slice(span.end);
-        await write(path, after);
+        await write(path, after, createHash("sha256").update(before).digest("hex"));
         return text("Edited " + String(input.path));
       },
     },

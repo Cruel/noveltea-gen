@@ -20,8 +20,10 @@ import type { JobStartResult } from '../../src/job'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SHA = /^[0-9a-f]{40}$/i
-const LIMIT_BODY = 8192
-const LIMIT_OUTPUT = 64 * 1024
+import { SANDBOX_COMMAND_BYTES, SANDBOX_FILE_REQUEST_BYTES, SANDBOX_RECORD_BYTES,
+  SANDBOX_COMMAND_OUTPUT_BYTES } from '../../src/sandbox-limits'
+const LIMIT_BODY = SANDBOX_COMMAND_BYTES
+const LIMIT_OUTPUT = SANDBOX_COMMAND_OUTPUT_BYTES
 
 export class SandboxError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
@@ -504,7 +506,7 @@ export class SandboxController {
    * the entire container (SIGKILL after zero grace) and start its clean init
    * process before returning ANY exit status to the trusted worker.
    */
-  async execute(id: string, argv: string[], onData: (stream: 'stdout' | 'stderr', data: string) => void) {
+  async execute(id: string, argv: string[], onData: (stream: 'stdout' | 'stderr', data: string) => void, stdin?: Buffer) {
     if (this.locked.has(id)) throw new SandboxError(409, 'Job sandbox already has an active operation.')
     this.locked.add(id)
     try {
@@ -514,12 +516,15 @@ export class SandboxController {
           argv.some(a => typeof a !== 'string' || a.length > 4096 || a.includes('\0'))) {
         throw new SandboxError(400, 'Invalid sandbox command arguments.')
       }
+      if (Buffer.byteLength(JSON.stringify({ argv })) > SANDBOX_COMMAND_BYTES ||
+          (stdin && stdin.byteLength > SANDBOX_RECORD_BYTES))
+        throw new SandboxError(413, 'Sandbox command input exceeds its bounded limit.')
       // Spawn with argv, never through a host shell. All child processes are
       // confined to the container's PID namespace and rootless cgroup.
       return await new Promise<number>((resolvePromise, reject) => {
         const name = containerName(id)
-        const child = this.spawnExec('docker', ['exec', '--workdir', '/story', name, ...argv], {
-          stdio: ['ignore', 'pipe', 'pipe'],
+        const child = this.spawnExec('docker', ['exec', ...(stdin ? ['-i'] : []), '--workdir', '/story', name, ...argv], {
+          stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         })
         const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
         let bytes = 0
@@ -555,6 +560,14 @@ export class SandboxController {
         child.stdout.on('data', (b: Buffer) => chunk('stdout', b))
         child.stderr.on('data', (b: Buffer) => chunk('stderr', b))
         child.on('error', () => abortContainer(new SandboxError(503, 'Sandbox Docker execution failed.')))
+        if (stdin) {
+          if (!child.stdin) {
+            abortContainer(new SandboxError(503, 'Sandbox stdin was not available.'))
+            return
+          }
+          child.stdin.on('error', () => abortContainer(new SandboxError(503, 'Sandbox input delivery failed.')))
+          child.stdin.end(stdin)
+        }
         child.on('close', code => {
           if (finished) return
           try {
@@ -592,12 +605,12 @@ function send(res: ServerResponse, status: number, data: object) {
   res.end(JSON.stringify(data))
 }
 
-async function body(req: IncomingMessage): Promise<unknown> {
+async function body(req: IncomingMessage, maxBytes = LIMIT_BODY): Promise<unknown> {
   let count = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
     const buf = Buffer.from(chunk as Buffer)
-    if ((count += buf.length) > LIMIT_BODY) throw new SandboxError(413, 'Request too large.')
+    if ((count += buf.length) > maxBytes) throw new SandboxError(413, 'Request too large.')
     chunks.push(buf)
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown }
@@ -630,23 +643,36 @@ export function createControllerServer(controller: SandboxController) {
       if (req.method === 'GET' && !match[2]) return send(res, 200, await controller.inspect(id))
       if (req.method === 'DELETE' && !match[2]) return send(res, 200, await controller.dispose(id))
       if (req.method === 'POST' && match[2] === 'exec') {
-        const payload = await body(req) as { argv?: unknown } | null
+        const payload = await body(req, SANDBOX_FILE_REQUEST_BYTES) as { argv?: unknown; stdinBase64?: unknown } | null
         if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
-            Object.keys(payload).some(key => key !== 'argv') || !Array.isArray(payload.argv))
+            Object.keys(payload).some(key => key !== 'argv' && key !== 'stdinBase64') || !Array.isArray(payload.argv))
           throw new SandboxError(400, 'Only sandbox command argv is accepted.')
         // Validate before writing any streaming headers.
         if (!payload.argv.length || payload.argv.length > 64 ||
             payload.argv.some(v => typeof v !== 'string' || v.length > 4096 || v.includes('\0'))) {
           throw new SandboxError(400, 'Invalid sandbox command argv.')
         }
-        if ((await controller.inspect(id)).status !== 'running') throw new SandboxError(409, 'Sandbox is not running.')
+        if (Buffer.byteLength(JSON.stringify({ argv: payload.argv })) > SANDBOX_COMMAND_BYTES)
+          throw new SandboxError(413, 'Command arguments too large.')
+        let stdin: Buffer | undefined
+        if (payload.stdinBase64 !== undefined) {
+          const encoded = payload.stdinBase64
+          if (typeof encoded !== 'string' || encoded.length > Math.ceil(SANDBOX_RECORD_BYTES / 3) * 4)
+            throw new SandboxError(413, 'File input exceeds the record limit.')
+          stdin = Buffer.from(encoded, 'base64')
+          if (stdin.toString('base64') !== encoded)
+            throw new SandboxError(400, 'Invalid canonical base64 input.')
+          if (stdin.byteLength > SANDBOX_RECORD_BYTES)
+            throw new SandboxError(413, 'File input exceeds the record limit.')
+        }
+        if ((await controller.inspect(id)).status !== 'running') throw new SandboxError(404, 'Sandbox is not running.')
         res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' })
         try {
           const code = await controller.execute(id, payload.argv as string[], (stream, data) =>
-            res.write(JSON.stringify({ stream, data }) + '\n'))
+            res.write(JSON.stringify({ stream, data }) + '\n'), stdin)
           res.end(JSON.stringify({ exitCode: code }) + '\n')
         } catch (error) {
-          res.end(JSON.stringify({ error: error instanceof SandboxError ? error.message : 'Sandbox execution failed.' }) + '\n')
+          res.end(JSON.stringify({ status: error instanceof SandboxError ? error.status : 503, error: error instanceof SandboxError ? error.message : 'Sandbox execution failed.' }) + '\n')
         }
         return
       }

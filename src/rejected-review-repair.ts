@@ -35,6 +35,7 @@ import { createJobModelRuntime } from "./model-runtime.js";
 import { resolvePiModel, guardPiBudget, registerPendingPiSession, recordPiSession } from "./job-pi-policy.js";
 import { createProjectResourceLoader } from "./pi.js";
 import { openStoryProject } from "./project.js";
+import { SandboxExecutionError } from "./sandbox-client.js";
 import { selectSandboxPiTools } from "./sandbox-pi-tools.js";
 import { createStoryValidateTool } from "./validator.js";
 import { promptStorySpecialist } from "./story-interruption.js";
@@ -1520,6 +1521,7 @@ async function prepareRepairWriter(job: JobStartResult, state: RepairReceipt) {
   if (!sandboxTools) throw Error("Review repair cannot run outside the isolated Story sandbox.");
   // The model never receives a write tool that can target a path beyond the
   // exact failed checkpoint inventory. No post-hoc rollback is needed.
+  let executionFailure: SandboxExecutionError | undefined;
   const scopedTools = sandboxTools.filter(tool =>
     ["read", "edit", "write", "grep", "find", "ls"].includes(tool.name)).map(tool =>
     !["write", "edit"].includes(tool.name) ? tool : {
@@ -1528,7 +1530,15 @@ async function prepareRepairWriter(job: JobStartResult, state: RepairReceipt) {
         const input = args[1] as { path?: unknown };
         if (typeof input.path !== "string" || !state.allowedPaths.includes(input.path))
           throw Error("Review repair tool denied path outside the original authorized assignment.");
-        return tool.execute(...args);
+        if (executionFailure?.disposition === "uncertain") throw executionFailure;
+        try {
+          const result = await tool.execute(...args);
+          executionFailure = undefined;
+          return result;
+        } catch (error) {
+          if (error instanceof SandboxExecutionError) executionFailure = error;
+          throw error;
+        }
       },
     });
   const open = async () => (await createAgentSession({
@@ -1539,7 +1549,7 @@ async function prepareRepairWriter(job: JobStartResult, state: RepairReceipt) {
     customTools: [...scopedTools, createStoryValidateTool(job), createPiStatusTool()],
     noTools: "all", tools: ["read", "edit", "write", "grep", "find", "ls", "story_validate", "report_status"],
   })).session;
-  return { open, skill, resolved };
+  return { open, skill, resolved, executionFailure: () => executionFailure };
 }
 
 /** Production Pi driver. Reopens the original writer transcript; no new agent
@@ -1557,7 +1567,7 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
   if (state.phase === "prepared") await inspectPreparedRepairDispatch(job, sha);
   await guardPiBudget(job, "semantic-repair:" + sha + ":" + (state.attempts + 1),
     state.origin.sessionFile);
-  const { open, skill, resolved } = await prepareRepairWriter(job, state);
+  const { open, skill, resolved, executionFailure } = await prepareRepairWriter(job, state);
   const feedback = await prepareRejectedRepairFeedback(job, state);
   const claimed = state.phase === "ready"
     ? await claimRejectedRepair(job, sha)
@@ -1636,6 +1646,21 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     const dispute = reply.match(/^DISPUTE_REVIEW:\s*([a-z][a-z0-9-]*\/[a-z0-9._-]+\.md):([1-9]\d*)\s*\|\s*(.{1,1000})\s*$/m);
     if (dispute) reportedDispute = { path: dispute[1]!, line: Number(dispute[2]), claim: dispute[3]!.trim() };
   } finally { session.dispose(); }
+  const technical = executionFailure();
+  if (technical && (technical.disposition === "uncertain" ||
+      !git(job, "status", "--porcelain=v1", "--untracked-files=all"))) {
+    // Tool-origin evidence, not an inference from model prose. No author
+    // choice can repair an unavailable transport. Preserve the original
+    // negative Review, exact transcript and any uncertain writer effects.
+    const stopped = await inspectRejectedRepair(job, sha);
+    stopped.phase = "blocked";
+    stopped.failure = "Original Review correction encountered a sandbox execution failure (" +
+      technical.disposition + ", HTTP " + technical.status +
+      "). Reconcile the original sandbox and draft; no creative dispute was established.";
+    stopped.sessionSha256 = hash(await readFile(stopped.origin.sessionFile));
+    await save(job, stopped);
+    return stopped;
+  }
   return finishRejectedRepairDraft(job, sha, reportedOutOfAuthority, reportedDispute);
 }
 

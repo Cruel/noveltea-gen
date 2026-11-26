@@ -5,9 +5,17 @@
 import { request } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
+import { SANDBOX_RECORD_BYTES, SANDBOX_COMMAND_BYTES } from './sandbox-limits.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export type SandboxResult = { jobId: string; status: string }
+
+export class SandboxExecutionError extends Error {
+  constructor(readonly status: number, readonly disposition: 'rejected' | 'uncertain') {
+    super('Sandbox controller ' + disposition + ' execution (HTTP ' + status + ').')
+    this.name = 'SandboxExecutionError'
+  }
+}
 
 export class SandboxClient {
   constructor(
@@ -69,9 +77,13 @@ export class SandboxClient {
   async dispose(jobId: string): Promise<SandboxResult> {
     return JSON.parse(await this.call('DELETE', '/v1/sandboxes/' + this.id(jobId))) as SandboxResult
   }
-  execute(jobId: string, argv: string[], output: (stream: 'stdout' | 'stderr', text: string) => void): Promise<number> {
+  execute(jobId: string, argv: string[], output: (stream: 'stdout' | 'stderr', text: string) => void, stdin?: Buffer): Promise<number> {
     const id = this.id(jobId)
-    const body = JSON.stringify({ argv })
+    if (stdin && stdin.byteLength > SANDBOX_RECORD_BYTES)
+      throw new SandboxExecutionError(413, 'rejected')
+    if (Buffer.byteLength(JSON.stringify({ argv })) > SANDBOX_COMMAND_BYTES)
+      throw new SandboxExecutionError(413, 'rejected')
+    const body = JSON.stringify({ argv, ...(stdin ? { stdinBase64: stdin.toString('base64') } : {}) })
     const token = readFileSync(this.tokenFile, 'utf8').trim()
     return new Promise((yes, no) => {
       const req = request({
@@ -84,7 +96,8 @@ export class SandboxClient {
       }, res => {
         if ((res.statusCode ?? 500) >= 400) {
           res.resume()
-          no(new Error('Sandbox controller refused execution (HTTP ' + res.statusCode + ').'))
+          no(new SandboxExecutionError(res.statusCode ?? 500,
+            [400, 401, 404, 413].includes(res.statusCode ?? 500) ? 'rejected' : 'uncertain'))
           return
         }
         let text = ''
@@ -108,9 +121,9 @@ export class SandboxClient {
               text = text.slice(end + 1)
               if (!line) continue
               const entry = JSON.parse(line) as {
-                stream?: 'stdout' | 'stderr'; data?: string; exitCode?: number; error?: string
+                stream?: 'stdout' | 'stderr'; data?: string; exitCode?: number; error?: string; status?: number
               }
-              if (entry.error) throw new Error('Sandbox command failed: ' + entry.error)
+              if (entry.error) throw new SandboxExecutionError(Number.isInteger(entry.status) && entry.status! >= 400 && entry.status! <= 599 ? entry.status! : 503, 'uncertain')
               if (entry.stream && entry.data) output(entry.stream, entry.data)
               if (typeof entry.exitCode === 'number') code = entry.exitCode
             }
@@ -119,16 +132,16 @@ export class SandboxClient {
             res.destroy(error as Error)
           }
         })
-        res.on('error', no)
+        res.on('error', error => no(error instanceof SandboxExecutionError ? error : new SandboxExecutionError(503, 'uncertain')))
         res.on('end', () => {
           if (failed) return
           text += decoder.end()
-          if (code === undefined || text.trim()) no(new Error('Sandbox ended without a complete execution status.'))
+          if (code === undefined || text.trim()) no(new SandboxExecutionError(503, 'uncertain'))
           else yes(code)
         })
       })
-      req.on('timeout', () => req.destroy(new Error('Sandbox command request timed out.')))
-      req.on('error', no)
+      req.on('timeout', () => req.destroy(new SandboxExecutionError(504, 'uncertain')))
+      req.on('error', error => no(error instanceof SandboxExecutionError ? error : new SandboxExecutionError(503, 'uncertain')))
       req.end(body)
     })
   }

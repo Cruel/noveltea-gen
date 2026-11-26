@@ -149,3 +149,18 @@ test('foreign, unverified, outdated or unrelated review choices cannot resume a 
   assert.equal(matchesReviewRepairResumeBoundary({ ...saved, status: 'running' }, choice, repair, point), false)
   assert.equal(matchesReviewRepairResumeBoundary({ ...saved, ideaTask: {} }, choice, repair, point), false)
 })
+
+test('current Foundation author-choice pause uses its typed recovery decision, not obsolete prose', () => {
+  const {saved,choice,repair,point}=valid()
+  const state = {...saved,reason:'Original Foundation Review correction paused.',
+    active:{stage:'foundation',id:'foundation'},result:{status:'committed',headSha:sha},
+    recoveryLifecycle:{active:{id:'case',origin:{operation:'independent-review',sourceHeadSha:sha}},
+      decision:{action:'pause',reason:'author-choice',caseId:'case',checkedSourceHeadSha:sha,
+        resumeRef:{store:'review-checkpoint',ref:sha}}}} as unknown as Parameters<typeof matchesReviewRepairResumeBoundary>[0]
+  repair.origin={...repair.origin,workItem:'foundation'}
+  point.workItem='foundation'
+  assert.equal(matchesReviewRepairResumeBoundary(state,choice,repair,point),true)
+  assert.equal(matchesReviewRepairResumeBoundary({...state,recoveryLifecycle:undefined},choice,repair,point),false)
+  assert.equal(matchesReviewRepairResumeBoundary({...state,recoveryLifecycle:{...state.recoveryLifecycle!,
+    decision:{...state.recoveryLifecycle!.decision!,checkedSourceHeadSha:'b'.repeat(40)}}},choice,repair,point),false)
+})

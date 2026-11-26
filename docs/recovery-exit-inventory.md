@@ -1436,3 +1436,24 @@ editing and positive rereview without repinning the approved proposal. The
 opt-in preserved Luna test authenticates the exact inherited Revelation
 owner and rejects substituted Milestone/path grants. Certification reporting
 separates native-eligible and semantically accepted checkpoints.
+
+### Sandbox record transfer and Review resumption (live #260)
+
+Canonical Markdown write and exact-edit capacity are now 1 MiB, independent
+of command argv and model-visible output budgets. Authenticated controller
+requests carry bounded base64 stdin separately from small argv, decoded
+and piped to Docker's stdin. The record is renamed atomically only after
+size/digest verification; edits authenticate the complete original source
+through digest-bound pages and compare its digest before replacement.
+The existing rootless container, filesystem projection, command timeout,
+output limits, and descendant-quiescence boundary are retained.
+
+A confirmed absent-container rejection allows one reacquisition for the
+original file write; uncertain execution never replays the write. Typed
+transport errors on a Review correction without a successful owned draft
+are preserved as a technical stop, not a creative Author Choice.
+The exact typed author-choice Review pause plus source/owner and authenticated
+answer can resume the original Review; it does not replay the original
+authoring stage. Tests exercise the full-limit stdin transfer through the
+authenticated controller and rootless Docker, a multi-page exact edit,
+a rejected-write Foundation Review regression, and the typed resume fence.

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /** In-process Pi transport and restrictive filesystem seam for source-bound
  * generation tests. This does NOT certify Docker sandbox isolation; production
  * sandbox/controller coverage is exercised separately.
@@ -99,7 +100,7 @@ export function fixtureSandboxClient(jobId: string, storyRoot: string) {
     return { jobId: id, status: "disposed" };
   };
   SandboxClient.prototype.execute = async (id: string, argv: string[],
-    output: (stream: "stdout" | "stderr", data: string) => void) => {
+    output: (stream: "stdout" | "stderr", data: string) => void, stdin?: Buffer) => {
     assert.equal(id, jobId);
     if (argv[0] === "sh" && argv[1] === "-c" && argv[3] === "nt-read") {
       const [start, end] = [Number(argv[4]), Number(argv[5])];
@@ -109,7 +110,16 @@ export function fixtureSandboxClient(jobId: string, storyRoot: string) {
     if (argv[0] === "sh" && argv[1] === "-c" && argv[3] === "nt-write") {
       const file = target(argv[4]!);
       mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, Buffer.from(argv.slice(5).join(""), "base64")); return 0;
+      assert.ok(stdin);
+      assert.equal(stdin.length,Number(argv[6]));
+      assert.equal(createHash("sha256").update(stdin).digest("hex"),argv[7]);
+      if(argv[8])assert.equal(createHash("sha256").update(readFileSync(file)).digest("hex"),argv[8]);
+      writeFileSync(file,stdin); return 0;
+    }
+    if (argv[0] === "sh" && argv[3] === "nt-context") {
+      const data=readFileSync(target(argv[4]!)), index=Number(argv[5]), size=Number(argv[7]);
+      output("stdout",createHash("sha256").update(data).digest("hex")+"\n"+
+        data.subarray(index*size,(index+1)*size).toString("base64")); return 0;
     }
     if (argv[0] === "wc" && argv[1] === "-c" && argv[2] === "--") {
       const file = target(argv[3]!);

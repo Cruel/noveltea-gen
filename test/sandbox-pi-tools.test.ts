@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import type { JobStartResult } from "../src/job.js";
+import { SandboxExecutionError } from "../src/sandbox-client.js";
+import { SANDBOX_RECORD_BYTES } from "../src/sandbox-limits.js";
 import { createSkillSnapshot } from "../src/snapshot.js";
 import { createSandboxPiTools, SANDBOX_TOOLS, SANDBOX_READ_ONLY_TOOLS, sandboxToolsRequired, selectSandboxPiTools, blockUnroutedHostedPi, readSandboxContextFile } from "../src/sandbox-pi-tools.js";
 import { removeTestTree } from "./helpers.js";
@@ -55,12 +57,15 @@ function fixture() {
 }
 function client() {
   const calls: string[][] = [];
+  const inputs: Buffer[] = [];
   let acquired = 0;
   return {
-    calls, get acquired() { return acquired; },
+    calls, inputs, get acquired() { return acquired; },
     async acquire(id: string) { acquired++; return { jobId: id, status: "running" }; },
-    async execute(_id: string, argv: string[], output: (stream: "stdout" | "stderr", data: string) => void) {
+    async execute(_id: string, argv: string[], output: (stream: "stdout" | "stderr", data: string) => void, stdin?:Buffer) {
       calls.push(argv);
+      if(stdin) inputs.push(stdin);
+      if(argv[3]==="nt-context"){const data=Buffer.from("old text\n");output("stdout",createHash("sha256").update(data).digest("hex")+"\n"+data.toString("base64"));}
       if (argv[0] === "cat") output("stdout", "old text\n");
       if (argv[0] === "wc") output("stdout", "9 /story/arcs/chapter.md\n");
       if (argv[0] === "sh" && argv[2]?.includes("sed -n")) output("stdout", "story content\n");
@@ -124,12 +129,13 @@ test("all seven Pi file/search/shell names route through the verified sandbox", 
   await call(tools.grep!, { pattern: "chapter" });
   await call(tools.find!, { pattern: "*.md" });
   await call(tools.ls!, { path: "arcs" });
-  assert.equal(runner.calls.length, 9, "edit performs read and write via container, never host");
+  assert.equal(runner.calls.length, 8, "edit performs read and write via container, never host");
   assert.ok(runner.calls.every(args => args[0] !== "docker" && args[0] !== "git"));
   assert.ok(runner.calls.some(args => args.join(" ").includes("/story/arcs/chapter.md")));
   assert.ok(runner.calls.some(args => args[0] === "bash" && args[1] === "-lc"));
-  const writeCall = runner.calls.find(args => args.some(x => x === "/story/arcs/chapter.md") && args.some(x => x.includes("base64 -d")));
-  assert.ok(writeCall, "write runs a base64 decode inside the sandbox");
+  const writeCall = runner.calls.find(args => args.some(x => x === "/story/arcs/chapter.md") && args[3] === "nt-write");
+  assert.ok(writeCall, "write streams file bytes to stdin");
+  assert.deepEqual(runner.inputs.map(b=>b.toString()),["chapter\n","new text\n"]);
 });
 
 test("hosted editorial reviewers receive only sandbox-backed read/search tools", async () => {
@@ -363,8 +369,8 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
   try {
     const remote = {
       async acquire(id: string) { return { jobId: id, status: "running" }; },
-      async execute(_id: string, argv: string[], output: (stream: "stdout" | "stderr", data: string) => void) {
-        const result = docker("exec", "--workdir", "/story", name, ...argv);
+      async execute(_id: string, argv: string[], output: (stream: "stdout" | "stderr", data: string) => void, stdin?:Buffer) {
+        const result = spawnSync("docker",["exec",...(stdin?["-i"]:[]),"--workdir","/story",name,...argv],{encoding:"utf8",timeout:60000,input:stdin});
         if (result.stdout) output("stdout", result.stdout);
         if (result.stderr) output("stderr", result.stderr);
         return result.status ?? 1;
@@ -378,6 +384,8 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
     const larger = "Canonical evidence with Unicode ☕\n".repeat(1900);
     await call(tools.write!, { path: "arcs/large.md", content: larger });
     assert.equal(await readSandboxContextFile(job, "arcs/large.md", remote), larger);
+    await call(tools.edit!, {path:"arcs/large.md",edits:[{oldText:larger,newText:larger+"Tail marker.\n"}]});
+    assert.equal(readFileSync(join(arcs,"large.md"),"utf8"),larger+"Tail marker.\n");
     await call(tools.edit!, { path: "arcs/chapter.md", edits: [{ oldText: "Opening", newText: "Closing" }] });
     assert.equal(readFileSync(join(arcs, "chapter.md"), "utf8"), "Closing scene\n");
     await call(tools.write!, { path: "choice-points/decision.md", content: "A real choice.\n" });
@@ -398,5 +406,24 @@ test("real rootless sandbox image executes all seven Pi tool operations without 
   } finally {
     const disposed = docker("rm", "-f", name);
     assert.equal(disposed.status, 0, disposed.stderr);
+  }
+});
+
+test("sandbox file write recovery only reacquires an explicitly rejected absent container", async () => {
+  const {snapshot,skills}=await fixture();
+  for(const [status,disposition,expected] of [[404,"rejected",2],[413,"rejected",1],[503,"uncertain",1]] as const) {
+    const runner=client();
+    const original=runner.execute.bind(runner);
+    let attempts=0;
+    runner.execute=async (...args)=>{
+      if(args[1][3]==="nt-write" && ++attempts===1)throw new SandboxExecutionError(status,disposition);
+      return original(...args);
+    };
+    const writer=(await createSandboxPiTools(job,snapshot,skills,runner)).find(t=>t.name==="write")!;
+    if(expected===2)await call(writer,{path:"arcs/chapter.md",content:"a".repeat(15000)});
+    else await assert.rejects(call(writer,{path:"arcs/chapter.md",content:"a".repeat(15000)}),/HTTP/);
+    assert.equal(attempts,expected);
+    assert.equal(runner.acquired,expected);
+    await assert.rejects(call(writer,{path:"arcs/chapter.md",content:"a".repeat(SANDBOX_RECORD_BYTES+1)}),/1 MiB/);
   }
 });

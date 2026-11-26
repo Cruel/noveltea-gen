@@ -364,7 +364,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["rejected-review-repair.ts", "inspectNativeReviewFailure", "c405cf63987e1af50a54b9a6c4ea32e36f017c6abd240e3f95175851764cb512"],
     ["rejected-review-repair.ts", "nativeRepairSource", "8bf5f0b39fd163323756c8c41a6d44e4438ab8e2790bed3f0728a628881f8742"],
     ["rejected-review-repair.ts", "validateRejectedRepairDraft", "5b2068cdbfc57d18377ec66fe475ab64c6edd18c26f4d916cab9a99815d14379"],
-    ["rejected-review-repair.ts", "prepareRepairWriter", "8582aad26bcf2a89e70e1b3e340ccbf203c2423557c45fbfc8e99d4596cf7980"],
+    ["rejected-review-repair.ts", "prepareRepairWriter", "acb8148a610034b004bd85bd0b99081feaeef98a11b65b026c438e926ea8c444"],
     ["generation-assignment-lifecycle.ts", "usesCheckpointedReviewRounds", "5e682931077703464285e3de6c13e8f3e1fd2fb6a91b9e79437313fffcc83c3f"],
     ["generation-review-round.ts", "createReviewRoundTransitions", "823d0bf6a5b8531a457c5460ede94b6c341a045850d8473b3218a9635db47ad9"],
     ["generation-operation-strategy.ts", "selectOperationStrategy", "a4ccc6fe989ec27ea80e27d78063fe7ae63cd407b0c12d4e0c97db656a703be2"],
@@ -999,7 +999,7 @@ test("R14I author questions retain the reviewed receipt and nested resume gates"
     [
       "web/src/lib/generation-controls.server.ts",
       "verifiedResumeAdmission",
-      "a92e9a86e0536bcc193a3d8d0d3b656234fa001d246d7c674b5792c691406381"
+      "f1eb9ca72f19fe6aa6ba5e6fe71be502ed3152d82fe6d98a53686342c9645d0c"
     ],
     [
       "web/src/lib/author-interactions.server.ts",
