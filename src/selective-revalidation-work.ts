@@ -59,6 +59,9 @@ interface Receipt {
   correctiveAssignment?: DependentCorrectionAssignment;
   /** Negative reviews are never deleted on correction. */
   historicalFailures?: RevalidationReview[];
+  /** Additional source edits invalidate earlier carry-forward verdicts.
+   * Keep their transcripts; review those obligations again at the new HEAD. */
+  supersededPasses?: RevalidationReview[];
   corrected?: Array<{ proposal: DependentCorrectionAssignment;
     itemId: string; successorSha: string; reviewDigest: string }>;
   finalHead?: string;
@@ -149,7 +152,7 @@ async function authenticatedCorrectionHeads(job: JobStartResult, state: Receipt)
       throw Error("Dependent corrective source lacks an independently passed Git successor.");
     heads.push(corrected.successorSha);
   }
-  for (const history of state.historicalFailures ?? []) {
+  for (const history of [...state.historicalFailures ?? [], ...state.supersededPasses ?? []]) {
     checkReview(job, state.proposal, history, heads);
     if (history.sessionDigest !== await transcript(job, history.sessionFile))
       throw Error("Historical negative dependent review was altered after correction.");
@@ -400,15 +403,18 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     assertDependentCorrection(state.correctiveAssignment, plan);
     const cited = state.results.find(r => r.itemId === state.correctiveAssignment!.itemId &&
       r.status === "failed");
-    const point = originalPoints[state.correctiveAssignment.itemId]?.find(p =>
+    const ownerId=state.correctiveAssignment.upstreamOwner?.itemId??state.correctiveAssignment.itemId;
+    const point = originalPoints[ownerId]?.find(p =>
       p.commitSha === state.correctiveAssignment!.originalCommitSha);
     if (!cited || cited.reviewerDigest !== state.correctiveAssignment.revalidationReviewDigest ||
         !point?.assurance ||
         state.correctiveAssignment.originalCommitSha !== point.commitSha ||
         state.correctiveAssignment.assignmentId !== point.assurance.assignmentId ||
         state.correctiveAssignment.originalReviewDigest !==
-          (reviewedSources[state.correctiveAssignment.itemId]?.reviewDigest ??
-            hash(point.assurance)) ||
+          (reviewedSources[ownerId]?.reviewDigest ?? hash(point.assurance)) ||
+        (state.correctiveAssignment.upstreamOwner &&
+          (state.correctiveAssignment.upstreamOwner.affectedCommitSha!==cited.originalCommitSha ||
+           state.correctiveAssignment.upstreamOwner.affectedReviewDigest!==cited.originalReviewDigest)) ||
         state.correctiveAssignment.authorizedPaths.some(p =>
           !point.assurance!.changedPaths.includes(p)))
       throw Error("Saved dependent correction changed its original owner or negative verdict.");
@@ -436,7 +442,8 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
     if (!proposal) return;
     const prior = state!.results.find(r => r.itemId === proposal.itemId &&
       r.status === "failed" && r.reviewerDigest === proposal.revalidationReviewDigest);
-    const original = originalPoints[proposal.itemId]?.find(p =>
+    const ownerId=proposal.upstreamOwner?.itemId??proposal.itemId;
+    const original = originalPoints[ownerId]?.find(p =>
       p.commitSha === proposal.originalCommitSha);
     if (!prior || !original?.assurance || !original.eligible)
       throw Error("Failed dependent correction has no original sealed reviewer or specialist.");
@@ -449,7 +456,9 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       job, proposal, plan, point: original, reviewerSnapshot: state!.snapshot,
       provider: opts.provider, model: opts.model, validatorSource: opts.validatorSource,
       sourcePaths: [...new Set([...(reviewedSources[proposal.itemId]?.sourcePaths ?? []),
-        ...original.assurance.changedPaths, ...correction.changedPaths, ...sharedMilestones])],
+        ...original.assurance.changedPaths,
+        ...(proposal.upstreamOwner?originalPoints[proposal.itemId]?.flatMap(p=>p.assurance?.changedPaths??[])??[]:[]),
+        ...correction.changedPaths, ...sharedMilestones])],
       findings: prior.verdict.findings.map(f => ({ source: f.source, message: f.message })),
     });
     const receipt = await inspectDependentCorrection(job, proposal, plan);
@@ -471,7 +480,10 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       verdict: approved.review, status: "passed",
     };
     state!.historicalFailures = [...state!.historicalFailures ?? [], prior];
-    state!.results = state!.results.map(result => result === prior
+    if(proposal.upstreamOwner) {
+      state!.supersededPasses=[...state!.supersededPasses??[],...state!.results.filter(r=>r.status==="passed")];
+      state!.results=[{...reviewed,digest:hash(reviewed)}];
+    } else state!.results = state!.results.map(result => result === prior
       ? { ...reviewed, digest: hash(reviewed) } : result);
     state!.corrected = [...state!.corrected ?? [], {
       proposal, itemId: proposal.itemId, successorSha: approved.commitSha,
@@ -484,8 +496,9 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
   };
   if (state.correctiveAssignment) await finishOwnerCorrection();
   const order = reviewOrder(inventory, wanted);
-  for (const id of order) {
-    if (state.results.some(r => r.itemId === id)) continue;
+  for (;;) {
+    const id=order.find(candidate=>!state!.results.some(r=>r.itemId===candidate));
+    if(!id)break;
     const item = inventory.items.find(i => i.id === id);
     const points = originalPoints[id];
     const omission = originalOmissions[id];
@@ -508,7 +521,12 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       turnGoal: "REVALIDATE PREVIOUSLY REVIEWED " + id +
         " under the original author objective: " + turn.goal +
         ". Only this unit's original obligations and actual consumed premises; " +
-        "later assignments remain outside this review.",
+        "later assignments remain outside this review. Distinguish a genuine regression caused by the correction from a pre-existing issue or a future unimplemented obligation. " +
+        "A Character's current preference is not a permanent restriction unless the author or canon explicitly makes it so. " +
+        "If a later branch can honor the preference by obtaining consent, evaluate the actual promised route and do not require its implementation at a foundations checkpoint. " +
+        "Exact upstream changed lines (old versus new): " + (await (await import("./dependency-state.js")).dependencyGit(job,
+          "diff","--unified=1",correction.baseSha,reviewHead,"--",...correction.changedPaths.map(p=>
+            (job.storyRelativePath?job.storyRelativePath+"/":"")+p))).slice(0,12000),
       ...(omission ? { omission: { assignmentId: id, headSha: reviewHead } } : {
       specialistAssignments: [{
         id: point!.assurance!.assignmentId,
@@ -567,13 +585,39 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       // never share an interchangeable writer transcript or file grant.
       const owners = originalPoints[id]!.filter(p => p.assurance &&
         failed.findings!.every(f => p.assurance!.changedPaths.includes(f.path)));
-      const originalPoint = owners.length === 1 ? owners[0]! : null;
-      const ownerPaths = originalPoint?.assurance?.changedPaths ?? [];
-      const exactPaths = preciseCorrectivePaths(item, ownerPaths, verdict.findings);
-      const ownerCanCorrect = !!originalPoint && exactPaths.length > 0 &&
+      let originalPoint = owners.length === 1 ? owners[0]! : null;
+      let ownerPaths = originalPoint?.assurance?.changedPaths ?? [];
+      let exactPaths = preciseCorrectivePaths(item, ownerPaths, verdict.findings);
+      let ownerCanCorrect = !!originalPoint && exactPaths.length > 0 &&
         failed.findings!.every(f => exactPaths.includes(f.path));
+      // A consumer can identify a defect in the *already authorized upstream
+      // record*. Reuse the existing exact owner correction, never transfer
+      // ownership to the consumer. Preserve both review obligations.
+      let upstreamOwner:DependentCorrectionAssignment["upstreamOwner"];
+      if(!ownerCanCorrect && !(state.corrected??[]).length &&
+          failed.findings!.every(f=>plan.changedPaths.includes(f.path))) {
+        const upstream=originalPoints[plan.upstreamItemId]?.filter(p=>
+          p.commitSha===plan.rootUpstreamCommitSha && p.eligible && p.semanticReview==="passed" &&
+          p.assurance && failed.findings!.every(f=>p.assurance!.changedPaths.includes(f.path)))??[];
+        const affected=turn.assignments.find(a=>a.id===point.assurance!.assignmentId);
+        const owner=upstream[0]?.assurance && turn.assignments.find(a=>a.id===upstream[0]!.assurance!.assignmentId);
+        if(upstream.length===1 && affected && owner && reviewedSources[plan.upstreamItemId]?.status==="passed") {
+          originalPoint=upstream[0]!;
+          ownerPaths=originalPoint.assurance!.changedPaths;
+          exactPaths=preciseCorrectivePaths(item,ownerPaths,verdict.findings);
+          const catalog=await (await import("./validator.js")).historicalCanonicalCatalog(job,reviewHead);
+          const actual=exactPaths.map(path=>catalog.find(record=>record.path===path));
+          // No protected metadata, structural grants or another support path.
+          ownerCanCorrect=exactPaths.length>0 && failed.findings!.every(f=>exactPaths.includes(f.path)) &&
+            actual.every(record=>record && owner.authority.recordTypes.includes(record.metadata.type) &&
+              !(Array.isArray(record.metadata.decisions)&&record.metadata.decisions.some(d=>d?.authority==="user-protected")));
+          if(ownerCanCorrect)upstreamOwner={itemId:plan.upstreamItemId,
+            affectedCommitSha:point.commitSha,affectedReviewDigest:sealed.originalReviewDigest,
+            affectedAssignmentId:affected.id,affectedObligation:affected.outcome};
+        }
+      }
       const originalAssignment = turn.assignments.find(a =>
-        a.id === point.assurance!.assignmentId);
+        a.id === (ownerCanCorrect?originalPoint!.assurance!.assignmentId:point.assurance!.assignmentId));
       if (!originalAssignment)
         throw Error("Dependent correction lost the original specialist goal.");
       if (ownerCanCorrect) {
@@ -582,7 +626,9 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
           assignmentId: originalPoint!.assurance!.assignmentId,
           specialist: originalPoint!.workItem.startsWith("interactive-puzzle-")
             ? "nt-puzzle-design" : originalAssignment.specialist,
-          originalReviewDigest: original?.reviewDigest ?? hash(point.assurance),
+          originalReviewDigest: upstreamOwner ? reviewedSources[upstreamOwner.itemId]!.reviewDigest :
+            original?.reviewDigest ?? hash(point.assurance),
+          ...(upstreamOwner?{upstreamOwner}:{}),
           revalidationReviewDigest: sealed.reviewerDigest, ownerPaths,
           blockingPaths: exactPaths, currentHeadSha: reviewHead,
           originalObligation: originalAssignment.outcome,
@@ -592,8 +638,8 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
         turnDigest: correction.turnDigest,
         rootFailureSha: ownerCanCorrect ? originalPoint!.commitSha : point.commitSha,
         sourceSha: reviewHead, reviewDigest: sealed.reviewerDigest,
-        assignmentId: point.assurance.assignmentId,
-        obligation: "Revalidate previously reviewed " + id + " after source-bound upstream correction.",
+        assignmentId: ownerCanCorrect?originalPoint!.assurance!.assignmentId:point.assurance.assignmentId,
+        obligation: upstreamOwner?originalAssignment.outcome:"Revalidate previously reviewed " + id + " after source-bound upstream correction.",
         causedBy: reviewHead,
         findings: failed.findings!.map(f => ({
           path: f.path, kind: f.kind, message: f.message,
@@ -604,7 +650,7 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       state.failure = ownerCanCorrect
         ? "Previously reviewed " + id + " now fails the original obligation after " +
           "upstream correction. New causal Repair finding admitted. Original owner " +
-          point.assurance.assignmentId + " may correct ONLY " + exactPaths.join(", ") +
+          originalPoint!.assurance!.assignmentId + " may correct ONLY " + exactPaths.join(", ") +
           " through an authenticated bounded assignment; no blanket re-authoring."
         : "Previously reviewed " + id + " now fails at a path not owned by its original " +
           "specialist. Causal Repair finding recorded, but a separate controller-authorized " +

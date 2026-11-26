@@ -375,10 +375,11 @@ test("R14K current archive reaches actual reviewed Composition and Turn fulfillm
     assert.ok(points.some(p => p.workItem === workItem && p.eligible && p.semanticReview === (workItem === "composition-reckoning" ? "not-required" : "passed")), JSON.stringify(points.map(p => ({ workItem: p.workItem, eligible: p.eligible, semanticReview: p.semanticReview, reason: p.reason }))));
 });
 
-for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-consumer", "blueprint-conditional", "blueprint-conditional-assessment", "composition-multi", "composition-choice", "composition-puzzle"] as const) test((mode.startsWith("blueprint") ? "R08 " : "R07 ") + mode + " suspends for independently verified upstream owner and continues original writer", {
+for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-consumer", "blueprint-conditional", "blueprint-conditional-assessment", "blueprint-conditional-cross-owner", "composition-multi", "composition-choice", "composition-puzzle"] as const) test((mode.startsWith("blueprint") ? "R08 " : "R07 ") + mode + " suspends for independently verified upstream owner and continues original writer", {
   skip: !available, timeout: 240_000,
 }, async () => {
   const multi = mode === "composition-multi";
+  const crossOwner=mode==="blueprint-conditional-cross-owner";
   const stage = mode.startsWith("composition") ? "composition" : mode.startsWith("blueprint") ? "blueprint" : mode;
   const f = setup("r07-" + mode + "-writer");
   await useScriptedArchiveCli(f);
@@ -400,7 +401,9 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
     let target = blueprint ? "event.disclose-ledger" : "character.neri";
     let path = blueprint ? "events/disclose-ledger.md" : "characters/neri.md";
     let specialist = blueprint ? "nt-event-design" : "nt-character-development";
-    if (mode === "composition-choice") {
+    if (crossOwner) {
+      target="milestone.reckoning";path="milestones/reckoning.md";specialist="nt-story-architecture";
+    } else if (mode === "composition-choice") {
       target = "choice-point.loyalty"; path = "choice-points/loyalty.md"; specialist = "nt-interactive-narrative";
     } else if (mode === "composition-puzzle") {
       target = "puzzle.ledger-proof"; path = "puzzles/ledger-proof.md"; specialist = "nt-interactive-narrative";
@@ -409,17 +412,18 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
     const milestonePath = "milestones/" + milestone.slice(10) + ".md";
     let correction = blueprint ? "Remove the premature inquiry acceptance from the earlier Event; preserve only the ledger discovery and its original routes." :
       "Make Neri's firsthand authentication of the original signature explicit.";
+    if(crossOwner) correction="Preserve the witness's existing privacy preference when presenting the redacted account.";
     if (mode === "composition-choice") correction = "Make the distinct consequences of protecting and challenging the witness explicit.";
     if (mode === "composition-puzzle") correction = "Make the independently observable seal a necessary part of ledger authentication.";
-    if (blueprint) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(earlyAccountOverreach));
+    if (blueprint&&!crossOwner) assert.ok(readFileSync(join(f.job.worktreeStoryRoot, path), "utf8").includes(earlyAccountOverreach));
     let second = false;
     const linkedInteraction = mode === "composition-choice" || mode === "composition-puzzle";
     const linkedEvent = mode === "composition-puzzle" ? "decode-ledger" : "disclose-ledger";
     const witnesses = () => linkedInteraction ? [milestonePath, "arcs/truth.md", "events/" + linkedEvent + ".md", path] :
       second ? [milestonePath, "arcs/truth.md", "characters/neri.md", path] : [milestonePath, "arcs/truth.md", path];
     const finding = () => ({ targetId: target, obligationIndex: 0, missing: correction,
-      affectedIds: [milestone, "arc.truth", ...(second ? ["character.neri"] : []), ...(linkedInteraction ? ["event." + linkedEvent] : []), target], sources: witnesses().map(p => ({
-        path: p, quote: blueprint && p === path ? earlyAccountOverreach : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))!,
+      affectedIds: [...new Set([milestone, "arc.truth", ...(second ? ["character.neri"] : []), ...(linkedInteraction ? ["event." + linkedEvent] : []), target])], sources: [...new Set(witnesses())].map(p => ({
+        path: p, quote: blueprint && !crossOwner && p === path ? earlyAccountOverreach : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))!,
       })), likelySpecialist: specialist, authorDecisionRequired: false });
     let negative = false, planned = false, written = false, supported = false;
     let conditionalDraft: any;
@@ -431,6 +435,8 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
     // then use the budgeted source-read continuation in the same Pi session.
     const skipDependencyReads = mode === "blueprint-conditional";
     let methodCorrections = 0;
+    let crossNegative=0,crossWrites=0,crossReviews=0;
+    const crossFix="Neri expressly consents to the redacted account before it is presented; Ada protects his private testimony and lets him choose his trusted contact.";
 
     const runtime = await scriptedStoryRuntime((index, context) => {
       const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
@@ -474,7 +480,7 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
           const design = JSON.parse((value.content[0] as { text: string }).text);
           assert.equal(design.milestoneId, milestone);
           const upstreamCorrection = finding();
-          if (conditional) upstreamCorrection.sources.push({path,quote:"id: " + target});
+          if (conditional&&!crossOwner) upstreamCorrection.sources.push({path,quote:"id: " + target});
           const result = {...design, upstreamCorrection};
           if (conditional) conditionalDraft = result;
           return stop(result);
@@ -508,8 +514,8 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
       if (planned && !supported && prompt.includes(specialist) && !prompt.includes("IMMUTABLE REVIEW PACKET") && !prompt.includes("MILESTONE PLAN REVIEW")) {
         if (!written) { written = true; return read(skills(specialist)); }
         const before = readFileSync(join(f.job.worktreeStoryRoot, path), "utf8");
-        if (blueprint ? before.includes(earlyAccountOverreach) : !before.includes(correction)) return { content: [{ type: "toolCall", name: "edit", id: "comp-support-edit",
-          arguments: { path, edits: [{ oldText: before, newText: blueprint ? before.replace("\n" + earlyAccountOverreach + "\n", "") : before + "\n" + correction + "\n" }] } }], reason: "toolUse" };
+        if (blueprint&&!crossOwner ? before.includes(earlyAccountOverreach) : !before.includes(correction)) return { content: [{ type: "toolCall", name: "edit", id: "comp-support-edit",
+          arguments: { path, edits: [{ oldText: before, newText: blueprint&&!crossOwner ? before.replace("\n" + earlyAccountOverreach + "\n", "") : before + "\n" + correction + "\n" }] } }], reason: "toolUse" };
         return stop({ modifiedRecords: [path], architecturalConflicts: [], laterObligations: [] });
       }
       if (written && !supported && prompt.includes("IMMUTABLE REVIEW PACKET")) {
@@ -525,6 +531,28 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
         return stop({ sourceDigest: packet.sourceDigest, verdict: "pass", findings: [],
           evidence: [{ commitSha: item.assurance.commitSha, assignmentId: item.assignment.id, path, line: 1,
             explanation: "Verified the bounded canonical owner correction." }] });
+      }
+      if(crossOwner && supported && prompt.includes("CONTROLLER-AUTHORIZED PREVIOUSLY REVIEWED DEPENDENT CORRECTION")) {
+        const lastUser=messages.findLastIndex(m=>m.role==="user");
+        const step=messages.slice(lastUser+1).filter(m=>m.role==="assistant").length;
+        assert.match(prompt,/Cross-owner review of foundations/);
+        if(!step)return read([...skills("nt-story-architecture"),path]);
+        if(step===1) {crossWrites++;return {content:[{type:"toolCall" as const,name:"edit",id:"cross-owner-exact-edit",arguments:{path,edits:[{oldText:correction,newText:correction+" "+crossFix}]}}],reason:"toolUse" as const};}
+        return stop("Clarified the witness's consent on the original Milestone, preserving all metadata.");
+      }
+      if(crossOwner&&supported&&prompt.includes("You are the independent nt-narrative-review editor")) {
+        const assignment=JSON.parse(prompt.split("\nASSIGNMENT:\n")[1]!);
+        const lastUser=messages.findLastIndex(m=>m.role==="user");
+        const step=messages.slice(lastUser+1).filter(m=>m.role==="assistant").length;
+        const negative=assignment.turnGoal.includes("REVALIDATE PREVIOUSLY REVIEWED foundations")&&!crossWrites;
+        const rereview=assignment.turnGoal.includes("ALSO independently verify the affected foundations obligation");
+        if(negative||rereview) {
+          if(!step)return read(prompt.split("PINNED REFERENCES:\n")[1]!.split("\nSTORY PATHS:")[0]!.split("\n").filter(p=>p.startsWith("skill://")).concat(assignment.paths));
+          if(negative){crossNegative++;return stop({verdict:"block",findings:[{severity:"blocking",dimension:"continuity",source:path+":20",
+            message:"The upstream Milestone does not establish Neri's consent to public disclosure, undermining Character Foundations.",repair:"architecture"}],evidence:[]});}
+          crossReviews++;assert.ok(readFileSync(join(f.job.worktreeStoryRoot,path),"utf8").includes(crossFix));
+          return stop({verdict:"pass",findings:[],evidence:[path+":20: Verified the specific consent and the Architecture and Character obligations."]});
+        }
       }
       return ordinary(index, context);
     });
@@ -582,6 +610,15 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
       [(f.job.storyRelativePath ? f.job.storyRelativePath + "/" : "") + path]);
     const revalidated = JSON.parse(readFileSync(join(f.job.stateDir, "revalidation-items", support.commitSha + ".json"), "utf8"));
     assert.equal(revalidated.state, "completed");
+    if(crossOwner){
+      assert.equal(crossNegative,1);assert.equal(crossWrites,1);assert.equal(crossReviews,1);
+      assert.equal(revalidated.corrected[0].proposal.upstreamOwner.itemId,"architecture");
+      assert.equal(revalidated.corrected[0].proposal.itemId,"foundations");
+      assert.equal(revalidated.corrected[0].proposal.assignmentId,"architecture");
+      assert.deepEqual(revalidated.corrected[0].proposal.authorizedPaths,[path]);
+      assert.equal(revalidated.historicalFailures[0].status,"failed");
+      assert.equal(revalidated.results.find((r:any)=>r.itemId==="foundations").status,"passed");
+    }
     assert.ok(revalidated.proposal.unaffected.includes("foundation"));
     assert.ok(!revalidated.results.some((entry: {itemId: string}) => revalidated.proposal.unaffected.includes(entry.itemId)));
     if (stage === "composition" && !linkedInteraction) {

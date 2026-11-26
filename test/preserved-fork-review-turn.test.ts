@@ -274,3 +274,36 @@ test("Luna inherited negative revalidation retains the exact passed Revelation o
   await assert.rejects(inheritedDependentSource(job,{...proposal,itemId:"event:milestone.accounts"}),/original Milestone owner/);
   await assert.rejects(inheritedDependentSource(job,{...proposal,authorizedPaths:["creative-direction/foundation.md"]}),/exact independently reviewed owner/);
 });
+
+test("Luna cross-owner foundations rejection resolves to inherited Architecture, not Character writer",{
+  skip:!root||!process.env.NT_TEST_CROSS_OWNER_JOB,
+},async()=>{
+  const {inheritedDependentSource}=await import("../src/dependent-correction-work.js");
+  const {inheritedReviewedCheckpoint}=await import("../src/recovery-fork-state.js");
+  const {proposeDependentCorrection}=await import("../src/selective-revalidation.js");
+  const {createHash}=await import("node:crypto");
+  const saved=JSON.parse(readFileSync(join(root!,"certification-source.json"),"utf8"));
+  const job=await startStoryJob({story:saved.storyRoot,job:process.env.NT_TEST_CROSS_OWNER_JOB!},false);
+  const state=JSON.parse(readFileSync(join(job.stateDir,"revalidation-items","e680ddd48fe4b543d66a6eb9610a2602954622e5.json"),"utf8"));
+  const neg=state.results.find((r:any)=>r.itemId==="foundations"&&r.status==="failed");
+  assert.ok(neg);
+  const turn=await readReviewTurnEvidence(job);
+  const owner=turn!.assignments.find(a=>a.id==="architecture")!;
+  const affected=turn!.assignments.find(a=>a.id==="foundations")!;
+  const inherited=inheritedReviewedCheckpoint(job,"global-architecture",state.proposal.rootUpstreamCommitSha)!;
+  assert.equal(inherited.status,"passed");
+  const digest=createHash("sha256").update(JSON.stringify([inherited.reviewDigest])).digest("hex");
+  const options={plan:state.proposal,item:{id:neg.itemId} as any,originalCommitSha:inherited.proof.commitSha,
+    assignmentId:owner.id,specialist:owner.specialist,originalReviewDigest:digest,
+    revalidationReviewDigest:neg.reviewerDigest,ownerPaths:inherited.proof.assurance!.changedPaths,
+    blockingPaths:neg.findings.map((f:any)=>f.path),currentHeadSha:neg.sourceSha,originalObligation:owner.outcome,
+    upstreamOwner:{itemId:"architecture",affectedCommitSha:neg.originalCommitSha,
+      affectedReviewDigest:neg.originalReviewDigest,affectedAssignmentId:affected.id,affectedObligation:affected.outcome}};
+  const proposal=proposeDependentCorrection(options);
+  assert.deepEqual(proposal.authorizedPaths,["milestones/reckoning.md"]);
+  const source=await inheritedDependentSource(job,proposal);
+  assert.equal(source?.proof.workItem,"global-architecture");
+  assert.equal(source?.model,"gpt-6-luna");
+  assert.throws(()=>proposeDependentCorrection({...options,blockingPaths:["milestones/accounts.md"]}),/upstream grant/);
+  await assert.rejects(inheritedDependentSource(job,{...proposal,assignmentId:"foundations"}),/exact independently reviewed owner/);
+});

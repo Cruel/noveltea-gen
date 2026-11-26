@@ -228,6 +228,16 @@ export interface DependentCorrectionAssignment {
   planVersion: number;
   originalCommitSha: string;
   itemId: string;
+  /** A negative consumer Review may require another correction of the
+   * already authorized upstream record. Never infer fresh write authority
+   * from the consumer's findings. */
+  upstreamOwner?: {
+    itemId: string;
+    affectedCommitSha: string;
+    affectedReviewDigest: string;
+    affectedAssignmentId: string;
+    affectedObligation: string;
+  };
   assignmentId: string;
   specialist: string;
   originalReviewDigest: string;
@@ -252,6 +262,7 @@ export function proposeDependentCorrection(input: {
   /** Current verified Story SHA after previously completed dependent corrections. */
   currentHeadSha?: string;
   originalObligation: string;
+  upstreamOwner?: DependentCorrectionAssignment["upstreamOwner"];
 }): DependentCorrectionAssignment {
   const { plan, item } = input;
   assertSelectiveRevalidationPlan(plan);
@@ -272,13 +283,16 @@ export function proposeDependentCorrection(input: {
     version: 1 as const, kind: "reviewed-dependent-correction" as const,
     sourceSha, turnDigest: plan.turnDigest,
     planVersion: plan.planVersion, originalCommitSha: input.originalCommitSha,
-    itemId: item.id, assignmentId: input.assignmentId,
+    itemId: item.id, ...(input.upstreamOwner ? {upstreamOwner: input.upstreamOwner} : {}),
+    assignmentId: input.assignmentId,
     specialist: input.specialist, originalReviewDigest: input.originalReviewDigest,
     revalidationReviewDigest: input.revalidationReviewDigest,
     causalCorrectionSha: plan.successorSha, authorizedPaths: paths,
     obligation: input.originalObligation,
   };
-  return { ...body, digest: digest(body) };
+  const proposal = { ...body, digest: digest(body) };
+  assertDependentCorrection(proposal, plan);
+  return proposal;
 }
 export function assertDependentCorrection(
   proposal: DependentCorrectionAssignment, plan: SelectiveRevalidationPlan,
@@ -300,6 +314,16 @@ export function assertDependentCorrection(
   assertSourcePaths(proposal.authorizedPaths);
   if (!proposal.authorizedPaths.length)
     throw Error("Dependent correction has no bound canonical path.");
+  if (proposal.upstreamOwner && (
+      proposal.upstreamOwner.itemId !== plan.upstreamItemId ||
+      proposal.upstreamOwner.itemId === proposal.itemId ||
+      proposal.originalCommitSha !== plan.rootUpstreamCommitSha ||
+      !SHA.test(proposal.upstreamOwner.affectedCommitSha) ||
+      !HASH.test(proposal.upstreamOwner.affectedReviewDigest) ||
+      !proposal.upstreamOwner.affectedAssignmentId?.trim() ||
+      !proposal.upstreamOwner.affectedObligation?.trim() ||
+      proposal.authorizedPaths.some(path=>!plan.changedPaths.includes(path))))
+    throw Error("Cross-owner dependent correction exceeds the independently reviewed upstream grant.");
   const { digest: actual, ...body } = proposal;
   if (actual !== digest(body))
     throw Error("Dependent correction plan differs from the source-bound original.");

@@ -1,3 +1,4 @@
+import { assertArchitectureProseOnly, authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 /** Source-bound same-owner correction after a historically PASSED checkpoint is
  * invalidated by a later independently reviewed upstream source.
  *
@@ -27,9 +28,17 @@ import { repairProgressScope, productiveEditorialRepair } from "./editorial-repa
 import { assertDependentCorrection, type DependentCorrectionAssignment,
   type SelectiveRevalidationPlan } from "./selective-revalidation.js";
 import type { JobStartResult } from "./job.js";
+import type { TurnEvidence } from "./turn-plan-evidence.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const hash = (v: unknown) => createHash("sha256").update(typeof v === "string" ? v : JSON.stringify(v)).digest("hex");
+// The signed Turn identifies its source, not necessarily the executing job.
+function dependentTurnSourceMatches(job: JobStartResult, turn: TurnEvidence | null | undefined) {
+  if (!turn || turn.source.verifiedSha !== job.baseSha) return false;
+  if (turn.source.jobId === job.jobId) return true;
+  if (!job.recoveryFork) return turn.source.jobId === null;
+  return readRecoveryFork(job)?.sourceJobId === turn.source.jobId;
+}
 const fileOf = (job: JobStartResult, proposal: DependentCorrectionAssignment) =>
   join(job.stateDir, "dependent-corrections", proposal.digest + ".json");
 function git(job: JobStartResult, ...args: string[]) {
@@ -158,6 +167,10 @@ export async function inspectDependentCorrection(job: JobStartResult,
           attempt.writerSession, state.origin.sessionFile) ||
         attempt.reviewerSessionDigest !== await reviewTranscript(job, attempt.reviewerSession))
       throw Error("Previous dependent correction Git/validator/reviewer provenance changed.");
+    if(proposal.upstreamOwner&&proposal.specialist==="nt-story-architecture")
+      for(const path of attempt.paths)if(authorizedArchitectureRecordPath(path))
+        assertArchitectureProseOnly(git(job,"show",parent+":"+repoPath(job,path)),
+          git(job,"show",attempt.commitSha+":"+repoPath(job,path)));
     parent = attempt.commitSha;
   }
   if (state.attempts.length && state.currentSourceSha !== parent)
@@ -239,12 +252,17 @@ export async function auditDependentCorrectionDraft(job: JobStartResult,
   // Milestone, protected direction or narrative ordering. The dedicated
   // Event field-only closeout already has a separate authenticated grant.
   // Do not silently turn its fields into general repair authority.
-  if (paths.some(p => /^(?:arcs|milestones|creative-direction|narrative-positions)\//.test(p)))
+  if (paths.some(p => /^(?:arcs|milestones|creative-direction|narrative-positions)\//.test(p) &&
+      !(proposal.upstreamOwner && proposal.specialist==="nt-story-architecture" &&
+        authorizedArchitectureRecordPath(p))))
     throw Error("Protected-adjacent Story fields require their original signed field-level amendment.");
   for (const path of paths) {
     const target = join(job.worktreeStoryRoot, path);
     if (await realpath(target) !== target || !(await lstat(target)).isFile())
       throw Error("Dependent correction target is symlinked or not a regular file.");
+    if (proposal.upstreamOwner && proposal.specialist==="nt-story-architecture" &&
+        authorizedArchitectureRecordPath(path))
+      assertArchitectureProseOnly(git(job,"show",sourceSha+":"+repoPath(job,path)),await readFile(target,"utf8"));
     if (proposal.itemId.startsWith("interactive:") && path.startsWith("events/")) {
       const { prerequisitesText } = await import("./interactive-work.js");
       const original = git(job, "show", sourceSha + ":" + repoPath(job, path));
@@ -289,6 +307,43 @@ function authenticatedSpecialist(workItem: string, original: string) {
     return "nt-puzzle-design";
   return original;
 }
+async function assertCrossOwnerNegativeReview(job:JobStartResult, proposal:DependentCorrectionAssignment,
+    plan:SelectiveRevalidationPlan) {
+  const affected=proposal.upstreamOwner;
+  if(!affected)return;
+  assertDependentCorrection(proposal,plan);
+  const turn=await readReviewTurnEvidence(job);
+  if(turn?.digest!==proposal.turnDigest ||
+      !turn.assignments.some(a=>a.id===affected.affectedAssignmentId&&a.outcome===affected.affectedObligation))
+    throw Error("Cross-owner correction changed the original affected obligation.");
+  const state=JSON.parse(await readFile(join(job.stateDir,"revalidation-items",plan.successorSha+".json"),"utf8"));
+  const binding=state.correctiveAssignment?.digest===proposal.digest ||
+    state.corrected?.some((c:{proposal:DependentCorrectionAssignment})=>c.proposal.digest===proposal.digest);
+  const report=[...state.results,...state.historicalFailures??[]].find(r=>
+    r.itemId===proposal.itemId&&r.status==="failed"&&r.reviewerDigest===proposal.revalidationReviewDigest);
+  if(!binding||state.proposal.digest!==plan.digest||state.jobId!==job.jobId||!report||
+      report.originalCommitSha!==affected.affectedCommitSha||report.originalReviewDigest!==affected.affectedReviewDigest||
+      report.sourceSha!==proposal.sourceSha||report.verdict?.verdict!=="block")
+    throw Error("Cross-owner grant lacks its exact negative consumer Review.");
+  const {digest,...body}=report;
+  const actualFindings=report.verdict.findings.filter((f:{severity:string})=>f.severity==="blocking")
+    .map((f:{source:string;message:string})=>({path:f.source.split(":")[0],kind:"continuity",message:f.message}));
+  if(JSON.stringify(actualFindings)!==JSON.stringify(report.findings) || hash(body)!==digest||await reviewTranscript(job,report.sessionFile)!==report.sessionDigest||
+      report.reviewerDigest!==hash({verdict:report.verdict,sessionDigest:report.sessionDigest,source:report.sourceSha,item:report.itemId})||
+      !report.findings?.length || report.findings.some((f:{path:string})=>!proposal.authorizedPaths.includes(f.path)))
+    throw Error("Cross-owner grant changed its sealed Review evidence or cited paths.");
+  const fork=readRecoveryFork(job);
+  const inherited=Object.entries(fork?.commits??{}).find(([id,entry])=>
+    executionId(id)===proposal.itemId&&entry.sha===affected.affectedCommitSha);
+  const inheritedProof=inherited?inheritedReviewedCheckpoint(job,inherited[0],inherited[1].sha):null;
+  const point=inherited?inheritedProof?.status==="passed"?inheritedProof.proof:undefined:
+    (await inspectRecoveryCheckpoints(job,"historical")).find(p=>p.eligible&&p.semanticReview==="passed"&&
+      p.commitSha===affected.affectedCommitSha);
+  if(!point?.assurance||point.assurance.assignmentId!==affected.affectedAssignmentId||
+      executionId(point.workItem)!==proposal.itemId)
+    throw Error("Cross-owner correction lost the affected original owner evidence.");
+}
+
 async function reviewAssignment(job: JobStartResult, proposal: DependentCorrectionAssignment,
   paths: string[], consumedPaths: string[], commitSha: string): Promise<ReviewAssignment> {
   const turn = await readReviewTurnEvidence(job);
@@ -303,6 +358,9 @@ async function reviewAssignment(job: JobStartResult, proposal: DependentCorrecti
     routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
     turnGoal: "Independent rereview of a *corrected historically accepted* " +
       "specialist assignment " + proposal.itemId + ". Evaluate the original obligation: " + author.outcome +
+      (proposal.upstreamOwner ? ". ALSO independently verify the affected "+proposal.itemId+
+        " obligation: "+proposal.upstreamOwner.affectedObligation+
+        ". The original consumer Review must be satisfied by the corrected upstream record; do not conflate an NPC's temporary preference with a permanent prohibition, or require implementation of a future Milestone at an earlier design checkpoint. " : "")+
       ". Preserve the separately reviewed upstream correction at " + proposal.causalCorrectionSha +
       " and every canonical Milestone that references the edited record. Check the actual Milestone change and fulfillment, not simply the high-level Turn goal. Do not undo a valid upstream correction or accept duplicated/premature progression. Do not certify by the prior positive reviewer or writer's claim.",
     specialistAssignments: [{
@@ -330,7 +388,7 @@ export async function inheritedDependentSource(job: JobStartResult, proposal: De
       proof.assurance.assignmentId!==proposal.assignmentId ||
       proposal.authorizedPaths.some(path=>!proof.assurance!.changedPaths.includes(path)))
     throw Error("Inherited dependent correction lost its exact independently reviewed owner.");
-  if (executionId(proof.workItem) !== proposal.itemId)
+  if (executionId(proof.workItem) !== (proposal.upstreamOwner?.itemId ?? proposal.itemId))
     throw Error("Inherited dependent correction changed the original Milestone owner.");
   git(job,"merge-base","--is-ancestor",proof.commitSha,job.baseSha);
   // Pinned original provenance is evidence. The new Turn below supplies
@@ -339,7 +397,15 @@ export async function inheritedDependentSource(job: JobStartResult, proposal: De
       r.jobId===proof.jobId && r.snapshot && r.provider && r.model) ??
     Object.values(fork!.receipts).find(r=>r.jobId===proof.jobId &&
       r.units?.some((u:{commitSha?:string})=>u.commitSha===proof.commitSha) &&
-      r.snapshot && r.provider && r.model);
+      r.snapshot && r.provider && r.model) ??
+    // The inherited Architecture receipt is rebound to the child plan. Its
+    // immutable expectedHead and complete original path inventory remain
+    // pinned by the fork; it is not an executable historical writer.
+    (proof.workItem==="global-architecture" && fork!.receipts["architecture.json"]?.expectedHead===proof.commitSha &&
+      fork!.receipts["architecture.json"]?.phase==="committed" &&
+      JSON.stringify([...fork!.receipts["architecture.json"].paths].sort())===
+        JSON.stringify([...proof.assurance.changedPaths].sort()) ?
+      fork!.receipts["architecture.json"] : undefined);
   if (!source || await openSkillSnapshot(source.snapshot.id)!==source.snapshot.path)
     throw Error("Inherited dependent lacks its pinned original owner methodology.");
   return {inherited,proof,snapshot:source.snapshot as SkillSnapshot,
@@ -390,13 +456,15 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
   const { job, proposal, plan, point } = opts;
   assertDependentCorrection(proposal, plan);
   if (proposal.authorizedPaths.some(p =>
-    /^(?:arcs|milestones|creative-direction|narrative-positions)\//.test(p)))
+    /^(?:arcs|milestones|creative-direction|narrative-positions)\//.test(p) &&
+    !(proposal.upstreamOwner && proposal.specialist==="nt-story-architecture" &&
+      authorizedArchitectureRecordPath(p))))
     throw Error("Original owner needs a separate signed field-level or protected decision amendment.");
   const turn = await readReviewTurnEvidence(job);
   const original = turn?.assignments.find(a => a.id === proposal.assignmentId);
   const inherited = point.jobId!==job.jobId ? await inheritedDependentSource(job,proposal,point) : null;
   if (!existsSync(join(job.stateDir, "turn-plan.json")) ||
-      !turn || turn.source.jobId !== job.jobId ||
+      !turn || !dependentTurnSourceMatches(job, turn) ||
       turn.source.verifiedSha !== job.baseSha ||
       turn.digest !== proposal.turnDigest || !point.eligible ||
       point.semanticReview !== "passed" || !point.assurance ||
@@ -404,9 +472,12 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
       point.assurance.turnDigest !== turn.digest)) ||
       point.commitSha !== proposal.originalCommitSha ||
       point.assurance.assignmentId !== proposal.assignmentId ||
+      executionId(point.workItem)!==(proposal.upstreamOwner?.itemId??proposal.itemId) ||
+      proposal.authorizedPaths.some(path=>!point.assurance!.changedPaths.includes(path)) ||
       !original || authenticatedSpecialist(point.workItem, original.specialist) !==
         proposal.specialist || original.outcome !== proposal.obligation)
     throw Error("Corrective writer has no original signed, independently passed specialist authority.");
+  if(proposal.upstreamOwner)await assertCrossOwnerNegativeReview(job,proposal,plan);
   const prior = inherited ? null : await inspectCheckpointReview(job, point);
   if (!inherited && (prior?.status !== "passed" || !prior.result))
     throw Error("Historical positive independent reviewer proof is missing.");
@@ -661,13 +732,16 @@ export async function verifyDependentCorrectionSuccessor(job: JobStartResult,
       valid?.inheritedReviewDigest!==inherited?.inherited.reviewDigest ||
       (!inherited && (prior?.status !== "passed" || !prior.result ||
       original.assurance.jobId !== job.jobId || original.assurance.turnDigest !== state.proposal.turnDigest)) ||
-      turn?.source.jobId !== job.jobId ||
+      !dependentTurnSourceMatches(job, turn) ||
       original.assurance.assignmentId !== state.proposal.assignmentId ||
+      executionId(original.workItem)!==(state.proposal.upstreamOwner?.itemId??state.proposal.itemId) ||
+      state.proposal.authorizedPaths.some(path=>!original.assurance!.changedPaths.includes(path)) ||
       turn?.digest !== state.proposal.turnDigest ||
       !turn.assignments.some(a => a.id === state.proposal.assignmentId &&
         authenticatedSpecialist(original.workItem, a.specialist) ===
           state.proposal.specialist && a.outcome === state.proposal.obligation))
     throw Error("Previously accepted dependent source lost its sealed original assignment or reviewer.");
+  if(state.proposal.upstreamOwner)await assertCrossOwnerNegativeReview(job,state.proposal,pinned.proposal);
   const trustedOrigin = inherited ? await inheritedDependentOrigin(job,state.proposal,inherited,valid?.origin)
     : await readRejectedRepairOrigin(job, original);
   if (JSON.stringify(valid?.origin) !== JSON.stringify(trustedOrigin))

@@ -1457,3 +1457,27 @@ answer can resume the original Review; it does not replay the original
 authoring stage. Tests exercise the full-limit stdin transfer through the
 authenticated controller and rootless Docker, a multi-page exact edit,
 a rejected-write Foundation Review regression, and the typed resume fence.
+
+### Blueprint negative assessments and cross-owner upstream revalidation (#260)
+
+A typed prospective Character's consistently repeated, unambiguous bare slug
+is prefix-normalized before Blueprint admission and replay. All other malformed
+Character fields are reported with exact array indices, values and expected
+syntax (bounded by the shared response-contract correction envelope).
+Persisting or regressed Event findings may cite the exact revised field; the
+semantic status stays negative and cannot be promoted to progress or PASS by
+the field change alone. Positive resolution retains its stricter proof.
+
+If a dependent Review negatively cites the *already authorized upstream
+correction path*, the exact original upstream owner may receive the existing
+dependent-correction lane, with both the original owner proof and the negative
+consumer Review bound to the proposal. Architecture edits are prose-only,
+protected decisions remain fenced, and actual record type/owned paths are
+verified. The reviewer assesses the upstream diff and original dependent
+obligation, including the distinction between temporary NPC preferences and
+protected permanent requirements. A successful further upstream correction
+requires fresh current-source review of earlier carry-forward verdicts.
+Original receipts are retained. One such correction chain per selective
+revalidation is supported; other-owner paths outside the already reviewed
+upstream grant, commitless rejection, or a new owner after that chain remain
+explicit stops, not implicit expanded authority.

@@ -98,6 +98,8 @@ export async function authorDependentCorrection(input: {
       "or stage/commit Git. Your ONLY editable paths are: " +
       proposal.authorizedPaths.join(", ") + ". " +
       "Original assignment goal: " + proposal.obligation +
+      (proposal.upstreamOwner ? ". Cross-owner review of "+proposal.itemId+" invalidated this obligation: "+
+        proposal.upstreamOwner.affectedObligation+". Correct only the already authorized upstream record; preserve all approved metadata and original protected decisions. " : "")+
       ". Current independent negative review: " + input.feedback.slice(0, 6000) +
       ". Correct the actual source-linked contradiction, retain all unrelated " +
       "canonical material, and finish with the source lines you changed. " +
