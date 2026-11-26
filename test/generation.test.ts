@@ -298,6 +298,12 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
     let conditionalReviews = 0;
     const conditional = mode.startsWith("blueprint-conditional");
     const assessConditional = mode === "blueprint-conditional-assessment";
+    // Reproduce the live Accounts failure in the original dependency planner:
+    // inspect the Story target, submit a valid proposal before reading methods,
+    // then use the budgeted source-read continuation in the same Pi session.
+    const skipDependencyReads = mode === "blueprint-conditional";
+    let methodCorrections = 0;
+
     const runtime = await scriptedStoryRuntime((index, context) => {
       const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
       const prompt = messages.filter(m => m.role === "user").flatMap(m =>
@@ -356,8 +362,18 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
         return stop({ modifiedRecords: [], architecturalConflicts: [correction], laterObligations: [],
           dependencyFinding: finding() });
       }
+      if (prompt.includes("CONTROLLER METHODOLOGY CORRECTION (same read-only Pi session)") && skipDependencyReads) {
+        assert.ok(planned && !written && !supported);
+        assert.ok(messages.some(m=>m.role==="user" && JSON.stringify(m.content).includes("READ-ONLY dependency orchestrator")));
+        const lastUser = messages.findLastIndex(m=>m.role==="user");
+        if (!messages.slice(lastUser+1).some(m=>m.role==="toolResult")) {
+          methodCorrections++;
+          return read(prompt.split("\n").filter(line=>line.startsWith("skill://")));
+        }
+        return stop({target,specialist,outcome:correction,reason:"Correct the existing canonical predecessor."});
+      }
       if (prompt.includes("dependency") && prompt.includes("nt-story-orchestrate") && !supported && !written) {
-        if (!planned) { planned = true; return read(["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+        if (!planned) { planned = true; return read(skipDependencyReads?[path]:["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
           "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"].map(p => "skill://" + p).concat(path)); }
         return stop({ target, specialist, outcome: correction, reason: "Correct the existing canonical predecessor." });
       }
@@ -426,6 +442,14 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
     const support = (await (await import("../src/dependency-state.js")).inspectDependencyPlan(f.job))!.entries.find(entry =>
       entry.writerSource?.sealDigest === suspended.focusedPrerequisite!.writerSource!.sealDigest)!;
     assert.ok(support.commitSha);
+    if(skipDependencyReads) {
+      assert.equal(methodCorrections,1);
+      assert.ok(support.planner?.skillReads?.some(p=>p.endsWith("/nt-story-orchestrate/SKILL.md")));
+      assert.ok(support.planner?.skillReads?.some(p=>p.endsWith("/nt-catalog/references/authority-and-validation.md")));
+      const transcript = readFileSync(support.planner!.sessionFile,"utf8");
+      assert.match(transcript,/CONTROLLER METHODOLOGY CORRECTION/);
+      assert.match(transcript,/READ-ONLY dependency orchestrator/);
+    } else assert.equal(methodCorrections,0);
     assert.deepEqual(git(f.job.worktreeRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", support.commitSha).trim().split("\n"),
       [(f.job.storyRelativePath ? f.job.storyRelativePath + "/" : "") + path]);
     const revalidated = JSON.parse(readFileSync(join(f.job.stateDir, "revalidation-items", support.commitSha + ".json"), "utf8"));

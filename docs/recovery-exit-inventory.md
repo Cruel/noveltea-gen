@@ -1394,3 +1394,18 @@ unreviewed Reconstruction commit. It does not fabricate a passing review.
 Focused Review tests reject a generic PASS lacking the explicit affected
 omission assessment; conditional Blueprint integration tests exercise
 independent upstream correction and writer reentry.
+
+### Missing dependency methodology (live #260)
+
+The dependency proposal remains a read-only source-bound invocation. A
+completed first response missing mandatory pinned methodology receives at
+most one continuation in the original session, with only the read tool,
+stable skill:// addresses, the original authority, and the existing Pi
+budget/usage admission. The original and corrected response transcripts
+are preserved. Successful reads are checked before entering the shared
+tool-free JSON protocol recovery and rechecked on accepted/refused
+proposal reconciliation. An interrupted correction is not replayed;
+persistent missing evidence cannot authorize supporting work. The R08
+conditional Blueprint integration now intentionally omits every required
+dependency methodology read before the initial valid proposal, then
+exercises correction, support Review and original writer reentry.

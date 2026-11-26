@@ -11,7 +11,8 @@ import { reconcileReadOnlyProtocol } from "./non-specialist-protocol.js";
 import { beginProtocolInvocation, recoverResponseContract, inspectCompletedProtocolReads, inspectCompletedProtocolResponse, type ResponseContractFailure } from "./response-contract-recovery.js";
 import { selectSandboxPiTools, SANDBOX_READ_ONLY_TOOLS } from "./sandbox-pi-tools.js";
 import { promptStorySpecialist } from "./story-interruption.js";
-import { canonicalPinnedReadPath } from "./pinned-skill-reads.js";
+import { canonicalPinnedReadPath, correctReadOnlyPinnedMethodology } from "./pinned-skill-reads.js";
+import { reportControllerReviewPhase } from "./controller-review-phase.js";
 import { dependencyBoundary, dependencyTurn, dependencyDigest, saveDependencyPlan, blueprintSourceOf, inspectDependencyAdmission, DependencyAuthorizationRefusedError,
   type DependencyEntry, type DependencyPlan } from "./dependency-state.js";
 import type { DependencyProposal } from "./dependency-amendments.js";
@@ -21,6 +22,9 @@ import type { DependencyProposal } from "./dependency-amendments.js";
  * already verified report. Explicitly conflicting identity fields fail closed.
  * An explicit model rejection is never converted into a grant. */
 export type DependencyPlanningResponse = DependencyProposal | { rejected: true; reason: string };
+
+const guidance = ["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
+  "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"] as const;
 
 export function bindDependencyProposalIdentity(
   proposal: DependencyPlanningResponse,
@@ -80,8 +84,6 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
   const selection = await loadSelectedStoryOrchestrator(job, hint.graphThreadId,
     { task: turn.originalRequest, kind: turn.contract.scope.kind, turnPlanDigest: turn.digest });
   const snapshot = selection.receipt.skillSnapshot;
-  const guidance = ["nt-story-orchestrate/SKILL.md", "nt-story-orchestrate/references/planning.md",
-    "nt-catalog/SKILL.md", "nt-catalog/references/records.md", "nt-catalog/references/authority-and-validation.md"];
   const dir = join(job.stateDir, "dependency-sessions", entry.reportDigest, "plan");
   const protocol = { receiptFile: join(dir, "response"), sourceDigest: dependencyDigest({
     jobId: job.jobId, threadId: job.threadId, turn: turn.digest, report: entry.reportDigest,
@@ -202,9 +204,6 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
         c.type === "toolCall" && c.name === "read" && completed.has(c.id)
           ? [canonicalPinnedReadPath(String(c.arguments.path ?? ""), project.root, snapshot.path)] : []) : []);
     };
-    const missingReads = () => guidance.map(p => join(snapshot.path, "skills", p))
-      .filter(p => !completedReads().includes(p));
-
     const settle = async () => {
       const last = session.messages.at(-1);
       if (!last || last.role !== "assistant" || last.stopReason !== "stop")
@@ -212,10 +211,23 @@ export async function proposeDependency(job: JobStartResult, plan: DependencyPla
       await recordPiSession(job, sessionFile);
     };
     await settle();
-    const reads = completedReads();
-    if (missingReads().length)
-      throw Error("Dependency planner did not read pinned methodology.");
-    entry.planner.skillReads = reads;
+    await correctReadOnlyPinnedMethodology({
+      session, root: project.root, snapshotRoot: snapshot.path, resources: guidance,
+      expectedResponse: "the complete original dependency proposal or rejection JSON, with the original contract's exact keys",
+      beforeCorrection: async () => {
+        if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Dependency source changed.");
+        await context.beforeTurn(sessionFile);
+        await reportControllerReviewPhase("correcting", { activity: "source-read-correction", role: "planner",
+          reason: "Dependency proposal lacks required pinned methodology reads." });
+        await registerPendingPiSession(job, sessionFile);
+      },
+      prompt: async feedback => {
+        await promptStorySpecialist(session, feedback);
+        await settle();
+        if (await dependencyBoundary(job) !== entry.report.sourceSha) throw Error("Dependency source changed.");
+      },
+    });
+    entry.planner.skillReads = completedReads();
     await saveDependencyPlan(job, plan);
     const proposal = await recoverResponseContract({ ...protocol, session,
       receiptFile: protocol.receiptFile + ".initial.json", sealTranscript: true,
@@ -266,6 +278,7 @@ export async function inspectDependencyPlanningRefusal(job: JobStartResult, plan
   const reads = proof.reads.map(path => canonicalPinnedReadPath(path, job.worktreeStoryRoot, snapshot.path));
   const bound = bindDependencyProposalIdentity(response, entry);
   if (proof.sessionFile !== entry.planner.sessionFile ||
+      guidance.some(p => !reads.includes(join(snapshot.path, "skills", p))) ||
       JSON.stringify(reads) !== JSON.stringify(entry.planner.skillReads) ||
       JSON.stringify(bound) !== JSON.stringify(entry.rejection.proposal)) return false;
   if ("rejected" in bound)

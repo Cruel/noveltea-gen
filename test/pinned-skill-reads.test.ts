@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { canonicalPinnedReadPath, completedPinnedSkillReads, requirePinnedSkillReads } from "../src/pinned-skill-reads.js";
+import { canonicalPinnedReadPath, completedPinnedSkillReads, requirePinnedSkillReads, correctReadOnlyPinnedMethodology } from "../src/pinned-skill-reads.js";
 
 test("snapshot roots containing /skills/ credit successful pinned skill:// reads", async () => {
   const root = "/tmp/cert/skills/abc123";
@@ -57,4 +57,45 @@ test("successful short-address reads record original pinned paths, not model-vis
     ["/snapshots/known/skills/nt-catalog/references/records.md"]);
   assert.equal(canonicalPinnedReadPath("skill://nt-catalog/../nt-story-orchestrate/SKILL.md", root, snapshot), "");
   assert.equal(canonicalPinnedReadPath("events/opening.md", root, snapshot), "/story/job/events/opening.md");
+});
+
+test("read-only methodology correction consumes one same-session read-only prompt; never trusts a self report", async () => {
+  const root = "/story/job", snapshotRoot = "/snapshots/pinned";
+  const resources = ["nt-story-orchestrate/SKILL.md", "nt-catalog/references/records.md"];
+  for (const mode of ["complete", "recover", "still-missing", "interrupted", "unsafe-tools"] as const) {
+    const messages: any[] = [
+      {role:"assistant",content:[{type:"toolCall",name:"read",id:"first",arguments:{path:"skill://"+resources[0]}}]},
+      {role:"toolResult",toolCallId:"first",isError:false},
+      {role:"assistant",content:[{type:"toolCall",name:"read",id:"second",arguments:{path:"skill://"+resources[1]}}]},
+      {role:"toolResult",toolCallId:"second",isError:mode!=="complete"},
+      {role:"assistant",stopReason:mode==="interrupted"?"aborted":"stop",content:[{type:"text",text:"{}"}]},
+    ];
+    const originalTools = mode==="unsafe-tools"?["read","write"]:["read","grep","find","ls"];
+    let active = [...originalTools], admitted=0, prompts=0;
+    const session = {messages,getActiveToolNames:()=>[...active],setActiveToolsByName:(names:string[])=>{active=[...names]}};
+    const run=()=>correctReadOnlyPinnedMethodology({
+      session:session as unknown as AgentSession,root,snapshotRoot,resources,
+      expectedResponse:"the original dependency JSON",
+      beforeCorrection:async()=>{admitted++;},
+      prompt:async feedback=>{
+        prompts++;
+        assert.equal(admitted,1);
+        assert.deepEqual(active,["read"]);
+        assert.match(feedback,/same read-only Pi session/);
+        assert.match(feedback,/skill:\/\/nt-catalog\/references\/records\.md/);
+        assert.doesNotMatch(feedback,/skill:\/\/nt-story-orchestrate\/SKILL\.md/);
+        assert.doesNotMatch(feedback,/\/snapshots\/pinned/);
+        messages.push(
+          {role:"assistant",content:[{type:"toolCall",name:"read",id:"corrected",arguments:{path:"skill://"+resources[1]}}]},
+          {role:"toolResult",toolCallId:"corrected",isError:mode==="still-missing"},
+          {role:"assistant",stopReason:"stop",content:[{type:"text",text:"{}"}]});
+      },
+    });
+    if(mode==="complete" || mode==="recover") await run();
+    else await assert.rejects(run,mode==="still-missing"?/exhausted its one continuation/:
+      mode==="interrupted"?/completed original response/:/read-only tool authority/);
+    assert.equal(prompts,mode==="recover" || mode==="still-missing"?1:0);
+    assert.equal(admitted,prompts);
+    assert.deepEqual(active,originalTools);
+  }
 });
