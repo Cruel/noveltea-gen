@@ -50,7 +50,7 @@ const scratch = mkdtempSync(join(tmpdir(), "nt-recovery-mutations-"));
 const env = { ...process.env, NT_SKILLS_CHECKOUT: skills,
   LANGSMITH_TRACING: "false", LANGCHAIN_TRACING_V2: "false", TRACE_TO_LANGSMITH: "false" };
 for (const key of Object.keys(env)) {
-  if (key.startsWith("NT_LIVE_") || key === "NT_GENERATION_TEST_SHARD" || key === "NT_TEST_KEEP_GENERATION") delete env[key];
+  if (key.startsWith("NT_LIVE_") || key === "NT_GENERATION_TEST_SHARD" || key === "NT_FOCUSED_GENERATION_TEST_SHARD" || key === "NT_TEST_KEEP_GENERATION") delete env[key];
 }
 
 function run(control, mutation) {

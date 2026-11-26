@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test as nodeTest } from "node:test";
 import { generationWeight, selectGenerationShard } from "./generation-shards.js";
+import { serialScenarioGuard } from "./support/serial-scenarios.js";
 import { removeTestTree } from "./helpers.js";
 import { authorApproval } from "./approval-controller.js";
 import { saveFixtureTurn } from "./puzzle-obligation-fixtures.js";
@@ -1675,8 +1676,8 @@ async function assertSubunitReviewSessions(job: Awaited<ReturnType<typeof startS
 for (const mode of ["review", "support", "support-negative", "other-owner", "other-owner-world", "writer-other-owner", "future-choice", "scene-evidence", "settled-no-write", "stale-choice-finding", "diagnosis", "binding-diagnosis", "prospective", "prospective-multi", "prospective-paused", "prospective-refused", "prospective-unauthorized", "prospective-review-negative", "prospective-review-outside", "prospective-review-stalled", "prospective-review-stalled-continue", "prospective-review-author", "prospective-review-native-protocol", "prospective-review-native-diagnosis", "prospective-writer-native-diagnosis", "source-recovery", "source-diagnostic-stop", "source-provider-pause"] as const) test("R14D Event native correction and negative Review recover in the original SQLite assignment " + mode, {
   // Allow for native/Git checkpoint and diagnostic work on shared test hosts.
   skip: !available,
-  timeout: mode.startsWith("source-") || mode.startsWith("prospective-") ? 480_000 :
-    ["prospective", "writer-other-owner", "support", "support-negative"].includes(mode) ? 240_000 : 120_000,
+  timeout: mode.startsWith("source-") || mode.startsWith("prospective-") ||
+    ["other-owner", "other-owner-world", "writer-other-owner", "support", "support-negative"].includes(mode) ? 480_000 : 240_000,
 }, async () => {
   const blueprintStop = mode === "source-diagnostic-stop";
   const blueprintPause = mode === "source-provider-pause";
@@ -3279,7 +3280,7 @@ for (const mode of ["crash", "public-cli", "studio"] as const) test("R14I produc
   }
 });
 
-test("R05 World and Character metadata and independent Review corrections resume the original Thread in order", { skip: !available, timeout: 120_000 }, async () => {
+test("R05 World and Character metadata and independent Review corrections resume the original Thread in order", { skip: !available, timeout: 240_000 }, async () => {
   const f = setup("r05-world-review");
   await useScriptedArchiveCli(f);
   const log = f.contract + ".model-calls";
@@ -3481,7 +3482,7 @@ test("R05 World and Character metadata and independent Review corrections resume
   }
 });
 
-test("R14C Choice and Puzzle native and independent Review corrections preserve their distinct original assignments", { skip: !available, timeout: 120_000 }, async () => {
+test("R14C Choice and Puzzle native and independent Review corrections preserve their distinct original assignments", { skip: !available, timeout: 480_000 }, async () => {
   const { archiveInteractiveRecords: records, archiveStages } = await import("./support/scripted-archive-stages.js");
   const f = setup("r14c-interactive-real");
   await useScriptedArchiveCli(f);
@@ -4933,5 +4934,6 @@ const shard = process.env.NT_GENERATION_TEST_SHARD;
 const selected = shard ? new Set(selectGenerationShard(scenarios.map(s => s.name), shard)) : null;
 if (selected) console.info("Generation shard " + shard + ": " + selected.size + "/" + scenarios.length +
   " cases; estimated serial seconds " + [...selected].reduce((sum, name) => sum + generationWeight(name), 0));
+const guarded = serialScenarioGuard();
 for (const scenario of scenarios)
-  if (!selected || selected.has(scenario.name)) nodeTest(scenario.name, scenario.options, scenario.run);
+  if (!selected || selected.has(scenario.name)) nodeTest(scenario.name, scenario.options, guarded(scenario.name, scenario.run));

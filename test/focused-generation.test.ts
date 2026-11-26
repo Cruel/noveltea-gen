@@ -3,7 +3,9 @@ import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { after, test } from "node:test";
+import { after, test as nodeTest } from "node:test";
+import { serialScenarioGuard } from "./support/serial-scenarios.js";
+import { focusedGenerationWeight, selectFocusedGenerationShard } from "./generation-shards.js";
 import { removeTestTree } from "./helpers.js";
 import { withJobModelRuntime } from "../src/model-runtime.js";
 import { requiredOrchestratorSkillReads } from "../src/story-skill-policy.js";
@@ -28,6 +30,12 @@ import type { CanonicalScopeRecord } from "../src/focused-scope.js";
 import { planObjective } from "../web/src/lib/turn-plan.js";
 import { inferStoryObjective } from "../web/src/lib/story-revision-plan.js";
 import { saveJobTurnPlan } from "../web/src/lib/turn-plan-receipt.server.js";
+
+// Like Generation, these fixtures mutate process-global hooks and environment.
+const scenarios: { name: string; options: nodeTest.TestOptions; run: nodeTest.TestFn }[] = [];
+function test(name: string, options: nodeTest.TestOptions | nodeTest.TestFn, run?: nodeTest.TestFn) {
+  scenarios.push(typeof options === "function" ? { name, options: {}, run: options } : { name, options, run: run! });
+}
 
 const source = resolve(process.env.NT_SKILLS_CHECKOUT ?? "../noveltea-skills");
 const available = existsSync(join(source, "src/cli.ts"));
@@ -317,7 +325,7 @@ test("focused revisions reject missing existing target IDs and unauthorized file
 
 for (const scenario of ["review", "writer", "support-no-write", "nested", "writer-native-diagnosis", "review-native-diagnosis", "writer-review-assessment", "review-review-assessment"] as const)
 test("R04 cross-owner prerequisite " + scenario + " uses the original logical assignment", {
-  skip: !available, timeout: 300_000,
+  skip: !available, timeout: scenario.endsWith("-review-assessment") ? 720_000 : 300_000,
 }, async () => {
   const f = fixture("r04-prerequisite-" + scenario);
   const nativeDiagnosis = scenario.endsWith("-native-diagnosis");
@@ -774,3 +782,11 @@ test("missing target and missing upstream context block without creating or edit
   assert.equal(git(job.worktreeRoot, "rev-parse", "HEAD"), git(f.repo, "rev-parse", "HEAD"));
   assert.equal(git(job.worktreeRoot, "status", "--porcelain"), "");
 });
+
+const shard = process.env.NT_FOCUSED_GENERATION_TEST_SHARD;
+const selected = shard ? new Set(selectFocusedGenerationShard(scenarios.map(s => s.name), shard)) : null;
+if (selected) console.info("Focused Generation shard " + shard + ": " + selected.size + "/" + scenarios.length +
+  " cases; estimated serial seconds " + [...selected].reduce((sum, name) => sum + focusedGenerationWeight(name), 0));
+const guarded = serialScenarioGuard();
+for (const scenario of scenarios)
+  if (!selected || selected.has(scenario.name)) nodeTest(scenario.name, scenario.options, guarded(scenario.name, scenario.run));

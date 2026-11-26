@@ -259,8 +259,8 @@ jobs:
           pnpm --dir ../noveltea-skills install --frozen-lockfile
           echo "Native CLI: Cruel/nt Build run ${{ steps.native-build.outputs.run_id }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Skills commit: $(git -C ../noveltea-skills rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-      # Certification runs once. Root shards cover every test file except
-      # generation.test.ts, which uses six timing-balanced case-level shards.
+      # Certification runs once. Generation and Focused Generation use
+      # timing-balanced case shards rather than file-level assignment.
       # Studio uses four weighted file/case shards on independent runners.
       - name: Certify native Story contract (no skipped native gate)
         if: steps.skills-access.outputs.enabled == 'true' && matrix.certify
@@ -268,9 +268,14 @@ jobs:
       - name: Run root test shard with native CLI and skills
         if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'root'
         run: |
-          mapfile -t files < <(find test -maxdepth 1 -name '*.test.ts' ! -name generation.test.ts -print | sort)
+          mapfile -t files < <(find test -maxdepth 1 -name '*.test.ts' ! -name generation.test.ts ! -name focused-generation.test.ts -print | sort)
           test "${#files[@]}" -gt 0
           pnpm exec tsx --test --test-shard=${{ matrix.shard }} "${files[@]}"
+      - name: Run focused generation scenario shard with native CLI and skills
+        if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'root'
+        env:
+          NT_FOCUSED_GENERATION_TEST_SHARD: ${{ matrix.shard }}
+        run: pnpm exec tsx --test test/focused-generation.test.ts
       - name: Run generation scenario shard with native CLI and skills
         if: steps.skills-access.outputs.enabled == 'true' && matrix.suite == 'generation'
         env:
