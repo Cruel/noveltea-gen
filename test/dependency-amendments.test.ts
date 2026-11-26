@@ -161,6 +161,20 @@ test("writer prerequisite shares the relative Job allowance", async () => {
   assert.throws(()=>authorizeWriterDependency({...repeated,version:9,versionBase:9,
     records:repeated.records.map(r=>r.path===source.path?{...r,metadata:{...r.metadata,decisions:[{origin:"user",authority:"protected"}]}}:r)}), /unprotected/);
 
+  // An existing architecture-owned Milestone is the actual correction
+  // target, not a proxy Event. Its exact-path grant cannot create records.
+  const arch = {...input,
+    plan:{...full,assignments:[...full.assignments,{...full.assignments[0],id:"architecture",
+      specialist:"nt-story-architecture",authority:{recordTypes:["arc","milestone"],existingPaths:[],mayCreate:true}}]},
+    report:{...finding,likelySpecialist:"nt-story-architecture"},
+    proposal:{...proposal,target:anchor.metadata.id,specialist:"nt-story-architecture"},
+    source:{...input.source,targetId:anchor.metadata.id,targetPath:anchor.path,
+      producer:{...input.source.producer,assignmentId:"architecture",workItem:"global-architecture"}}};
+  const architectureGrant=authorizeWriterDependency({...arch,version:9,versionBase:9});
+  assert.equal(architectureGrant.assignment.specialist,"nt-story-architecture");
+  assert.deepEqual(architectureGrant.assignment.authority,{recordTypes:["milestone"],existingPaths:[anchor.path],mayCreate:false});
+  assert.throws(()=>authorizeWriterDependency({...arch,version:9,versionBase:9,
+    proposal:{...arch.proposal,specialist:"nt-event-design"}}),/correction/);
   assert.equal(authorizeWriterDependency({ ...input, version: 16, versionBase: 9 }).afterVersion, 17);
   assert.throws(() => authorizeWriterDependency({ ...input, version: 17, versionBase: 9 }), /prerequisite/i);
 });

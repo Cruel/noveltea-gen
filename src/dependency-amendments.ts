@@ -1,5 +1,5 @@
 import { declaredCanonicalReferences, type CanonicalScopeRecord } from "./focused-scope.js";
-import { focusedSpecialist } from "./focused-specialist.js";
+import { focusedSpecialist, writerDependencySpecialist } from "./focused-specialist.js";
 import type { TurnAssignmentEvidence, TurnEvidence } from "./turn-plan-evidence.js";
 import { createHash } from "node:crypto";
 import { reviewOtherOwners, type ReviewDependencyRequest } from "./review-repair-amendment.js";
@@ -291,7 +291,7 @@ export function authorizeWriterDependency(input: {
       !report.affectedIds.every(id => cited.some(r => r.metadata.id === id)) ||
       !keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason") ||
       proposal.sourceSha !== head || proposal.reportDigest !== input.reportDigest ||
-      proposal.target !== source.targetId || proposal.specialist !== focusedSpecialist(source.targetId) ||
+      proposal.target !== source.targetId || proposal.specialist !== writerDependencySpecialist(source.targetId) ||
       proposal.specialist !== report.likelySpecialist || proposal.outcome !== report.missing ||
       !text(proposal.reason) || report.sourceSha !== head || report.turnDigest !== plan.digest ||
       !plan.objective.obligations.includes(report.obligation) || report.authorDecisionRequired ||

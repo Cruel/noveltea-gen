@@ -221,3 +221,28 @@ test("Luna Accounts conditional correction identifies the inherited producer and
   assert.equal(dependencyGit(job,"rev-parse","HEAD"),job.baseSha);
   assert.equal(dependencyGit(job,"status","--porcelain"),"");
 });
+
+test("latest Luna duplicate Blueprint response and ordinary omission impact replay", {
+  skip: !root || !process.env.NT_TEST_PRESERVED_LATEST_JOB,
+}, async () => {
+  const {createHash} = await import("node:crypto");
+  const {assertBlueprintReplies,parseMilestoneBlueprintReview} = await import("../src/milestone-blueprint.js");
+  const {affectedEventOnlyOmissions,readHistoricalEventOnlyOmission,reviewedOmissionSuccessor} = await import("../src/interactive-event-only.js");
+  const saved = JSON.parse(readFileSync(join(root!,"certification-source.json"),"utf8"));
+  const job = await startStoryJob({story:saved.storyRoot,job:process.env.NT_TEST_PRESERVED_LATEST_JOB!},false);
+  const record = JSON.parse(readFileSync(join(job.stateDir,"milestone-blueprints/contradiction.json"),"utf8"));
+  const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const assignment = {milestonePath:"milestones/contradiction.md",sourcePaths:[...new Set<string>(
+    record.rounds.flatMap((r:any)=>[...r.review.findings.map((f:any)=>f.anchorPath),
+      ...r.draft.events.flatMap((e:any)=>e.evidence.map((x:any)=>x.anchorPath))]))]};
+  await assertBlueprintReplies(record.writer,record.rounds.map((r:any)=>r.draftDigest));
+  await assertBlueprintReplies(record.reviewer,record.rounds.map((r:any)=>r.reviewerVerdict?sha(r.reviewerVerdict):r.reviewDigest),
+    (text,i)=>parseMilestoneBlueprintReview(text,record.rounds[i].draft,assignment as any,record.rounds.slice(0,i),"sealed-replay"));
+  const head = "13d1ca5a39f248fd7df7b14740286292e21cc3a6";
+  const impact = await affectedEventOnlyOmissions(job,job.baseSha,head,["events/reconstruct-access-mismatch.md"]);
+  assert.deepEqual(impact.map(p=>p.milestoneId),["milestone.revelation"]);
+  const seal = JSON.parse(readFileSync(join(job.stateDir,"interactive-event-only/revelation.json"),"utf8"));
+  const original = await readHistoricalEventOnlyOmission(job,"milestone.revelation",{nonce:seal.nonce,digest:seal.digest});
+  assert.equal(await reviewedOmissionSuccessor(job,original,seal.digest,head),null,
+    "an unreviewed ordinary commit cannot confer live omission authority");
+});

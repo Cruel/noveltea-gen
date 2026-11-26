@@ -569,7 +569,10 @@ export function assignmentFidelityPrompt(snapshot: SkillSnapshot, packet: Semant
       "[{commitSha,assignmentId,path,line,kind,message,requiredCorrection,affectedPaths}] " +
       "Finding kind MUST be exactly one of missing-requirement, unrequested-change, " +
       "continuity, other (do not invent specialized kind names). " +
-      "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. When the " +
+      "Provide evidence [{commitSha,assignmentId,path,line,explanation}]. " +
+      (packet.items.some(item=>item.affectedOmissions?.length) ?
+        "AFFECTED OMISSION REVALIDATION: an ordinary writer changed sources of previously independently reviewed Event-only Milestones. Reassess EACH affectedOmissions entry using the actual canonicalContext and changed diff. Distinguish a later shared Event's Choice from this local Milestone's own required interaction; do not add an artificial quota. PASS only if the original local no-write obligation remains sound. For EACH affected omission include a separate evidence entry with omissionMilestone equal to its exact milestoneId, a changed path belonging to its sourceHashes, a real line and explanation. If the ordinary writer invalidated the prior local outcome, FAIL with a concrete correction on its changed path. Do not claim the old reviewer examined new bytes. " : "") +
+      "When the " +
       "packet includes milestoneBlueprint and the committed source PROVES a material " +
       "private-plan defect, a PASS may attach to that evidence item " +
       "blueprintChallenge:{pinDigest,field,before,proposed,sourceQuote,violatedObligation}. " +

@@ -268,7 +268,7 @@ function sourceOf(result: IndependentReviewResult) {
   return hash(result);
 }
 async function verifiedFailure(job: JobStartResult, point: RecoveryCheckpoint) {
-  const saved = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const saved = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === point.commitSha && p.proofDigest === point.proofDigest);
   if (!saved || !saved.assurance || JSON.stringify(saved.assurance) !==
       JSON.stringify(point.assurance)) throw Error("Rejected checkpoint no longer matches sealed evidence.");
@@ -370,7 +370,7 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
   return withStoryJobLockOrReuse(job, "rejected-review-admission",
     ["rejected-review-next-attempt"], admit);
 }
-export async function inspectRejectedRepair(job: JobStartResult, sha: string, sourceMode: "live" | "historical" = "live"): Promise<RepairReceipt> {
+export async function inspectRejectedRepair(job: JobStartResult, sha: string, sourceMode: "live" | "historical" = "historical"): Promise<RepairReceipt> {
   if (!SHA.test(sha)) throw Error("Invalid repair source SHA.");
   const file = pathFor(job, sha), stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 128_000)
@@ -959,7 +959,7 @@ export async function acceptRejectedRepairCheckpoint(job: JobStartResult,
       !point.assurance || point.assurance.assignmentId !== state.assignment.id ||
       !point.assurance.reviewSelection.reasons.includes("previous-review-failure"))
     throw Error("A repair requires a new independently validated, review-required checkpoint.");
-  const saved = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const saved = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === point.commitSha &&
     p.proofDigest === point.proofDigest &&
     JSON.stringify(p.assurance) === JSON.stringify(point.assurance));
@@ -1014,7 +1014,7 @@ export async function finishRejectedRepairReview(job: JobStartResult, sha: strin
   const state = await inspectRejectedRepair(job, sha);
   if (state.phase !== "reviewing" || !state.repairedCommitSha)
     throw Error("Repair has no independently reviewed successor.");
-  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === state.repairedCommitSha);
   if (!point) throw Error("Repair successor checkpoint is unavailable.");
   const review = await inspectCheckpointReview(job, point);
@@ -1125,7 +1125,7 @@ export async function consumeRejectedRepairChoice(job: JobStartResult, sha: stri
 async function ensureRepairLedger(job: JobStartResult, state: RepairReceipt) {
   const file = join(job.stateDir, "revisions", "verified-head.json");
   if (!existsSync(file)) {
-    const source = (await inspectRecoveryCheckpoints(job)).find(point =>
+    const source = (await inspectRecoveryCheckpoints(job, "historical")).find(point =>
       point.eligible && point.commitSha === state.sourceCommitSha &&
       point.workItem === "foundation" && point.semanticReview === "failed");
     if (state.origin.workItem !== "foundation" ||
@@ -1362,7 +1362,7 @@ export async function commitRejectedRepairDraft(job: JobStartResult, sha: string
     ({ path, diff: git(job, "diff", "--binary", "--", repoPath(job, path)) })));
   if (digestNow !== state.draftDigest)
     throw Error("Draft changed after native validation; do not commit stale work.");
-  const original = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const original = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === sha);
   if (!original?.assurance || (original.planVersion !== null &&
       original.planVersion !== state.planAmendment.basePlanVersion))
@@ -1635,7 +1635,7 @@ export async function adjudicateRejectedRepair(job: JobStartResult, sha: string)
     .split(/\r?\n/)[claim.line - 1];
   if (line === undefined || !state.findings.some(f => f.path === claim.path && f.line === claim.line))
     throw Error("Deterministic source check rejects a stale or invented dispute location.");
-  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === sha && p.assurance);
   if (!point || sourceOf(await verifiedFailure(job, point)) !== state.sourceReviewDigest)
     throw Error("Disputed review no longer matches the immutable source.");
@@ -1679,7 +1679,7 @@ type ReviewAssessment = NonNullable<Extract<RecoveryDecision, { action: "known-c
  * original Review transcript. The graph stores only a reference to this proof. */
 async function foundationDiagnosticSource(job: JobStartResult, state: RepairReceipt) {
   if (!state.repairedCommitSha) return null;
-  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === state.repairedCommitSha && p.semanticReview === "failed");
   if (!point?.assurance) return null;
   const cycle = await inspectPostcommitReviewCycle(job, state.rootFailureSha, point.assurance.assignmentDigest);
@@ -1752,7 +1752,7 @@ export function sharedFoundationReviewWorkItem(workItem: string) {
 
 export async function authenticateFoundationReviewHead(job: JobStartResult, root: string, publishedHead?: string) {
   const head = publishedHead ?? await trustedHead(job);
-  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
   const original = points.find(p => p.commitSha === root && usesSharedAssignmentReview(p.workItem) &&
     p.validation.status === "passed" && p.semanticReview === "failed");
   if (!original?.assurance) return false;
@@ -1800,7 +1800,7 @@ export async function inspectFoundationReviewBoundary(job: JobStartResult, root:
 async function inspectFoundationDisputeOutcome(job: JobStartResult, state: RepairReceipt) {
   const dispute = state.dispute;
   if (!dispute || !dispute.adjudication || state.phase !== "blocked") return null;
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === state.sourceCommitSha);
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible && p.commitSha === state.sourceCommitSha);
   if (!point) throw Error("Disputed Foundation source is no longer eligible");
   const packet = await prepareSemanticReview(job, [point], { sourceSha: state.sourceCommitSha,
     reviewDigest: state.sourceReviewDigest, path: dispute.path, line: dispute.line, claim: dispute.claim });
@@ -1885,7 +1885,7 @@ export async function acceptGuidedRepairContinuation(job: JobStartResult,
       await trustedHead(job) !== grant.headSha ||
       git(job, "status", "--porcelain=v1", "--untracked-files=all"))
     throw Error("Guided repair grant does not match a clean, rejected successor checkpoint.");
-  const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === grant.headSha && p.semanticReview === "failed");
   if (!point || !point.assurance ||
       !(ledger.findings.some(f => f.rootFailureSha === state.rootFailureSha &&
@@ -1914,7 +1914,7 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
       await reconcileCompletedRepairWriter(job, sourceSha);
     }
   });
-  const point = (await inspectRecoveryCheckpoints(job)).find(
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(
     p => p.eligible && p.commitSha === sourceSha);
   if (!point) throw Error("Requested rejected checkpoint is not independently verified.");
   const originWorkItem = point.workItem.startsWith("repair-") ?
@@ -1948,7 +1948,7 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
         (await adapter.pending(job)).length > 0;
     },
     reviewStatus: async state => {
-      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
         p.eligible && p.commitSha === state.repairedCommitSha);
       if (!point?.assurance ||
           !["required-pending", "passed", "failed"].includes(point.semanticReview))
@@ -1956,7 +1956,7 @@ async function rejectedRepairOperations(job: JobStartResult, sourceSha: string,
       return point.semanticReview as "required-pending" | "passed" | "failed";
     },
     rereview: async state => {
-      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
         p.eligible && p.commitSha === state.repairedCommitSha);
       if (!point?.assurance) throw Error("Repair successor checkpoint was lost.");
       const profile = (await inspectRejectedRepair(job, state.sourceCommitSha)).reviewer;
@@ -2242,7 +2242,7 @@ export async function executeReviewRound(job: JobStartResult,
   if (!SHA.test(sourceSha) || !SHA.test(rootSha) || !caseId || !HASH.test(assignmentKey) ||
       !usesCheckpointedReviewRounds(workItem))
     throw new ProtocolIntegrityBlockedError("Missing original Review admission");
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === sourceSha);
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible && p.commitSha === sourceSha);
   // Never create a repair receipt for a foreign checkpoint, even on replay.
   if (!point || (sourceSha === rootSha
       ? point.workItem !== workItem

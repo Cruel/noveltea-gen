@@ -151,7 +151,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
     const report = await inspectJobReport(s.request);
     const fulfillment = report.generation.planFulfillment;
     if (fulfillment.status === "incomplete") {
-      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
         p.eligible && p.commitSha === head && p.validation.status === "passed" &&
         (p.semanticReview === "passed" || p.semanticReview === "not-required"));
       if (op?.evidence.reference !== "completion-report" || op.source.headSha !== head ||
@@ -302,7 +302,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
         op.source.headSha === head && op.source.planVersion === planVersion &&
         op.source.turnDigest === turnDigest) {
       const report = await inspectJobReport(s.request);
-      const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+      const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
         p.eligible && p.commitSha === head && p.validation.status === "passed" &&
         (p.semanticReview === "passed" || p.semanticReview === "not-required"));
       if (report.identity.headSha === head && report.identity.clean &&
@@ -328,7 +328,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
     const op = source?.input as GenerationOperationRecovery | undefined;
     const original = op?.evidence.completion;
     const report = await inspectJobReport(s.request);
-    const point = (await inspectRecoveryCheckpoints(job)).find(p =>
+    const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
       p.eligible && p.commitSha === head && p.workItem === original?.checkpoint &&
       (p.semanticReview === "passed" || p.semanticReview === "not-required"));
     if (op?.evidence.reference !== "completion-report" || !original || !point ||
@@ -352,7 +352,7 @@ async function diagnosticEvidence(job: JobStartResult, s: State, c: RecoveryCase
     return null;
   if (operation === "completion-verification" &&
       (c.observation !== "returned-failure" || !s.escalation)) return null;
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible && p.commitSha === head &&
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible && p.commitSha === head &&
     p.assurance?.turnDigest === turnDigest && p.validation.status === "passed");
   if (!point?.assurance) return null;
   if (existsSync(join(job.stateDir, "review-repairs", head + ".json"))) {
@@ -415,7 +415,7 @@ export async function originalFailedReviewProof(job: JobStartResult, s: State,
   if (op?.outcome !== "returned-failure" || op.operation !== "independent-review" ||
       op.evidence.reference !== "review-checkpoints" ||
       op.evidence.assignmentId !== s.active.id) return null;
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible &&
     p.commitSha === c.origin.sourceHeadSha &&
     p.assurance?.turnDigest === c.origin.turnDigest &&
     p.assurance?.reviewSelection.status === "required-pending" &&
@@ -854,7 +854,7 @@ export async function authenticateAssignmentDiagnosticDischarge(job: JobStartRes
   const original = await authenticateAssignmentDiagnosticDecision(job, c, source, d, undefined, head);
   if (!original || correction.digest !== original.authorization.decisionDigest ||
       original.terminal.invocationProof?.ordinal !== original.terminal.proof.ordinal + 1) return false;
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible &&
     p.workItem === ("workItem" in original.terminal ? original.terminal.workItem : "foundation") && p.commitSha === head && p.parentSha === c.origin.sourceHeadSha &&
     p.validation.status === "passed" && ["passed", "not-required"].includes(p.semanticReview) &&
     p.assurance?.turnDigest === c.origin.turnDigest &&

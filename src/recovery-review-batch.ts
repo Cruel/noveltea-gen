@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import type { JobStartResult } from "./job.js";
 import type { RecoveryCheckpoint } from "./recovery-checkpoints.js";
 import type { GenerationInventory } from "./generation-plan.js";
-import { readEventOnlyOmission, type EventOnlyPayload, type EventOnlyRef } from "./interactive-event-only.js";
+import { readEventOnlyOmission, reviewedOmissionSuccessor, type OmissionRevalidation, type EventOnlyPayload, type EventOnlyRef } from "./interactive-event-only.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -24,6 +24,7 @@ export interface ReviewedOmissionHandoff {
   milestoneId: string;
   sourceSeal: EventOnlyRef;
   sourcePayload: EventOnlyPayload;
+  revalidatedSource?: OmissionRevalidation;
   /** Only the two original no-write specialist dispositions, never sessions or grants. */
   sourceReceipt: Record<string, any>;
 }
@@ -117,14 +118,13 @@ export async function collectReviewedOmissionBatch(job: JobStartResult,
       throw Error("Review batch Event source identity was changed.");
     // Read from the selected Git TREE, not from an interrupted writer's
     // worktree, to ensure that the child actually receives the reviewed bytes.
-    for (const [relative, expected] of Object.entries(payload.sourceHashes)) {
-      const treePath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + relative;
-      const committed = git(job, "show", checkpoint.commitSha + ":" + treePath);
-      if (sha(committed) !== expected)
-        throw Error("Review batch source differs from the selected committed Story.");
-    }
+    const changed = Object.entries(payload.sourceHashes).some(([relative,expected])=>
+      sha(git(job,"show",checkpoint.commitSha+":"+(job.storyRelativePath?job.storyRelativePath+"/":"")+relative))!==expected);
+    const revalidatedSource = changed ? await reviewedOmissionSuccessor(job,payload,ref.digest,checkpoint.commitSha) : null;
+    if (changed && !revalidatedSource)
+      throw Error("Review batch source differs from the selected committed Story without a transferable revalidation.");
     entries.push({ milestoneId, sourceSeal: ref, sourcePayload: payload,
-      sourceReceipt: receipt });
+      ...(revalidatedSource?{revalidatedSource}:{}),sourceReceipt: receipt });
   }
   if (!entries.length) return null;
   const turn = await readReviewTurnEvidence(job);
@@ -158,7 +158,8 @@ export async function sealReviewedOmissionBatch(job: JobStartResult,
     const proof = await readEventOnlyOmission(job, item.milestone!, receipt.units?.[0]?.eventOnly);
     for (const [relative, expected] of Object.entries(proof.sourceHashes)) {
       const treePath = (job.storyRelativePath ? job.storyRelativePath + "/" : "") + relative;
-      if (sha(git(job, "show", checkpoint.commitSha + ":" + treePath)) !== expected)
+      if (sha(git(job, "show", checkpoint.commitSha + ":" + treePath)) !== expected &&
+          !await reviewedOmissionSuccessor(job,proof,receipt.units?.[0]?.eventOnly?.digest,checkpoint.commitSha))
         revalidated = true;
     }
   }

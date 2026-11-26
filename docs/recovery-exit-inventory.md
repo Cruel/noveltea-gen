@@ -1367,3 +1367,30 @@ the suspended writer, reviewed owner correction and original Event reentry.
 The opt-in preserved Accounts regression authenticates the actual failed
 run's inherited producer and checks the exact write grant using a
 test-only complete citation set; no live checkpoint or Story is modified.
+
+### Exact Blueprint protocol and ordinary-write omission impact (live #260)
+
+A prerequisite-only Blueprint can defer local Event realization but cannot
+grant a local writer before independent prerequisite review. Source line
+selectors resolve against the pinned Git tree into exact quotations.
+A reviewer can resolve the local draft while conditioning its approval on
+an independently verified upstream correction. Existing Arc/Milestone
+corrections select the architecture specialist only through the exact
+existing-record dependency grant. Protected decisions remain fenced.
+
+Blueprint replay binds each accepted response ordinal and digest to its
+sealed session, rather than treating every completed response as a new
+review round. Native checkpoint publication authenticates historical
+omission receipts; live authority to skip a Choice/Puzzle remains separate.
+Ordinary specialist Review must explicitly revalidate every affected
+omission on the new source bytes before a later consumer can rely on it.
+Fork handoff authenticates this exact ordinary-write revalidation against
+the selected commit and immutable original seal; support corrections
+continue to use their separate selective-revalidation proof.
+
+The latest preserved Luna regression replays the duplicated Contradiction
+response and identifies the Revelation omission invalidated by the
+unreviewed Reconstruction commit. It does not fabricate a passing review.
+Focused Review tests reject a generic PASS lacking the explicit affected
+omission assessment; conditional Blueprint integration tests exercise
+independent upstream correction and writer reentry.

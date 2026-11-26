@@ -733,8 +733,10 @@ export async function finalizeRecoveryCheckpoint(job: JobStartResult,
   } else await atomic(pending, intent);
   // Deterministic crash-boundary certification. Fixture receipts only; a live
   // Pi worker must never be interrupted by test fault injection.
-  const sourceMode = workItem.startsWith("dependency:") || workItem.startsWith("repair-") ||
-    workItem.startsWith("dependent-repair-") ? "historical" as const : "live" as const;
+  // Native checkpoint publication precedes independent Review. Historical
+  // omission proof is immutable; live skip authority remains independently
+  // gated by the affected omission revalidation in the assignment Review.
+  const sourceMode = "historical" as const;
   if (existsSync(finalizedFile(job, commitSha))) {
     const point = await readFinal(job, commitSha);
     await verifyFinal(job, point, undefined, sourceMode);

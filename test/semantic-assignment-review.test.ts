@@ -14,7 +14,7 @@ import { readIndependentReview } from "../src/checkpoint-assurance.js";
 import { deriveReviewRepairAmendment } from "../src/review-repair-amendment.js";
 import { prepareSemanticReview, reviewBoundedAssignments,
   normalizeOmittedSemanticEvidenceSha, normalizeFailedSemanticFindingKinds,
-  validateSemanticVerdict, semanticUnitOutcome,
+  validateSemanticVerdict, semanticUnitOutcome, independentReviewResults,
   type SemanticReviewPacket } from "../src/semantic-assignment-review.js";
 import { assertSemanticCorrectionPreserved,
   choiceSelectionSchemaRecheck } from "../src/narrative-review-specialist.js";
@@ -614,4 +614,21 @@ test("stale source and unauthorized reviewer actions cannot become approvals", (
       { ...evidence("focus:character.nia", "characters/nia.md"), line: 900 }] }), /source-linked/);
   assert.throws(() => validateSemanticVerdict(packet, { ...valid,
     verdict: "approve-author-protected-canon" }), /malformed/);
+});
+
+test("ordinary specialist Review must explicitly revalidate every affected omission on changed source", () => {
+  const packet = makePacket();
+  const item = packet.items[0]!;
+  const path = item.assurance.changedPaths[0]!;
+  const impact = {milestoneId:"milestone.revelation",sourceSealDigest:"a".repeat(64),
+    reviewHead:"b".repeat(40),sourceSha:item.assurance.commitSha,sourceHashes:{[path]:"c".repeat(64)}};
+  item.affectedOmissions=[impact];
+  const entry = evidence(item.assignment.id,path,item.assurance.commitSha);
+  const raw = {sourceDigest:packet.sourceDigest,verdict:"pass",findings:[],evidence:[entry]};
+  assert.throws(()=>validateSemanticVerdict(packet,raw),/source-linked/);
+  assert.throws(()=>validateSemanticVerdict(packet,{...raw,evidence:[{...entry,omissionMilestone:"milestone.foreign"}]}),/source-linked/);
+  const accepted=validateSemanticVerdict(packet,{...raw,evidence:[{...entry,omissionMilestone:impact.milestoneId}]});
+  assert.deepEqual(JSON.parse(independentReviewResults(packet,accepted,"test")[0]!.evidence).omissionRevalidations,[impact]);
+  const fail=validateSemanticVerdict(packet,{...raw,verdict:"fail",findings:[finding(item.assignment.id,path,"continuity",item.assurance.commitSha)],evidence:[]});
+  assert.equal(JSON.parse(independentReviewResults(packet,fail,"test")[0]!.evidence).omissionRevalidations,undefined);
 });

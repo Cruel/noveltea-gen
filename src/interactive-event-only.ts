@@ -3,7 +3,7 @@
  * Recovery and Composition independently reopen this same source-bound proof. */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { execFileSync } from "./git-read-cache.js";
 import type { JobStartResult } from "./job.js";
@@ -297,6 +297,93 @@ export async function inspectDeclinedEventOnlyReview(job: JobStartResult, milest
   git(job, "merge-base", "--is-ancestor", p.eventHead, p.reviewHead);
   git(job, "merge-base", "--is-ancestor", p.reviewHead, "HEAD");
   return { digest: seal.digest, findings: p.findings };
+}
+
+/** Immutable source impact for ordinary assignment Review. A source hash
+ * change is an independent review obligation, not a reason to rewrite the
+ * historical omission or to grant another specialist write authority. */
+export interface OmissionRevalidation {
+  milestoneId: string;
+  sourceSealDigest: string;
+  reviewHead: string;
+  sourceSha: string;
+  sourceHashes: Record<string,string>;
+}
+export function omissionHashesAt(job: JobStartResult, original: EventOnlyPayload, head: string) {
+  if (!SHA.test(head)) throw Error("Invalid omission revalidation source SHA.");
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_COMMON_DIR","GIT_PREFIX"]) delete env[key];
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  return Object.fromEntries(Object.keys(original.sourceHashes).sort().map(path => {
+    if (!/^[a-z][a-z-]*\/[a-z0-9-]+\.md$/.test(path))
+      throw Error("Invalid omission revalidation source path.");
+    const name = prefix + path;
+    if (!/^100(?:644|755) blob [a-f0-9]{40}\t/.test(git(job,"ls-tree",head,"--",name)))
+      throw Error("Omission revalidation source is not a canonical Git blob.");
+    return [path,sha256(execFileSync("git",["show",head+":"+name],
+      {cwd:job.worktreeRoot,env,maxBuffer:4*1024*1024}))];
+  }));
+}
+export async function affectedEventOnlyOmissions(job: JobStartResult, parent: string,
+  head: string, changedPaths: readonly string[]): Promise<OmissionRevalidation[]> {
+  const dir = join(job.stateDir,"interactive-event-only");
+  if (!existsSync(dir)) return [];
+  const names = (await readdir(dir)).filter(name=>/^[a-z][a-z0-9-]*\.json$/.test(name)).sort();
+  if (names.length > 64) throw Error("Unbounded omission revalidation inventory.");
+  const affected: OmissionRevalidation[] = [];
+  for (const name of names) {
+    const file = join(dir,name);
+    if (await realpath(file) !== file || !(await lstat(file)).isFile())
+      throw Error("Unsafe omission revalidation source receipt.");
+    const candidate = JSON.parse(await readFile(file,"utf8")) as Seal;
+    if (candidate.phase !== "sealed") continue;
+    if (!changedPaths.some(path=>candidate.payload?.sourceHashes?.[path])) continue;
+    const milestoneId = "milestone."+name.slice(0,-5);
+    const ref = {nonce:candidate.nonce,digest:candidate.digest};
+    const original = await readHistoricalEventOnlyOmission(job,milestoneId,ref);
+    try { git(job,"merge-base","--is-ancestor",original.reviewHead,parent); }
+    catch (error) {
+      if ((error as {status?:number}).status !== 1) throw error;
+      continue; // not yet reviewed at this historical assignment boundary
+    }
+    const sourceHashes = omissionHashesAt(job,original,head);
+    const before = omissionHashesAt(job,original,parent);
+    if (JSON.stringify(before) === JSON.stringify(sourceHashes)) continue;
+    affected.push({milestoneId,sourceSealDigest:ref.digest,reviewHead:original.reviewHead,
+      sourceSha:head,sourceHashes});
+  }
+  return affected;
+}
+/** Authenticate a later ordinary specialist's independent Review. It must
+ * explicitly cover the original omitted local obligation at the entire new
+ * source set; an unrelated generic PASS is not sufficient. */
+export async function reviewedOmissionSuccessor(job: JobStartResult, original: EventOnlyPayload,
+  sealDigest: string, head: string): Promise<OmissionRevalidation | null> {
+  const hashes = omissionHashesAt(job,original,head);
+  const entry = readRecoveryFork(job)?.reviewBatch?.entries.find(e=>e.milestoneId===original.milestoneId);
+  const inherited = entry?.revalidatedSource;
+  if (inherited && inherited.milestoneId===original.milestoneId &&
+      inherited.sourceSealDigest===entry!.sourceSeal.digest && inherited.reviewHead===original.reviewHead &&
+      JSON.stringify(inherited.sourceHashes)===JSON.stringify(hashes)) {
+    git(job,"merge-base","--is-ancestor",inherited.sourceSha,head);
+    return {...inherited,sourceSealDigest:sealDigest};
+  }
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const latest = git(job,"log","-1","--format=%H",head,"--",...Object.keys(hashes).map(path=>prefix+path));
+  if (!SHA.test(latest) || latest === original.reviewHead ||
+      !existsSync(join(job.stateDir,"recovery-checkpoints",latest+".json"))) return null;
+  const {inspectHistoricalRecoveryCheckpoint} = await import("./recovery-checkpoints.js");
+  const point = await inspectHistoricalRecoveryCheckpoint(job,latest);
+  if (!point.assurance || point.semanticReview !== "passed") return null;
+  const {readIndependentReview} = await import("./checkpoint-assurance.js");
+  const review = (await readIndependentReview(job,point.assurance)).result;
+  if (!review || review.status!=="passed") return null;
+  let evidence: {omissionRevalidations?:OmissionRevalidation[]};
+  try { evidence = JSON.parse(review.evidence); } catch { return null; }
+  if (!evidence || !Array.isArray(evidence.omissionRevalidations)) return null;
+  const expected: OmissionRevalidation = {milestoneId:original.milestoneId,
+    sourceSealDigest:sealDigest,reviewHead:original.reviewHead,sourceSha:latest,sourceHashes:hashes};
+  return evidence.omissionRevalidations?.some(p=>JSON.stringify(p)===JSON.stringify(expected)) ? expected : null;
 }
 
 /** Live authority: current source bytes must still match the reviewed

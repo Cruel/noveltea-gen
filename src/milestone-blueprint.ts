@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "./git-read-cache.js";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { authenticateBlueprintGrant, requestBlueprintAssessment, type BlueprintAssessmentGrant, type BlueprintAssessmentProof } from "./blueprint-reassessment.js";
 import { getConfig } from "@langchain/langgraph";
@@ -35,6 +35,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const MILESTONE = /^milestone\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const REQUIRED = ["nt-event-design/SKILL.md", "nt-catalog/SKILL.md"] as const;
 type Owner = "event" | "interactive" | "composition";
+import { writerDependencySpecialist } from "./focused-specialist.js";
 import { parseWriterDependencyFinding, type WriterDependencyFinding } from "./dependency-amendments.js";
 
 export interface MilestoneBlueprint {
@@ -239,7 +240,9 @@ function milestoneCorrectionEvidence(p: NonNullable<MilestoneBlueprintReview["pr
     return p.status === "resolved" && !!correction && !!claim &&
       !("target" in claim) && claim.field === evidence.field &&
       evidence.quote === claim.quote &&
-      !!retained && milestoneFieldRetainsQuote(source, retained, evidence.field, evidence.quote) &&
+      !!retained && (milestoneFieldRetainsQuote(source, retained, evidence.field, evidence.quote) ||
+        milestoneFieldQuote(source, evidence.field, evidence.quote) &&
+        before !== milestoneFieldText(retained, evidence.field)) &&
       correction.targetId === evidence.targetId && sha(correction) === evidence.correctionDigest &&
       correction.sources.some(source => source.path === finding.anchorPath);
   }
@@ -476,6 +479,36 @@ async function sourceDigest(job: JobStartResult, paths: string[], head: string) 
     path, digest: sha(git(job, "show", head + ":" + canonicalGitPath(job, path))),
   })));
 }
+/** A planner identifies evidence using immutable canonical line ranges.
+ * Resolve bytes at the pinned Git SHA, never approximate or invent quotes.
+ * Stored findings continue to carry the exact authenticated quotations. */
+export function resolveMilestoneBlueprintSourceSelectors(job: JobStartResult, head: string,
+  paths: readonly string[], text: string): string {
+  const raw = parse(text);
+  if (!object(raw) || !object(raw.upstreamCorrection) ||
+      !Array.isArray(raw.upstreamCorrection.sources)) return text;
+  let changed = false;
+  const correction = raw.upstreamCorrection;
+  correction.sources = (correction.sources as unknown[]).map((source, index) => {
+    if (!object(source) || !("startLine" in source || "endLine" in source)) return source;
+    const field = "upstreamCorrection.sources[" + index + "]";
+    if (!exact(source, ["path", "startLine", "endLine"]) ||
+        typeof source.path !== "string" || !paths.includes(source.path) ||
+        typeof source.startLine !== "number" || typeof source.endLine !== "number" ||
+        !Number.isSafeInteger(source.startLine) || !Number.isSafeInteger(source.endLine) ||
+        source.startLine < 1 || source.endLine < source.startLine ||
+        source.endLine - source.startLine >= 20)
+      invalid(field, "Select an exact supplied canonical path and a 1-based startLine/endLine range (at most 20 lines).");
+    const lines = git(job, "show", head + ":" + canonicalGitPath(job, source.path)).split("\n");
+    const quote = lines.slice(source.startLine - 1, source.endLine).join("\n");
+    if (source.endLine > lines.length || !quote.trim() || quote.length > 2000)
+      invalid(field, "Select nonempty canonical lines within the file, no more than 2000 characters.");
+    changed = true;
+    return {path: source.path, quote};
+  });
+  return changed ? JSON.stringify(raw) : text;
+}
+
 function string(value: unknown, max = 1200): value is string {
   return typeof value === "string" && !!value.trim() && value.length <= max;
 }
@@ -519,7 +552,7 @@ function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<Eve
     "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
     "Controller binds the original rejected identity, before and after values. Do not repeat escaped field arrays. " +
     "For unchanged rejected fields use persisting/regressed with current, never improved/resolved with revised. " +
-    (draft.upstreamCorrection ? "EXCEPTION: a retained claim whose ONLY blocker is the exact typed upstreamCorrection may be conditionally resolved using {kind:'upstream',targetId:" + JSON.stringify(draft.upstreamCorrection.targetId) + "} and status:resolved, with top-level status:prerequisite. This is a review of the proposed correction, NOT a claim that it happened. The controller suspends Event, executes and independently verifies the original owner correction, then replans against corrected canon. All unrelated local defects still require revise. " : "") +
+    (draft.upstreamCorrection ? "EXCEPTION: a corrected or retained claim whose ONLY remaining blocker is the exact typed upstreamCorrection may be conditionally resolved using {kind:'upstream',targetId:" + JSON.stringify(draft.upstreamCorrection.targetId) + "} and status:resolved, with top-level status:prerequisite. This is a review of the proposed correction, NOT a claim that it happened. The controller suspends Event, executes and independently verifies the original owner correction, then replans against corrected canon. All unrelated local defects still require revise. " : "") +
     "If an independent local blocker remains, include it as a current finding; revise with findings:[] is invalid. " +
     "CURRENT FIELD COMPARISON (controller-derived, not a verdict): " +
     JSON.stringify(previous.flatMap((round, i) => independentFindings(round).map((finding, j) => {
@@ -540,8 +573,11 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
   if (!exact(raw, ["schema", "milestoneId", "events", "downstream",
         ...(object(raw) && "upstreamCorrection" in raw ? ["upstreamCorrection"] : [])]) ||
       raw.schema !== "noveltea-milestone-blueprint/v1" || raw.milestoneId !== assignment.milestoneId ||
-      !Array.isArray(raw.events) || raw.events.length < 1 || raw.events.length > 5 ||
-      !Array.isArray(raw.downstream) || raw.downstream.length < 1 || raw.downstream.length > 10)
+      !Array.isArray(raw.events) || raw.events.length > 5 ||
+      !Array.isArray(raw.downstream) || raw.downstream.length > 10 ||
+      (raw.events.length === 0
+        ? !raw.upstreamCorrection || raw.downstream.length !== 0
+        : raw.downstream.length < 1))
     throw Error("Invalid bounded Milestone Blueprint or target identity.");
   const seen = new Set<string>();
   for (const [i, event] of raw.events.entries()) {
@@ -655,7 +691,7 @@ export function milestoneBlueprintSourceFindings(draft: MilestoneBlueprint, assi
         report("source", ".participants[" + j + "]", participant, "Unknown Character requires a prospective material source declaration.");
     earlierEvents.push(event.id);
   }
-  if (!draft.downstream.some(item => item.owner === "composition"))
+  if (draft.events.length && !draft.downstream.some(item => item.owner === "composition"))
     findings.push({ category: "semantic", path: "downstream", offendingId: "composition",
       expected: "Milestone plan must identify the downstream Composition owner.", trustedContext: context });
   return findings;
@@ -802,6 +838,8 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
       ". Rebuild a compact JSON object without copying escaped evidence arrays.");
   }
   bindCompactReviewEvidence(raw, draft, previous);
+  if (object(raw) && draft.events.length === 0 && raw.status === "pass" && policy === "admission")
+    invalid("status", "A prerequisite-only draft requires the explicit prerequisite verdict.");
   if (object(raw) && raw.status === "prerequisite") {
     if (raw.schema !== "noveltea-milestone-blueprint-review/v5" || !draft.upstreamCorrection)
       invalid("status", "prerequisite requires a typed upstreamCorrection in the exact current draft");
@@ -934,7 +972,7 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
             "for a downstream replacement/addition include index of the NEW entry. " +
             "For a missing Interactive owner resolved by removing an implied choice, use " +
             "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
-            "For an otherwise valid retained Event claim blocked ONLY by the current typed upstreamCorrection, use status:prerequisite and {kind:'upstream',targetId:exact correction target} with prior status:resolved. Do not claim a local edit. All unrelated findings still require ordinary correction. " +
+            "If a local rejected field is corrected, cite revised/added/removed. If the correction also depends on a reviewed upstream correction, use upstream with the exact target (the controller binds both the local field and prerequisite). For an otherwise valid retained Event claim blocked ONLY by the current typed upstreamCorrection, use status:prerequisite and {kind:'upstream',targetId:exact correction target} with prior status:resolved. Do not claim a local edit. All unrelated findings still require ordinary correction. " +
             "Resolved/improved cannot use current, and persisting/regressed require current. " +
             "The controller binds the original rejected field and current exact evidence; do not copy long escaped JSON. " +
             "Original identity: " + JSON.stringify({round:p.round,findingIndex:p.findingIndex,eventId:original.eventId,
@@ -997,27 +1035,64 @@ async function verifySeal(job: JobStartResult, sealValue: SessionSeal,
 /** A post-approval grant must cite actual independent answers, not just a
  * self-consistent set of hashes copied into a private planning receipt. Pi
  * retains earlier answers in JSONL across compaction and protocol retries. */
-async function assertBlueprintReplies(session: SessionSeal, expected: string[],
+export async function assertBlueprintReplies(session: SessionSeal, expected: string[],
   normalize?: (text: string, index: number) => unknown) {
+  const bytes = await readFile(session.file, "utf8");
+  if (Buffer.byteLength(bytes) !== session.bytes || sha(bytes) !== session.digest)
+    throw Error("Milestone Blueprint transcript differs from its original seal.");
+  const completed = bytes.split("\n").filter(Boolean).map(line => JSON.parse(line))
+    .filter(entry => entry.type === "message" && entry.message?.role === "assistant" &&
+      entry.message.stopReason === "stop")
+    .map(entry => entry.message.content.filter((c: {type: string}) => c.type === "text")
+      .map((c: {text: string}) => c.text).join("\n") as string);
+  const dir = join(dirname(dirname(dirname(session.file))), "milestone-protocol");
+  const receiptNames = existsSync(dir) ? (await readdir(dir)).filter(name =>
+    name.startsWith(session.id + "-") && name.endsWith(".json")) : [];
+  const receipts: Array<{responseOrdinal:number;normalizedResponseHash?:string}> = [];
+  for (const name of receiptNames) {
+    const path = join(dir,name);
+    if (await realpath(path) !== path || !(await lstat(path)).isFile())
+      throw Error("Unsafe Milestone protocol receipt.");
+    const receipt = JSON.parse(await readFile(path,"utf8"));
+    if (receipt.version !== 1 || receipt.status !== "accepted" || receipt.sessionId !== session.id ||
+        receipt.sessionFile !== session.file || !/^milestone-blueprint\.(planner|reviewer|diagnostic)\.v1$/.test(receipt.contract) ||
+        receipt.invocationId !== sha(receipt.contract + "\u0000" + session.id + "\u0000" + session.file) ||
+        !Number.isSafeInteger(receipt.responseOrdinal) || receipt.responseOrdinal < 1 ||
+        receipt.responseOrdinal > completed.length ||
+        receipt.responseHash !== sha(completed[receipt.responseOrdinal-1]) ||
+        receipt.failedPaths?.length !== 0)
+      throw Error("Milestone Blueprint protocol receipt differs from its exact accepted response.");
+    receipts.push(receipt);
+  }
+  const digestReply = (raw: string, index: number) => {
+    const text = normalizeCompletedModelJson(raw);
+    const rawDigest = sha(parse(text));
+    return rawDigest === expected[index] || !normalize ? rawDigest : sha(normalize(text,index));
+  };
+  if (receipts.length) {
+    receipts.sort((a,b)=>a.responseOrdinal-b.responseOrdinal);
+    if (receipts.length !== expected.length ||
+        receipts.some((r,i)=> (i>0 && r.responseOrdinal <= receipts[i-1]!.responseOrdinal) ||
+          r.normalizedResponseHash !== (normalizeCompletedModelJson(completed[r.responseOrdinal-1]!) === completed[r.responseOrdinal-1]!
+            ? undefined : sha(normalizeCompletedModelJson(completed[r.responseOrdinal-1]!))) ||
+          digestReply(completed[r.responseOrdinal-1]!,i) !== expected[i]) ||
+        receipts.at(-1)?.responseOrdinal !== completed.length)
+      throw Error("Milestone Blueprint history differs from the accepted protocol response ordinals.");
+    return;
+  }
+  // Historical sealed review/diagnostic proofs predating protocol receipts.
+  // Normalize the final response even if it repeats the last accepted answer.
   let matched = 0, last: string | undefined;
-  for (const line of (await readFile(session.file, "utf8")).split("\n")) {
-    if (!line.trim()) continue;
-    const entry = JSON.parse(line);
-    if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+  for (const text of completed) {
     last = undefined;
-    if (entry.message.stopReason !== "stop") continue;
-    const text = entry.message.content.filter((c: { type: string }) => c.type === "text")
-      .map((c: { text: string }) => c.text).join("");
-    try {
-      last = sha(parse(normalizeCompletedModelJson(text)));
-      if (last !== expected[matched] && normalize && matched < expected.length)
-        last = sha(normalize(normalizeCompletedModelJson(text), matched));
-    } catch { continue; } // e.g. the original protocol-error response
+    try { last = digestReply(text,Math.min(matched,expected.length-1)); }
+    catch { continue; }
     if (last === expected[matched]) matched++;
   }
   if (!expected.length || matched !== expected.length || last !== expected.at(-1))
     throw Error("Milestone Blueprint history differs from the sealed Pi answers.");
 }
+
 function validateReceiptShape(value: Receipt, id: string) {
   if (value?.schema !== "noveltea-milestone-plan-receipt/v1" ||
       !MILESTONE.test(id) || value.lineage?.milestoneId !== id ||
@@ -1258,7 +1333,7 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "Use the exact CHARACTER IDS below for existing authorized Characters. Reuse a realized Character for the same witness role instead of inventing a duplicate. If the intended evidence needs an additional " +
     "Character not in that inventory, declare a typed character.slug as prospective and include it in participants. " +
     "For every evidence entry include characterSources: [{id,availability:'existing|prospective',role}] " +
-    "for all material Character sources, or [] for non-Character sources. A prospective Character is a required " +
+    "for all material Character sources, or [] for non-Character sources. A prerequisite-only draft has no downstream owner obligations until the fresh local design is reviewed. A prospective Character is a required " +
     "predecessor, NOT authority for Event to author it or proof of existing canon. Do not remove valid narrative evidence " +
     "merely because its required Character is not yet realized. dependsOn " +
     "MUST use only earlier provisional Event slugs. " +
@@ -1278,8 +1353,8 @@ function plannerPrompt(assignment: EventAssignment, task: string, earlier?: Roun
     "routes:[{condition,consequence}]}],downstream:[{owner:'event|interactive|composition',obligation}]}. " +
     "An Event id is a provisional slug, not a canonical event.* ID. " +
     (assignment.dependencyObligations ? "If already-realized upstream canon contradicts this Milestone's required delivery, preserve the intended local design and append upstreamCorrection: " +
-      JSON.stringify({ obligationIndex: 0, targetId: "event.earlier", missing: "exact correction of existing canon", affectedIds: [assignment.milestoneId, "arc.related", "event.earlier"], sources: [{path: "canonical/path.md", quote: "exact contradictory source quote"}], likelySpecialist: "nt-event-design", authorDecisionRequired: false }) +
-      ". Cite an existing earlier owned record and its typed source relation. Every affectedId MUST have at least one exact quote from its own canonical file, including the selected Milestone and linking Arc. Multiple material quotes from one record are allowed. Do not report future planned delivery. A passing design with this finding does NOT authorize Event writing until the upstream correction is independently verified. Original delivery obligations: " + JSON.stringify(assignment.dependencyObligations) + ". " : "") +
+      JSON.stringify({ obligationIndex: 0, targetId: "event.earlier", missing: "exact correction of existing canon", affectedIds: [assignment.milestoneId, "arc.related", "event.earlier"], sources: [{path: "canonical/path.md", startLine: 12, endLine: 14}], likelySpecialist: "nt-event-design", authorDecisionRequired: false }) +
+      ". Cite an existing earlier owned record and its typed source relation. Every affectedId MUST have at least one citation from its own canonical file. Use {path,startLine,endLine} (1-based lines from the canonical read); the controller extracts exact Git bytes. Do NOT retype quotations. If no local Event can yet be safely designed, return events:[],downstream:[] with the exact upstreamCorrection, then design only after verification. targetId MUST be the actual record to EDIT, not a conflicting read-only witness: milestone/arc -> nt-story-architecture; event -> nt-event-design. If the Milestone prose is wrong, target the Milestone. If the Arc prose is wrong, target the Arc. Do not nominate the Event to edit another record. Do not report future planned delivery. A passing design with this finding does NOT authorize Event writing until the upstream correction is independently verified. Original delivery obligations: " + JSON.stringify(assignment.dependencyObligations) + ". " : "") +
     "SOURCE PATHS: " + JSON.stringify(assignment.sourcePaths) +
     "\nCHARACTER IDS: " + JSON.stringify(assignment.characterIds) +
     "\nAUTHOR OBJECTIVE: " + task +
@@ -1305,7 +1380,7 @@ function reviewerPrompt(assignment: EventAssignment, draft: MilestoneBlueprint, 
     "Reject duplicated prior/later occurrences, advancement beyond this Milestone's promised knowledge or outcomes, and unsupported prerequisites. " +
     "dependsOn is exclusively a list of earlier PROVISIONAL slugs within this draft; [] is correct for its first Event. Existing canonical prerequisites belong in evidence/access and route conditions, NOT dependsOn. Never request a canonical event.* ID in dependsOn. " +
     "An inspection performed only by the player can legitimately have participants: []. " +
-    (draft.upstreamCorrection ? "CONDITIONAL PREREQUISITE VERDICT: independently inspect the exact existing canonical sources in upstreamCorrection. If the correction is necessary, accurately scoped, and the proposed design is sound conditional on it, return status:'prerequisite', findings:[], with prior findings resolved by actual local corrections OR explicit upstream evidence. Do NOT require the canonical correction to be executed before this verdict: the controller cannot authorize the original owner until this independent conditional review. A duplicate that will be removed by the exact proposed upstream correction is not an additional local blocker. Never use this verdict to waive unrelated, unsupported or protected changes. Event stays suspended until owner correction, independent verification and fresh planning against corrected canon. " : "") +
+    (draft.upstreamCorrection ? "CONDITIONAL PREREQUISITE VERDICT: independently inspect the exact existing canonical sources in upstreamCorrection. If the correction is necessary, accurately scoped, and the proposed design is sound conditional on it (or local design is deferred with events:[],downstream:[]), return status:'prerequisite', findings:[], with prior findings resolved by actual local corrections OR explicit upstream evidence. Verify the target is the actual record whose bytes must change, not merely a conflicting read-only witness. A Milestone or Arc wording correction belongs to nt-story-architecture, not Event. Do NOT require the canonical correction to be executed before this verdict: the controller cannot authorize the original owner until this independent conditional review. A duplicate that will be removed by the exact proposed upstream correction is not an additional local blocker. Never use this verdict to waive unrelated, unsupported or protected changes. Event stays suspended until owner correction, independent verification and fresh planning against corrected canon. " : "") +
     "Verify EVERY material witness, informant, testimony provider or other Character evidence source " +
     "is explicitly declared in characterSources and participants. The subject of a statement is not automatically its provider. " +
     "Reject a missing declaration by citing the evidence field; " +
@@ -1577,9 +1652,10 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
       { id: record.reviewer.id, file: record.reviewer.file });
     await verifySeal(job, record.writer, "writer");
     await verifySeal(job, record.reviewer, record.reviewerRole ?? "reviewer");
-    if (expected || record.supersedes || record.rounds.some(r => r.reviewerVerdict || milestoneBlueprintSourceFindings(r.draft, assignment).length)) {
+    if (expected || record.supersedes || record.draft?.upstreamCorrection || record.rounds.some(r => r.reviewerVerdict || milestoneBlueprintSourceFindings(r.draft, assignment).length)) {
       const starts = record.reviewStarts ?? (record.reviewStart ? [record.reviewStart] : []);
-      await assertBlueprintReplies(record.writer, record.rounds.filter((_, i) => !starts.includes(i)).map(r => r.draftDigest));
+      await assertBlueprintReplies(record.writer, record.rounds.filter((_, i) => !starts.includes(i)).map(r => r.draftDigest),
+        text => parse(resolveMilestoneBlueprintSourceSelectors(job,pin.sourceSha,assignment.sourcePaths,text)));
       const reviewers = [...(record.reviewerHistory ?? []).map(h => h.session), record.reviewer];
       if (reviewers.length !== starts.length + 1) throw Error("Incomplete Blueprint reviewer lineage.");
       for (const [index, session] of reviewers.entries()) {
@@ -1756,7 +1832,8 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       if (current.phase === "draft" && current.reviewStart !== current.rounds.length && current.draft)
         drafts.push(sha(current.draft));
       if (!current.writer) throw Error("Settled Milestone Blueprint lacks its writer.");
-      await assertBlueprintReplies(current.writer, drafts);
+      await assertBlueprintReplies(current.writer, drafts,
+        text => parse(resolveMilestoneBlueprintSourceSelectors(job,head,assignment.sourcePaths,text)));
       const reviewers = [...(current.reviewerHistory ?? []).map(h => h.session),
         ...(current.reviewer ? [current.reviewer] : [])];
       if (reviewers.length !== starts.length + (current.reviewer ? 1 : 0))
@@ -1836,10 +1913,15 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
       const { resolveWriterDependencySources } = await import("./writer-dependency.js");
       const draft = await correctMilestoneContract(writer, job, assignment, "planner",
         raw => {
-          const candidate = parseMilestoneBlueprint(raw, assignment, "review-draft");
+          const candidate = parseMilestoneBlueprint(resolveMilestoneBlueprintSourceSelectors(job,head,assignment.sourcePaths,raw), assignment, "review-draft");
           if (candidate.upstreamCorrection) {
             if (!ownerCatalog) invalid("upstreamCorrection", "No original Turn authority for an upstream correction.");
-            try { resolveWriterDependencySources(job, head, candidate.upstreamCorrection, ownerCatalog); }
+            try {
+              resolveWriterDependencySources(job, head, candidate.upstreamCorrection, ownerCatalog);
+              const owner = writerDependencySpecialist(candidate.upstreamCorrection.targetId);
+              if (candidate.upstreamCorrection.likelySpecialist !== owner)
+                invalid("upstreamCorrection.likelySpecialist", "The actual target record is owned by " + owner + "; do not nominate a different record as a proxy.");
+            }
             catch (error) { invalid("upstreamCorrection.sources", error instanceof Error ? error.message : String(error)); }
           }
           return candidate;

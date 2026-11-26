@@ -903,7 +903,7 @@ async function runFoundationAssignmentChild(
   // effect but before the original assignment is recorded complete. Recover
   // the immutable source from the eligible native receipt, not refreshed HEAD.
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
-  const published = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const published = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.workItem === "foundation" &&
     p.commitSha === (correction?.origin.sourceHeadSha ?? s.inventory!.headSha) &&
     p.planVersion === (s.planVersion ?? null) && p.validation.status === "passed" &&
@@ -970,7 +970,7 @@ async function runFoundationAssignmentChild(
       // and finalized native receipt before the parent task was checkpointed
       // (the already-published recovery checkpoint). Both remain bound to
       // the original source parent and *same* work-item identity.
-      const finalized = (await inspectRecoveryCheckpoints(job)).some(point =>
+      const finalized = (await inspectRecoveryCheckpoints(job, "historical")).some(point =>
         point.eligible && point.workItem === "foundation" &&
         point.commitSha === currentHead && point.parentSha === sourceHead &&
         point.planVersion === (s.planVersion ?? null) &&
@@ -1058,7 +1058,7 @@ async function runFoundationAssignmentChild(
       const head = await trustedHead(job);
       if (actual.headSha !== head)
         throw Error("Original Foundation result differs from independently reviewed Git HEAD.");
-      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
       const reviews = await resolvedCheckpointReviews(job, points);
       const reviewed = points.find(p => p.workItem === "foundation" &&
         p.commitSha === head && p.parentSha === sourceHead &&
@@ -1225,7 +1225,7 @@ async function runFoundationAssignmentChild(
   if (!reviewedState && finished.outcome.status === "unresolved" &&
       finished.outcome.dispositionRef === "review-checkpoints" && finished.submission?.headSha) {
     const head = finished.submission.headSha;
-    const failed = (await inspectRecoveryCheckpoints(job)).find(p =>
+    const failed = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
       p.eligible && p.workItem === "foundation" && p.commitSha === head && p.semanticReview === "failed");
     if (failed) {
       const candidate = { ...s, result: { status: finished.submission.status, headSha: head } };
@@ -1353,7 +1353,7 @@ async function runArchitectureAssignmentChild(
   const saved = await checkPlan(job, s.request, s.planVersion);
   const version = s.planVersion ?? 1;
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
-  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
   const original = points.find(p => p.workItem === "global-architecture" &&
     p.planVersion === version && p.validation.status === "passed" &&
     p.commitSha === (correction?.origin.sourceHeadSha ?? saved?.expectedHead) &&
@@ -1450,7 +1450,7 @@ async function runArchitectureAssignmentChild(
         if (!correction) disposition = await (await import("./architecture.js")).verifyArchitectureAssignmentResult(
           job, s.request, version, sourceHead, submission.headSha);
         if (disposition === "commit" && !correction &&
-            !(await inspectRecoveryCheckpoints(job)).some(p => p.eligible &&
+            !(await inspectRecoveryCheckpoints(job, "historical")).some(p => p.eligible &&
               p.workItem === "global-architecture" && p.planVersion === version &&
               p.commitSha === submission.headSha && p.parentSha === sourceHead &&
               p.validation.status === "passed" &&
@@ -1475,7 +1475,7 @@ async function runArchitectureAssignmentChild(
           .verifyReviewCycleSuccessor(job, correction.origin.sourceHeadSha, head))
           throw Error("Architecture correction lacks its independently passing successor.");
       } else if (disposition === "commit") {
-        const current = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const current = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
         const reviews = await resolvedCheckpointReviews(job, current);
         const point = current.find(p => p.commitSha === submission.headSha);
         if (!point || !["passed", "not-required"].includes(reviews.get(point.commitSha) ?? point.semanticReview))
@@ -1638,7 +1638,7 @@ function subunitReviewTransitions(s: State, job: JobStartResult, identity: Assig
 async function subunitReviewStop(s: State, job: JobStartResult, identity: AssignmentIdentity,
   correction: NonNullable<State["recoveryLifecycle"]["active"]>, outcome: AssignmentOutcome,
   workItem = identity.assignmentId): Promise<Partial<State>> {
-  const originalReview = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const originalReview = (await inspectRecoveryCheckpoints(job, "historical")).find(p =>
     p.eligible && p.commitSha === correction.origin.sourceHeadSha && p.workItem === workItem);
   if (!originalReview?.assurance || originalReview.assurance.turnDigest !== identity.turnDigest)
     throw new ProtocolIntegrityBlockedError("Subunit Review stop lacks its original sealed assignment.");
@@ -1715,7 +1715,7 @@ async function runCharacterWorldAssignmentChild(
       saved.units?.length !== 2 || saved.units[0]?.id !== "world-foundations" ||
       saved.units[1]?.id !== "character-foundations"))
     throw Error("World/Character receipt differs from its original assignment.");
-  const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+  const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
   const original = correction ? points.find(p => p.commitSha === correction.origin.sourceHeadSha &&
     ["world-foundations", "character-foundations"].includes(p.workItem)) : undefined;
   if (correction && !original) throw Error("Correction lacks its original World/Character source.");
@@ -1865,7 +1865,7 @@ async function runCharacterWorldAssignmentChild(
   const verifyCommitted = async (submission: AssignmentSubmission): Promise<AssignmentOutcome> => {
       if (submission.status !== resultStatus || !submission.headSha)
         return outcome("unresolved", ref, { dispositionRef: submission.status });
-      const native = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+      const native = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible &&
         p.commitSha === submission.headSha && p.workItem === workItem && p.parentSha === (writerPin ? s.inventory!.headSha : sourceHead) &&
         p.planVersion === s.planVersion && p.validation.status === "passed");
       if (!native || native.assurance?.turnDigest !== s.request.turnPlanDigest)
@@ -1880,7 +1880,7 @@ async function runCharacterWorldAssignmentChild(
       const reviewStop = reviewProjectionOutcome(reviewPatch, key, "review-checkpoints");
       if (reviewStop) return reviewStop;
       const head = await trustedHead(job);
-      const eligible = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const eligible = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
       const point = eligible.find(p => p.commitSha === submission.headSha)!;
       const resolved = await resolvedCheckpointReviews(job, eligible);
       if (!["passed", "not-required"].includes(resolved.get(point.commitSha) ?? point.semanticReview))
@@ -2009,7 +2009,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
     throw Error("Narrative child lacks its admitted Turn, assignment and plan.");
   const turnDigest = s.request.turnPlanDigest!;
   const correction = correctionSelected ? s.recoveryLifecycle.active : null;
-  const points = await inspectRecoveryCheckpoints(job);
+  const points = await inspectRecoveryCheckpoints(job, "historical");
   const root = correction && points.find(p => p.eligible &&
     p.commitSha === correction.origin.sourceHeadSha && executionId(p.workItem) === active.id);
   if (correctionSelected && (!correction || !root || !s.result ||
@@ -2214,7 +2214,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       const awaitableWriterBase = writerPin ? active.stage === "event"
         ? (await inspectPendingEventInvocation(job, milestone))?.expectedHead
         : (await runCompositionWorkItem({ ...s.request, milestone, action: "inspect" })).expectedHead : undefined;
-      const native = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+      const native = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible &&
         p.workItem === workItem && p.commitSha === (root ? root.commitSha : submission.headSha) &&
         p.parentSha === (root ? root.parentSha : writerPin
           ? (awaitableWriterBase ?? sourceHead) : sourceHead) && p.validation.status === "passed" &&
@@ -2226,7 +2226,7 @@ async function runNarrativeAssignmentChild(s: State, config: RunnableConfig,
       const reviewStop = reviewProjectionOutcome(patch, key, ref);
       if (reviewStop) return reviewStop;
       const head = await trustedHead(job);
-      const refreshed = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const refreshed = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
       const reviews = await resolvedCheckpointReviews(job, refreshed);
       const current = refreshed.find(p => p.commitSha === native.commitSha);
       if (!current ||
@@ -2340,7 +2340,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
       return false;
     const head = await trustedHead(job);
     if (head === entry.commitSha) return true;
-    return original.phase === "committed" && (await inspectRecoveryCheckpoints(job)).some(p =>
+    return original.phase === "committed" && (await inspectRecoveryCheckpoints(job, "historical")).some(p =>
       p.eligible && p.workItem === active.id && p.parentSha === entry.commitSha && p.commitSha === head);
   };
   const preflight = async () => {
@@ -2415,7 +2415,7 @@ async function runFocusedAssignmentChild(s: State, config: RunnableConfig,
       if (reviewStop) return reviewStop;
       const actual = patch.result === undefined ? candidate.result : patch.result;
       const head = await trustedHead(job);
-      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
       const reviews = await resolvedCheckpointReviews(job, points);
       if (!patch.status && !patch.operationRecovery && !patch.recovery && !patch.unknownRecovery &&
           !patch.escalation && !patch.reviewSteeringHandoff && actual?.headSha === head &&
@@ -2494,7 +2494,7 @@ async function reviewPrerequisiteIdentity(s: State, config: RunnableConfig,
   const plan = await inspectDependencyPlan(job);
   if (!plan?.reviewRequests?.some(r => isDeepStrictEqual(r, request)))
     throw Error("Review prerequisite request is not sealed in the controller ledger.");
-  const point = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+  const point = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible &&
     p.commitSha === request.sourceSha && p.semanticReview === "failed" &&
     p.assurance?.assignmentDigest === request.originalAssignmentDigest);
   if (!point?.assurance) throw Error("Review prerequisite lost its native checkpoint.");
@@ -2673,7 +2673,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
       diagnostic.terminal.workItem === "interactive-puzzle-" + milestone.slice(10) ? "puzzle" : undefined;
   if (diagnostic && !correctionDomain) throw Error("Diagnostic lost the original Interactive unit.");
   if (correction) {
-    const root = (await inspectRecoveryCheckpoints(job)).find(p => p.eligible &&
+    const root = (await inspectRecoveryCheckpoints(job, "historical")).find(p => p.eligible &&
       p.commitSha === correction.origin.sourceHeadSha);
     correctionDomain = root?.workItem === "interactive-choice-" + milestone.slice(10) ? "choice" :
       root?.workItem === "interactive-puzzle-" + milestone.slice(10) ? "puzzle" : undefined;
@@ -2687,7 +2687,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
   if (!correction && !diagnostic && !pending && active.stage === "interactive") {
     const choice = await inspectInteractiveUnit(job, milestone, "choice");
     if (choice?.unit.phase === "committed" && choice.unit.commitSha) {
-      const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+      const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
       const point = points.find(p => p.workItem === choice.unit.id && p.commitSha === choice.unit.commitSha);
       const reviews = await resolvedCheckpointReviews(job, points);
       const fork = readRecoveryFork(job);
@@ -2851,7 +2851,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
         }
         if (unit.phase !== "committed" || !unit.commitSha)
           throw Error("Interactive child has no committed native result");
-        const points = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const points = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
         const point = points.find(p => p.workItem === workItem && p.commitSha === unit.commitSha &&
           p.parentSha === effectiveHead && p.validation.status === "passed" &&
           p.planVersion === s.planVersion &&
@@ -2883,7 +2883,7 @@ async function runInteractiveAssignmentChildren(s: State, config: RunnableConfig
           const reviewStop = reviewProjectionOutcome(patch, key, ref);
           if (reviewStop) return reviewStop;
         }
-        const refreshed = (await inspectRecoveryCheckpoints(job)).filter(p => p.eligible);
+        const refreshed = (await inspectRecoveryCheckpoints(job, "historical")).filter(p => p.eligible);
         const reviews = await resolvedCheckpointReviews(job, refreshed);
         const current = refreshed.find(p => p.commitSha === unit.commitSha);
         if (!current ||
@@ -3225,7 +3225,7 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
     const { createSkillSnapshot } = await import("./snapshot.js");
     const { loadSkillConfig } = await import("./skills.js");
     const { inspectPiPolicy } = await import("./job-pi-policy.js");
-    const history = await inspectRecoveryCheckpoints(job);
+    const history = await inspectRecoveryCheckpoints(job, "historical");
     if (job.recoveryFork && history.some(point => point.eligible && !point.assurance))
       throw Error("Recovered Story has a native-verified specialist checkpoint without " +
         "independent-review assurance; do not dispatch Choice or other dependent work.");
@@ -3257,7 +3257,7 @@ async function independentAssignmentBoundary(s: State, correctionSelected = fals
             reviewer: "independent-pi-assignment-review", onSession: async () => {},
           }));
       }
-      const reviewed = (await inspectRecoveryCheckpoints(job))
+      const reviewed = (await inspectRecoveryCheckpoints(job, "historical"))
         .find(saved => saved.eligible && saved.commitSha === point.commitSha);
       if (!reviewed || reviewed.semanticReview === "required-pending")
         throw Error("Independent semantic reviewer did not seal a source-linked decision.");

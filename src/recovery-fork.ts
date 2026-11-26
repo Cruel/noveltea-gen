@@ -308,6 +308,14 @@ async function writeOnce(path: string, value: string) {
 /** Caller owns repository Git/cache admission. Only the child's writer lock is
  * taken, so a running parent remains untouched. Retries never reset a child. */
 export async function prepareRecoveryFork(parent: JobStartResult, bundle: RecoveryForkBundle) {
+  if (bundle.reviewBatch) {
+    const original = await collectReviewedOmissionBatch(parent,bundle.checkpoint);
+    if (JSON.stringify(original)!==JSON.stringify(bundle.reviewBatch))
+      throw new RecoveryCompatibilityError("invalid-evidence",
+        "Reviewed omission sources changed between fork admission and preparation.");
+    await verifySavedReviewBatch(parent,bundle.reviewBatch);
+  }
+
   for (const [path, receipt] of Object.entries(bundle.receipts))
     if (path.startsWith("event-items/")) assertInheritedEventCompletion(parent, receipt);
   const inheritedEvents = Object.entries(bundle.receipts).filter(([path, receipt]) =>

@@ -8,7 +8,7 @@ import { parseDependencyReport, parseWriterDependencyFinding, type DependencyRep
 import { inspectRecoveryCheckpoints, inspectHistoricalRecoveryCheckpoint } from "./recovery-checkpoints.js";
 import type { OtherOwnerCheckpoint } from "./review-repair-amendment.js";
 import { checkpointRecordType, readRepairCommitProof } from "./checkpoint-assurance.js";
-import { focusedSpecialist } from "./focused-specialist.js";
+import { writerDependencySpecialist } from "./focused-specialist.js";
 import { historicalCanonicalCatalog } from "./validator.js";
 import { inheritedReviewedCheckpoint, readRecoveryFork } from "./recovery-fork-state.js";
 import type { CanonicalScopeRecord } from "./focused-scope.js";
@@ -182,7 +182,7 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
         !["fact", "world-entity"].includes(f.targetId.split(".")[0]!) :
         !original.milestoneId || !f.affectedIds.includes(original.milestoneId)) ||
       f.sources.some(s => !original.sourcePaths.includes(s.path)) ||
-      f.likelySpecialist !== focusedSpecialist(f.targetId))
+      f.likelySpecialist !== writerDependencySpecialist(f.targetId))
     throw Error("Writer prerequisite lacks exact original Turn, assignment, scope or owner.");
   const catalog = await historicalCanonicalCatalog(job, original.head);
   const {targetPath, sources} = resolveWriterDependencySources(job, original.head, f, catalog);

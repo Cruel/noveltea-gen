@@ -2,7 +2,7 @@ import { assignmentCommittedEffect, type AssignmentDiagnosticAuthorization } fro
 import { createDependencyTool } from "./dependency-tool.js";
 import { authorizedDependency, dependencyDigest, inspectDependencyPlan, dependencyWriterBase } from "./dependency-state.js";
 import { parseDependencyReport, type DependencyReport } from "./dependency-amendments.js";
-import { focusedSpecialist } from "./focused-specialist.js";
+import { focusedSpecialist, writerDependencySpecialist } from "./focused-specialist.js";
 import { steeringForAssignment } from "./steering-amendments.js";
 import { createPiStatusTool } from "./pi-work-status.js";
 import { execFileSync } from "./git-read-cache.js";
@@ -371,7 +371,7 @@ async function writeWithPi(job: JobStartResult, receipt: Receipt, task: string,
           dependencyReport = report;
           if (round) { receipt.pendingDependencyReport = report; await save(receiptPath(job, receipt), receipt); }
         }) : null;
-  const skill = focusedSpecialist(receipt.target);
+  const skill = receipt.workItemId.startsWith("dependency:") ? writerDependencySpecialist(receipt.target) : focusedSpecialist(receipt.target);
   const project = await openStoryProject(job.worktreeStoryRoot);
   const config = { discovery: "explicit-only" as const, novelteaSkills: receipt.snapshot!.path,
     skillDirs: [], requiredSkills: [skill, "nt-catalog"] };
@@ -877,7 +877,7 @@ export async function runFocusedWorkItem(input: FocusedWorkOptions) {
       ? { discovery: "explicit-only" as const, novelteaSkills: input.skillsSource, skillDirs: [], requiredSkills: [] }
       : await loadSkillConfig(undefined, false);
     if (!receipt.snapshot) {
-      const requiredSkills = [focusedSpecialist(input.target), "nt-catalog"];
+      const requiredSkills = [dependency?.writerSource ? writerDependencySpecialist(input.target) : focusedSpecialist(input.target), "nt-catalog"];
       const snapshot = await createSkillSnapshot({ ...config, requiredSkills });
       if (!snapshot) throw new Error("Focused work requires pinned canonical skills.");
       receipt.snapshot = snapshot; await save(file, receipt);

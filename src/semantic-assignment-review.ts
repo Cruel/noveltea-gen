@@ -16,6 +16,7 @@ import { inspectRecoveryCheckpoints } from "./recovery-checkpoints.js";
 import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { sourceBoundBlueprintChallenge } from "./blueprint-challenge.js";
 import type { MilestoneBlueprint, MilestoneBlueprintPin } from "./milestone-blueprint.js";
+import { affectedEventOnlyOmissions, type OmissionRevalidation } from "./interactive-event-only.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { sealIndependentReview, inspectCheckpointReview, repairReviewAssignment, readRepairCommitProof, checkpointOriginalAssignment,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
@@ -36,6 +37,7 @@ export interface SemanticReviewItem {
   canonicalContext: SealedReviewRecord[];
   /** Read-only sources include protected changed records which repair cannot edit. */
   readOnlyPaths: string[];
+  affectedOmissions?: OmissionRevalidation[];
   /** Ceiling only: the repair controller must still authorize an amendment. */
   repairTargets: string[];
   /** Signed Event correction exception; no other Milestone fields may change. */
@@ -91,6 +93,7 @@ export interface SemanticVerdict {
   progressDiagnosis?: EditorialRepairDiagnosis;
   findings: SemanticFinding[];
   evidence: Array<{ commitSha: string; assignmentId: string; path: string; line: number; explanation: string;
+    omissionMilestone?: string;
     blueprintChallenge?: import("./milestone-blueprint-correction.js").BlueprintChallenge }>;
 }
 
@@ -114,6 +117,7 @@ function packetDigest(items: SemanticReviewItem[], dispute?: SemanticReviewPacke
 /** Review only the work actually authorized at this durable checkpoint.
  * Parent Turn goals still belong to the following units and final Turn review. */
 export function semanticUnitOutcome(workItem: string, specialist?: string): string {
+  if (workItem.startsWith("dependency:") && specialist === "nt-story-architecture") return "Review only the exact controller-admitted existing Arc or Milestone correction, preserve protected decisions and native fulfillment, and do not require the suspended consumer to be realized yet.";
   if (workItem.startsWith("dependency:")) return "Review only the controller-admitted necessary prerequisite and exact authorized paths; do not require the suspended consumer to be realized yet. Any Arc link is field-only; the writer may not change its prose or other fields.";
   if (workItem.startsWith("repair-") && specialist === "nt-event-design")
     return (
@@ -198,8 +202,11 @@ export async function prepareSemanticReview(job: JobStartResult,
     if (architectureReview && (direction.length !== 1 ||
       !/^creative-direction\/[a-z0-9][a-z0-9._-]*\.md$/.test(direction[0]!)))
       throw new Error('Independent Architecture review needs one pinned canonical Creative Direction.');
+    const affectedOmissions = point.workItem.startsWith("dependency:") ? [] :
+      await affectedEventOnlyOmissions(job,point.parentSha,point.commitSha,assurance.changedPaths);
     const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
-      ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths, ...direction])];
+      ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths, ...direction,
+      ...affectedOmissions.flatMap(omission=>Object.keys(omission.sourceHashes))])];
     const canonicalContext = await loadSealedReviewContext(job, point.commitSha, paths);
     let eventMilestone: import("./review-repair-amendment.js").EventMilestoneRepairGrant | undefined;
     if (point.workItem.startsWith("repair-")) {
@@ -370,6 +377,7 @@ export async function prepareSemanticReview(job: JobStartResult,
           "this text grants no additional path, domain or protected-decision authority." : ""),
       assurance, diff, canonicalContext,
       readOnlyPaths, repairTargets,
+      ...(affectedOmissions.length ? { affectedOmissions } : {}),
       ...(milestoneBlueprint ? { milestoneBlueprint } : {}),
       ...(eventMilestone ? { eventMilestoneFieldGrant: { ...eventMilestone,
         fields: ["completeness", "fulfillment"] as ["completeness", "fulfillment"] } } : {}),
@@ -503,6 +511,11 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
       verdict.evidence.some(e => {
         if (!e || !belongs(e.commitSha, e.assignmentId, e.path, e.line) ||
             typeof e.explanation !== "string" || !e.explanation.trim()) return true;
+        if (e.omissionMilestone !== undefined && !packet.items.some(item =>
+          item.assurance.commitSha === e.commitSha && item.assignment.id === e.assignmentId &&
+          item.assurance.changedPaths.includes(e.path) && item.affectedOmissions?.some(omission=>
+            omission.milestoneId===e.omissionMilestone && omission.sourceHashes[e.path])))
+          return true;
         if (e.blueprintChallenge === undefined) return false;
         // A reviewer may only CHALLENGE the precise approved version in the
         // authenticated packet. An arbitrary JSON extension cannot confer scope.
@@ -516,7 +529,11 @@ export function validateSemanticVerdict(packet: SemanticReviewPacket, raw: unkno
           return false;
         } catch { return true; }
       }) ||
-      (verdict.verdict === "pass" && verdict.findings.length > 0) ||
+      (verdict.verdict === "pass" && (verdict.findings.length > 0 ||
+        packet.items.some(item=>item.affectedOmissions?.some(omission=>
+          !verdict.evidence.some(e=>e.commitSha===item.assurance.commitSha &&
+            e.assignmentId===item.assignment.id && e.omissionMilestone===omission.milestoneId &&
+            item.assurance.changedPaths.includes(e.path) && omission.sourceHashes[e.path]))))) ||
       (verdict.verdict === "fail" && !verdict.findings.length) ||
       packet.items.some(item =>
         !verdict.evidence.some(e => e.commitSha === item.assurance.commitSha &&
@@ -551,6 +568,8 @@ export function independentReviewResults(packet: SemanticReviewPacket, verdict: 
         kind: f.kind, line: f.line, affectedPaths: f.affectedPaths,
         requiredCorrection: f.requiredCorrection })),
       evidence: JSON.stringify({ policy: packet.policy, sourceDigest: packet.sourceDigest,
+        ...(!findings.length && item.affectedOmissions?.length && verdict.verdict==="pass" ?
+          {omissionRevalidations:item.affectedOmissions} : {}),
         evidence: verdict.evidence.filter(e => e.commitSha === item.assurance.commitSha &&
           e.assignmentId === item.assignment.id) }),
     } satisfies IndependentReviewResult;

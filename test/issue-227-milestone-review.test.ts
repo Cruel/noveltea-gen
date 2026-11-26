@@ -520,6 +520,14 @@ test("conditional upstream Review binds the retained rejected claim to exact pro
       evidence:{kind:"upstream",targetId:"event.earlier"}}]};
   const approved = parseMilestoneBlueprintReview(JSON.stringify(raw),conditional,scope,previous);
   assert.equal(approved.status,"pass");
+  const deferred = {...conditional,events:[],downstream:[]};
+  assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(deferred),scope),deferred);
+  assert.throws(()=>parseMilestoneBlueprint(JSON.stringify({...deferred,upstreamCorrection:undefined}),scope));
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify({...raw,status:"pass",prior:[]}),deferred,scope),/prerequisite/);
+  assert.equal(parseMilestoneBlueprintReview(JSON.stringify({...raw,prior:[]}),deferred,scope).status,"pass");
+  const revised = {...conditional,events:[{...draft.events[0]!,purpose:"Compare the already recorded log after the earlier correction."}]};
+  assert.equal(parseMilestoneBlueprintReview(JSON.stringify(raw),revised,scope,previous).status,"pass");
+
   assert.equal((approved.prior![0]!.evidence as {kind:string}).kind,"upstream");
   assert.deepEqual(parseMilestoneBlueprintReview(JSON.stringify(approved),conditional,scope,previous,"sealed-replay"),approved);
   assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify(raw),draft,scope,previous), /upstreamCorrection/);

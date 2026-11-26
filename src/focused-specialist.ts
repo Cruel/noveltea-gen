@@ -25,3 +25,11 @@ export function focusedSpecialist(recordId: string): string {
     throw Error("No bounded focused specialist for " + recordId + "; select an Arc or Milestone scope.");
   return owners[type];
 }
+
+/** Existing canonical architecture records may be corrected only under an
+ * independently admitted, exact-path supporting dependency grant. Ordinary
+ * focused author requests still use the original focused-scope policy. */
+export function writerDependencySpecialist(recordId: string): string {
+  const type = recordId.split(".")[0];
+  return type === "arc" || type === "milestone" ? "nt-story-architecture" : focusedSpecialist(recordId);
+}

@@ -275,6 +275,15 @@ export async function assertRevalidatedEventOnlySource(job: JobStartResult,
     original: import("./interactive-event-only.js").EventOnlyPayload, sealDigest: string, changed: string[]) {
   const { inspectDependencyPlan, dependencyGit, dependencyDigest } = await import("./dependency-state.js");
   const head = await trustedHead(job);
+  const {reviewedOmissionSuccessor} = await import("./interactive-event-only.js");
+  // The shared assignment-fidelity Review may attest an ordinary write's
+  // affected no-write obligations, in addition to the support adapter below.
+  if (await reviewedOmissionSuccessor(job,original,sealDigest,head)) {
+    const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+    if (Object.keys(original.sourceHashes).some(path=>dependencyGit(job,"status","--porcelain=v1","--untracked-files=all","--",prefix+path)))
+      throw Error("Event-only canonical evidence changed after review.");
+    return;
+  }
   const plan = await inspectDependencyPlan(job);
   const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   for (const path of changed) {
