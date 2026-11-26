@@ -182,6 +182,115 @@ async function useScriptedArchiveCli(f: ReturnType<typeof setup>) {
   Object.assign(f.env, { NT_TEST_SCRIPTED_ARCHIVE: "1" });
 }
 
+async function pinTestDiscoveryApproval(job: import("../src/job.js").JobStartResult,
+  plan: ReturnType<typeof planWholeStory>, snapshot: NonNullable<Awaited<ReturnType<typeof createSkillSnapshot>>>,
+  foundation: import("../src/foundation-record.js").FoundationDraft) {
+  const proposalDigest=pendingDigest(foundation);
+  const {pinChatApprovedFoundation}=await import("../src/chat-approved-foundation.js");
+  const {sealDiscoveryHandoff,pinDiscoveryHandoff}=await import("../src/discovery-generation-handoff.js");
+  const {emptyPiUsage}=await import("../src/job-pi-policy.js");
+  await pinChatApprovedFoundation(job,{jobId:job.jobId,sourceSha:job.baseSha,firstTurnId:job.jobId,
+    scope:"whole-story",originalObjective:plan.originalRequest,proposalDigest,skillId:snapshot.id,foundation,
+    creativeMode:"autonomous",provider:scriptedModel.provider,model:scriptedModel.id});
+  const digest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  await pinDiscoveryHandoff(job,sealDiscoveryHandoff({
+    owner:"fixture-owner",storyId:"fixture-story",repositoryId:"fixture-repo",directory:job.storyRelativePath,
+    firstTurnId:job.jobId,threadId:"root:"+job.jobId,sourceSha:job.baseSha,originalObjective:plan.originalRequest,
+    graphEpoch:digest("epoch"),approvalOperation:1,reviewedProposalDigest:proposalDigest,approvedProposalDigest:proposalDigest,
+    authorEvidenceDigest:digest("exact approval"),reviewDigest:digest("positive review"),
+    foundationDigest:digest(foundation),skillId:snapshot.id,model:{provider:scriptedModel.provider,id:scriptedModel.id},
+    limits:{},usage:emptyPiUsage(),usageEvidenceDigest:digest("usage"),turnPlanDigest:plan.digest,
+  }));
+}
+
+test("R01 Chat-approved Foundation negative Review admits a new source-bound correction and preserves approval",{
+  skip:!available,timeout:120_000,
+},async()=>{
+  const f=setup("r01-chat-foundation-repair");
+  const contract=JSON.parse(readFileSync(f.contract,"utf8"));
+  contract.scope={kind:"full-story",depth:"composition",targets:[],branches:[]};
+  const plan=planWholeStory(f.start[3]!,contract,f.job.baseSha);
+  await saveJobTurnPlan(f.job,plan);
+  const old=Object.fromEntries(Object.keys(f.env).map(key=>[key,process.env[key]]));
+  Object.assign(process.env,f.env);
+  const restore=fixtureSandboxClient(f.job.jobId,f.job.worktreeStoryRoot);
+  const saver=SqliteSaver.fromConnString(join(f.job.stateDir,"chat-foundation-repair.sqlite"));
+  try {
+    const snapshot=await createSkillSnapshot({discovery:"explicit-only",novelteaSkills:source,skillDirs:[],
+      requiredSkills:["nt-story-discovery","nt-catalog"]});
+    assert.ok(snapshot);
+    const foundation={id:"foundation",title:"The Archive Witness",premise:"A ledger vanishes from the archive.",
+      central_conflict:"A witness fears exposure.",genre:"Mystery",tone:"Suspenseful",
+      player_experience:"Compare evidence and decide whether to protect the witness.",
+      scope:"One archive and two endings.",decisions:[{id:"author-brief",statement:plan.originalRequest,
+        origin:"user" as const,authority:"user-protected" as const}],
+      body:"# The Archive Witness\n\nThe witness holds a clue. No catalog file was written."};
+    await pinTestDiscoveryApproval(f.job,plan,snapshot,foundation);
+    const originalApproval=readFileSync(join(f.job.stateDir,"chat-approved-foundation.json"),"utf8");
+    const path="creative-direction/foundation.md";
+    const corrected="The witness saw the signature on the missing ledger and compares it with the register.";
+    let reviews=0,writes=0;
+    const scripted=await scriptedStoryRuntime((index,context)=>{
+      const messages=context.messages as Array<{role:string;content:string|Array<{text?:string}>}>;
+      const prompt=messages.filter(m=>m.role==="user").flatMap(m=>typeof m.content==="string"?[m.content]:m.content.map(c=>c.text??"")).at(-1)??"";
+      const lastUser=messages.findLastIndex(m=>m.role==="user");
+      const step=messages.slice(lastUser+1).filter(m=>m.role==="assistant").length;
+      const stop=(v:unknown)=>({content:scriptedText(v),reason:"stop" as const});
+      const read=(paths:string[])=>({content:scriptedReadCalls(paths,index),reason:"toolUse" as const});
+      if(prompt.includes("IMMUTABLE REVIEW PACKET")) {
+        const packet=JSON.parse(prompt.split("\nIMMUTABLE REVIEW PACKET\n")[1]!);
+        const item=packet.items[0];
+        assert.match(item.unitOutcome,/AUTHENTICATED DISCOVERY APPROVAL/);
+        if(!step)return read(boundedPinnedSources("nt-narrative-review").map(p=>"skill://"+p));
+        const pass=reviews++>0;
+        return stop({sourceDigest:packet.sourceDigest,verdict:pass?"pass":"fail",
+          findings:pass?[]:[{commitSha:item.assurance.commitSha,assignmentId:item.assignment.id,path,line:1,
+            kind:"continuity",message:"Committed Foundation incorrectly says no catalog was written.",
+            requiredCorrection:"Remove proposal-era commentary and explain the observable clue.",affectedPaths:[path]}],
+          evidence:pass?[{commitSha:item.assurance.commitSha,assignmentId:item.assignment.id,path,line:1,
+            explanation:"Approved metadata retained; concrete clue is present."}]:[],
+          ...(pass?{progressDiagnosis:{status:"material",reason:"Actual body correction resolves the finding.",
+            evidence:{path,quote:corrected,change:"added"}}}:{})});
+      }
+      if(prompt.includes("Execute the controller-admitted corrective Foundation session")) {
+        assert.match(JSON.stringify(messages),/no historical writer session/);
+        if(!step)return read(boundedPinnedSources("nt-story-discovery").map(p=>"skill://"+p).concat(path));
+        if(step===1){writes++;return {content:[{type:"toolCall" as const,name:"edit",id:"chat-repair-edit",
+          arguments:{path,edits:[{oldText:"The witness holds a clue. No catalog file was written.",newText:corrected}]}}],
+          reason:"toolUse" as const};}
+        if(step===2)return {content:[{type:"toolCall" as const,name:"story_validate",id:"chat-repair-validate",arguments:{}}],
+          reason:"toolUse" as const};
+        return stop("Corrected the canonical clue and removed proposal commentary.");
+      }
+      if(index===0)return read(requiredOrchestratorSkillReads("autonomous").map(p=>"skill://"+p));
+      if(index===1)return stop({sourceSha:f.job.baseSha,turnDigest:plan.digest,
+        assignments:plan.assignments.map(a=>({id:a.id,reason:"Execute the original objective."}))});
+      throw Error("Unexpected Chat foundation model invocation "+index+" "+prompt.slice(0,100));
+    });
+    const graph=createGenerationGraph(saver,"cli");
+    const cfg={configurable:{thread_id:f.job.threadId+":generation"},recursionLimit:1000};
+    const output=await withJobModelRuntime(scripted.runtime,()=>graph.invoke({request:{
+      story:f.story,job:f.job.jobId,task:plan.originalRequest,contract,turnPlanDigest:plan.digest,
+      fixture:false,skillsSource:source,validatorSource:source,provider:scriptedModel.provider,
+      model:scriptedModel.id,orchestrationPolicy:"explicit",
+      discoveryHandoffDigest:JSON.parse(readFileSync(join(f.job.stateDir,"discovery-handoff.json"),"utf8")).digest,
+    },pauseAfter:"foundation"},cfg));
+    assert.equal(output.status,"paused",JSON.stringify({reason:output.reason,recovery:output.recoverySources}));
+    assert.equal(reviews,2);assert.equal(writes,1);
+    assert.equal(readFileSync(join(f.job.stateDir,"chat-approved-foundation.json"),"utf8"),originalApproval);
+    assert.equal(readFileSync(join(f.job.worktreeStoryRoot,path),"utf8"),
+      renderFoundation({...foundation,body:"# The Archive Witness\n\n"+corrected},"approved"));
+    const rootReceipt=JSON.parse(readFileSync(join(f.job.stateDir,"foundation.json"),"utf8"));
+    assert.equal(rootReceipt.piSessionFile,undefined);
+    const repair=JSON.parse(readFileSync(join(f.job.stateDir,"review-repairs",rootReceipt.commitSha+".json"),"utf8"));
+    assert.equal(repair.phase,"passed");
+    assert.ok(repair.origin.chatFoundationApproval);
+    assert.ok(repair.origin.sessionFile.includes("foundation-correction-sessions"));
+  }finally{
+    restore();saver.db.close();for(const [key,value] of Object.entries(old))value===undefined?delete process.env[key]:process.env[key]=value;
+  }
+});
+
 test("R14K canonical archive baseline executes Foundation, Blueprint, Architecture and World/Character with actual current Turn", {
   skip: !available, timeout: 120_000,
 }, async () => {

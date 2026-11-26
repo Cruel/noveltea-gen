@@ -17,6 +17,7 @@ import { type TurnAssignmentEvidence } from "./turn-plan-evidence.js";
 import { sourceBoundBlueprintChallenge } from "./blueprint-challenge.js";
 import type { MilestoneBlueprint, MilestoneBlueprintPin } from "./milestone-blueprint.js";
 import { affectedEventOnlyOmissions, type OmissionRevalidation } from "./interactive-event-only.js";
+import { verifyMaterializedChatFoundation } from "./chat-approved-foundation.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { sealIndependentReview, inspectCheckpointReview, repairReviewAssignment, readRepairCommitProof, checkpointOriginalAssignment,
   type CheckpointAssurance, type IndependentReviewResult } from "./checkpoint-assurance.js";
@@ -204,7 +205,14 @@ export async function prepareSemanticReview(job: JobStartResult,
       throw new Error('Independent Architecture review needs one pinned canonical Creative Direction.');
     const affectedOmissions = point.workItem.startsWith("dependency:") ? [] :
       await affectedEventOnlyOmissions(job,point.parentSha,point.commitSha,assurance.changedPaths);
-    const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths,
+    let fulfillmentContext:string[]=[];
+    if (assurance.changedPaths.some(path=>path.startsWith("events/"))) {
+      const catalog=await (await import("./validator.js")).historicalCanonicalCatalog(job,point.commitSha);
+      const eventIds=new Set(catalog.filter(r=>assurance.changedPaths.includes(r.path)&&r.metadata.type==="event").map(r=>r.metadata.id));
+      fulfillmentContext=catalog.filter(r=>r.metadata.type==="milestone" &&
+        (r.metadata.fulfillment as {any_of?:string[][]}|undefined)?.any_of?.some(route=>route.some(id=>eventIds.has(id)))).map(r=>r.path);
+    }
+    const paths = [...new Set([...assurance.changedPaths, ...assignment.authority.existingPaths, ...fulfillmentContext,
       ...dependencies.flatMap(a => a.authority.existingPaths), ...dependencyPaths, ...direction,
       ...affectedOmissions.flatMap(omission=>Object.keys(omission.sourceHashes))])];
     const canonicalContext = await loadSealedReviewContext(job, point.commitSha, paths);
@@ -368,8 +376,25 @@ export async function prepareSemanticReview(job: JobStartResult,
             originalProof: origin.consequenceProof };
       }
     }
+    // Exact Chat approval is controller evidence, not prose a reviewer must
+    // infer from the initial "propose a baseline" author instruction.
+    const approvalRoot = point.workItem === "foundation" ? point :
+      priorNegative && assignment.id === "foundation" ?
+        saved.find(p=>p.commitSha===priorNegative!.rootFailureSha && p.workItem==="foundation") : undefined;
+    const chatFoundation = approvalRoot &&
+      await (await import("./discovery-generation-handoff.js")).readDiscoveryHandoff(job)
+      ? await verifyMaterializedChatFoundation(job,approvalRoot) : null;
+    const fulfillmentReview = fulfillmentContext.length ?
+      " CANONICAL EVENT OWNERS: "+fulfillmentContext.join(", ")+
+      ". These are current fulfillment witnesses, not extra write grants. Verify that the edited Event still delivers its independently promised canonical Milestone outcomes. Authoring order is not narrative order; an existing Event may realize a later or shared Milestone. A prerequisite correction cannot simply erase required delivery. If the proposal would erase an existing fulfillment, report the source-linked defect rather than approve it. " : "";
+    const approvalContext = chatFoundation ?
+      " AUTHENTICATED DISCOVERY APPROVAL: the author accepted the exact independently reviewed proposal " +
+      chatFoundation.approval.proposalDigest + " (approval operation " +
+      chatFoundation.handoff.approvalOperation + ", sealed handoff " + chatFoundation.handoff.digest +
+      "). The original committed canonical status approved is therefore correct. Do not request a downgrade or infer absent approval from proposal-era prose. " +
+      "Review material Story defects independently; corrections may change only unprotected explanatory body, preserving exact approved metadata and protected decisions. " : "";
     items.push({ assignment, reviewedWorkItem: point.workItem,
-      unitOutcome: semanticUnitOutcome(architectureReview ? "global-architecture" : point.workItem, assignment.specialist) + milestoneBlueprintObligations +
+      unitOutcome: semanticUnitOutcome(architectureReview ? "global-architecture" : point.workItem, assignment.specialist) + milestoneBlueprintObligations + approvalContext + fulfillmentReview +
         (refinement ? " Additional controller-admitted, source-bound assignment outcome (" +
           refinement.item + ", " + (refinement.sourcePath ?? "verified Architecture") + " at " + refinement.sourceSha +
           "): " + refinement.outcome +

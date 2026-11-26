@@ -1409,3 +1409,30 @@ persistent missing evidence cannot authorize supporting work. The R08
 conditional Blueprint integration now intentionally omits every required
 dependency methodology read before the initial valid proposal, then
 exercises correction, support Review and original writer reentry.
+
+### Approved Foundation and inherited dependent correction origins (live #260)
+
+A materialized Chat-approved Foundation has no historical Foundation Pi
+writer. The original Discovery handoff, approval digest, Turn, committed
+canonical bytes, and specialist snapshot are authenticated before exposing
+approval evidence to Review or admitting a local corrective session. The
+controller fences session initialization before dispatch. Corrections may
+change only the explanatory body; approved frontmatter, protected decisions
+and the original approval receipt stay immutable. Independent Review remains
+mandatory for the new revision.
+
+A negatively revalidated inherited checkpoint can supply an original owner
+through the sealed fork bundle, not through execution of a parent's writer.
+The existing dependent correction lane admits a local session, validates its
+exact path grant and rechecks the original owner, fork and snapshot on
+reconciliation. It still refuses commitless failures and edits requiring
+additional owner/field grants. Related Milestones that actually name an
+Event in fulfillment now enter Blueprint and independent Review context:
+authoring order is not narrative order, and an upstream correction cannot
+erase another Milestone's required outcome.
+
+The Foundation integration test exercises actual negative Review, scoped
+editing and positive rereview without repinning the approved proposal. The
+opt-in preserved Luna test authenticates the exact inherited Revelation
+owner and rejects substituted Milestone/path grants. Certification reporting
+separates native-eligible and semantically accepted checkpoints.

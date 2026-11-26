@@ -3,7 +3,7 @@ import test from 'node:test'
 import { certificationFailureSummary, formatCertificationProgress } from './support/full-story-case'
 
 test('live certification identifies the actual terminal assignment and verified successor checkpoint', () => {
-  const checkpoint = { eligible: true, commitSha: 'a'.repeat(40),
+  const checkpoint = { eligible: true, semanticReview: 'passed', commitSha: 'a'.repeat(40),
     workItem: 'event-reconstruction', nextWorkItem: 'event-accounts' }
   const summary = certificationFailureSummary({
     terminal: 'blocked', nativeValidation: 'passed', validationError: null, recoveryError: null,
@@ -14,7 +14,7 @@ test('live certification identifies the actual terminal assignment and verified 
         defects: [{ kind: 'semantic', path: 'milestones/revelation.md', code: 'event-missing-binding', detail: 'Formal binding missing' }] },
       recoveryLifecycle: { active: { origin: { assignmentId: 'event:milestone.revelation' } },
         decision: { action: 'diagnostic-stop', disposition: 'operator-intervention' } } },
-    recoveryCheckpoints: [checkpoint, { ...checkpoint, eligible: false, commitSha: 'b'.repeat(40) }],
+    recoveryCheckpoints: [checkpoint, { ...checkpoint, eligible: false, commitSha: 'b'.repeat(40) }, { ...checkpoint, semanticReview: 'failed', commitSha: 'c'.repeat(40) }],
   }, '/private/observation.json')
   assert.equal(summary.reason, 'No authenticated corrective adapter.')
   assert.equal(summary.assignment, 'event:milestone.revelation')

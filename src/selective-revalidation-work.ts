@@ -440,11 +440,16 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       p.commitSha === proposal.originalCommitSha);
     if (!prior || !original?.assurance || !original.eligible)
       throw Error("Failed dependent correction has no original sealed reviewer or specialist.");
+    const catalog = await (await import("./validator.js")).historicalCanonicalCatalog(job,proposal.sourceSha);
+    const affectedIds=new Set(catalog.filter(r=>proposal.authorizedPaths.includes(r.path)&&r.metadata.type==="event").map(r=>r.metadata.id));
+    const sharedMilestones=catalog.filter(r=>r.metadata.type==="milestone" &&
+      (r.metadata.id===proposal.itemId.split(":")[1] ||
+       (r.metadata.fulfillment as {any_of?:string[][]}|undefined)?.any_of?.some(route=>route.some(id=>affectedIds.has(id))))).map(r=>r.path);
     const outcome = await advanceDependentCorrection({
       job, proposal, plan, point: original, reviewerSnapshot: state!.snapshot,
       provider: opts.provider, model: opts.model, validatorSource: opts.validatorSource,
       sourcePaths: [...new Set([...(reviewedSources[proposal.itemId]?.sourcePaths ?? []),
-        ...original.assurance.changedPaths, ...correction.changedPaths])],
+        ...original.assurance.changedPaths, ...correction.changedPaths, ...sharedMilestones])],
       findings: prior.verdict.findings.map(f => ({ source: f.source, message: f.message })),
     });
     const receipt = await inspectDependentCorrection(job, proposal, plan);
@@ -551,9 +556,9 @@ export async function revalidateAfterReviewedCorrection(opts: RevalidateAfterCor
       [...state.corrected ?? []].map(c => c.successorSha));
     if (projection.failures.length) {
       const failed = projection.failures.at(-1)!;
-      if (omission || !point?.assurance || point.jobId !== job.jobId) {
+      if (omission || !point?.assurance) {
         state.state = "blocked";
-        state.failure = "Independent revalidation rejected inherited or commitless evidence; an authorized owner amendment is required.";
+        state.failure = "Independent revalidation rejected commitless evidence; an authorized owner amendment is required.";
         await save(file, state);
         throw Error(state.failure);
       }

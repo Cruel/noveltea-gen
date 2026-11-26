@@ -1,4 +1,5 @@
 import { EVENT_CAUSAL_GROUNDING } from "./event-causal-grounding.js";
+import { verifyMaterializedChatFoundation, assertChatFoundationBodyOnly } from "./chat-approved-foundation.js";
 import { readEventMilestoneRepairGrant } from "./event-milestone-repair.js";
 import { assertArchitectureProseOnly, authorizedArchitectureRecordPath } from "./architecture-record-path.js";
 import { assertMilestoneFulfillmentOnly } from "./milestone-field-scope.js";
@@ -113,6 +114,8 @@ export interface RepairOrigin {
   model: string;
   thinking?: "low" | "medium" | "high";
   snapshot: SkillSnapshot;
+  /** A real newly admitted corrective session, not a historical Foundation writer. */
+  chatFoundationApproval?: string;
 }
 export interface RepairRevision {
   version: number;
@@ -205,7 +208,47 @@ function specialistSource(job: JobStartResult, workItem: string) {
 }
 /** Establish origin from the *committed writer receipt*, not model-supplied
  * instructions. A missing or unsafe session is a recoverable blocker. */
-export async function readRejectedRepairOrigin(job: JobStartResult, point: RecoveryCheckpoint): Promise<RepairOrigin> {
+async function chatFoundationRepairOrigin(job: JobStartResult, point: RecoveryCheckpoint,
+  admitted?: RepairOrigin, create = false): Promise<RepairOrigin> {
+  const materialized = await verifyMaterializedChatFoundation(job,point);
+  if (!materialized || await openSkillSnapshot(materialized.snapshot.id)!==materialized.snapshot.path)
+    throw Error("Failed review cannot be repaired without the original committed Pi writer or authenticated Chat approval.");
+  const {approval,handoff,snapshot}=materialized;
+  const directory=join(job.stateDir,"foundation-correction-sessions",point.commitSha);
+  const marker="CONTROLLER-ADMITTED FOUNDATION CORRECTION (no historical writer session). " +
+    "Exact materialized proposal "+approval.proposalDigest+"; Discovery handoff "+handoff.digest+
+    "; root commit "+point.commitSha+". This is not an author approval or a new author objective. " +
+    "Correct only independently reviewed defects in the original approved Foundation body.";
+  if (!admitted) {
+    if (!create) throw Error("Chat-approved Foundation repair requires an admitted corrective session.");
+    await mkdir(directory,{recursive:true,mode:0o700});
+    const manager=SessionManager.create(job.worktreeStoryRoot,directory);
+    // Persist the real new Pi session's controller admission before dispatch.
+    // No historical assistant reply, tool evidence or author approval is invented.
+    manager.appendMessage({role:"user",content:marker,timestamp:Date.now()});
+    admitted={workItem:"foundation",sessionFile:manager.getSessionFile()!,sessionId:manager.getSessionId(),
+      provider:approval.provider,model:approval.model, snapshot,
+      ...(handoff.model.thinking?{thinking:handoff.model.thinking}:{}),
+      chatFoundationApproval:handoff.digest};
+  }
+  const expected={workItem:"foundation",provider:approval.provider,model:approval.model,snapshot,
+    chatFoundationApproval:handoff.digest};
+  if (admitted.workItem!==expected.workItem || admitted.provider!==expected.provider ||
+      admitted.model!==expected.model || JSON.stringify(admitted.snapshot)!==JSON.stringify(snapshot) ||
+      admitted.thinking!==handoff.model.thinking || admitted.chatFoundationApproval!==handoff.digest ||
+      !admitted.sessionFile.startsWith(directory+sep) ||
+      await realpath(admitted.sessionFile)!==admitted.sessionFile ||
+      !(await lstat(admitted.sessionFile)).isFile())
+    throw Error("Chat Foundation correction session lost its exact approval provenance.");
+  const lines=(await readFile(admitted.sessionFile,"utf8")).trim().split("\n").map(line=>JSON.parse(line));
+  const first=lines.find(line=>line.type==="message")?.message;
+  if (lines[0]?.type!=="session" || lines[0].id!==admitted.sessionId ||
+      first?.role!=="user" || first.content!==marker)
+    throw Error("Chat Foundation correction session lost its controller admission marker.");
+  return admitted;
+}
+
+export async function readRejectedRepairOrigin(job: JobStartResult, point: RecoveryCheckpoint, admitted?: RepairOrigin): Promise<RepairOrigin> {
   if (point.workItem.startsWith("repair-")) {
     const previous = await inspectRejectedRepair(job, point.workItem.slice(7));
     return predecessorOrigin(previous, point);
@@ -219,6 +262,8 @@ export async function readRejectedRepairOrigin(job: JobStartResult, point: Recov
     throw Error("Unsafe original specialist receipt.");
   const raw = JSON.parse(await readFile(source, "utf8")) as Record<string, any>;
   const foundation = point.workItem === "foundation";
+  if (foundation && raw.chatApprovalDigest && admitted?.chatFoundationApproval)
+    return chatFoundationRepairOrigin(job,point,admitted);
   const unit = raw.units ? raw.units.find((u: { id: string }) => u.id === point.workItem) : raw;
   if (raw.jobId !== job.jobId || (foundation ? raw.workerMode !== "pi" ||
       !!raw.chatApprovalDigest || raw.stage !== "committed" ||
@@ -324,10 +369,13 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
       ["rejected-review-next-attempt"], () => recordReviewDependency(job, request));
     throw new ReviewDependencyRequiredError(request);
   }
-  const origin = previous ? predecessorOrigin(previous, point) : await readRejectedRepairOrigin(job, point);
+  const chatOrigin = !previous && point.workItem==="foundation" &&
+    !!await (await import("./chat-approved-foundation.js")).readChatApprovedFoundation(job);
+  const origin = previous ? predecessorOrigin(previous, point) :
+    chatOrigin ? undefined : await readRejectedRepairOrigin(job, point);
   const planAmendment = deriveReviewRepairAmendment({ assurance: point.assurance!,
     review: failure, original: assignment, planVersion: point.planVersion ?? plan!.version,
-    originWorkItem: origin.workItem,
+    originWorkItem: origin?.workItem ?? point.workItem,
     ...(eventCharacter ? { eventCharacter } : { eventMilestone }) });
   const root = previous?.rootFailureSha ?? point.commitSha;
   const rootReview = previous?.originalReviewDigest ?? sourceOf(failure);
@@ -352,14 +400,15 @@ export async function beginRejectedRepair(job: JobStartResult, point: RecoveryCh
       assignmentId: assignment.id, obligation: assignment.outcome,
       findings: failure.findings,
     });
+    const admittedOrigin = origin ?? await chatFoundationRepairOrigin(job,point,undefined,true);
     const state: RepairReceipt = {
       version: 1, jobId: job.jobId, threadId: job.threadId,
       sourceCommitSha: point.commitSha, rootFailureSha: root,
       sourceReviewDigest: sourceOf(failure), originalReviewDigest: rootReview,
       originalSource: rootSource, source: failure.source,
       findings: structuredClone(failure.findings), planAmendment, assignment,
-      allowedPaths: [...planAmendment.assignment.authority.existingPaths], origin,
-      sessionSha256: hash(await readFile(origin.sessionFile)),
+      allowedPaths: [...planAmendment.assignment.authority.existingPaths], origin:admittedOrigin,
+      sessionSha256: hash(await readFile(admittedOrigin.sessionFile)),
       phase: "ready", attempts: previous?.attempts ?? 0, baselineHead: head,
       ...(previous?.revision ? { revision: previous.revision } : {}),
       ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}),
@@ -437,7 +486,7 @@ export async function inspectRejectedRepair(job: JobStartResult, sha: string, so
   if (!turn) throw Error("Repair lost its pinned original Turn plan.");
   const previous = current.workItem.startsWith("repair-")
     ? await inspectRejectedRepair(job, current.workItem.slice(7), sourceMode) : null;
-  const origin = previous ? predecessorOrigin(previous, current) : await readRejectedRepairOrigin(job, current);
+  const origin = previous ? predecessorOrigin(previous, current) : await readRejectedRepairOrigin(job, current,state.origin);
   const eventMilestone = current.workItem.startsWith("event-") &&
       current.assurance!.changedPaths.some(p => p.startsWith("milestones/"))
     ? await readEventMilestoneRepairGrant(job, current, state.assignment)
@@ -737,6 +786,15 @@ export function changedRepairPaths(job: JobStartResult, state: RepairReceipt) {
         path.startsWith("milestones/") && path !== milestonePath) &&
         !(state.origin.workItem === "global-architecture" && authorizedArchitectureRecordPath(path))))
     throw Error("Review feedback never authorizes unrelated or protected Story changes.");
+  if (state.origin.chatFoundationApproval) {
+    for (const path of paths) {
+      const target=join(job.worktreeStoryRoot,path);
+      if (realpathSync(target)!==target || !lstatSync(target).isFile())
+        throw Error("Unsafe Chat Foundation correction target.");
+      assertChatFoundationBodyOnly(gitRaw(job,"show",state.baselineHead+":"+repoPath(job,path)),
+        readFileSync(target,"utf8"));
+    }
+  }
   if (state.origin.workItem === "global-architecture") {
     for (const path of paths) {
       const target = join(job.worktreeStoryRoot, path);
@@ -1506,6 +1564,9 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
     : await inspectPreparedRepairDispatch(job, sha);
   if (claimed.attempts !== state.attempts)
     throw Error("Repair attempt counter changed before the original Pi session.");
+  // Initializing a newly admitted Pi conversation can append model-selection
+  // metadata. Fence it before opening, without weakening the transcript check.
+  if (state.origin.chatFoundationApproval) await markRejectedRepairStarted(job, sha);
   const session = await open();
   let reportedOutOfAuthority: string | undefined;
   let reportedDispute: { path: string; line: number; claim: string } | undefined;
@@ -1514,9 +1575,11 @@ export async function runPiRejectedRepair(job: JobStartResult, sha: string) {
         session.thinkingLevel !== resolved.resolution.thinking)
       throw Error("Original specialist thinking effort changed.");
     await reportControllerReviewPhase("correcting");
-    await markRejectedRepairStarted(job, sha);
+    if (!state.origin.chatFoundationApproval) await markRejectedRepairStarted(job, sha);
     await promptStorySpecialist(session,
-      "Continue your ORIGINAL specialist Pi session to correct a rejected draft. " +
+      (state.origin.chatFoundationApproval ?
+        "Execute the controller-admitted corrective Foundation session. The original Foundation was materialized from an exact author-approved Chat proposal, not written by a Pi specialist. Preserve every approved frontmatter byte and decision; correct only the body. " :
+        "Continue your ORIGINAL specialist Pi session to correct a rejected draft. ") +
       "This is not an argument with the independent reviewer. The prior verdict " +
       "remains failed unless files actually change and pass a fresh native " +
       "validation and separate semantic rereview. First read the relevant pinned " +

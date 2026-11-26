@@ -246,3 +246,31 @@ test("latest Luna duplicate Blueprint response and ordinary omission impact repl
   assert.equal(await reviewedOmissionSuccessor(job,original,seal.digest,head),null,
     "an unreviewed ordinary commit cannot confer live omission authority");
 });
+
+test("Luna inherited negative revalidation retains the exact passed Revelation owner", {
+  skip: !process.env.NT_TEST_INHERITED_DEPENDENT_JOB || !root,
+}, async () => {
+  const {inheritedDependentSource}=await import("../src/dependent-correction-work.js");
+  const {inheritedReviewedCheckpoint}=await import("../src/recovery-fork-state.js");
+  const {proposeDependentCorrection}=await import("../src/selective-revalidation.js");
+  const saved=JSON.parse(readFileSync(join(root!,"certification-source.json"),"utf8"));
+  const job=await startStoryJob({story:saved.storyRoot,job:process.env.NT_TEST_INHERITED_DEPENDENT_JOB!},false);
+  const state=JSON.parse(readFileSync(join(job.stateDir,"revalidation-items","d981a60d9bf70113fa60978affc7e5f54e03dce9.json"),"utf8"));
+  const negative=state.results.find((r:any)=>r.itemId==="event:milestone.revelation"&&r.status==="failed");
+  assert.ok(negative);
+  const inherited=inheritedReviewedCheckpoint(job,"event-revelation",negative.originalCommitSha)!;
+  assert.equal(inherited.status,"passed");
+  const turn=await readReviewTurnEvidence(job);
+  const original=turn!.assignments.find(a=>a.id==="event")!;
+  const proposal=proposeDependentCorrection({
+    plan:state.proposal,item:{id:negative.itemId} as any,originalCommitSha:negative.originalCommitSha,
+    assignmentId:original.id,specialist:original.specialist,originalReviewDigest:negative.originalReviewDigest,
+    revalidationReviewDigest:negative.reviewerDigest,ownerPaths:inherited.proof.assurance!.changedPaths,
+    blockingPaths:negative.findings.map((f:any)=>f.path),currentHeadSha:negative.sourceSha,originalObligation:original.outcome,
+  });
+  const source=await inheritedDependentSource(job,proposal);
+  assert.equal(source?.proof.commitSha,negative.originalCommitSha);
+  assert.equal(source?.model,"gpt-6-luna");
+  await assert.rejects(inheritedDependentSource(job,{...proposal,itemId:"event:milestone.accounts"}),/original Milestone owner/);
+  await assert.rejects(inheritedDependentSource(job,{...proposal,authorizedPaths:["creative-direction/foundation.md"]}),/exact independently reviewed owner/);
+});

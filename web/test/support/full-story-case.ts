@@ -66,7 +66,7 @@ const adaptiveBrief = adaptiveShape === 'narrative-led'
 export function certificationFailureSummary(evidence: {
   terminal: string; checkpointState: unknown; nativeValidation: string;
   validationError: string | null; recoveryError: string | null;
-  recoveryCheckpoints: Array<{ eligible: boolean; commitSha: string; workItem: string; nextWorkItem: string | null }>;
+  recoveryCheckpoints: Array<{ eligible: boolean; semanticReview?: string; commitSha: string; workItem: string; nextWorkItem: string | null }>;
 }, observation: string) {
   const state = evidence.checkpointState as { reason?: string; inspectionError?: string;
     active?: { id?: string; stage?: string }; failures?: Record<string, string>;
@@ -74,7 +74,8 @@ export function certificationFailureSummary(evidence: {
     recoveryLifecycle?: { active?: { origin?: { assignmentId?: string; operation?: string } };
       decision?: { action?: string; reason?: string; disposition?: string } } } | null
   const bounded = (value: unknown) => typeof value === 'string' ? value.slice(0, 1200) : undefined
-  const latest = evidence.recoveryCheckpoints.filter(point => point.eligible).at(-1)
+  const latest = evidence.recoveryCheckpoints.filter(point => point.eligible &&
+    (point.semanticReview === "passed" || point.semanticReview === "not-required")).at(-1)
   return {
     terminal: evidence.terminal, stage: state?.active?.stage,
     assignment: state?.recoveryLifecycle?.active?.origin?.assignmentId ?? state?.active?.id,
@@ -500,7 +501,9 @@ export async function verifyLiveNewStory(
   ] }, join(attempts, 'observation.json'))
   console.log('Live ' + mode + ' final:', JSON.stringify({ mode, jobId, finalHead,
     terminal, nativeValidation: validationStatus,
-    eligibleCheckpoints: recoveryPoints.filter(point => point.eligible).length,
+    nativeEligibleCheckpoints: recoveryPoints.filter(point => point.eligible).length,
+    eligibleCheckpoints: recoveryPoints.filter(point => point.eligible &&
+      (point.semanticReview === "passed" || point.semanticReview === "not-required")).length,
     ...(terminal !== 'completed' ? { failure } : {}),
   }))
   assert.equal(terminal, 'completed', 'Story certification did not complete: ' + JSON.stringify(failure))

@@ -13,7 +13,9 @@ import { execFileSync } from "./git-read-cache.js";
 import { trustedHead } from "./revision.js";
 import { readReviewTurnEvidence } from "./fork-review-turn.js";
 import { inspectRecoveryCheckpoints, type RecoveryInspection } from "./recovery-checkpoints.js";
-import { inspectCheckpointReview } from "./checkpoint-assurance.js";
+import { executionId, inspectCheckpointReview } from "./checkpoint-assurance.js";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { readRecoveryFork, inheritedReviewedCheckpoint } from "./recovery-fork-state.js";
 import { readRejectedRepairOrigin, type RepairOrigin } from "./rejected-review-repair.js";
 import { inspectRepairLedger, submitRepairCorrection, settleRepairReview,
   admitCausalRevalidationFinding } from "./repair-ledger.js";
@@ -90,6 +92,8 @@ export interface DependentCorrectionReceipt {
     "reviewing" | "reviewed" | "verified" | "blocked";
   currentSourceSha: string;
   origin: RepairOrigin;
+  /** Inherited source is an immutable proof, not an executable parent writer. */
+  inheritedReviewDigest?: string;
   originalCheckpointProofDigest: string;
   originalSessionDigest: string;
   snapshot: SkillSnapshot;
@@ -294,12 +298,13 @@ async function reviewAssignment(job: JobStartResult, proposal: DependentCorrecti
     throw Error("Dependent rereview lost the original author goal or specialist authority.");
   return {
     contract: turn.contract, planVersion: proposal.planVersion,
-    scopeIds: author.targets, paths: [...new Set([...paths, ...consumedPaths,
+    scopeIds: proposal.itemId.includes(":") ? [proposal.itemId.slice(proposal.itemId.indexOf(":")+1)] : author.targets, paths: [...new Set([...paths, ...consumedPaths,
       ...proposal.authorizedPaths])].sort(),
     routes: [], milestoneRoutes: [], puzzleRoutes: [], outstanding: [], uncertainties: [],
     turnGoal: "Independent rereview of a *corrected historically accepted* " +
-      "specialist assignment. Evaluate the original obligation: " + author.outcome +
-      ". Do not certify by the prior positive reviewer or writer's claim.",
+      "specialist assignment " + proposal.itemId + ". Evaluate the original obligation: " + author.outcome +
+      ". Preserve the separately reviewed upstream correction at " + proposal.causalCorrectionSha +
+      " and every canonical Milestone that references the edited record. Check the actual Milestone change and fulfillment, not simply the high-level Turn goal. Do not undo a valid upstream correction or accept duplicated/premature progression. Do not certify by the prior positive reviewer or writer's claim.",
     specialistAssignments: [{
       id: author.id, specialist: proposal.specialist, outcome: author.outcome,
       targets: author.targets,
@@ -311,6 +316,65 @@ async function reviewAssignment(job: JobStartResult, proposal: DependentCorrecti
       changedPaths: proposal.authorizedPaths },
   };
 }
+/** Resolve an earlier owner through the fork's already authenticated
+ * checkpoint, without restoring a parent session or its execution grants. */
+export async function inheritedDependentSource(job: JobStartResult, proposal: DependentCorrectionAssignment,
+  point?: RecoveryInspection) {
+  const fork=readRecoveryFork(job);
+  const entry=Object.entries(fork?.commits ?? {}).find(([,entry])=>entry.sha===proposal.originalCommitSha);
+  if (!entry) return null;
+  const inherited=inheritedReviewedCheckpoint(job,entry[0],proposal.originalCommitSha);
+  const proof=inherited?.proof;
+  if (!inherited || inherited.status!=="passed" || !proof?.assurance ||
+      (point && (point.proofDigest!==proof.proofDigest || point.jobId!==proof.jobId)) ||
+      proof.assurance.assignmentId!==proposal.assignmentId ||
+      proposal.authorizedPaths.some(path=>!proof.assurance!.changedPaths.includes(path)))
+    throw Error("Inherited dependent correction lost its exact independently reviewed owner.");
+  if (executionId(proof.workItem) !== proposal.itemId)
+    throw Error("Inherited dependent correction changed the original Milestone owner.");
+  git(job,"merge-base","--is-ancestor",proof.commitSha,job.baseSha);
+  // Pinned original provenance is evidence. The new Turn below supplies
+  // actual write authority; this receipt never becomes a local writer.
+  const source=Object.values(fork!.receipts).find(r=>r.commitSha===proof.commitSha &&
+      r.jobId===proof.jobId && r.snapshot && r.provider && r.model) ??
+    Object.values(fork!.receipts).find(r=>r.jobId===proof.jobId &&
+      r.units?.some((u:{commitSha?:string})=>u.commitSha===proof.commitSha) &&
+      r.snapshot && r.provider && r.model);
+  if (!source || await openSkillSnapshot(source.snapshot.id)!==source.snapshot.path)
+    throw Error("Inherited dependent lacks its pinned original owner methodology.");
+  return {inherited,proof,snapshot:source.snapshot as SkillSnapshot,
+    provider:source.provider as string,model:source.model as string,
+    thinking:source.thinking as RepairOrigin["thinking"]};
+}
+async function inheritedDependentOrigin(job: JobStartResult, proposal:DependentCorrectionAssignment,
+  source: NonNullable<Awaited<ReturnType<typeof inheritedDependentSource>>>,
+  admitted?:RepairOrigin, create=false):Promise<RepairOrigin> {
+  const dir=join(job.stateDir,"dependent-correction-sessions",proposal.digest,"origin");
+  const marker="CONTROLLER-ADMITTED INHERITED DEPENDENT CORRECTION. Original owner "+source.proof.workItem+
+    ", independently reviewed commit "+source.proof.commitSha+", fork Review "+source.inherited.reviewDigest+
+    ", exact new correction grant "+proposal.digest+". No parent session or author grant is replayed.";
+  if (!admitted) {
+    if (!create) throw Error("Inherited correction has no admitted local session.");
+    await mkdir(dir,{recursive:true,mode:0o700});
+    const manager=SessionManager.create(job.worktreeStoryRoot,dir);
+    manager.appendMessage({role:"user",content:marker,timestamp:Date.now()});
+    admitted={workItem:source.proof.workItem,sessionFile:manager.getSessionFile()!,
+      sessionId:manager.getSessionId(),provider:source.provider,model:source.model,
+      snapshot:source.snapshot,...(source.thinking?{thinking:source.thinking}:{})};
+  }
+  if (admitted.workItem!==source.proof.workItem || admitted.provider!==source.provider ||
+      admitted.model!==source.model || admitted.thinking!==source.thinking ||
+      JSON.stringify(admitted.snapshot)!==JSON.stringify(source.snapshot) ||
+      !admitted.sessionFile.startsWith(dir+sep))
+    throw Error("Inherited corrective session substituted its original owner or grant.");
+  await verifiedPiSession(job,admitted.sessionFile,admitted.sessionFile);
+  const rows=(await readFile(admitted.sessionFile,"utf8")).trim().split("\n").map(line=>JSON.parse(line));
+  const first=rows.find(line=>line.type==="message")?.message;
+  if (rows[0]?.id!==admitted.sessionId || first?.role!=="user" || first.content!==marker)
+    throw Error("Inherited corrective session has no source-bound controller admission.");
+  return admitted;
+}
+
 export interface DependentCorrectionOptions {
   job: JobStartResult; proposal: DependentCorrectionAssignment;
   plan: SelectiveRevalidationPlan; point: RecoveryInspection;
@@ -330,20 +394,21 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
     throw Error("Original owner needs a separate signed field-level or protected decision amendment.");
   const turn = await readReviewTurnEvidence(job);
   const original = turn?.assignments.find(a => a.id === proposal.assignmentId);
+  const inherited = point.jobId!==job.jobId ? await inheritedDependentSource(job,proposal,point) : null;
   if (!existsSync(join(job.stateDir, "turn-plan.json")) ||
       !turn || turn.source.jobId !== job.jobId ||
       turn.source.verifiedSha !== job.baseSha ||
       turn.digest !== proposal.turnDigest || !point.eligible ||
       point.semanticReview !== "passed" || !point.assurance ||
-      point.assurance.jobId !== job.jobId ||
-      point.assurance.turnDigest !== turn.digest ||
+      (!inherited && (point.assurance.jobId !== job.jobId ||
+      point.assurance.turnDigest !== turn.digest)) ||
       point.commitSha !== proposal.originalCommitSha ||
       point.assurance.assignmentId !== proposal.assignmentId ||
       !original || authenticatedSpecialist(point.workItem, original.specialist) !==
         proposal.specialist || original.outcome !== proposal.obligation)
     throw Error("Corrective writer has no original signed, independently passed specialist authority.");
-  const prior = await inspectCheckpointReview(job, point);
-  if (prior?.status !== "passed" || !prior.result)
+  const prior = inherited ? null : await inspectCheckpointReview(job, point);
+  if (!inherited && (prior?.status !== "passed" || !prior.result))
     throw Error("Historical positive independent reviewer proof is missing.");
   const path = fileOf(job, proposal);
   let state = await inspectDependentCorrection(job, proposal, plan);
@@ -351,7 +416,8 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
     if (await trustedHead(job) !== proposal.sourceSha ||
         git(job, "rev-parse", "HEAD") !== proposal.sourceSha || changed(job).length)
       throw Error("Dependent writer needs the original corrected, clean and trusted source.");
-    const origin = await readRejectedRepairOrigin(job, point);
+    const origin = inherited ? await inheritedDependentOrigin(job,proposal,inherited,undefined,true)
+      : await readRejectedRepairOrigin(job, point);
     if (origin.provider !== opts.provider || origin.model !== opts.model)
       throw Error("Dependent writer model differs from original specialist's pinned profile.");
     if (await openSkillSnapshot(opts.reviewerSnapshot.id) !== opts.reviewerSnapshot.path)
@@ -359,6 +425,7 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
     state = { version: 1, jobId: job.jobId, threadId: job.threadId,
       turnDigest: proposal.turnDigest, proposal, origin,
       originalCheckpointProofDigest: point.proofDigest,
+      ...(inherited?{inheritedReviewDigest:inherited.inherited.reviewDigest}:{}),
       originalSessionDigest: await verifiedPiSession(job, origin.sessionFile, origin.sessionFile),
       snapshot: opts.reviewerSnapshot, currentSourceSha: proposal.sourceSha,
       phase: "ready", attempts: [] };
@@ -367,8 +434,10 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
   // An existing private receipt is a crash fence, not authority. Re-authenticate
   // its original specialist, exact checkpoint and reviewer snapshot on every
   // resume BEFORE giving Pi any writable tools.
-  const authenticOrigin = await readRejectedRepairOrigin(job, point);
+  const authenticOrigin = inherited ? await inheritedDependentOrigin(job,proposal,inherited,state.origin)
+    : await readRejectedRepairOrigin(job, point);
   if (state.originalCheckpointProofDigest !== point.proofDigest ||
+      state.inheritedReviewDigest !== inherited?.inherited.reviewDigest ||
       JSON.stringify(state.origin) !== JSON.stringify(authenticOrigin) ||
       state.snapshot.id !== opts.reviewerSnapshot.id ||
       state.snapshot.path !== opts.reviewerSnapshot.path ||
@@ -410,7 +479,7 @@ export async function advanceDependentCorrection(opts: DependentCorrectionOption
         JSON.stringify(s.attempts.at(-1)?.review.findings);
       const file = await authorDependentCorrection({
         job, proposal, origin: s.origin, originalPaths: opts.sourcePaths,
-        sourceSession: originSession, feedback,
+        sourceSession: originSession, feedback, inherited:!!inherited,
         onSession: async file => { s.writerSession = file; await atomic(path, s); },
         audit: async () => { await auditDependentCorrectionDraft(job, proposal, source); },
       });
@@ -580,23 +649,27 @@ export async function verifyDependentCorrectionSuccessor(job: JobStartResult,
     state.proposal.causalCorrectionSha + ".json"), "utf8"));
   const pinned = JSON.parse(plan) as { proposal: SelectiveRevalidationPlan };
   const valid = await inspectDependentCorrection(job, state.proposal, pinned.proposal);
-  const original = (await inspectRecoveryCheckpoints(job)).find(p =>
+  const inherited=await inheritedDependentSource(job,state.proposal);
+  const original = inherited ? {...inherited.proof,eligible:true,reason:null,semanticReview:"passed" as const} :
+    (await inspectRecoveryCheckpoints(job,"historical")).find(p =>
     p.eligible && p.commitSha === state.proposal.originalCommitSha &&
     p.proofDigest === valid?.originalCheckpointProofDigest);
-  const prior = original && await inspectCheckpointReview(job, original);
+  const prior = original && !inherited ? await inspectCheckpointReview(job, original) : null;
   const turn = await readReviewTurnEvidence(job);
   if (!existsSync(join(job.stateDir, "turn-plan.json")) ||
-      !original?.assurance || prior?.status !== "passed" || !prior.result ||
-      original.assurance.jobId !== job.jobId ||
+      !original?.assurance || original.proofDigest!==valid?.originalCheckpointProofDigest ||
+      valid?.inheritedReviewDigest!==inherited?.inherited.reviewDigest ||
+      (!inherited && (prior?.status !== "passed" || !prior.result ||
+      original.assurance.jobId !== job.jobId || original.assurance.turnDigest !== state.proposal.turnDigest)) ||
       turn?.source.jobId !== job.jobId ||
       original.assurance.assignmentId !== state.proposal.assignmentId ||
-      original.assurance.turnDigest !== state.proposal.turnDigest ||
       turn?.digest !== state.proposal.turnDigest ||
       !turn.assignments.some(a => a.id === state.proposal.assignmentId &&
         authenticatedSpecialist(original.workItem, a.specialist) ===
           state.proposal.specialist && a.outcome === state.proposal.obligation))
     throw Error("Previously accepted dependent source lost its sealed original assignment or reviewer.");
-  const trustedOrigin = await readRejectedRepairOrigin(job, original);
+  const trustedOrigin = inherited ? await inheritedDependentOrigin(job,state.proposal,inherited,valid?.origin)
+    : await readRejectedRepairOrigin(job, original);
   if (JSON.stringify(valid?.origin) !== JSON.stringify(trustedOrigin))
     throw Error("Dependent corrective writer changed its authenticated original Pi context.");
   const attempt = valid?.attempts.find(a => a.commitSha === commit);

@@ -264,6 +264,14 @@ export function selectedAssignment(job: JobStartResult, plan: Plan, report: Pick
   const related = current.filter(r =>
     r.metadata.type === "creative-direction" ||
     r.metadata.id === milestoneId || arcIds.includes(r.metadata.id) ||
+    // A related Event may already fulfill a different canonical Milestone
+    // (including a later one authored early). Its owner promises are
+    // indispensable READ-ONLY context, never additional fulfillment grants.
+    r.metadata.type === "milestone" &&
+      (r.metadata.fulfillment as {any_of?:string[][]}|undefined)?.any_of?.some(route=>
+        route.some(id=>current.some(event=>event.metadata.type==="event" &&
+          event.metadata.id===id &&
+          (event.metadata.arcs as string[]??[]).some(arc=>arcIds.includes(arc))))) ||
     r.metadata.type === "character" && characterIds.has(r.metadata.id) ||
     r.metadata.type === "relationship" && (r.metadata.characters as string[] ?? []).some(id => characterIds.has(id)) ||
     r.metadata.type === "fact" && current.some(c => characterIds.has(c.metadata.id) &&

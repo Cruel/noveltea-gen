@@ -103,3 +103,11 @@ test("Only native-verified existing Creative Direction can bypass the foundation
       { ...result, status: "unverified" }), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("materialized approval permits body-only correction but never a status or decision change", async () => {
+  const {assertChatFoundationBodyOnly}=await import("../src/chat-approved-foundation.js");
+  const original=renderFoundation(foundation,"approved");
+  assert.doesNotThrow(()=>assertChatFoundationBodyOnly(original,renderFoundation({...foundation,body:"A concrete clue is shown."},"approved")));
+  assert.throws(()=>assertChatFoundationBodyOnly(original,renderFoundation(foundation,"draft")),/approved metadata/);
+  assert.throws(()=>assertChatFoundationBodyOnly(original,renderFoundation({...foundation,decisions:[]},"approved")),/protected decisions/);
+});

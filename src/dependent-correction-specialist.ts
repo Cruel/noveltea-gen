@@ -29,7 +29,7 @@ function kind(proposal: DependentCorrectionAssignment, origin: RepairOrigin) {
 export async function authorDependentCorrection(input: {
   job: JobStartResult; proposal: DependentCorrectionAssignment;
   origin: RepairOrigin; originalPaths: string[];
-  sourceSession: string; feedback: string;
+  sourceSession: string; feedback: string; inherited?:boolean;
   onSession: (file: string) => Promise<void>;
   audit: () => Promise<void>;
 }): Promise<string> {
@@ -61,7 +61,13 @@ export async function authorDependentCorrection(input: {
     provider: origin.provider, model: origin.model, thinking: origin.thinking,
     directory: sessionDir,
   }, runtime);
-  const sandbox = await selectSandboxPiTools(job, origin.snapshot, skills);
+  const sandbox = (await selectSandboxPiTools(job, origin.snapshot, skills))?.map(tool =>
+    tool.name!=="edit" ? tool : {...tool,execute:async (...args:Parameters<typeof tool.execute>)=>{
+      const path=(args[1] as {path?:unknown}).path;
+      if(typeof path!=="string" || !proposal.authorizedPaths.includes(path))
+        throw Error("Dependent corrective writer denied path outside the exact owner grant.");
+      return tool.execute(...args);
+    }});
   const manager = SessionManager.forkFrom(input.sourceSession, project.root, sessionDir);
   const { session } = await createAgentSession({
     cwd: project.root, modelRuntime: runtime, model: context.model,
@@ -84,7 +90,10 @@ export async function authorDependentCorrection(input: {
       proposal.originalCommitSha + ". A subsequently corrected upstream " +
       "record invalidated a specific dependent obligation. Preserve the original " +
       "author objective, the historical positive verdict, and all other committed work. " +
-      "Resume the context of your ORIGINAL specialist session, do not create " +
+      (input.inherited ?
+        "This is a new controller-admitted local corrective session using the exact inherited owner proof. The parent writer is not replayed. " :
+        "Resume the context of your ORIGINAL specialist session. ") +
+      "Preserve the separately reviewed upstream correction and every canonical Milestone fulfilled by the edited record. Read the actual affected Milestone and source relations. Do not create " +
       "new Story records, change protected decisions, write another owner's files, " +
       "or stage/commit Git. Your ONLY editable paths are: " +
       proposal.authorizedPaths.join(", ") + ". " +
