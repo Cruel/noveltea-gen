@@ -28,7 +28,7 @@ import {
   deferRecoveryForIndependentWork,
 } from "./generation-recovery-lifecycle.js";
 import { originalGraphFailureAnchor } from "./generation-recovery-anchor.js";
-import { independentObligation, operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
+import { independentObligation, isRepeatedUnchangedOperation, operationChecks, type GenerationOperationRecovery } from "./generation-operation-recovery.js";
 import { unknownCompletionCase, type UnknownRecoveryStatus } from "./unknown-recovery-diagnostic.js";
 import type { AdaptiveRecovery } from "./adaptive-protocol.js";
 
@@ -509,6 +509,22 @@ export async function applyDomainRecovery(
     if (priorCase) {
       if (priorCase.channel !== channel || !isDeepStrictEqual(priorCase.input, d.input))
         l = fence(l, "Original failed-check identity conflicts with a prior settled case");
+      continue;
+    }
+    // Discharge removes the active domain projection. Retain the existing
+    // source-bound repeat guard across that transition for read-only scheduler
+    // and intake failures. A new Pregel task is not a fresh retry allowance
+    // when the checked source/evidence has not changed.
+    if (channel === "operationRecovery" &&
+        ["scheduling", "author-update-intake"].includes(d.origin.operation) &&
+        sources.some(source => source.channel === channel &&
+          l.discharged.some(entry => entry.case.id === source.caseId) &&
+          isRepeatedUnchangedOperation({ ...source.input, phase: "continued" } as unknown as GenerationOperationRecovery,
+            raw as unknown as GenerationOperationRecovery))) {
+      const evidence: RecoveryEvidence = { store: "graph-checkpoint", ref: anchor.ref };
+      l = admitRecovery(l, { outcome: "fenced", fence: inspectionFence(
+        "untrusted-receipt", d.origin, [evidence], evidence,
+        "The same read-only recovery check failed again on unchanged evidence after discharge.") });
       continue;
     }
     const admission = await recoveryAdmission({

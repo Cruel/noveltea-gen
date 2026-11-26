@@ -1325,3 +1325,24 @@ checkpoint/native assurance and resolved independent Review coverage. The
 original saved Luna successor chain and latest checkpoint admission are
 read-only regression witnesses; the prospective integration test also checks
 this boundary on an independently generated supporting checkpoint.
+
+### #260 bounded scheduling recovery after nested continuation
+
+Inherited Event-only omission seals are attributed to the authenticated
+historical Turn projection even after the successor admits its own writer
+Turn. The collecting omission batch authenticates each source seal before
+aggregation; the batch's execution attribution does not relabel its
+individual independent verdicts. The preserved nested Luna continuation
+regression reopens both omissions and the batch after new Turn admission.
+
+Scheduling reconciliation and its independent discharge check now run
+the existing receipt/inventory reconciliation with amendments disabled,
+rather than merely checking clean HEAD, plan and idea scheduling. The
+existing unchanged-operation guard also checks discharged read-only
+scheduling/intake Cases and their immutable phase-free source inputs.
+A new graph task cannot create a fresh recovery allowance for an
+unchanged failed check after discharge. C05 transient and persistent
+scheduler regressions and the shared lifecycle repeat regression cover
+the two outcomes; no writer or model replay is permitted. R02/R14
+fingerprints and the outer recoveryNode exit fingerprint were reviewed
+for these changes.

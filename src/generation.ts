@@ -698,6 +698,18 @@ async function reconcile(s: State, job: JobStartResult, allowAmend = true): Prom
     active: nextExecutionItem(effective,
       causalDispatchPriority(receipt, pendingOrder ?? s.orchestratorOrder ?? undefined)) ?? null };
 }
+/** Reexecute the scheduler's source/receipt and inventory checks without
+ * admitting a planner amendment, model invocation or writer. A clean HEAD
+ * and an existing objective plan alone are not a successful scheduling check. */
+async function verifyReadOnlyScheduling(job: JobStartResult, s: State) {
+  const next = await reconcile(s, job, false);
+  if (next.status === "blocked" || next.status === "paused" ||
+      next.recovery?.phase === "assessment" || next.operationRecovery?.phase === "assessment")
+    throw Error(next.reason ?? "Original scheduling verification remains unresolved.");
+  if (!isFocusedScope(next.request?.contract ?? s.request.contract))
+    await scheduleIdeasAtBoundary(job, "parent-generation");
+}
+
 /** The DB receipt and the private graph amendment must never diverge. A
  * missing file after an applied receipt cannot silently restore the old plan;
  * an unacknowledged file cannot be dispatched before crash reconciliation. */
@@ -3935,8 +3947,7 @@ export function recoveryNode(
           if (!state.request.turnPlanDigest || !state.orchestratorOrder ||
               !state.orchestratorPlanningDigest || !state.orchestratorSnapshotId)
             throw Error("Original objective planner evidence is absent.");
-          if (!isFocusedScope(state.request.contract))
-            await scheduleIdeasAtBoundary(job, "parent-generation");
+          await verifyReadOnlyScheduling(job, state as State);
           assurance.verifiedHead = head;
           assurance.verifiedReceipt = current.evidence[0]!;
         });
@@ -4234,10 +4245,8 @@ export function createGenerationGraph(
                 const updates = await processAuthorUpdatesAfterWork(job);
                 if ("error" in updates || updates.status !== "ready")
                   throw Error("Author intake still has an unresolved message or acknowledgement.");
-              } else if (!isFocusedScope(s.request.contract)) {
-                // This is the original read-only scheduling operation, not an
-                // idea placement or a new Pi writer invocation.
-                await scheduleIdeasAtBoundary(job, "parent-generation");
+              } else {
+                await verifyReadOnlyScheduling(job, s);
               }
             });
             // After the original read-only check succeeds, discharge only a

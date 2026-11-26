@@ -377,3 +377,23 @@ test("R14L contradictory callback projection and replayed child fence cannot gra
   assert.throws(() => assertReviewProjection(undefined, { status: "fenced", assignmentKey: "original",
     evidenceRef: "original", inspectionRef: "review-checkpoints" }, "original"), /is fenced/);
 });
+
+test("discharged scheduler recovery cannot mint fresh Cases for unchanged failure at new task IDs", async () => {
+  const failure: GenerationOperationRecovery = {...operation, operation:"scheduling",
+    check:"generation-scheduling.v1", evidence:{reference:"generation-checkpoint"}};
+  const first = await applyDomainRecovery(empty(), {operationRecovery:failure}, cfg(one), id, trusted);
+  const decided = {...first,recoveryLifecycle:decideExistingRecovery(first)};
+  const settled = await applyDomainRecovery(decided, {operationRecovery:null},cfg(one),id,trusted,{
+    verifiedHead:head,verifiedReceipt:first.recoveryLifecycle.active!.evidence[0],
+  });
+  assert.equal(settled.recoveryLifecycle.active,null);
+  assert.equal(settled.recoveryLifecycle.discharged.length,1);
+  const repeated = await applyDomainRecovery(settled,{operationRecovery:{...failure,reason:"different text"}},cfg(two),id,trusted);
+  assert.equal(repeated.recoveryLifecycle.phase,"fenced");
+  assert.equal(repeated.recoveryLifecycle.discharged.length,1);
+  assert.equal(repeated.recoverySources.length,1);
+  assert.match(repeated.recoveryLifecycle.inspectionFences[0]!.requiredInspection ?? "", /unchanged evidence/);
+  const changed = await applyDomainRecovery(settled,{operationRecovery:{...failure,source:{...failure.source,headSha:"d".repeat(40)}}},cfg(two),id,trusted);
+  assert.equal(changed.recoveryLifecycle.phase,"assessing");
+  assert.equal(changed.recoverySources.length,2);
+});

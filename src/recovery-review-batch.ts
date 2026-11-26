@@ -128,7 +128,10 @@ export async function collectReviewedOmissionBatch(job: JobStartResult,
   }
   if (!entries.length) return null;
   const turn = await readReviewTurnEvidence(job);
-  if (!turn || entries.some(entry => entry.sourcePayload.turnDigest !== turn.digest))
+  // Each entry was independently authenticated above against its own
+  // originating Turn (including inherited seals). The batch is attributed
+  // to the collecting execution, not a replacement approval of those entries.
+  if (!turn)
     throw Error("Review batch lacks the original authenticated Turn.");
   return { version: 1, sourceJobId: job.jobId, sourceHead: checkpoint.commitSha,
     planDigest: checkpoint.planDigest!, turnDigest: turn.digest, entries };

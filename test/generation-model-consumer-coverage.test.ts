@@ -153,7 +153,7 @@ const downstreamReviewed: Record<string, string> = {
   "src/dependency-work.ts:advanceReviewDependency": "1:bda3257d043a0223fc3fbe02",
   "src/dependency-work.ts:continueReviewDependency": "1:763cf4d2e8040ab5985f92bd",
   "src/generation.ts:independentAssignmentBoundary": "1:cd5885456ac1086a2ab87516",
-  "src/generation.ts:createGenerationGraph": "3:675c9cb906105333c9205a92",
+  "src/generation.ts:createGenerationGraph": "3:c4afd495e0cbb332cc4088cf",
   "src/generation-operation-strategy.ts:executeOperationStrategy": "1:2516cd69b4a625038eeafe1c",
   // Validated, read-only verdict consumers and sealed evidence re-readers.
   "src/cross-domain-closeout-specialist.ts:authorMilestoneCloseout": "1:7837b5d229deb6f1e0f9287a",

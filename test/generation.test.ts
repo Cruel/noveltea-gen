@@ -945,10 +945,11 @@ test("C02 current-format checkpoint tampering cannot grant a new recovery or wri
     "a forged current-case phase cannot charge or replay the original specialist");
 });
 
-test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation", {
+for (const persistent of [false,true])
+test(persistent ? "C05 unchanged scheduling failure fences instead of falsely discharging the original Case" : "C05 unfamiliar scheduling failure is resolved by source-bound recheck and resumes generation", {
   skip: !available, timeout: 120_000,
 }, async () => {
-  const f = setup("c05-source-bound-reconciliation");
+  const f = setup("c05-source-bound-reconciliation-" + persistent);
   await useScriptedArchiveCli(f);
   const paused = f.cli([...f.start, "--pause-after", "event"]);
   assert.equal(paused.status, "paused");
@@ -981,9 +982,20 @@ test("C05 unfamiliar scheduling failure is resolved by source-bound recheck and 
     // The injected transient private scheduling failure disappears. This is
     // NOT an authorized Story correction; recovery must still independently
     // rerun the original read-only check before any ordinary scheduling.
-    if (originalTasks) writeFileSync(tasksFile, originalTasks);
-    else unlinkSync(tasksFile);
+    if (!persistent) {
+      if (originalTasks) writeFileSync(tasksFile, originalTasks);
+      else unlinkSync(tasksFile);
+    }
     const reconciled = await graph.invoke(null, { ...cfg, interruptAfter: ["assess_recovery"] });
+    if (persistent) {
+      assert.equal(reconciled.status, "blocked");
+      assert.equal(reconciled.recoveryLifecycle.phase, "fenced");
+      assert.equal(reconciled.recoveryLifecycle.active?.id, admitted.recoveryLifecycle.active?.id);
+      assert.equal(reconciled.recoveryLifecycle.discharged.length, admitted.recoveryLifecycle.discharged.length);
+      assert.equal((await inspectPiPolicy(f.job)).budget.modelCalls, priorCalls);
+      assert.equal(git(f.job.worktreeRoot, "rev-parse", "HEAD"), head);
+      return;
+    }
     assert.equal(reconciled.recoveryLifecycle.active, null,
       JSON.stringify({ status: reconciled.status, reason: reconciled.reason,
         lifecycle: reconciled.recoveryLifecycle }));

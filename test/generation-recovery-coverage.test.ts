@@ -243,7 +243,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
   const reviewed = [
 
 
-    ["interactive-event-only.ts", "verifyEventOnlyOmission", "31e5ab2ea986ef43ab84e2ccc42b07dc70d7a9842ff5ee13b0c5b1aab39f7e65"],
+    ["interactive-event-only.ts", "verifyEventOnlyOmission", "b39bdbe0a114d2b58a2d1ded71ef06b53fc92ffa04f07ddafd9294508b1b39b7"],
     ["selective-revalidation-work.ts", "assertRevalidatedEventOnlySource", "d02def5caa23b0757518bf4f0a328d47cf3eade487e9171283765ec2839568f4"],
     ["recovery-checkpoints.ts", "inspectRecoveryCheckpoints", "caa65253b810d7a8ca83a1a9db13088e906f8b5e3b7cb5684009b3fdabd3d8d6"],
     ["recovery-checkpoints.ts", "finalizeRecoveryCheckpoint", "dd22053ec7bef9b6fba47cb0b8d1c63eb9698c1731815ef14ce975d36627fc73"],
@@ -252,7 +252,7 @@ test("R02 source-bound correction and terminal evidence retain reviewed proof ga
     ["support-review.ts", "inspectSharedSupportReview", "3b940a25e739110bfa7bba1be6ae7eb6b3257009891b5dedec469809a1e44d67"],
     ["dependency-state.ts", "inspectDependencyLedger", "29e4ad44f6b6ef4c428f508080b25103574c1cc82250b4a5969f3a952664246f"],
     ["postcommit-review-cycle.ts", "inspectPostcommitReviewCycle", "3e8e9ae3411aad8ee4a1d3fdcb0dec8e41ad7fe57f6b70c396e3cf1fca4a18fb"],
-    ["recovery-review-batch.ts", "collectReviewedOmissionBatch", "b4e292911a0872cecfdc9f3f86413cb9873c0253bc8fb4d9ff661ff6fdb7a8cd"],
+    ["recovery-review-batch.ts", "collectReviewedOmissionBatch", "023b3506649038a6dccd5a56340bdef5ce8d83b8009474f57cb59ac556868bc7"],
     ["recovery-review-batch.ts", "sealReviewedOmissionBatch", "bece0ddad17be3496256c121988e8dcdc4519518fa53d292248fc1060b1167f6"],
     ["job-successor.ts", "verifiedNarrativeChain", "c0514accd9a5fd06c5e3dc8db2e71ed649dd6e2161d935b4c41e86533ed25581"],
 

@@ -134,3 +134,33 @@ test(
     );
   },
 );
+
+// Exact current-format reproduction: a new admitted writer Turn and historical
+// no-write Review seals coexist. Read-only checks must consume the original
+// projected Turn rather than relabeling the old verdict with new authority.
+test("Luna nested continuation retains independently reviewed Event-only omissions after replacement Turn admission", {
+  skip: !process.env.NT_TEST_PRESERVED_OMISSION_JOB || !root,
+}, async () => {
+  const { readInheritedReviewTurn } = await import("../src/fork-review-turn.js");
+  const { readRecoveryFork } = await import("../src/recovery-fork-state.js");
+  const { readEventOnlyOmission, readHistoricalEventOnlyOmission } = await import("../src/interactive-event-only.js");
+  const { collectReviewedOmissionBatch } = await import("../src/recovery-review-batch.js");
+  const saved = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8"));
+  const job = await startStoryJob({story:saved.storyRoot,job:process.env.NT_TEST_PRESERVED_OMISSION_JOB!},false);
+  const fork = readRecoveryFork(job)!;
+  assert.ok(fork.reviewBatch?.entries.length);
+  const inherited = readInheritedReviewTurn(job)!;
+  const local = (await readReviewTurnEvidence(job))!;
+  assert.notEqual(local.digest, inherited.digest);
+  for (const entry of fork.reviewBatch!.entries) {
+    const slug = entry.milestoneId.slice(10);
+    const receipt = JSON.parse(readFileSync(join(job.stateDir,"interactive-items",slug+".json"),"utf8"));
+    const ref = receipt.units[0].eventOnly;
+    const historical = await readHistoricalEventOnlyOmission(job,entry.milestoneId,ref);
+    assert.equal(historical.turnDigest,inherited.digest);
+    assert.deepEqual(await readEventOnlyOmission(job,entry.milestoneId,ref),historical);
+  }
+  const batch = await collectReviewedOmissionBatch(job,fork.checkpoint);
+  assert.deepEqual(batch?.entries.map(e=>e.milestoneId),fork.reviewBatch!.entries.map(e=>e.milestoneId));
+  assert.equal(batch?.turnDigest,local.digest);
+});

@@ -10,7 +10,7 @@ import type { JobStartResult } from "./job.js";
 import type { Plan } from "./architecture.js";
 import type { ReviewedMilestoneHandoff } from "./milestone-obligation-handoff.js";
 import { declaredCanonicalReferences } from "./focused-scope.js";
-import { readReviewTurnEvidence } from "./fork-review-turn.js";
+import { readInheritedReviewTurn, readReviewTurnEvidence } from "./fork-review-turn.js";
 import { createSkillSnapshot, openSkillSnapshot } from "./snapshot.js";
 import { loadSkillConfig } from "./skills.js";
 import { readRecoveryFork } from "./recovery-fork-state.js";
@@ -198,7 +198,9 @@ async function verifyEventOnlyOmission(job: JobStartResult, milestone: string,
       entry.milestoneId === milestone)) {
     throw Error("A transferred Event-only decision lost its inherited source proof.");
   }
-  const turn = await readReviewTurnEvidence(job);
+  // Inherited no-write evidence belongs to the immutable historical Turn,
+  // not the replacement execution's newly admitted writer Turn.
+  const turn = seal.inherited ? readInheritedReviewTurn(job) : await readReviewTurnEvidence(job);
   if (!turn || turn.digest !== p.turnDigest)
     throw Error("Event-only omission lost its original authenticated Turn.");
   if (sourceMode !== "historical" && p.reviewMode !== "pi") throw Error("Historical fixture omission is inspection only.");
