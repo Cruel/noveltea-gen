@@ -247,7 +247,7 @@ test("R14K current archive reaches actual reviewed Composition and Turn fulfillm
     assert.ok(points.some(p => p.workItem === workItem && p.eligible && p.semanticReview === (workItem === "composition-reckoning" ? "not-required" : "passed")), JSON.stringify(points.map(p => ({ workItem: p.workItem, eligible: p.eligible, semanticReview: p.semanticReview, reason: p.reason }))));
 });
 
-for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-consumer", "composition-multi", "composition-choice", "composition-puzzle"] as const) test((mode.startsWith("blueprint") ? "R08 " : "R07 ") + mode + " suspends for independently verified upstream owner and continues original writer", {
+for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-consumer", "blueprint-conditional", "blueprint-conditional-assessment", "composition-multi", "composition-choice", "composition-puzzle"] as const) test((mode.startsWith("blueprint") ? "R08 " : "R07 ") + mode + " suspends for independently verified upstream owner and continues original writer", {
   skip: !available, timeout: 240_000,
 }, async () => {
   const multi = mode === "composition-multi";
@@ -294,6 +294,10 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
         path: p, quote: blueprint && p === path ? earlyAccountOverreach : readFileSync(join(f.job.worktreeStoryRoot, p), "utf8").split("\n").find(l => l.startsWith("id:"))!,
       })), likelySpecialist: specialist, authorDecisionRequired: false });
     let negative = false, planned = false, written = false, supported = false;
+    let conditionalDraft: any;
+    let conditionalReviews = 0;
+    const conditional = mode.startsWith("blueprint-conditional");
+    const assessConditional = mode === "blueprint-conditional-assessment";
     const runtime = await scriptedStoryRuntime((index, context) => {
       const messages = context.messages as Array<{ role: string; content: string | Array<{ text?: string }> }>;
       const prompt = messages.filter(m => m.role === "user").flatMap(m =>
@@ -301,13 +305,45 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
       const stop = (v: unknown) => ({ content: scriptedText(v), reason: "stop" as const });
       const read = (paths: string[]) => ({ content: scriptedReadCalls(paths, index), reason: "toolUse" as const });
       const skills = (name: string) => boundedPinnedSources(name).map(p => "skill://" + p);
+      if (conditional && !supported && conditionalDraft &&
+          (prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT") || prompt.includes("INDEPENDENT READ-ONLY MILESTONE PLAN REVIEW") ||
+            prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC"))) {
+        const lastUser = messages.findLastIndex(m => m.role === "user");
+        if (!messages.slice(lastUser+1).some(m=>m.role==="toolResult"))
+          return read([...skills("nt-event-design"),milestonePath,path]);
+        if (prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT")) return stop(conditionalDraft);
+        const event = conditionalDraft.events[0];
+        if (prompt.includes("FRESH INDEPENDENT READ-ONLY MILESTONE REVIEW DIAGNOSTIC"))
+          return stop({schema:"noveltea-milestone-diagnosis/v1",action:"replace",
+            explanation:"A fresh reviewer should assess the proposed upstream correction, not require it to have happened.",
+            assessments:[{kind:"material",reason:"Original local delivery requires a canonical owner correction.",
+              requirement:{source:"task",quote:turn.originalRequest},
+              evidence:{eventId:event.id,field:"purpose",quote:event.purpose}}]});
+        const round = conditionalReviews++;
+        if (round < (assessConditional ? 3 : 1))
+          return stop({schema:"noveltea-milestone-blueprint-review/v5",status:"revise",findings:[{
+            eventId:event.id,anchorPath:path,requirement:"No duplicate occurrence in canonical Event.",
+            reason:"Existing Event advances the inquiry before the current milestone.",
+            correction:"Correct the earlier canonical Event before implementing this design.",
+            evidence:{field:"purpose",quote:event.purpose,repair:"replace"},
+          }],prior:Array.from({length:round},(_,i)=>({round:i,findingIndex:0,status:"persisting",
+            reason:"The canonical source has not changed and the prior claim is retained.",evidence:{kind:"current"}}))});
+        return stop({schema:"noveltea-milestone-blueprint-review/v5",status:"prerequisite",findings:[],
+          prior:assessConditional ? [] : [{round:0,findingIndex:0,status:"resolved",
+            reason:"The retained provisional design is contingent on the exact independently reviewed owner correction.",
+            evidence:{kind:"upstream",targetId:target}}]});
+      }
       if (blueprint && !supported && prompt.includes("READ-ONLY LOCAL MILESTONE BLUEPRINT")) {
         const value = ordinary(index, context);
         if (value.reason === "stop") {
           assert.equal(value.content[0]?.type, "text");
           const design = JSON.parse((value.content[0] as { text: string }).text);
           assert.equal(design.milestoneId, milestone);
-          return stop({ ...design, upstreamCorrection: finding() });
+          const upstreamCorrection = finding();
+          if (conditional) upstreamCorrection.sources.push({path,quote:"id: " + target});
+          const result = {...design, upstreamCorrection};
+          if (conditional) conditionalDraft = result;
+          return stop(result);
         }
         return value;
       }
@@ -375,6 +411,15 @@ for (const mode of ["composition", "choice", "puzzle", "blueprint", "blueprint-c
       assert.equal(original.sessionFile, undefined);
       assert.equal(original.phase, "ready");
       assert.ok(original.blueprintPin);
+      if (conditional) {
+        assert.equal(conditionalReviews,assessConditional?4:2);
+        const saved = JSON.parse(readFileSync(join(f.job.stateDir,"milestone-blueprints/reckoning.json"),"utf8"));
+        assert.equal(saved.rounds.length,assessConditional?4:2);
+        assert.equal(saved.rounds[0].draftDigest,saved.rounds.at(-1).draftDigest);
+        if (assessConditional) assert.equal(saved.diagnostics.at(-1).diagnosis.action,"replace");
+        else assert.equal(saved.rounds[1].review.prior[0].evidence.kind,"upstream");
+        assert.equal(git(f.job.worktreeRoot,"rev-parse","HEAD"),original.expectedHead);
+      }
     }
     const verified = await withJobModelRuntime(runtime.runtime, () => graph.invoke(null, { ...cfg, interruptAfter: ["dependency_amendment"] }));
     assert.ok(verified.focusedPrerequisite?.supportRef, JSON.stringify({ reason: verified.reason, recovery: verified.recoverySources }));

@@ -1346,3 +1346,24 @@ scheduler regressions and the shared lifecycle repeat regression cover
 the two outcomes; no writer or model replay is permitted. R02/R14
 fingerprints and the outer recoveryNode exit fingerprint were reviewed
 for these changes.
+
+### Conditional upstream Blueprint correction and reassessment (live #260)
+
+A reviewed Milestone design with an exact upstreamCorrection is conditional:
+the retained Event claim may be resolved for planning purposes by the
+source-bound correction digest, but the Event writer stays fenced until
+the existing owner dependency is independently reviewed and revalidated.
+This includes an independently reassessed Blueprint with a replacement
+reviewer; transcript replay uses the same reviewer-local history as
+admission. The writer prerequisite authenticates inherited producer
+checkpoints, preserves the original assurance, validates all quoted
+affected records, and allows multiple quotes from one record. Read-only
+witness decisions do not enlarge the single-target write grant. Selective
+revalidation binds the original inherited realization and current support
+Turn separately.
+
+R08 blueprint-conditional and blueprint-conditional-assessment exercise
+the suspended writer, reviewed owner correction and original Event reentry.
+The opt-in preserved Accounts regression authenticates the actual failed
+run's inherited producer and checks the exact write grant using a
+test-only complete citation set; no live checkpoint or Story is modified.

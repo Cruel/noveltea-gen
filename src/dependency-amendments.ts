@@ -286,7 +286,7 @@ export function authorizeWriterDependency(input: {
       target.metadata.type !== source.targetId.split(".")[0] ||
       !plan.assignments.some(a => a.authority.recordTypes.includes(target.metadata.type)) ||
       target.metadata.status === "superseded" || cited.some(r => r.metadata.status === "superseded") ||
-      cited.length !== report.sources.length ||
+      cited.length !== new Set(report.sources.map(s => s.path)).size ||
       cited.some(r => !report.affectedIds.includes(r.metadata.id)) ||
       !report.affectedIds.every(id => cited.some(r => r.metadata.id === id)) ||
       !keys(proposal, "sourceSha,reportDigest,target,specialist,outcome,reason") ||
@@ -296,7 +296,10 @@ export function authorizeWriterDependency(input: {
       !text(proposal.reason) || report.sourceSha !== head || report.turnDigest !== plan.digest ||
       !plan.objective.obligations.includes(report.obligation) || report.authorDecisionRequired ||
       JSON.stringify(report.sources) !== JSON.stringify(input.sources) ||
-      cited.some(r => r.metadata.decisions !== undefined && (!Array.isArray(r.metadata.decisions) || r.metadata.decisions.length)) ||
+      // Source records are read-only witnesses, not write grants. Only the
+      // exact target may be edited; its decisions still fence this amendment.
+      target.metadata.decisions !== undefined &&
+        (!Array.isArray(target.metadata.decisions) || target.metadata.decisions.length > 0) ||
       input.priorAmendments.some(a => a.authority.existingPaths.includes(source.targetPath) || a.authority.newPaths?.includes(source.targetPath)) ||
       !validDependencyVersion(input.version, input.versionBase))
     throw new DependencyAuthorizationRefusedError("Writer prerequisite is not a source-linked, unprotected existing owner correction.");

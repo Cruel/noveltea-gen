@@ -1133,7 +1133,9 @@ export async function runEventWorkItem(input: EventOptions) {
     }
     if (receipt.blueprintOwnerFinding) {
       await inspectEventWriterDependency(job, receipt.milestoneId, receipt.blueprintOwnerFinding.sealDigest);
-      return output(job, receipt);
+      return input.blueprintAssessment
+        ? { ...output(job, receipt), status: "blueprint-approved", blueprintPin: receipt.blueprintPin }
+        : output(job, receipt);
     }
     if (receipt.phase === "prerequisite-reported") {
       if (!receipt.prerequisite || !receipt.assignment ||
@@ -1193,7 +1195,12 @@ export async function runEventWorkItem(input: EventOptions) {
           const finding = local.blueprint.upstreamCorrection;
           receipt.blueprintOwnerFinding = { finding, sealDigest: blueprintOwnerSeal(receipt, finding) };
           await persist(receiptFile, receipt);
-          return output(job, receipt);
+          // Settle the original read-only Blueprint reassessment first.
+          // The normal parent reentry consumes the sealed owner finding,
+          // NOT an Event writer grant. It must use shared dependency recovery.
+          return input.blueprintAssessment
+            ? { ...output(job, receipt), status: "blueprint-approved", blueprintPin: receipt.blueprintPin }
+            : output(job, receipt);
         }
       }
       receipt.blueprintTask = task;

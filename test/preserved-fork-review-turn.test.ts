@@ -164,3 +164,60 @@ test("Luna nested continuation retains independently reviewed Event-only omissio
   assert.deepEqual(batch?.entries.map(e=>e.milestoneId),fork.reviewBatch!.entries.map(e=>e.milestoneId));
   assert.equal(batch?.turnDigest,local.digest);
 });
+
+// Private source regression: no synthetic approval or Story mutation. Exercise
+// the actual conditional correction packet against the current fork authority.
+test("Luna Accounts conditional correction identifies the inherited producer and one exact writable path", {
+  skip: !process.env.NT_TEST_PRESERVED_ACCOUNTS_JOB || !root,
+}, async () => {
+  const { readdirSync } = await import("node:fs");
+  const { parseMilestoneBlueprintReview } = await import("../src/milestone-blueprint.js");
+  const { historicalCanonicalCatalog } = await import("../src/validator.js");
+  const { dependencyTurn, dependencyGit, dependencyVersionBase } = await import("../src/dependency-state.js");
+  const { reconstructWriterDependency, resolveWriterDependencySources, verifiedPathProducer } = await import("../src/writer-dependency.js");
+  const { authorizeWriterDependency } = await import("../src/dependency-amendments.js");
+  const saved = JSON.parse(readFileSync(join(root!, "certification-source.json"), "utf8"));
+  const job = await startStoryJob({story:saved.storyRoot,job:process.env.NT_TEST_PRESERVED_ACCOUNTS_JOB!},false);
+  const receipt = JSON.parse(readFileSync(join(job.stateDir,"milestone-blueprints/accounts.json"),"utf8"));
+  const event = JSON.parse(readFileSync(join(job.stateDir,"event-items/accounts.json"),"utf8"));
+  const assessment = JSON.parse(readFileSync(join(job.stateDir,"blueprint-assessments",
+    readdirSync(join(job.stateDir,"blueprint-assessments"))[0]!),"utf8"));
+  const assign = assessment.context.assignment, draft = receipt.draft;
+  const prior = receipt.rounds.at(-1).review.prior.map((p:any)=>p.status==="resolved"?p:{
+    ...p,status:"resolved",evidence:{kind:"upstream",targetId:draft.upstreamCorrection.targetId}});
+  const conditional = parseMilestoneBlueprintReview(JSON.stringify({
+    schema:"noveltea-milestone-blueprint-review/v5",status:"prerequisite",findings:[],prior,
+  }),draft,assign,receipt.rounds.slice(0,-1));
+  assert.equal(conditional.status,"pass");
+  const turn=await dependencyTurn(job), catalog=await historicalCanonicalCatalog(job,job.baseSha);
+  const finding=structuredClone(draft.upstreamCorrection);
+  assert.throws(()=>resolveWriterDependencySources(job,job.baseSha,finding,catalog),/Missing exact source quotation/);
+  const prefix=job.storyRelativePath?job.storyRelativePath+"/":"";
+  // Complete the missing linking-record citation only in this test input.
+  // This is not a model verdict, and no approval or grant is persisted.
+  for(const id of finding.affectedIds){
+    const record=catalog.find(r=>r.metadata.id===id)!;
+    if(!finding.sources.some((s:any)=>s.path===record.path)){
+      const bytes=dependencyGit(job,"show",job.baseSha+":"+prefix+record.path);
+      finding.sources.push({path:record.path,quote:bytes.split("\n").find(l=>l.startsWith("id:"))});
+    }
+  }
+  const {source,report,reportDigest}=await reconstructWriterDependency(job,{
+    stage:"event",origin:"blueprint",milestoneId:assign.milestoneId,workItemId:event.workItemId,
+    planVersion:event.planVersion,sealDigest:"a".repeat(64),assignmentKey:event.assignmentKey,
+    head:event.expectedHead,sourcePaths:assign.sourcePaths,obligations:assign.dependencyObligations,finding,
+  });
+  assert.equal(source.producer.workItem,"event-revelation");
+  const first=dependencyGit(job,"log","--reverse","--diff-filter=A","--format=%H",job.baseSha,"--",prefix+source.targetPath).split("\n")[0]!;
+  assert.equal((await verifiedPathProducer(job,turn.digest,first,source.targetPath)).workItem,"event-reconstruction");
+  await assert.rejects(verifiedPathProducer(job,"0".repeat(64),first,source.targetPath),/inherited producer/);
+  const version=dependencyVersionBase(job);
+  const grant=authorizeWriterDependency({plan:turn,head:job.baseSha,report,reportDigest,
+    proposal:{sourceSha:report.sourceSha,reportDigest,target:source.targetId,specialist:report.likelySpecialist,
+      outcome:report.missing,reason:"Test-only source authorization preflight"},
+    records:catalog,sources:report.sources,version,versionBase:version,source,priorAmendments:[]});
+  assert.deepEqual(grant.assignment.authority.existingPaths,["events/reconstruct-access-mismatch.md"]);
+  assert.equal(grant.assignment.authority.mayCreate,false);
+  assert.equal(dependencyGit(job,"rev-parse","HEAD"),job.baseSha);
+  assert.equal(dependencyGit(job,"status","--porcelain"),"");
+});

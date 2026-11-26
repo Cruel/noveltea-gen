@@ -501,3 +501,34 @@ test("#248 valid JSON with an evidence subject and unauthorized witness is a sub
   assert.deepEqual(milestoneBlueprintSourceFindings(parseMilestoneBlueprint(JSON.stringify(repaired), scope), scope), []);
   assert.equal(milestoneCharacterPrerequisites(repaired, scope)[0]!.characterId, "character.witness");
 });
+
+test("conditional upstream Review binds the retained rejected claim to exact proposed correction, never a completed edit", () => {
+  const anchorPath = "events/earlier.md";
+  const scope = {...assignment,sourcePaths:[...assignment.sourcePaths,anchorPath]};
+  const finding = {...meta,anchorPath,eventId:draft.events[0]!.id,
+    evidence:{field:"purpose",quote:draft.events[0]!.purpose,repair:"replace"}};
+  const negative = parseMilestoneBlueprintReview(review("revise",[finding]),draft,scope);
+  const previous = [{draft,review:negative,draftDigest:"original",reviewDigest:"review"}];
+  const conditional: MilestoneBlueprint = {...draft,upstreamCorrection:{
+    targetId:"event.earlier",obligationIndex:0,missing:"Remove the duplicated inspection in the earlier Event.",
+    affectedIds:["event.earlier",assignment.milestoneId],
+    sources:[{path:anchorPath,quote:"The investigator inspects the dated gate log."}],
+    likelySpecialist:"nt-event-design",authorDecisionRequired:false,
+  }};
+  const raw = {schema:"noveltea-milestone-blueprint-review/v5",status:"prerequisite",findings:[],
+    prior:[{round:0,findingIndex:0,status:"resolved",reason:"The retained claim is contingent on correcting the earlier duplicated inspection.",
+      evidence:{kind:"upstream",targetId:"event.earlier"}}]};
+  const approved = parseMilestoneBlueprintReview(JSON.stringify(raw),conditional,scope,previous);
+  assert.equal(approved.status,"pass");
+  assert.equal((approved.prior![0]!.evidence as {kind:string}).kind,"upstream");
+  assert.deepEqual(parseMilestoneBlueprintReview(JSON.stringify(approved),conditional,scope,previous,"sealed-replay"),approved);
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify(raw),draft,scope,previous), /upstreamCorrection/);
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify(raw),{...conditional,upstreamCorrection:{...conditional.upstreamCorrection!,targetId:"event.other"}},scope,previous));
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify(approved),{...conditional,upstreamCorrection:{...conditional.upstreamCorrection!,missing:"Unrelated new correction"}},scope,previous));
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify(raw),{...conditional,upstreamCorrection:{...conditional.upstreamCorrection!,sources:[{path,quote:"Unrelated source"}]}},scope,previous));
+  const other = {...finding,anchorPath:path};
+  const otherNegative = parseMilestoneBlueprintReview(review("revise",[other]),draft,scope);
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify(raw),conditional,scope,[{...previous[0]!,review:otherNegative}]));
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify({...raw,prior:[]}),conditional,scope,previous));
+  assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify({...raw,findings:[finding]}),conditional,scope,previous));
+});

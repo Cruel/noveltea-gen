@@ -5,6 +5,8 @@ import { parseTimingShard, timingShards } from "./support/timing-shards.js";
  * cases use conservative estimates until a complete observation is available.
  * Scheduling only: every registered test remains eligible. */
 const slowCases: Record<string, number> = {
+  "R08 blueprint-conditional suspends for independently verified upstream owner and continues original writer": 30,
+  "R08 blueprint-conditional-assessment suspends for independently verified upstream owner and continues original writer": 35,
   "C04 typed Character prerequisite supports reviewed World and resumes the original assignment": 30,
   "C04 typed Character prerequisite supports reviewed World and resumes the original assignment with native diagnosis": 85,
   "C08 parent Idea dispatch and verification authenticate the original task deferred": 55,

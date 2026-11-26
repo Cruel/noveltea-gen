@@ -153,6 +153,14 @@ test("writer prerequisite shares the relative Job allowance", async () => {
       } } };
   assert.equal(authorizeWriterDependency({ ...input, version: 9, versionBase: 9 }).assignment.id,
     "dependency:9:event.disclosure");
+  const repeatedSources = [...sources, {...source, quote:"Another exact quote from the same canonical Event"}];
+  const readOnlyDecisions = {...anchor,metadata:{...anchor.metadata,decisions:[{origin:"user",authority:"protected"}]}};
+  const repeated = {...input,report:{...finding,sources:repeatedSources},sources:repeatedSources,
+    records:[...records,readOnlyDecisions]};
+  assert.deepEqual(authorizeWriterDependency({...repeated,version:9,versionBase:9}).assignment.authority.existingPaths,[source.path]);
+  assert.throws(()=>authorizeWriterDependency({...repeated,version:9,versionBase:9,
+    records:repeated.records.map(r=>r.path===source.path?{...r,metadata:{...r.metadata,decisions:[{origin:"user",authority:"protected"}]}}:r)}), /unprotected/);
+
   assert.equal(authorizeWriterDependency({ ...input, version: 16, versionBase: 9 }).afterVersion, 17);
   assert.throws(() => authorizeWriterDependency({ ...input, version: 17, versionBase: 9 }), /prerequisite/i);
 });

@@ -10,6 +10,8 @@ import type { OtherOwnerCheckpoint } from "./review-repair-amendment.js";
 import { checkpointRecordType, readRepairCommitProof } from "./checkpoint-assurance.js";
 import { focusedSpecialist } from "./focused-specialist.js";
 import { historicalCanonicalCatalog } from "./validator.js";
+import { inheritedReviewedCheckpoint, readRecoveryFork } from "./recovery-fork-state.js";
+import type { CanonicalScopeRecord } from "./focused-scope.js";
 import { isDeepStrictEqual } from "node:util";
 
 export interface WriterDependencySource {
@@ -50,6 +52,18 @@ export async function verifiedPathProducer(job: JobStartResult, turnDigest: stri
   if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw Error("Invalid historical producer source.");
   dependencyGit(job, "merge-base", "--is-ancestor", sourceSha, "HEAD");
   const pointAt = async (sha: string) => {
+    const fork = readRecoveryFork(job);
+    const inheritedItem = Object.entries(fork?.commits ?? {}).find(([, entry]) => entry.sha === sha);
+    if (inheritedItem) {
+      const inherited = inheritedReviewedCheckpoint(job, inheritedItem[0], sha);
+      if (!inherited?.proof.assurance || (await dependencyTurn(job)).digest !== turnDigest ||
+          dependencyGit(job, "merge-base", sha, job.baseSha) !== sha)
+        throw Error("Writer prerequisite lacks an independently verified inherited producer.");
+      // Preserve the ORIGINAL assurance/digest. The replacement Turn grants
+      // current authority independently; historical review is not rebound.
+      return { ...inherited.proof, assurance: inherited.proof.assurance,
+        semanticReview: inherited.status, commitSha: sha };
+    }
     const point = points ? points.find(p => p.commitSha === sha && p.eligible) :
       await inspectHistoricalRecoveryCheckpoint(job, sha);
     if (!point?.assurance || point.assurance.turnDigest !== turnDigest)
@@ -131,6 +145,31 @@ export async function verifiedPathProducer(job: JobStartResult, turnDigest: stri
   return trace(sourceSha);
 }
 
+/** Bind all submitted quotations to exact canonical records. Several
+ * independent quotes from the SAME record are evidence, not several owners.
+ * Shared by proposal validation and actual dependency admission. */
+export function resolveWriterDependencySources(job: JobStartResult, head: string,
+  finding: WriterDependencyFinding, catalog: readonly CanonicalScopeRecord[]) {
+  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
+  const targets = new Set<string>();
+  const citedIds = new Set<string>();
+  const sources = finding.sources.map(s => {
+    const records = catalog.filter(record => record.path === s.path);
+    if (records.length !== 1 || !finding.affectedIds.includes(records[0]!.metadata.id) ||
+        records[0]!.metadata.status === "superseded")
+      throw Error("Writer prerequisite source " + s.path + " is outside the cited typed records.");
+    const bytes = dependencyGit(job, "show", head + ":" + prefix + s.path);
+    if (!bytes.includes(s.quote)) throw Error("Writer prerequisite quote differs from original Git source: " + s.path);
+    citedIds.add(records[0]!.metadata.id);
+    if (records[0]!.metadata.id === finding.targetId) targets.add(s.path);
+    return { ...s, sha256: sourceDigest(bytes) };
+  });
+  const uncited = finding.affectedIds.filter(id => !citedIds.has(id));
+  if (uncited.length) throw Error("Missing exact source quotation for affectedIds: " + uncited.join(", "));
+  if (targets.size !== 1) throw Error("Writer prerequisite must cite exactly one existing canonical target.");
+  return { targetPath: [...targets][0]!, sources };
+}
+
 export async function reconstructWriterDependency(job: JobStartResult, original: OriginalWriterDependency,
   points?: Awaited<ReturnType<typeof inspectRecoveryCheckpoints>>) {
   const turn = await dependencyTurn(job);
@@ -145,21 +184,8 @@ export async function reconstructWriterDependency(job: JobStartResult, original:
       f.sources.some(s => !original.sourcePaths.includes(s.path)) ||
       f.likelySpecialist !== focusedSpecialist(f.targetId))
     throw Error("Writer prerequisite lacks exact original Turn, assignment, scope or owner.");
-  const prefix = job.storyRelativePath ? job.storyRelativePath + "/" : "";
   const catalog = await historicalCanonicalCatalog(job, original.head);
-  const targets: string[] = [];
-  const sources = f.sources.map(s => {
-    const bytes = dependencyGit(job, "show", original.head + ":" + prefix + s.path);
-    if (!bytes.includes(s.quote)) throw Error("Writer prerequisite quote differs from original Git source.");
-    const records = catalog.filter(record => record.path === s.path);
-    if (records.length !== 1 || !f.affectedIds.includes(records[0]!.metadata.id) ||
-        records[0]!.metadata.status === "superseded")
-      throw Error("Writer prerequisite source is outside the cited typed records.");
-    if (records[0]!.metadata.id === f.targetId) targets.push(s.path);
-    return { ...s, sha256: sourceDigest(bytes) };
-  });
-  if (targets.length !== 1) throw Error("Writer prerequisite must cite exactly one existing canonical target.");
-  const targetPath = targets[0]!;
+  const {targetPath, sources} = resolveWriterDependencySources(job, original.head, f, catalog);
   const producer = await verifiedPathProducer(job, turn.digest, original.head, targetPath, points);
   const priorOwner = turn.assignments.find(a => a.id === producer.assignmentId);
   const recordType = checkpointRecordType(targetPath);

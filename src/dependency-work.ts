@@ -581,13 +581,18 @@ export async function advanceWriterDependency(input: Omit<FocusedWorkOptions, "t
     const first = dependencyGit(job, "log", "--reverse", "--diff-filter=A", "--format=%H",
       report.sourceSha, "--", repoPath).split("\n")[0];
     let upstream = producer;
+    const { readRecoveryFork, inheritedReviewedCheckpoint } = await import("./recovery-fork-state.js");
+    const inheritedFirst = Object.entries(readRecoveryFork(job)?.commits ?? {}).find(([, entry]) => entry.sha === first);
     if (first && first !== source.producer.commitSha &&
-        first !== job.baseSha && dependencyGit(job, "merge-base", first, job.baseSha) !== first) {
+        (inheritedFirst || first !== job.baseSha && dependencyGit(job, "merge-base", first, job.baseSha) !== first)) {
       const { inspectHistoricalRecoveryCheckpoint } = await import("./recovery-checkpoints.js");
-      const original = await inspectHistoricalRecoveryCheckpoint(job, first);
+      const original = inheritedFirst
+        ? inheritedReviewedCheckpoint(job, inheritedFirst[0], first)?.proof
+        : await inspectHistoricalRecoveryCheckpoint(job, first);
+      if (!original?.assurance) throw Error("Writer prerequisite lost the earlier verified realization of its source.");
       const item = inventory.items.find(i => i.id === executionId(original.workItem) &&
         i.status === "verified" && i.verifiedSha);
-      if (!item?.verifiedSha || original.assurance?.turnDigest !== report.turnDigest ||
+      if (!item?.verifiedSha || !inheritedFirst && original.assurance.turnDigest !== report.turnDigest ||
           !original.assurance.changedPaths.includes(source.targetPath))
         throw Error("Writer prerequisite lost the earlier verified realization of its source.");
       const initial = await (await import("./writer-dependency.js")).verifiedPathProducer(

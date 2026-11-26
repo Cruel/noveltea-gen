@@ -217,7 +217,7 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
           receipt.planVersion === item.planVersion) {
         const proof = await readHistoricalEventOnlyOmission(job, item.milestone, choice.eventOnly);
         if (proof.reviewMode !== "pi" || proof.reviewHead !== choice.beforeHead ||
-            proof.reviewHead !== item.verifiedSha || proof.turnDigest !== turn.digest ||
+            proof.reviewHead !== item.verifiedSha ||
             proof.planVersion !== item.planVersion || proof.planDigest !== receipt.planDigest ||
             proof.eventHead !== receipt.eventHead)
           throw Error("Commitless dependent has no authenticated original review.");
@@ -234,7 +234,8 @@ export async function authenticateSelectiveImpact(job: JobStartResult,
       points.length === 1 && points[0]!.planVersion === null &&
       points[0]!.commitSha === item.verifiedSha &&
       points[0]!.validation.status === "passed" &&
-      points[0]!.assurance?.turnDigest === turn.digest;
+      (points[0]!.assurance?.turnDigest === turn.digest ||
+        inheritedProofs.some(entry => entry.proof.commitSha === points[0]!.commitSha));
     if (!matches.length || points.length !== matches.length ||
         (!prePlanFoundation && points.some(p => p.planVersion !== correction.planVersion))) continue;
     const files: string[] = [];

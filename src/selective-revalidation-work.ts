@@ -292,12 +292,12 @@ export async function assertRevalidatedEventOnlySource(job: JobStartResult,
     const review = state?.results.find(r => r.itemId === "interactive:" + original.milestoneId &&
       r.originalCommitSha === original.reviewHead && r.originalReviewDigest === sealDigest &&
       r.status === "passed");
-    if (!review || !state?.finalHead || state.proposal.turnDigest !== original.turnDigest ||
+    if (!review || !state?.finalHead || state.proposal.turnDigest !== entry.report.turnDigest ||
         state.proposal.planVersion !== original.planVersion)
       throw Error("Event-only canonical evidence changed without its independent revalidation.");
     await assertCompletedOtherOwnerRevalidation(job, {
       baseSha: entry.report.sourceSha, successorSha: entry.commitSha,
-      turnDigest: original.turnDigest, path, historicalChainHead: head,
+      turnDigest: entry.report.turnDigest, path, historicalChainHead: head,
       correctionReviewDigest: dependencyDigest(entry.review),
     });
     if (dependencyGit(job, "rev-parse", review.sourceSha + ":" + repoPath) !==
