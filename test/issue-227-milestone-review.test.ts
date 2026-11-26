@@ -540,3 +540,81 @@ test("conditional upstream Review binds the retained rejected claim to exact pro
   assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify({...raw,prior:[]}),conditional,scope,previous));
   assert.throws(()=>parseMilestoneBlueprintReview(JSON.stringify({...raw,findings:[finding]}),conditional,scope,previous));
 });
+
+test("prospective Character IDs normalize only an exact unambiguous declared bare slug",()=>{
+  const raw=structuredClone(draft);
+  raw.events[0]!.participants=["new-witness"];
+  raw.events[0]!.evidence[0]!.characterSources=[{id:"new-witness",availability:"prospective",role:"Directly saw the register."}];
+  const normalized=parseMilestoneBlueprint(JSON.stringify(raw),assignment);
+  assert.deepEqual(normalized.events[0]!.participants,["character.new-witness"]);
+  assert.equal(normalized.events[0]!.evidence[0]!.characterSources![0]!.id,"character.new-witness");
+  assert.deepEqual(parseMilestoneBlueprint(JSON.stringify(raw),assignment,"sealed-replay"),normalized);
+  assert.equal(milestoneCharacterPrerequisites(normalized,assignment)[0]!.characterId,"character.new-witness");
+  assert.throws(()=>parseMilestoneBlueprint(JSON.stringify(raw),{...assignment,characterIds:["character.new-witness"]}),/participants\[0\].*new-witness/);
+  const collision=structuredClone(raw);collision.events[0]!.participants.push("character.new-witness");
+  assert.throws(()=>parseMilestoneBlueprint(JSON.stringify(collision),assignment),/participants\[0\].*new-witness/);
+});
+
+test("Character contract reports all invalid IDs and availability with exact offending values",()=>{
+  const raw=structuredClone(draft);
+  raw.events[0]!.participants=["unlisted","fact.log","fact.log"];
+  raw.events[0]!.evidence[0]!.characterSources=[{id:"unlisted",availability:"existing",role:"Directly observed."},{id:"bad id",availability:"wrong",role:"Observed."} as any];
+  assert.throws(()=>parseMilestoneBlueprint(JSON.stringify(raw),assignment),err=>{
+    const failures=(err as {failures?:{path:string;expected:string}[]}).failures!;
+    assert.ok(failures);
+    for(const path of ["events[0].participants[0]","events[0].participants[1]","events[0].participants[2]","events[0].evidence[0].characterSources[0].id","events[0].evidence[0].characterSources[1].id","events[0].evidence[0].characterSources[1].availability"])
+      assert.ok(failures.some(f=>f.path===path),path);
+    assert.match(failures[0]!.expected,/"unlisted".*"character.unlisted"/);
+    assert.ok(failures.some(f=>f.expected.includes('Duplicate participant "fact.log"')));
+    return true;
+  });
+});
+
+test("independent negative Review may cite revised Event text that still has the same defect",()=>{
+  const original=structuredClone(draft);
+  const previous=history(original,{...meta,eventId:"register",evidence:{field:"purpose",quote:original.events[0]!.purpose,repair:"replace"}});
+  const changed=structuredClone(original);
+  changed.events[0]!.purpose=original.events[0]!.purpose+" The same inference still holds.";
+  const finding={...meta,eventId:"register",evidence:{field:"purpose",quote:changed.events[0]!.purpose,repair:"replace"}};
+  for(const status of ["persisting","regressed"]){
+    const prior=[{round:0,findingIndex:0,status,reason:"The wording changed but the underlying inference remains.",evidence:{kind:"revised"}}];
+    const verdict=parseMilestoneBlueprintReview(review("revise",[finding],prior),changed,assignment,previous);
+    assert.equal(verdict.prior![0]!.status,status);
+    assert.throws(()=>parseMilestoneBlueprintReview(review("pass",[],prior),changed,assignment,previous));
+    assert.throws(()=>parseMilestoneBlueprintReview(review("revise",[finding],prior),original,assignment,previous));
+  }
+  assert.throws(()=>parseMilestoneBlueprintReview(passProof({kind:"revised"}),changed,assignment,previous));
+});
+
+test("unambiguous prospective Character prefix is completed consistently; conflicting IDs receive indexed diagnostics", () => {
+  const candidate=structuredClone(draft);
+  candidate.events[0]!.participants=["passenger-interval-witness"];
+  candidate.events[0]!.evidence[0]!.characterSources=[{id:"passenger-interval-witness",availability:"prospective",role:"Independent testimony"}];
+  const parsed=parseMilestoneBlueprint(JSON.stringify(candidate),assignment);
+  assert.deepEqual(parsed.events[0]!.participants,["character.passenger-interval-witness"]);
+  assert.equal(parsed.events[0]!.evidence[0]!.characterSources![0]!.id,"character.passenger-interval-witness");
+  const bad=structuredClone(candidate);
+  bad.events[0]!.evidence[0]!.characterSources![0]!.availability="existing";
+  assert.throws(()=>parseMilestoneBlueprint(JSON.stringify(bad),assignment), e=>{
+    assert.match(String(e),/participants\[0\].*passenger-interval-witness.*character\.passenger-interval-witness/);
+    assert.match(String(e),/evidence\[0\]\.characterSources\[0\]\.id/);
+    return true;
+  });
+  candidate.events[0]!.participants.push("character.passenger-interval-witness");
+  assert.throws(()=>parseMilestoneBlueprint(JSON.stringify(candidate),assignment),/Invalid Character ID/);
+});
+
+test("persisting semantic defect in a genuinely revised Event field is not a format error or progress", () => {
+  const finding={...meta,eventId:"register",evidence:{field:"purpose",quote:draft.events[0]!.purpose,repair:"replace"}};
+  const previous=history(draft,finding);
+  const changed=structuredClone(draft);
+  changed.events[0]!.purpose="Inspect the dated gate log, then repeat the same inspection.";
+  const current={...finding,evidence:{...finding.evidence,quote:changed.events[0]!.purpose}};
+  const negative=review("revise",[current],[{round:0,findingIndex:0,status:"persisting",
+    reason:"The duplicate inspection remains after the wording changed.",evidence:{kind:"revised"}}]);
+  const result=parseMilestoneBlueprintReview(negative,changed,assignment,previous);
+  assert.equal(result.prior![0]!.status,"persisting");
+  assert.equal(result.status,"revise");
+  assert.throws(()=>parseMilestoneBlueprintReview(negative,draft,assignment,previous));
+  assert.throws(()=>parseMilestoneBlueprintReview(passProof({kind:"revised"}),changed,assignment,previous),/correction/);
+});

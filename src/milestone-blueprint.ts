@@ -261,6 +261,12 @@ function milestoneCorrectionEvidence(p: NonNullable<MilestoneBlueprintReview["pr
   if (!target) return false;
   const after = milestoneFieldText(target, evidence.field);
   if (evidence.kind === "revised" || evidence.kind === "added") {
+    // Negative semantic assessments may cite a changed field. Authenticate
+    // the original quotation and exact current field without requiring
+    // removal of the defect. Positive resolution retains stricter checks.
+    if (p.status === "persisting" || p.status === "regressed")
+      return evidence.kind === "revised" && milestoneFieldQuote(source,evidence.field,evidence.before) &&
+        evidence.after === after && before !== after;
     // An additive repair is permitted only if the ORIGINAL rejected finding
     // expressly classified the defect as an omission. A later reviewer may
     // not reinterpret a removal-required claim as a benign omission.
@@ -530,6 +536,93 @@ class MilestoneContractError extends Error {
   constructor(readonly path: string, readonly expected: string) { super(path + ": " + expected); }
 }
 function invalid(path: string, expected: string): never { throw new MilestoneContractError(path, expected); }
+class MilestoneCharacterContractError extends Error {
+  constructor(readonly failures: readonly ResponseContractFailure[]) {
+    super(failures.map(f=>f.path+": "+f.expected).join("; "));
+  }
+}
+const characterIdPattern = /^character\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const characterSlugPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+/** Normalize only a bare slug explicitly declared as a prospective provider
+ * and repeated verbatim as a participant. No inference of an existing ID,
+ * merging of aliases, invented provider, or authority expansion. Run for
+ * transcript replay too; the raw completed response is retained by protocol. */
+function normalizeProspectiveCharacterIds(events: unknown[], existing: readonly string[]) {
+  const originalEvents=structuredClone(events);
+  for (const event of events) {
+    if (!object(event) || !Array.isArray(event.participants) || !Array.isArray(event.evidence)) continue;
+    let participants: unknown[] = event.participants;
+    const sources = event.evidence.flatMap(e=>object(e) && Array.isArray(e.characterSources)
+      ? e.characterSources.filter(object) : []);
+    const slugs = new Set(sources.filter(source=>typeof source.id==="string" &&
+      characterSlugPattern.test(source.id) && source.availability==="prospective").map(source=>String(source.id)));
+    for (const slug of slugs) {
+      const id="character."+slug;
+      if (existing.includes(id) || participants.filter(p=>p===slug).length!==1 ||
+          participants.includes(id) || sources.some(source=>source.id===id ||
+            source.id===slug && source.availability!=="prospective")) continue;
+      const conflict=originalEvents.some(other=>object(other)&&(
+        Array.isArray(other.participants)&&other.participants.includes(id) ||
+        Array.isArray(other.evidence)&&other.evidence.some(e=>object(e)&&Array.isArray(e.characterSources)&&
+          e.characterSources.some(source=>object(source)&&(source.id===id ||
+            source.id===slug&&source.availability!=="prospective")))));
+      if(conflict) continue;
+      // Repetition across distinct evidence entries is valid. Within a single
+      // entry duplicates remain invalid and are never removed here.
+      participants=participants.map(p=>p===slug?id:p);
+      event.participants=participants;
+      for(const source of sources) if(source.id===slug)source.id=id;
+    }
+  }
+}
+
+/** Check all independently inspectable Character fields, not just whichever
+ * malformed participant happens to be encountered first. */
+function validateBlueprintCharacterFields(events: unknown[]) {
+  const failures:ResponseContractFailure[]=[];
+  const report=(path:string, expected:string)=>failures.push({path,expected});
+  const describe=(value:unknown)=>JSON.stringify(value)?.slice(0,200) ?? "missing";
+  const checkId=(value:unknown,path:string)=>{
+    if(typeof value==="string" && value.length<=150 && characterIdPattern.test(value))return;
+    report(path,"Invalid Character ID "+describe(value)+". Expected character.<slug> (at most 150 characters)"+
+      (typeof value==="string" && value.length<=140 && characterSlugPattern.test(value)?
+        "; use "+JSON.stringify("character."+value):"")+".");
+  };
+  for(const [i,event] of events.entries()){
+    if(!object(event))continue;
+    const path="events["+i+"]";
+    if(!Array.isArray(event.participants))report(path+".participants","Expected an array of Character IDs (use [] for no participants).");
+    else {
+      if(event.participants.length>12)report(path+".participants","Received "+event.participants.length+" participants; maximum is 12.");
+      const seen=new Set<unknown>();
+      for(const [j,id] of event.participants.entries()){
+        const field=path+".participants["+j+"]";
+        checkId(id,field);
+        if(seen.has(id))report(field,"Duplicate participant "+describe(id)+"; list each Character once.");
+        seen.add(id);
+      }
+    }
+    if(!Array.isArray(event.evidence))continue;
+    for(const [j,evidence] of event.evidence.entries()){
+      if(!object(evidence)||!("characterSources" in evidence))continue;
+      const field=path+".evidence["+j+"].characterSources";
+      if(!Array.isArray(evidence.characterSources)){report(field,"Expected an array of material Character sources (use [] for none).");continue;}
+      if(evidence.characterSources.length>12)report(field,"Received "+evidence.characterSources.length+" Character sources; maximum is 12.");
+      for(const [k,source] of evidence.characterSources.entries()){
+        const sourcePath=field+"["+k+"]";
+        if(!object(source)){report(sourcePath,"Expected an object with id, availability and role.");continue;}
+        if(!exact(source,["id","availability","role"]))report(sourcePath,"Expected exactly id, availability and role.");
+        checkId(source.id,sourcePath+".id");
+        if(source.availability!=="existing"&&source.availability!=="prospective")
+          report(sourcePath+".availability","Received "+describe(source.availability)+"; expected existing or prospective.");
+        if(!string(source.role,400))report(sourcePath+".role","Expected a nonempty material evidence role, at most 400 characters.");
+      }
+    }
+  }
+  if(failures.length)throw new MilestoneCharacterContractError(failures);
+}
+
 /** All historical identifiers are controller-generated, never inferred by a model. */
 export function milestoneReviewFindingIndex(previous: readonly Round[]) {
   return previous.flatMap((round, i) => independentFindings(round).map((finding, j) => ({
@@ -551,7 +644,7 @@ function milestoneReviewContract(draft: MilestoneBlueprint, assignment: Pick<Eve
     "For a missing Interactive owner corrected by revising away an implied choice use " +
     "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
     "Controller binds the original rejected identity, before and after values. Do not repeat escaped field arrays. " +
-    "For unchanged rejected fields use persisting/regressed with current, never improved/resolved with revised. " +
+    "For unchanged rejected fields use persisting/regressed with current. If the field changed but the semantic defect persists or regresses, use persisting/regressed with revised; the revised selector identifies the actual changed field, not a resolved defect. Only use resolved/improved when the semantic finding is actually addressed. " +
     (draft.upstreamCorrection ? "EXCEPTION: a corrected or retained claim whose ONLY remaining blocker is the exact typed upstreamCorrection may be conditionally resolved using {kind:'upstream',targetId:" + JSON.stringify(draft.upstreamCorrection.targetId) + "} and status:resolved, with top-level status:prerequisite. This is a review of the proposed correction, NOT a claim that it happened. The controller suspends Event, executes and independently verifies the original owner correction, then replans against corrected canon. All unrelated local defects still require revise. " : "") +
     "If an independent local blocker remains, include it as a current finding; revise with findings:[] is invalid. " +
     "CURRENT FIELD COMPARISON (controller-derived, not a verdict): " +
@@ -579,6 +672,9 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
         ? !raw.upstreamCorrection || raw.downstream.length !== 0
         : raw.downstream.length < 1))
     throw Error("Invalid bounded Milestone Blueprint or target identity.");
+  normalizeProspectiveCharacterIds(raw.events,
+    policy === "sealed-replay" || policy === "sealed-rejected" ? [] : assignment.characterIds);
+  validateBlueprintCharacterFields(raw.events);
   const seen = new Set<string>();
   for (const [i, event] of raw.events.entries()) {
     const path = "events[" + i + "]";
@@ -592,7 +688,7 @@ export function parseMilestoneBlueprint(text: string, assignment: Pick<EventAssi
       invalid(path + ".dependsOn", "expected at most four provisional Event ID strings");
     if (!strings(event.participants, 12) || new Set(event.participants).size !== event.participants.length ||
         event.participants.some(id => !/^character\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)))
-      invalid(path + ".participants", "expected at most twelve unique typed Character IDs");
+      invalid(path + ".participants", "expected an array of at most twelve unique Character IDs in character.<slug> format");
     if (!Array.isArray(event.evidence) || !event.evidence.length || event.evidence.length > 8)
       invalid(path + ".evidence", "expected 1–8 concrete evidence entries");
     if (!Array.isArray(event.routes) || event.routes.length > 5)
@@ -966,14 +1062,14 @@ export function parseMilestoneBlueprintReview(text: string, draft: MilestoneBlue
               !strict && policy === "sealed-replay") ||
             ((p.status === "resolved" || p.status === "improved")
               ? proof.kind === "current"
-              : proof.kind !== "current"))
+              : proof.kind !== "current" && !(!("target" in proof) && proof.kind === "revised")))
           invalid(path + ".evidence", "Milestone finding correction needs a change to its rejected field or verified Event removal. " +
             "Use compact evidence {kind:'revised|added|removed|current'} for an Event finding; " +
             "for a downstream replacement/addition include index of the NEW entry. " +
             "For a missing Interactive owner resolved by removing an implied choice, use " +
             "{kind:'not-required',eventId:retained revised Event ID,field:'purpose|routes'}. " +
             "If a local rejected field is corrected, cite revised/added/removed. If the correction also depends on a reviewed upstream correction, use upstream with the exact target (the controller binds both the local field and prerequisite). For an otherwise valid retained Event claim blocked ONLY by the current typed upstreamCorrection, use status:prerequisite and {kind:'upstream',targetId:exact correction target} with prior status:resolved. Do not claim a local edit. All unrelated findings still require ordinary correction. " +
-            "Resolved/improved cannot use current, and persisting/regressed require current. " +
+            "Resolved/improved cannot use current. For a persisting/regressed Event finding, use current if the rejected quotation is retained, or revised if the field changed but the underlying defect remains. This is NOT approval. For downstream findings, use current for unresolved obligations. " +
             "The controller binds the original rejected field and current exact evidence; do not copy long escaped JSON. " +
             "Original identity: " + JSON.stringify({round:p.round,findingIndex:p.findingIndex,eventId:original.eventId,
               target:original.evidence && "target" in original.evidence ? original.evidence.target : undefined}) +
@@ -1536,7 +1632,7 @@ async function correctMilestoneContract<T>(original: Awaited<ReturnType<typeof s
         const failure: ResponseContractFailure = error instanceof MilestoneContractError
           ? { path: error.path, expected: error.expected }
           : { path: "$", expected: error instanceof Error ? error.message : "exact source-bound JSON" };
-        failuresForActivity = [failure];
+        failuresForActivity = error instanceof MilestoneCharacterContractError ? [...error.failures] : [failure];
         return failuresForActivity;
       }
     },
@@ -1656,7 +1752,7 @@ export async function readReviewedMilestoneBlueprint(job: JobStartResult,
     if (expected || record.supersedes || record.draft?.upstreamCorrection || record.rounds.some(r => r.reviewerVerdict || milestoneBlueprintSourceFindings(r.draft, assignment).length)) {
       const starts = record.reviewStarts ?? (record.reviewStart ? [record.reviewStart] : []);
       await assertBlueprintReplies(record.writer, record.rounds.filter((_, i) => !starts.includes(i)).map(r => r.draftDigest),
-        text => parse(resolveMilestoneBlueprintSourceSelectors(job,pin.sourceSha,assignment.sourcePaths,text)));
+        text => parseMilestoneBlueprint(resolveMilestoneBlueprintSourceSelectors(job,pin.sourceSha,assignment.sourcePaths,text), assignment, "sealed-rejected"));
       const reviewers = [...(record.reviewerHistory ?? []).map(h => h.session), record.reviewer];
       if (reviewers.length !== starts.length + 1) throw Error("Incomplete Blueprint reviewer lineage.");
       for (const [index, session] of reviewers.entries()) {
@@ -1834,7 +1930,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         drafts.push(sha(current.draft));
       if (!current.writer) throw Error("Settled Milestone Blueprint lacks its writer.");
       await assertBlueprintReplies(current.writer, drafts,
-        text => parse(resolveMilestoneBlueprintSourceSelectors(job,head,assignment.sourcePaths,text)));
+        text => parseMilestoneBlueprint(resolveMilestoneBlueprintSourceSelectors(job,head,assignment.sourcePaths,text), assignment, "sealed-rejected"));
       const reviewers = [...(current.reviewerHistory ?? []).map(h => h.session),
         ...(current.reviewer ? [current.reviewer] : [])];
       if (reviewers.length !== starts.length + (current.reviewer ? 1 : 0))
@@ -1929,7 +2025,7 @@ export async function ensureMilestoneBlueprint(job: JobStartResult, plan: Plan,
         },
         "Return schema noveltea-milestone-blueprint/v1 with milestoneId " + assignment.milestoneId +
         ", events (id, purpose, dependsOn, evidence, participants, knowledge, routes), downstream (owner, obligation). " +
-        "Preserve retained provisional Event IDs, source citations, and earlier Event dependencies. Knowledge is a string.", receipt.rounds.length);
+        "Preserve retained provisional Event IDs, source citations, and earlier Event dependencies. Knowledge is a string. Every participants[] entry and characterSources[].id uses character.<slug>, including prospective Characters.", receipt.rounds.length);
       await writer.context.completed(writer.session.sessionManager.getSessionFile()!, writer.session.sessionId);
       receipt.writer = await seal(writer.session);
       receipt.draft = checkCandidate(draft);

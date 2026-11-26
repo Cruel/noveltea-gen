@@ -1972,6 +1972,14 @@ for (const mode of ["review", "support", "support-negative", "other-owner", "oth
         characterSources: [{ id: "character.mara", availability: "prospective",
           role: "The archive night witness identifies the ledger signature." }] });
     }
+    // Live Accounts regression: the actual planner submits a bare prospective
+    // slug in both fields. All durable downstream evidence must bind the
+    // normalized typed ID without requiring another model response.
+    if (mode === "prospective") {
+      plan.events[0]!.participants=plan.events[0]!.participants.map(id=>id==="character.mara"?"mara":id);
+      Object.assign(plan.events[0]!.evidence[0]!,{characterSources:[
+        {id:"mara",availability:"prospective",role:"The archive night witness identifies the ledger signature."}]});
+    }
     if (stalledSupport || nativeDiagnosis || writerDiagnosis) Object.assign(plan.events[0]!.evidence[0]!, { anchorPath: "milestones/disclosure.md" });
     if (multi && !stalledSupport && !nativeDiagnosis && !writerDiagnosis) {
       plan.events[0]!.participants.push("character.oren");
